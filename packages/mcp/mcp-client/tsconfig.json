@@ -22,6 +22,12 @@
       "path": "../../core/tools"
     },
     {
+      "path": "../../credentials/credentials"
+    },
+    {
+      "path": "../../credentials/credentials-local"
+    },
+    {
       "path": "../../subprocess/subprocess"
     },
     {

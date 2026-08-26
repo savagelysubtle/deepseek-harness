@@ -17,12 +17,62 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
+import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js'
 import type { Context } from '@deepseek-ai/cordis'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { createTransport } from './transport.ts'
 import { syncTools } from './tools.ts'
 import type { ToolBridgeOptions, ToolDisposers } from './tools.ts'
+import { CredentialsOAuthProvider } from './oauth.ts'
+import { DEFAULT_OAUTH_REDIRECT_PORT } from './index.ts'
 import type { Config } from './index.ts'
+
+/**
+ * Server names whose authorization-required guidance already logged this
+ * process. The reconnect loop re-enters the same failed path every attempt;
+ * the full consent instructions belong in the log once, not once per attempt.
+ */
+const AUTH_GUIDANCE_SHOWN = new Set<string>()
+
+/**
+ * Build the persisted OAuth provider for one server, or `undefined` when the
+ * config carries no `auth` block. Callers fail loud before reaching here when
+ * OAuth is configured without the credential service.
+ * @param ctx - plugin context carrying the credential store and logger.
+ * @param config - resolved transport configuration (streamable-http when auth applies).
+ * @param label - diagnostic prefix naming this plugin instance.
+ * @returns the provider, or `undefined` for unauthenticated servers.
+ */
+function resolveAuthProvider(ctx: Context, config: Config, label: string): CredentialsOAuthProvider | undefined {
+  if (config.transport !== 'streamable-http' || config.auth === undefined) return undefined
+  const credentials = ctx.get('credentials')
+  if (credentials === undefined) {
+    // Unreachable through apply() (it fails loud first); kept at the operation
+    // so direct startConnection callers get the same named diagnostic.
+    throw new Error(`${label}: auth.oauth requires the credential-reference service — mount @deepseek-ai/dsh-credentials-local`)
+  }
+  const provider = CredentialsOAuthProvider.create({
+    serverName: config.serverName,
+    serverUrl: new URL(config.url),
+    ...(config.auth.scope === undefined ? {} : { scope: config.auth.scope }),
+    ...(config.auth.clientId === undefined ? {} : { staticClientId: config.auth.clientId }),
+    store: credentials,
+    // Hosts never capture the consent redirect; both host and CLI advertise
+    // the same fixed loopback URL so dynamic client registration matches
+    // whichever process consents first.
+    redirectUri: `http://127.0.0.1:${config.auth.redirectPort ?? DEFAULT_OAUTH_REDIRECT_PORT}/callback`,
+    onAuthorizationUrl(authorizationUrl) {
+      if (AUTH_GUIDANCE_SHOWN.has(config.serverName)) return
+      AUTH_GUIDANCE_SHOWN.add(config.serverName)
+      ctx.logger.error([
+        `${label}: human consent required to authorize MCP access.`,
+        `Open this URL, approve access, then complete the login with: dsh-mcp-client-auth --server-name ${config.serverName}`,
+        String(authorizationUrl),
+      ].join('\n  '))
+    },
+  })
+  return provider
+}
 
 /** Automatic reconnect policy for one MCP server connection. */
 export interface ReconnectConfig {
@@ -122,6 +172,9 @@ export interface ConnectionHandle {
  */
 export function startConnection(ctx: Context, config: Config, policy: ResolvedReconnectPolicy): ConnectionHandle {
   const label = `mcp-client(${config.serverName})`
+  // Built once per plugin instance: it closes over the credential store and
+  // the server identity, and every generation shares its persisted state.
+  const authProvider = resolveAuthProvider(ctx, config, label)
   const opts: ToolBridgeOptions = {
     registrationFailure: 'contain',
     serverName: config.serverName,
@@ -269,7 +322,7 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
       },
     )
     try {
-      await generation.connect(createTransport(config))
+      await generation.connect(createTransport(config, authProvider))
       if (hasClosed()) {
         attemptSettled = true
         generationDown(generation)
@@ -279,8 +332,12 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
     } catch (error) {
       if (firstAttemptError === undefined) firstAttemptError = error
       // Disposal clears current ownership before it closes the generation, so
-      // only a live supervisor reports an attempt failure.
-      if (isCurrent(generation)) ctx.logger.warn(`${label}: connection attempt failed: ${String(error)}`)
+      // only a live supervisor reports an attempt failure. An authorization
+      // failure already logged its consent guidance through the provider's
+      // onAuthorizationUrl hook — repeating it per attempt would only spam.
+      if (isCurrent(generation) && !(error instanceof UnauthorizedError)) {
+        ctx.logger.warn(`${label}: connection attempt failed: ${String(error)}`)
+      }
       try { await generation.close() } catch { /* transport already gone */ }
       const quiesced = hasClosed() || await waitForClose(closed.promise)
       attemptSettled = true

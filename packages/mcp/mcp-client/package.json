@@ -25,14 +25,20 @@
     "./src/*": "./src/*",
     "./package.json": "./package.json"
   },
+  "bin": {
+    "dsh-mcp-client-auth": "lib/auth-cli.js"
+  },
   "files": [
     "lib/index.js",
     "lib/invariant.js",
+    "lib/auth-cli.js",
     "lib/types/**/*.d.ts"
   ],
   "license": "MIT",
   "peerDependencies": {
     "@deepseek-ai/dsh-attachment": "workspace:^",
+    "@deepseek-ai/dsh-credentials": "workspace:^",
+    "@deepseek-ai/dsh-credentials-local": "workspace:^",
     "@deepseek-ai/dsh-invariants": "workspace:^",
     "@deepseek-ai/dsh-llm": "workspace:^",
     "@deepseek-ai/dsh-subprocess": "workspace:^",
@@ -48,6 +54,8 @@
   "devDependencies": {
     "@deepseek-ai/dsh-attachment": "workspace:^",
     "@deepseek-ai/dsh-attachment-local": "workspace:^",
+    "@deepseek-ai/dsh-credentials": "workspace:^",
+    "@deepseek-ai/dsh-credentials-local": "workspace:^",
     "@deepseek-ai/dsh-invariants": "workspace:^",
     "@deepseek-ai/dsh-llm": "workspace:^",
     "@deepseek-ai/dsh-subprocess": "workspace:^",

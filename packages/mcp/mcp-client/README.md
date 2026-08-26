@@ -42,7 +42,11 @@ The model sees `mcp__github__create_issue`, `mcp__web__search`, … — the same
 | `env` | stdio | no | Extra env vars merged on top of scrubbed ambient env |
 | `cwd` | stdio | no | Working directory for the child process |
 | `url` | http | yes | MCP server URL |
-| `headers` | http | no | Extra headers (e.g. auth tokens) |
+| `headers` | http | no | Extra headers (e.g. static auth tokens) |
+| `auth.mode` | http | no | `"oauth"` switches the server to OAuth 2.0 authorization-code flow with PKCE (see [OAuth authentication](#oauth-authentication)) |
+| `auth.scope` | http | no | Scope requested when the server does not advertise one; omission lets discovery decide |
+| `auth.clientId` | http | no | Pre-registered client id; omission performs RFC 7591 dynamic registration on first consent |
+| `auth.redirectPort` | http | no | Loopback port for the consent redirect; must match the consent CLI's `--redirect-port` (default `14506`) |
 | `toolCallTimeoutMs` | both | no | Timeout per `callTool` invocation (default 60000) |
 | `failOnStartupError` | both | no | Reject plugin activation when initial connection or tool synchronization fails (default `false`) |
 | `reconnect.enabled` | both | no | Reconnect automatically after a lost connection (default `true`) |
@@ -58,6 +62,20 @@ Every MCP tool has two names: the raw MCP name (sent on the wire in `tools/call`
 - A duplicate `serverName` across live instances fails the later plugin instance at load.
 - A server listing the same tool name twice is rejected as an invalid tool list.
 - A foreign registration squatting on this server's namespace rolls back the whole generation (never a partial set), with a loud error.
+
+## OAuth authentication
+
+`auth: { mode: 'oauth' }` is explicit configuration, never an auto-started flow on an unexpected 401: consent is human approval of one identity grant, so it lives where a reviewer can see it. Configuring OAuth requires the credential-reference service (`@deepseek-ai/dsh-credentials-local`) to be mounted; the plugin instance rejects at load otherwise. Tokens ride the MCP SDK's Streamable HTTP support: attach on every request, refresh through the stored grant when the server answers 401, and re-consent only when refresh is refused.
+
+State for one server — tokens, dynamic client registration, pending PKCE verifier, discovery cache — persists as ONE credential reference `DSH_MCP_OAUTH_<SERVERNAME>` (uppercased, non-identifier characters become underscores) in `$DSH_HOME/.credentials.yaml`, written `0600`. Values resolve per operation, so state written by any process reaches every other process immediately.
+
+First consent (headless-safe): run the consent CLI from this package on any machine that can open a URL.
+
+```sh
+dsh-mcp-client-auth --url https://mcp.example.com/mcp --server-name example
+```
+
+It prints the authorization URL, captures the redirect on `127.0.0.1:<auth.redirectPort>` (default `14506`; pass `--redirect-port` here AND in the plugin config when you change it), exchanges the code, and writes the tokens. A running host picks them up on its next connection attempt without a restart. When consent is missing, the host logs the same URL once with run-the-CLI guidance and keeps retrying under its normal reconnect budget; `--reset` starts the grant over.
 
 ## Behavior
 
@@ -75,6 +93,7 @@ Every MCP tool has two names: the raw MCP name (sent on the wire in `tools/call`
 | Service | Usage |
 |---|---|
 | `ctx.tools` | Register/unregister MCP tools |
+| `ctx.credentials` | Required for OAuth servers: read and persist token state per operation |
 | `ctx.attachments` | Optionally validate and persist image result batches before model projection |
 | `ctx.llm` | Optionally prove the exact calling route explicitly supports image input |
 
@@ -115,3 +134,6 @@ Append-only; newly visible content follows the reusable request prefix and does 
 - **Reconnect triggers on transport close** — a crashed stdio child fires it; Streamable HTTP failures surface per request and through the SDK transport's own SSE-stream recovery, so an unreachable HTTP server is retried per call rather than respawned by the supervisor.
 - **Image is the only durable rich-result bridge** — PNG, JPEG, WebP, and GIF can enter Native context after exact capability proof. Audio and embedded-resource payloads remain execution-local with explicit diagnostics, while resource links preserve only their name and URI as text.
 - **Unsupported MCP output schemas are not enforced** — `structuredContent` falls back to `JsonValue` when the advertised schema uses vocabulary outside the harness subset.
+- **OAuth consent capture coordinates on one loopback port per server** — the host never listens; only the consent CLI does. Changing `auth.redirectPort` requires the same `--redirect-port` on the next CLI run, and two servers sharing a port cannot consent concurrently.
+- **The consent CLI trusts the authorization server's redirect `state` handling to the SDK** — the CLI captures whatever code arrives on its listener without re-validating the `state` parameter, matching a single-user local-machine threat model.
+- **OAuth servers are the only authenticated remotes** — static-token deployments keep using `headers`; there is no `apikey` auth mode by design (headers already cover it).

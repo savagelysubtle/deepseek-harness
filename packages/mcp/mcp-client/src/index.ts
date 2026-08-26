@@ -23,6 +23,8 @@ import type {} from '@deepseek-ai/dsh-tools'
 
 export type { McpResult } from './tools.ts'
 export type { ReconnectConfig, ResolvedReconnectPolicy } from './connection.ts'
+export { CredentialsOAuthProvider, buildClientMetadata, oauthCredentialRef } from './oauth.ts'
+export type { OAuthCredentialStore } from './oauth.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'mcp-client'
@@ -72,6 +74,28 @@ export interface StdioConfig {
   reconnect?: ReconnectConfig
 }
 
+/**
+ * OAuth configuration for one server. Authorization is explicit config, never
+ * an auto-started flow on an unexpected 401: consent is human approval of one
+ * identity grant, so it is declared here where a reviewer can see it.
+ */
+export interface OAuthAuthConfig {
+  /** Selects the OAuth 2.0 authorization-code flow with PKCE. */
+  mode: 'oauth'
+  /** Scope string requested when the server does not advertise one; omission lets discovery decide. */
+  scope?: string
+  /** Pre-registered client id; omission performs RFC 7591 dynamic client registration on first consent. */
+  clientId?: string
+  /**
+   * Loopback port for the consent redirect. Must match the `--redirect-port`
+   * passed to the `dsh-mcp-client-auth` consent CLI. Default {@link DEFAULT_OAUTH_REDIRECT_PORT}.
+   */
+  redirectPort?: number
+}
+
+/** Default loopback port for the OAuth consent redirect capture. */
+export const DEFAULT_OAUTH_REDIRECT_PORT = 14_506
+
 /** Config for connecting to an MCP server over Streamable HTTP (SSE). */
 export interface StreamableHttpConfig {
   /** Selects Streamable HTTP transport. */
@@ -86,6 +110,11 @@ export interface StreamableHttpConfig {
   url: string
   /** Additional headers attached to MCP requests. */
   headers: Record<string, string>
+  /**
+   * OAuth 2.0 authorization for this server. Omission sends requests as-is;
+   * a server that answers 401 then fails the connection with its diagnostic.
+   */
+  auth?: OAuthAuthConfig
   /** Per-tool-call timeout in milliseconds. */
   toolCallTimeoutMs: number
   /** Fail plugin activation when the initial connection or tool synchronization fails. */
@@ -102,6 +131,13 @@ const Reconnect: z<ReconnectConfig> = z.object({
   initialDelayMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).default(RECONNECT_DEFAULTS.initialDelayMs),
   maxDelayMs: z.number().min(1).max(MAX_TIMER_DELAY_MS).default(RECONNECT_DEFAULTS.maxDelayMs),
   maxAttempts: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(RECONNECT_DEFAULTS.maxAttempts),
+})
+
+const Auth: z<OAuthAuthConfig> = z.object({
+  mode: z.const('oauth').required(),
+  scope: z.string(),
+  clientId: z.string(),
+  redirectPort: z.number().step(1).min(1).max(65_535).default(DEFAULT_OAUTH_REDIRECT_PORT),
 })
 
 export const Config = z.union([
@@ -121,6 +157,7 @@ export const Config = z.union([
     serverName: z.string().required().pattern(SERVER_NAME_PATTERN),
     url: z.string().required(),
     headers: z.dict(String).default({}),
+    auth: Auth,
     toolCallTimeoutMs: z.number().default(DEFAULT_TOOL_CALL_TIMEOUT_MS),
     failOnStartupError: z.boolean().default(false),
     reconnect: Reconnect,
@@ -142,6 +179,25 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // construction that bypassed Schemastery) rejects THIS instance before any
   // effect registers.
   const reconnect = resolveReconnectPolicy(config.reconnect, `mcp-client(${config.serverName}): reconnect`)
+
+  // Fail loud at load: OAuth requires the credential-reference service to hold
+  // tokens. Without it the plugin could never authorize, so reject THIS
+  // instance with the mounting fix named. The widened probe is deliberate:
+  // an auth block on a stdio row exists only at runtime (the schema strips
+  // it, and union narrowing would call the check impossible).
+  const authBlock = (config as { auth?: OAuthAuthConfig }).auth
+  if (authBlock !== undefined) {
+    if (config.transport !== 'streamable-http') {
+      throw new Error(
+        `mcp-client(${config.serverName}): auth.oauth applies only to transport: streamable-http servers`,
+      )
+    }
+    if (ctx.get('credentials') === undefined) {
+      throw new Error(
+        `mcp-client(${config.serverName}): auth.oauth requires the credential-reference service — mount @deepseek-ai/dsh-credentials-local`,
+      )
+    }
+  }
 
   // Reserve the namespace next: a duplicate `serverName` fails THIS instance
   // at load with an actionable error and leaves the earlier instance intact.

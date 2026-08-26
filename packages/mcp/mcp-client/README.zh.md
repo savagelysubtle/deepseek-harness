@@ -42,7 +42,11 @@ MCP 客户端桥接插件：连接外部 [Model Context Protocol](https://modelc
 | `env` | stdio | 否 | 合并到已清理环境中的额外环境变量 |
 | `cwd` | stdio | 否 | 子进程工作目录 |
 | `url` | http | 是 | MCP 服务器 URL |
-| `headers` | http | 否 | 额外标头（例如认证 token） |
+| `headers` | http | 否 | 额外标头（例如静态认证 token） |
+| `auth.mode` | http | 否 | `"oauth"` 将该服务器切换为 OAuth 2.0 授权码流程（含 PKCE），参见[OAuth 认证](#oauth-authentication) |
+| `auth.scope` | http | 否 | 服务器未声明 scope 时请求的 scope；缺省时由发现流程决定 |
+| `auth.clientId` | http | 否 | 预注册客户端 id；缺省时在首次同意时执行 RFC 7591 动态注册 |
+| `auth.redirectPort` | http | 否 | 同意重定向使用的回环端口；必须与同意 CLI 的 `--redirect-port` 一致（默认 `14506`） |
 | `toolCallTimeoutMs` | 两者 | 否 | 每次 `callTool` 调用的超时（默认 60000） |
 | `failOnStartupError` | 两者 | 否 | 初始连接或工具同步失败时拒绝插件激活（默认 `false`） |
 | `reconnect.enabled` | 两者 | 否 | 连接丢失后自动重新连接（默认 `true`） |
@@ -58,6 +62,21 @@ MCP 客户端桥接插件：连接外部 [Model Context Protocol](https://modelc
 - 存活实例中的重复 `serverName` 会使后加载的插件实例失败。
 - 服务器在工具列表中两次列出同一工具名称时，该列表会作为无效工具列表被拒绝。
 - 外部注册抢占该服务器 namespace 时，会回滚整个世代（绝不保留部分集合），并明确报错。
+
+<a id="oauth-authentication"></a>
+## OAuth 认证
+
+`auth: { mode: 'oauth' }` 是显式配置，绝不会在意外的 401 上自动启动流程：同意是对单个身份授权的人工批准，因此它放在评审者能看到的位置。配置 OAuth 要求挂载凭证引用服务（`@deepseek-ai/dsh-credentials-local`）；否则该插件实例会在加载时拒绝。Token 由 MCP SDK 的 Streamable HTTP 支持承载：每次请求附带、服务器返回 401 时通过已存储的 grant 刷新，只有刷新被拒绝时才需要重新同意。
+
+每个服务器的状态——token、动态客户端注册、待用的 PKCE verifier、发现缓存——作为单一凭证引用 `DSH_MCP_OAUTH_<SERVERNAME>`（大写，非标识符字符替换为下划线）持久保存在 `$DSH_HOME/.credentials.yaml` 中，以 `0600` 权限写入。值按操作解析，因此任一进程写入的状态都会立即对其他进程可见。
+
+首次同意（无头环境安全）：在任意能打开 URL 的机器上运行本包自带的同意 CLI。
+
+```sh
+dsh-mcp-client-auth --url https://mcp.example.com/mcp --server-name example
+```
+
+它会打印授权 URL，在 `127.0.0.1:<auth.redirectPort>`（默认 `14506`；如需修改，请在此命令和插件配置中同时传入 `--redirect-port`）上捕获重定向，交换 code 并写入 token。运行中的 Host 会在下一次连接尝试时取到这些 token，无需重启。缺少同意时，Host 会将同一 URL 记录一次日志并附上运行 CLI 的指引，同时在正常重连预算内继续重试；`--reset` 可重新开始整个授权。
 
 ## 行为
 
@@ -75,6 +94,7 @@ MCP 客户端桥接插件：连接外部 [Model Context Protocol](https://modelc
 | 服务 | 用途 |
 |---|---|
 | `ctx.tools` | 注册／注销 MCP 工具 |
+| `ctx.credentials` | OAuth 服务器必需：按操作读取并持久保存 token 状态 |
 | `ctx.attachments` | 可选；在模型投影前校验并持久保存图片结果批次 |
 | `ctx.llm` | 可选；证明确切调用路由明确支持图片输入 |
 
@@ -115,3 +135,6 @@ MCP 客户端桥接插件：连接外部 [Model Context Protocol](https://modelc
 - **重连在传输关闭时触发**：崩溃的 stdio 子进程会触发重连；Streamable HTTP 失败通过每次请求以及 SDK 传输自身的 SSE（Server-Sent Events）流恢复机制暴露，因此不可达的 HTTP 服务器会按调用重试，而非由 supervisor 重新 spawn。
 - **图片是唯一的持久丰富结果桥接**：PNG、JPEG、WebP 和 GIF 可以在确切能力得到证明后进入 Native 上下文。音频和嵌入资源载荷仍只存在于执行局部，并配有明确诊断；资源链接只以文本保留名称和 URI。
 - **不强制执行不受支持的 MCP 输出 schema**：已声明 schema 使用 harness 子集之外的词汇时，`structuredContent` 会回退到 `JsonValue`。
+- **OAuth 同意捕获在每个服务器一个回环端口上协调**：Host 从不监听；只有同意 CLI 监听。修改 `auth.redirectPort` 要求下一次 CLI 运行使用相同的 `--redirect-port`，且共享端口的两台服务器无法同时同意。
+- **同意 CLI 将重定向 `state` 校验交由 SDK 处理**：CLI 捕获到达其监听器的任意 code，不重新校验 `state` 参数，与单用户本地机器威胁模型一致。
+- **OAuth 是远程服务器唯一的认证方式**：静态 token 部署继续使用 `headers`；刻意不设 `apikey` 认证模式（headers 已覆盖该场景）。
