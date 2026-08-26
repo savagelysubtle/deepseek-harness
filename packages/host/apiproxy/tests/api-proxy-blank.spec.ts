@@ -1,9 +1,12 @@
 /**
- * The summary blank bit means "conversation not started" (no turn has run),
- * not "log empty": standalone plugin events — command lifecycle records,
- * plan/mode, permission knob events, session titles — never flip it, so running /plan or /goal on a
- * fresh session keeps it list-hidden and reusable, while the first accepted
- * prompt's turn/start clears it. The host/session-added frame shares the
+ * The summary blank bit means "not yet real": no turn has run and no user
+ * rename has pinned a title. Standalone plugin events — command lifecycle
+ * records, plan/mode, permission knob events, automatic session titles — never
+ * flip it, so running /plan or /goal on a fresh session keeps it list-hidden
+ * and reusable, while the first accepted prompt's turn/start clears it. A
+ * user-source `session/title` clears it too: pinning a name is how an
+ * agent-created seat becomes visible before its first turn. The
+ * host/session-added frame shares the
  * same predicate function (covered by the workspace spec's frame assertion).
  */
 
@@ -80,6 +83,18 @@ describe('summary blank = conversation not started', () => {
     attach(session)
     appendStandalone(session)
     session.append('turn/start', { turn: 0 })
+    expect(await listBlank(api, session.id)).toBe(false)
+  })
+
+  it('a user rename clears blank before any turn (agent-created named seat)', async () => {
+    const { ctx, api, attach } = await harness()
+    const session = ctx.sessions.create()
+    attach(session)
+    appendStandalone(session)
+    expect(await listBlank(api, session.id)).toBe(true)
+    session.append('session/title', {
+      title: 'Batman', messageSeqs: [], source: { kind: 'user' },
+    })
     expect(await listBlank(api, session.id)).toBe(false)
   })
 })

@@ -185,12 +185,16 @@ export interface SessionSummary {
   /** Status of the attached agent; always false for cold (unattached) sessions. */
   running: boolean
   /**
-   * Derived conversation-not-started bit: true while no turn has run.
+   * Derived not-yet-real bit: true while no turn has run and no user rename
+   * has pinned a title. A user-pinned title is an existence assertion — it is
+   * how an agent-created named session becomes visible before its first turn.
    * Standalone plugin events — command lifecycle
-   * records, plan/mode, titles, goals — do not open a turn and therefore do
-   * not clear it. Clients hide blank Sessions from lists and reuse them for
+   * records, plan/mode, automatic titles, goals — do not clear it, so
+   * running `/plan` or `/goal` on a fresh session keeps it blank
+   * (list-hidden, reusable). Clients hide blank Sessions from lists and reuse them for
    * New Session on the same workspace. A cold Session is true only when a
-   * small-artifact read verifies that no `turn/start` exists; unavailable
+   * small-artifact read verifies that neither a `turn/start` nor a
+   * user-pinned title exists; unavailable
    * or oversized artifacts conservatively report false.
    */
   blank: boolean

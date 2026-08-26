@@ -51,6 +51,7 @@ describe('sessions.list cold merge', () => {
     const metas = [
       header('small-blank', 100),
       header('small-conversation', 200),
+      header('small-named', 250),
       header('large-unknown', 300),
       header('cached-nonblank', 400),
       header('locationless', 500, { parentSession: sid('session-parent'), origin: 'subagent' }),
@@ -73,6 +74,17 @@ describe('sessions.list cold merge', () => {
               type: 'user/message', seq: 1, time: 1200,
               data: createUserMessage({ content: [{ type: 'text', text: 'worked' }], source: { kind: 'user' } }),
               surfaceOp: 'append',
+            },
+          ] as SessionEvent[],
+        }
+      }
+      if (id === sid('small-named')) {
+        return {
+          meta: metas[2]!,
+          events: [
+            {
+              type: 'session/title', seq: 0, time: 300,
+              data: { title: 'Obiwan', messageSeqs: [], source: { kind: 'user' } },
             },
           ] as SessionEvent[],
         }
@@ -113,6 +125,8 @@ describe('sessions.list cold merge', () => {
     expect(byId['small-blank']).toMatchObject({ blank: true, updatedAt: 100, running: false })
     // A stale true hint cannot hide the turn found in the bounded read.
     expect(byId['small-conversation']).toMatchObject({ blank: false, updatedAt: 1200 })
+    // A user-pinned title proves existence without a turn; it does not move recency.
+    expect(byId['small-named']).toMatchObject({ blank: false, updatedAt: 250 })
     expect(byId['large-unknown']).toMatchObject({ blank: false, updatedAt: 300 })
     // false is monotonic, so this row skips stat/read and keeps cached recency.
     expect(byId['cached-nonblank']).toMatchObject({ blank: false, updatedAt: 1000 })
@@ -124,10 +138,11 @@ describe('sessions.list cold merge', () => {
     })
     expect(byId['vanished']).toMatchObject({ blank: false, updatedAt: 600 })
     expect(byId['read-failure']).toMatchObject({ blank: false, updatedAt: 700 })
-    expect(readFrom).toHaveBeenCalledTimes(3)
+    expect(readFrom).toHaveBeenCalledTimes(4)
     expect(readFrom.mock.calls.map(([id]) => id)).toEqual(expect.arrayContaining([
       sid('small-blank'),
       sid('small-conversation'),
+      sid('small-named'),
       sid('read-failure'),
     ]))
   })

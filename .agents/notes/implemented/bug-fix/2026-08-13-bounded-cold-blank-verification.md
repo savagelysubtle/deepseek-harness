@@ -35,3 +35,5 @@ Existing small blank JSONL artifacts are hidden without depending on projection-
 Blank artifacts above the threshold and blank Sessions on location-less backends remain visible. Missing or delayed recency cache entries for artifacts that are not read fall back to `createdAt`. These are conservative degradations: the UI may show an extra empty row or order a Session too low, but it does not hide a conversation or promote one because it was merely opened.
 
 The gateway-owned projection is an effect of the gateway fiber; unloading the gateway removes the key. Unit coverage pins exact-threshold eligibility, stale-true rejection, monotonic false reuse, exact small-log recency, live-attachment races, fallback direction, human-prompt recency, and fiber disposal. A keyless Web snapshot boots the shipped compressed JSONL composition, seeds a small cold blank artifact without a cache row, and verifies that the sidebar omits it.
+
+The existence predicate this probe folds is owned by [the user-pinned-title decision](../architecture/2026-08-26-user-pinned-title-clears-blank.md): a user-source `session/title` event now also proves non-blank inside the same bounded read.

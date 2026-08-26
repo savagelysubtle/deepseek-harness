@@ -467,19 +467,25 @@ function jobViews(snapshots: readonly JobSnapshot[]): JobView[] {
 }
 
 /**
- * Whether the session's conversation has started: no turn has run yet (a
- * turn is one model-loop execution). Standalone plugin events — command
- * lifecycle records, plan/mode, titles, goals — never open a turn, so
- * running `/plan` or `/goal` on a fresh session keeps it blank
- * (list-hidden, reusable).
+ * An event proving the session exists beyond a provisional placeholder: a
+ * conversation has run (a turn is one model-loop execution), or a user rename
+ * pinned a durable title (an agent-created seat named before its first turn).
+ * Standalone plugin events — command lifecycle records, plan/mode, automatic
+ * titles, goals — never prove existence, so running `/plan` or `/goal` on a
+ * fresh session keeps it blank (list-hidden, reusable).
  */
+function startsConversation(event: SessionEvent): boolean {
+  return event.type === 'turn/start'
+    || (event.type === 'session/title' && event.data.source.kind === 'user')
+}
+
 function sessionBlank(session: Session): boolean {
-  return !session.events.some(event => event.type === 'turn/start')
+  return !session.events.some(startsConversation)
 }
 
 /** Advance the Session-list hint projection by one committed event. */
 function applySessionListMetadata(state: SessionListMetadata, event: SessionEvent): SessionListMetadata {
-  const blank = state.blank && event.type !== 'turn/start'
+  const blank = state.blank && !startsConversation(event)
   const lastPromptAt = event.type === 'user/message' && event.data.source.kind === 'user'
     ? event.time
     : state.lastPromptAt
@@ -3023,6 +3029,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       // Recomposing is limited to a blank session because a started
       // conversation's history was produced under its preset's tools; the
       // agent and the session survive, only the composition is swapped.
+      // A user-pinned title counts as started: the seat is committed to its
+      // composition from naming onward.
       async select(request) {
         const { sessionId, agentPreset } = request.payload
         const presets = ctx.get('agentPresets')
