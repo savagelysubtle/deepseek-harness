@@ -80,6 +80,7 @@ import type {} from '@deepseek-ai/dsh-skill'
 import { SettingsConflictError, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { SettingsDescriptor, SettingsNamespace, SettingsPathOp } from '@deepseek-ai/dsh-settings'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { publishAndWake } from '@deepseek-ai/dsh-mailbox-bridge'
 // Value edge: the rename impl narrows the title service's validation failure; the import also resolves `ctx.get('sessionTitle')`.
 import { SessionTitleInvalidError } from '@deepseek-ai/dsh-session-title'
 import type { CallId } from '@deepseek-ai/dsh-llm/brand'
@@ -1900,6 +1901,11 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     return { code: 'internal', message: 'credentials service is absent: this deployment does not mount a credential provider (e.g. @deepseek-ai/dsh-credentials-local) in its composition', details: {} }
   }
 
+  /** Uniform rejection for the mailbox domain: every refusal names its reason. */
+  function mailboxRejected(reason: string): RpcError {
+    return { code: 'mailbox-rejected', message: reason, details: { reason } }
+  }
+
   /** Map one redacted settings descriptor to its wire view. */
   function namespaceView(descriptor: SettingsDescriptor): SettingsNamespaceView {
     return {
@@ -3309,6 +3315,42 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           })
         }
         return ok(request, {})
+      },
+    },
+
+    mailbox: {
+      async publish(request) {
+        const { address, namespace, name, type, subject, payload, traceId } = request.payload
+        // The admitting operation builds the address once, here: exactly one
+        // of the two addressing forms must be present.
+        let to: string
+        if (address !== undefined) {
+          if (namespace !== undefined || name !== undefined) {
+            return err(request, mailboxRejected('pass either "address" or "namespace"+"name", not both addressing forms'))
+          }
+          to = address
+        } else if (typeof namespace === 'string' && typeof name === 'string') {
+          to = `${namespace}:${name}`
+        } else {
+          return err(request, mailboxRejected('mailbox publish requires an "address" or both "namespace" and "name"'))
+        }
+        if (ctx.get('mailbox') === undefined) {
+          return err(request, mailboxRejected('no mailbox registry is composed in this deployment'))
+        }
+        try {
+          const result = await publishAndWake(ctx, {
+            to,
+            from: request.payload.from,
+            ...type !== undefined ? { type } : {},
+            ...subject !== undefined ? { subject } : {},
+            payload,
+            ...traceId !== undefined ? { traceId } : {},
+          })
+          return ok(request, result)
+        } catch (error: unknown) {
+          const reason = error instanceof Error ? error.message : String(error)
+          return err(request, { code: 'mailbox-rejected', message: reason, details: { reason } })
+        }
       },
     },
 

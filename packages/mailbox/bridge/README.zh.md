@@ -43,6 +43,10 @@
 
 按目标会话追加式增长。每条准入邮件在既有前缀之后扩展转录，既有前缀缓存仍可复用；崩溃窗口内的过期重投可能追加重复回合——不替换任何内容，只是增加消费者必须容忍其重复的 token。
 
+## 线路准入
+
+非 dsh 调用方经宿主 API 的 `mailbox.publish`（[apiproxy](../../host/apiproxy/README.md)）走同一条排水路径，其内部封装了导出的 [`publishAndWake`](./src/index.ts)：对照每个已挂载桥的地址做响亮的花名册校验、经默认提供方的一次存储写入、一次立即路由，以及取自本次唤醒落定观察的 `delivered`／`queued` 处置。终态路由失败会携带记录原因响亮拒绝，而不是虚假的快速确认。
+
 ## Known Limitations and Deferred Work
 
 - **无待送目录发现** — 花名册由配置声明；扫描存储中的未知地址需要 Service Definition 尚未提供的提供方枚举表面（`discoverPending` 在此之前不做规划）。

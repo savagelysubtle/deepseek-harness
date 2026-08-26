@@ -17,7 +17,7 @@ import { formatMailboxAddress } from '@deepseek-ai/dsh-mailbox'
 import { acquireNamedSessionLock, deriveNamedSessionId, namedLockPath } from '@deepseek-ai/dsh-named-sessions'
 import MailboxLocal from '@deepseek-ai/dsh-mailbox-local'
 import * as bridge from '../src/index.ts'
-import { admittedOutcome, relaySource, relayText } from '../src/delivery.ts'
+import { admittedOutcome, publishAndWake, relaySource, relayText } from '../src/delivery.ts'
 
 let homes: string[] = []
 
@@ -249,5 +249,65 @@ describe('routing outcomes', () => {
     expect(badRow.state).toBe('failed')
     expect(JSON.parse(badRow.result ?? '{}').reason).toContain('boom')
     await expect(rowState(h.storePath, good)).resolves.toMatchObject({ state: 'done' })
+  })
+})
+
+describe('publishAndWake', () => {
+  /** Attach one bridge's resolved roster so the wake path sees it as served. */
+  function serveSpecs(ctx: ContextType, addresses: readonly string[]): void {
+    ctx.provide('mailboxBridgeSpecs', [bridge.resolveBridgeSpec({
+      addresses: [...addresses], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000,
+    })] as never)
+  }
+
+  it('delivers into a live target and reports the admission', async () => {
+    const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    serveSpecs(h.ctx, ['sc:target'])
+    const result = await bridge.publishAndWake(h.ctx, { to: 'sc:target', from: 'wire:ceo', subject: 'wake' })
+    expect(result.disposition).toBe('delivered')
+    expect(live.followup).toHaveBeenCalledTimes(1)
+    expect((live.followup.mock.calls[0]?.[0] as { source: { messageId: string } }).source.messageId).toBe(result.messageId)
+    await expect(rowState(h.storePath, result.messageId)).resolves.toMatchObject({ state: 'done' })
+  })
+
+  it('reports queued while residency holds the target elsewhere', async () => {
+    const h = await makeHarness({ persisted: true })
+    serveSpecs(h.ctx, ['sc:target'])
+    const lock = acquireNamedSessionLock('target')
+    try {
+      const result = await bridge.publishAndWake(h.ctx, { to: 'sc:target', from: 'wire:ceo', subject: 'hold' })
+      expect(result.disposition).toBe('queued')
+      await expect(rowState(h.storePath, result.messageId)).resolves.toMatchObject({ state: 'pending' })
+    } finally {
+      lock.release()
+    }
+  })
+
+  it('rejects grammar violations before anything is stored', async () => {
+    const h = await makeHarness({ persisted: true })
+    serveSpecs(h.ctx, ['sc:target'])
+    await expect(bridge.publishAndWake(h.ctx, { to: 'no separator', from: 'wire:ceo' }))
+      .rejects.toThrow(/invalid mailbox address/)
+  })
+
+  it('rejects addresses outside every mounted roster loud', async () => {
+    const h = await makeHarness({ persisted: true })
+    serveSpecs(h.ctx, ['sc:target'])
+    await expect(bridge.publishAndWake(h.ctx, { to: 'sc:stranger', from: 'wire:ceo' }))
+      .rejects.toThrow(/not served by any mounted mailbox bridge/)
+  })
+
+  it('surfaces a terminal routing failure with its recorded reason', async () => {
+    const h = await makeHarness({ persisted: false })
+    serveSpecs(h.ctx, ['sc:target'])
+    await expect(bridge.publishAndWake(h.ctx, { to: 'sc:target', from: 'wire:ceo', subject: 'nobody home' }))
+      .rejects.toThrow(/mailbox delivery failed: unknown-address/)
+  })
+
+  it('refuses to publish when no bridge is composed at all', async () => {
+    const h = await makeHarness({ persisted: true })
+    await expect(bridge.publishAndWake(h.ctx, { to: 'sc:target', from: 'wire:ceo' }))
+      .rejects.toThrow(/no mailbox bridge is composed/)
   })
 })

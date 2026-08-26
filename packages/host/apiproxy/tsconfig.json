@@ -93,6 +93,15 @@
       "path": "../directory-picker"
     },
     {
+      "path": "../../mailbox/bridge"
+    },
+    {
+      "path": "../../mailbox/mailbox"
+    },
+    {
+      "path": "../../session/named-sessions"
+    },
+    {
       "path": "../../extensions/cordis-host-runner"
     },
     {

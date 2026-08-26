@@ -1,3 +1,5 @@
+English | [中文](2026-08-26-mailbox-local-store.zh.md)
+
 # Agent Note: Mailbox local store — SQLite leasing semantics
 
 Status: implemented

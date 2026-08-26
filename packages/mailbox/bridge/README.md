@@ -43,6 +43,10 @@ Conditional and real: every delivered message appends its rendered turn to the t
 
 Append-only per target session. Each admitted mail extends the transcript after the existing prefix, so previously cached prefixes stay reusable; a stale-lease redelivery can append a duplicate turn after a crash window, replacing nothing but adding tokens consumers must tolerate duplicates of.
 
+## Wire admission
+
+Non-dsh callers reach the same drain through the host API's `mailbox.publish` ([the apiproxy](../../host/apiproxy/README.md)), which wraps the exported [`publishAndWake`](./src/index.ts): loud roster validation against every mounted bridge's addresses, one store write through the default provider, one immediate routing pass, and a `delivered`/`queued` disposition taken from what this wake's settlements observed. Terminal routing failures reject with the recorded reason instead of a false-fast acknowledgment.
+
 ## Known Limitations and Deferred Work
 
 - **No pending-directory discovery** — the roster is configuration-declared; scanning a store's unknown addresses needs a provider enumeration surface the Service Definition does not ship yet (`discoverPending` stays unplanned until then).

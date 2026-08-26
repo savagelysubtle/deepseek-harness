@@ -31,7 +31,7 @@ import {
   type NamedSessionLock,
 } from '@deepseek-ai/dsh-named-sessions'
 import { parseMailboxAddress } from '@deepseek-ai/dsh-mailbox'
-import type { MailboxAddress, MailboxClaimFilter, MailboxLease } from '@deepseek-ai/dsh-mailbox'
+import type { MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxMessageId } from '@deepseek-ai/dsh-mailbox'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { admittedOutcome, relayUserMessage } from './delivery.ts'
 
@@ -135,8 +135,9 @@ function deliverToLive(agent: Agent, message: UserMessage): void {
  * @param ctx - plugin context carrying the mailbox registry and core services.
  * @param spec - resolved serving parameters.
  * @param lease - the lease claimed this cycle.
+ * @returns what the settlement recorded, observed by {@link internals.drainOnce}.
  */
-async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease): Promise<void> {
+async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease): Promise<RouteResult> {
   const mailbox = ctx.mailbox
   // Both halves of every served address were grammar-checked at mount, so the
   // name half slices out directly — routing adds no second encoding.
@@ -148,7 +149,7 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
   if (live !== undefined) {
     deliverToLive(live, relayUserMessage(lease))
     await mailbox.settle(lease.leaseRef, admittedOutcome(lease))
-    return
+    return { kind: 'done' }
   }
 
   let lock: NamedSessionLock | undefined
@@ -158,7 +159,7 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
     lock = acquireNamedSessionLock(name, spec.lockStaleMs === undefined ? {} : { maxAgeMs: spec.lockStaleMs })
   } catch {
     await mailbox.settle(lease.leaseRef, { state: 'pending', result: undefined })
-    return
+    return { kind: 'pending' }
   }
   try {
     const persistence = ctx.get('sessionPersistence')
@@ -168,7 +169,7 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
     const persisted = (await persistence.list()).some(header => header.id === sessionId)
     if (!persisted) {
       await mailbox.settle(lease.leaseRef, { state: 'failed', result: { reason: 'unknown-address' } })
-      return
+      return { kind: 'failed', reason: 'unknown-address' }
     }
     const { agent, dispose } = await resumeTarget(ctx, sessionId)
     try {
@@ -183,6 +184,7 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
     } finally {
       await dispose()
     }
+    return { kind: 'done' }
   } finally {
     lock.release()
   }
@@ -209,57 +211,83 @@ async function resumeTarget(ctx: Context, sessionId: ReturnType<typeof deriveNam
   return ctx.agents.resume({ resumeSessionId: sessionId, agentOptions, setup })
 }
 
-/**
- * Run one drain pass: claim a bounded batch across the roster and route every
- * lease. A per-lease failure settles `failed` with the reason instead of
- * wedging the roster behind one poison message.
- * @param ctx - plugin context carrying the mailbox registry and core services.
- * @param spec - resolved serving parameters.
- */
-async function drainOnce(ctx: Context, spec: BridgeSpec): Promise<void> {
-  const filter: MailboxClaimFilter = {
-    addresses: spec.addresses,
-    limit: spec.maxClaimPerCycle,
-    staleClaimMs: spec.staleClaimMs,
-  }
-  const leases = await ctx.mailbox.claim(filter)
-  for (const lease of leases) {
-    try {
-      await deliverLease(ctx, spec, lease)
-    } catch (error) {
-      await ctx.mailbox.settle(lease.leaseRef, {
-        state: 'failed',
-        result: { reason: error instanceof Error ? `${error.message}` : String(error) },
-      }).catch(() => {
-        // The settlement surface itself is down; re-raising would mask its cause.
-      })
-    }
-  }
-}
-
 /** Stable Cordis plugin name. */
 export const name = 'mailbox-bridge'
 
 /** Core services required before any cycle can route deliveries. */
 export const inject = ['mailbox', 'agents']
 
-/** One drain pass without the interval wrapper — the unit-test surface. */
-export const internals = { drainOnce }
+/**
+ * Context key every mounted bridge contributes its resolved spec under, so
+ * wire consumers (the host API) can validate that an address is actually
+ * served before admitting mail for it.
+ */
+export type MailboxBridgeSpecs = readonly BridgeSpec[]
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    /** Union of every mounted bridge's serving roster in mount order. */
+    mailboxBridgeSpecs?: MailboxBridgeSpecs
+  }
+}
+
+/**
+ * Lifecycle result of routing one claimed lease, observed at its settlement
+ * write. `failed` carries the reason the settlement recorded.
+ */
+export type RouteResult = { kind: 'done' } | { kind: 'pending' } | { kind: 'failed'; reason: string }
+
+/**
+ * One drain pass without the interval wrapper — the unit-test surface. The
+ * optional observer fires once per routed lease at its settlement write, so a
+ * consumer can learn what became of a specific message it just published.
+ * @param ctx - plugin context carrying the mailbox registry and core services.
+ * @param spec - resolved serving parameters.
+ * @param onSettled - observer keyed by the provider-assigned message id.
+ */
+export const internals = {
+  async drainOnce(ctx: Context, spec: BridgeSpec, onSettled?: (messageId: string, result: RouteResult) => void): Promise<void> {
+    const filter: MailboxClaimFilter = {
+      addresses: spec.addresses,
+      limit: spec.maxClaimPerCycle,
+      staleClaimMs: spec.staleClaimMs,
+    }
+    const leases = await ctx.mailbox.claim(filter)
+    for (const lease of leases) {
+      try {
+        const result = await deliverLease(ctx, spec, lease)
+        onSettled?.(String(lease.message.id), result)
+      } catch (error) {
+        const reason = error instanceof Error ? `${error.message}` : String(error)
+        await ctx.mailbox.settle(lease.leaseRef, {
+          state: 'failed',
+          result: { reason },
+        }).catch(() => {
+          // The settlement surface itself is down; re-raising would mask its cause.
+        })
+        onSettled?.(String(lease.message.id), { kind: 'failed', reason })
+      }
+    }
+  },
+}
 
 /**
  * Mount the drain loop. The first cycle runs inline so structural faults — an
  * unregistered default provider, a malformed roster — fail the mount itself;
  * later cycles stay periodic, single-flight, and loud on structural failure.
+ * The resolved spec joins the process-wide serving roster, so wire consumers
+ * can validate addresses against it ({@link publishAndWake}).
  * @param ctx - plugin context carrying the mailbox registry and core services.
  * @param config - validated plugin configuration.
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
   const spec = resolveBridgeSpec(config)
+  ctx.provide('mailboxBridgeSpecs', [...ctx.get('mailboxBridgeSpecs') ?? [], spec])
   let draining = false
   const cycle = (): void => {
     if (draining) return
     draining = true
-    void drainOnce(ctx, spec)
+    void internals.drainOnce(ctx, spec)
       .catch((error: unknown) => {
         // A second structural failure after mount cannot self-heal by ticking;
         // clearing the interval makes the broken deployment fail visibly
@@ -271,7 +299,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         draining = false
       })
   }
-  await drainOnce(ctx, spec)
+  await internals.drainOnce(ctx, spec)
   const timer = setInterval(cycle, spec.pollIntervalMs)
   // Unref'd: the drain loop must not pin its host's event loop. Deployments
   // that exist only to serve mail hold themselves up through other handles.
@@ -279,4 +307,66 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   ctx.effect(() => () => {
     clearInterval(timer)
   }, 'mailbox-bridge.poll')
+}
+
+/** What the wire reports about one woken message. */
+export type MailboxWakeDisposition = 'delivered' | 'queued'
+
+/** Addressed publish input shared by every wire caller. */
+export interface PublishAndWakeRequest {
+  /** Destination address in the `<namespace>:<name>` grammar. */
+  readonly to: string
+  /** Sender address; free-form provenance, never validated against live endpoints. */
+  readonly from: string
+  readonly type?: string
+  readonly subject?: string
+  /** JSON-serializable body owned by the sender. */
+  readonly payload?: unknown
+  readonly traceId?: string
+}
+
+/**
+ * The wire admission path for non-dsh callers: validate the address against
+ * the mounted bridges' rosters, store the message through the registry's
+ * default provider, then run one immediate drain of that bridge's roster so
+ * the fresh mail wakes its target in the same call.
+ *
+ * `delivered` means the routing admitted the message into a session inbox
+ * this wake (live or cold-resumed); `queued` means it remains stored for a
+ * later cycle — residency held elsewhere, or a full claim batch ahead of it.
+ * A terminal routing failure (`unknown-address`, missing backends) rejects
+ * loud with the recorded reason.
+ * @param ctx - context carrying the mailbox registry and the bridge specs.
+ * @param request - addressed publish content without an id.
+ * @returns the provider-assigned id plus the observed disposition.
+ */
+export async function publishAndWake(
+  ctx: Context,
+  request: PublishAndWakeRequest,
+): Promise<{ messageId: MailboxMessageId; disposition: MailboxWakeDisposition }> {
+  const mailbox = ctx.get('mailbox')
+  if (mailbox === undefined) {
+    throw new Error('mailbox publish: no mailbox registry is composed in this deployment')
+  }
+  const to = parseMailboxAddress(request.to)
+  const specs = ctx.get('mailboxBridgeSpecs') ?? []
+  if (specs.length === 0) {
+    throw new Error(`mailbox publish: no mailbox bridge is composed, so "${to}" cannot be served or woken`)
+  }
+  const spec = specs.find(candidate => candidate.addresses.includes(to))
+  if (spec === undefined) {
+    throw new Error(`mailbox publish: address "${to}" is not served by any mounted mailbox bridge`)
+  }
+  const messageId = await mailbox.publish({ ...request, to })
+  let observed: RouteResult | undefined
+  await internals.drainOnce(ctx, spec, (settledId, result) => {
+    if (settledId === messageId && observed === undefined) observed = result
+  })
+  if (observed === undefined || observed.kind === 'pending') {
+    return { messageId, disposition: 'queued' }
+  }
+  if (observed.kind === 'failed') {
+    throw new Error(`mailbox delivery failed: ${observed.reason}`)
+  }
+  return { messageId, disposition: 'delivered' }
 }

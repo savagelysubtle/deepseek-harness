@@ -1,3 +1,5 @@
+English | [中文](2026-08-26-mailbox-bridge-delivery.zh.md)
+
 # Agent Note: Mailbox bridge — steer-first delivery over derived session identity
 
 Status: implemented

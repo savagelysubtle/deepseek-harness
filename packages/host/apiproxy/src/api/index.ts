@@ -5,6 +5,7 @@
  */
 
 import type { SessionsApi } from './sessions.ts'
+export type { MailboxApi, MailboxPublishPayload, MailboxPublishValue } from './mailbox.ts'
 import type { HostApi } from './host.ts'
 import type { WorkspaceApi } from './workspace.ts'
 import type { AgentPresetsApi } from './agent-presets.ts'
@@ -16,6 +17,7 @@ import type { SettingsApi } from './settings.ts'
 import type { CredentialsApi } from './credentials.ts'
 import type { LlmApi } from './llm.ts'
 import type { DownloadsApi } from './downloads.ts'
+import type { MailboxApi } from './mailbox.ts'
 import type { ClientResponse, RpcReceipt } from './rpc.ts'
 
 /** Root interface of the unified API. New client-request domain = one new file pair + one field here + one map row. */
@@ -31,6 +33,8 @@ export interface ApiProxy {
   settings: SettingsApi
   credentials: CredentialsApi
   llm: LlmApi
+  /** Host-wire face for non-dsh callers admitting mail into served namespaces. */
+  mailbox: MailboxApi
   /** Host-only download surfaces (GET, no wire envelope); absent from IApiClient. */
   downloads: DownloadsApi
   /**

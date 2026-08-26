@@ -7,3 +7,7 @@
 | 包 | 角色 | ctx 键 |
 |---|---|---|
 | [`mailbox/`](mailbox/README.md) | Service Definition：提供方契约、`<namespace>:<name>` 地址文法、注册表与默认解析便捷操作、`mailbox` 消息来源种类 | `ctx.mailbox` |
+| [`local/`](local/README.md) | SQLite 存储：单文件持久化、IMMEDIATE 事务单赢家认领、令牌守卫落定与过期租约回收、schema 版本门禁 | provider `local` on `ctx.mailbox` |
+| [`bridge/`](bridge/README.md) | 消费方：轮询排水到具名会话 agent——steer 优先投递、驻留锁下的冷恢复、`unknown-address` 失败 | 驱动排水；无 ctx 键 |
+
+[mailbox 计划](../../interagentstuff/plans/mailbox-plan.md)中的规划角色：`mailbox-rest`（兼容 PostgREST 的提供方）、`tool-mailbox-send`（面向模型的发送工具）。

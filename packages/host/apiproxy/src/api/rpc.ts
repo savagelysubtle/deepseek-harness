@@ -92,6 +92,13 @@ export interface RpcErrorDetailsMap {
   'subagent-not-resumable': { childSessionId: SessionId }
   'subagent-unauthorized': { childSessionId: SessionId }
   'subagent-delivery-unavailable': { childSessionId: SessionId }
+  /**
+   * A mailbox publish was refused or its wake failed terminally: malformed
+   * addressing, no mailbox registry or bridge composed, an address outside
+   * every mounted roster, or a routing failure recorded by the provider.
+   * The message is the bridge's own text; details carry the same reason.
+   */
+  'mailbox-rejected': { reason: string }
   'internal': {}
 }
 

@@ -303,7 +303,13 @@ describe('mailbox delivery over real compositions', () => {
           '    addresses: ["comp:hook-target"]',
           '    pollIntervalMs: 10',
         ],
-        settled: () => until(() => storedState(env.storePath, id) === 'done'),
+        settled: async () => {
+          // Admission settles before the delivered turn streams; give the
+          // resumed agent's model exchange one bounded beat so the scripted
+          // adapter records the request before teardown disposes the tree.
+          await until(() => storedState(env.storePath, id) === 'done')
+          await new Promise<void>(resolve => { setTimeout(resolve, 400) })
+        },
       })
 
       const mailboxMessages = second.adapter.requests
