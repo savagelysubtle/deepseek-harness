@@ -1,0 +1,55 @@
+import { defineConfig } from 'tsdown'
+
+/** Build the seam root, local provider, tool consumer, and invariant companion as independent bundles. */
+export default defineConfig([
+  {
+    entry: ['lib/types/index.js'],
+    outDir: 'lib',
+    format: ['esm'],
+    platform: 'node',
+    target: 'es2024',
+    fixedExtension: false,
+    dts: false,
+    clean: false,
+  },
+  {
+    entry: ['lib/types/local.js'],
+    outDir: 'lib',
+    format: ['esm'],
+    platform: 'node',
+    target: 'es2024',
+    fixedExtension: false,
+    dts: false,
+    clean: false,
+  },
+  {
+    entry: ['lib/types/tool.js'],
+    outDir: 'lib',
+    format: ['esm'],
+    platform: 'node',
+    target: 'es2024',
+    fixedExtension: false,
+    dts: false,
+    clean: false,
+  },
+  {
+    entry: ['lib/types/invariant.js'],
+    outDir: 'lib',
+    format: ['esm'],
+    platform: 'node',
+    target: 'es2024',
+    fixedExtension: false,
+    dts: false,
+    clean: false,
+  },
+  {
+    entry: ['lib/types/local-plugin.js'],
+    outDir: 'lib',
+    format: ['esm'],
+    platform: 'node',
+    target: 'es2024',
+    fixedExtension: false,
+    dts: false,
+    clean: false,
+  },
+])
