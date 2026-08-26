@@ -24,6 +24,8 @@ Which lane carries it depends on what the owner is doing. A busy owner is inject
 
 Waking is bounded. Each owner may open `maxConsecutiveWakes` turns this way before further notices degrade to injection, and claiming any user-authored message restores the budget. The bound exists because the chain is self-exciting: a woken turn may start the background job whose completion wakes it again. Notices this plugin queued never refill the budget they spent.
 
+Machine-owned owners — agents whose session header carries `origin: 'subagent'`, i.e. delegated children — get their own larger `machineOwnerWakeBudget` (default 16) under the same reset. A child cannot ask for help (its approval policy is pinned at delegation), so exhausting its budget does not degrade silently: one final wake instructs it to persist state via the memory tool and remain quiet, and only afterwards do further notices inject without opening a turn. A user-authored claim re-arms both the budget and that wind-down turn.
+
 One host registry may carry several mounts of this plugin — one per agent preset. The registry routes each settlement to the listeners the owner's scope chain reaches, so a mount under one preset never sees another preset's agents and an agent reads exactly one notice per completion however many presets are mounted. The same routing decides which agents this mount's controller serves: an agent whose composition loads no `tool-jobs` cannot start background work at all.
 
 ## Config
@@ -34,6 +36,7 @@ One host registry may carry several mounts of this plugin — one per agent pres
 | `maxWaitTimeoutMs` | `600000` | cap for model-supplied waits |
 | `completionDelivery` | `wakeup` | `wakeup` opens a turn on an idle owner; `quiet` leaves the notice pending |
 | `maxConsecutiveWakes` | `3` | turns one owner may open by wake before notices degrade to injection |
+| `machineOwnerWakeBudget` | `16` | the same bound for machine-owned owners (`origin: 'subagent'`), with a final wind-down turn before degradation |
 
 A default above the cap fails at load.
 

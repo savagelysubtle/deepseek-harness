@@ -35,6 +35,8 @@ interface FakeDelivery {
   followup?: (...args: unknown[]) => void
   /** Defaults to `running`, the lane that never wakes, so notice-content tests pin one lane. */
   status?: 'idle' | 'running'
+  /** Marks the owner a machine-originated delegated child (`SessionHeader.origin`). */
+  origin?: 'subagent'
 }
 
 /**
@@ -50,7 +52,15 @@ function fakeAgent(ctx: Context, sessionId: string, delivery: FakeDelivery = {})
     inject: delivery.inject ?? (() => {}),
     followup: delivery.followup ?? (() => {}),
     status: delivery.status ?? 'running',
-    session: { id, header: { version: 0, id, createdAt: 0 } },
+    session: {
+      id,
+      header: {
+        version: 0,
+        id,
+        createdAt: 0,
+        ...delivery.origin !== undefined ? { origin: delivery.origin } : {},
+      },
+    },
   } as unknown as Agent
   agentRegistryDisposers.set(agent, ctx.agents.register(agent))
   agentScopeFibers.set(agent, scopeFiber)
@@ -610,6 +620,57 @@ describe('completion notice delivery', () => {
     })
     await settleTasks(ctx, owner, 1)
     expect(followup).toHaveBeenCalledTimes(2)
+  })
+
+  it('wakes a machine-owned owner on its own budget, then hands off with one loud wind-down turn', async () => {
+    const { ctx } = await setup({ machineOwnerWakeBudget: 1 })
+    const inject = vi.fn()
+    const followup = vi.fn()
+    const owner = fakeAgent(ctx, 'child-sess', { inject, followup, status: 'idle', origin: 'subagent' })
+
+    await settleTasks(ctx, owner, 3)
+    // First settle wakes within the machine budget; the second is the
+    // wind-down turn that replaces the interactive silent degrade; anything
+    // after that is injected without opening a turn.
+    expect(followup).toHaveBeenCalledTimes(2)
+    const windDown = followup.mock.calls[1]?.[0] as { content: { text: string }[] }
+    expect(windDown.content[0]?.text).toContain('memory tool')
+    expect(windDown.content[0]?.text).toContain('out of completion wakes')
+    expect(inject).toHaveBeenCalledTimes(1)
+  })
+
+  it('a user claim restores the machine-owner budget and re-arms its wind-down turn', async () => {
+    const { ctx } = await setup({ machineOwnerWakeBudget: 1 })
+    const inject = vi.fn()
+    const followup = vi.fn()
+    const owner = fakeAgent(ctx, 'child-sess', { inject, followup, status: 'idle', origin: 'subagent' })
+
+    await settleTasks(ctx, owner, 2)
+    expect(followup).toHaveBeenCalledTimes(2)
+
+    emitAgentEvent(ctx, owner, 'agent/inbox/claimed', {
+      message: createUserMessage({ content: [{ type: 'text', text: 'carry on' }], source: { kind: 'user' } }),
+      turn: 1,
+    })
+    // New epoch: one wake, then a fresh wind-down turn, then injections.
+    await settleTasks(ctx, owner, 3)
+    expect(followup).toHaveBeenCalledTimes(4)
+    expect(inject).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps interactive owners on the silent injection degrade with no wind-down turn', async () => {
+    const { ctx } = await setup({ maxConsecutiveWakes: 1 })
+    const inject = vi.fn()
+    const followup = vi.fn()
+    const owner = fakeAgent(ctx, 'root-sess', { inject, followup, status: 'idle' })
+
+    await settleTasks(ctx, owner, 4)
+    expect(followup).toHaveBeenCalledTimes(1)
+    expect(inject).toHaveBeenCalledTimes(3)
+    for (const call of inject.mock.calls) {
+      const notice = call[0] as { content: { text: string }[] }
+      expect(notice.content[0]?.text).not.toContain('memory tool')
+    }
   })
 
   it('neither wakes nor injects into an owner its own teardown is draining', async () => {

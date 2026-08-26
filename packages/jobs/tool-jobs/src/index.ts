@@ -43,6 +43,17 @@ export interface Config {
    * completion wakes it again.
    */
   maxConsecutiveWakes?: number
+  /**
+   * The same bound for a machine-owned owner — an agent whose session header
+   * carries `origin: 'subagent'`. A delegated child cannot ask (its approval
+   * policy is pinned at delegation), so job settlements are its only built-in
+   * reactivation channel, and starving them silently strands parked children.
+   * Its budget is larger, and exhausting it delivers one loud wind-down turn
+   * that directs the child to persist state via the memory tool before the
+   * degrade-to-injection behavior takes over. Reset by the same user-authored
+   * input as {@link Config.maxConsecutiveWakes} (default 16).
+   */
+  machineOwnerWakeBudget?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -50,6 +61,7 @@ export const Config: z<Config> = z.object({
   maxWaitTimeoutMs: z.number().min(1).default(600_000),
   completionDelivery: z.union(['quiet', 'wakeup'] as const).default('wakeup'),
   maxConsecutiveWakes: z.number().min(1).default(3),
+  machineOwnerWakeBudget: z.number().min(1).default(16),
 })
 
 /** Task state safe for model-authored programs; ownership/bookkeeping fields are omitted. */
@@ -143,6 +155,22 @@ function completionSummary(snapshot: JobSnapshot): string {
   return boundContextSummary(`${snapshot.kind} ${snapshot.label} ${statusLine(snapshot)}`)
 }
 
+/**
+ * The machine-owner wind-down turn: the last wakeup-lane delivery once an
+ * owner has spent its wake budget. Loud where the interactive cap is silent,
+ * because nobody else watches a background child's inbox — the child must
+ * persist what matters itself, on its way quiet.
+ * @param snapshot - the settled job that tripped exhaustion.
+ * @param cap - the machine-owner budget that was just exceeded.
+ * @returns the model-facing wind-down instruction.
+ */
+function windDownText(snapshot: JobSnapshot, cap: number): string {
+  return `background job ${snapshot.id} finished while you are out of completion wakes `
+    + `(${cap} turns opened since your last input from the user). Persist any state you still need `
+    + 'with the memory tool now, then remain quiet until new input arrives; later completions '
+    + 'reach your inbox as injections and will not wake you.'
+}
+
 function fitCompletionNotice(snapshot: JobSnapshot): string {
   const prefix = `background job ${snapshot.id}`
   const detail = ` (${snapshot.kind}: ${snapshot.label}) finished ${statusLine(snapshot)}`
@@ -207,11 +235,14 @@ export function apply(ctx: Context, config: Config): void {
   const waitCap = config.maxWaitTimeoutMs ?? 600_000
   const delivery = config.completionDelivery ?? 'wakeup'
   const wakeBudget = config.maxConsecutiveWakes ?? 3
+  const machineWakeBudget = config.machineOwnerWakeBudget ?? 16
 
   // Turns this plugin opened on each owner since that owner last consumed
   // human input. Keyed by the exact Agent, so a same-session replacement
-  // starts with a full budget.
+  // starts with a full budget. A machine-owned owner gets a larger budget
+  // plus one loud wind-down turn before the silent injection degrade applies.
   const spentWakes = new WeakMap<Agent, number>()
+  const woundDown = new WeakSet<Agent>()
   if (waitDefault > waitCap) {
     throw new Error(`tool-jobs: waitTimeoutMs (${waitDefault}) exceeds maxWaitTimeoutMs (${waitCap})`)
   }
@@ -220,12 +251,18 @@ export function apply(ctx: Context, config: Config): void {
   if (!Number.isSafeInteger(wakeBudget)) {
     throw new Error(`tool-jobs: maxConsecutiveWakes (${wakeBudget}) must be a whole number of turns`)
   }
+  if (!Number.isSafeInteger(machineWakeBudget)) {
+    throw new Error(`tool-jobs: machineOwnerWakeBudget (${machineWakeBudget}) must be a whole number of turns`)
+  }
   // Nothing spends the budget under quiet delivery, so nothing needs to refill it.
   if (delivery === 'wakeup') {
     ctx.on('agent/inbox/claimed', ({ agent, message }) => {
       // Claiming is the point the human's input actually enters a step; a notice
       // this plugin itself queued must not refill the budget it just spent.
-      if (message.source.kind === 'user') spentWakes.delete(agent)
+      if (message.source.kind === 'user') {
+        spentWakes.delete(agent)
+        woundDown.delete(agent)
+      }
     })
   }
 
@@ -291,10 +328,30 @@ export function apply(ctx: Context, config: Config): void {
       },
     })
     const spent = spentWakes.get(owner) ?? 0
-    if (delivery === 'wakeup' && owner.status === 'idle' && spent < wakeBudget) {
-      spentWakes.set(owner, spent + 1)
-      owner.followup(message)
-      return
+    if (delivery === 'wakeup' && owner.status === 'idle') {
+      // Machine-owned owners get their own longer budget, then exactly one
+      // wind-down turn: the wakeup lane degrades loudly for a delegated child
+      // (which cannot ask anyone for help) instead of going straight silent,
+      // so its state survives for whoever pokes it later.
+      const cap = owner.session.header.origin === 'subagent' ? machineWakeBudget : wakeBudget
+      if (spent < cap) {
+        spentWakes.set(owner, spent + 1)
+        owner.followup(message)
+        return
+      }
+      if (owner.session.header.origin === 'subagent' && !woundDown.has(owner)) {
+        woundDown.add(owner)
+        owner.followup(createUserMessage({
+          content: [{ type: 'text', text: windDownText(snapshot, cap) }],
+          source: {
+            kind: 'plugin',
+            plugin: 'tool-jobs',
+            form: 'notice',
+            summary: completionSummary(snapshot),
+          },
+        }))
+        return
+      }
     }
     owner.inject(message)
   })
