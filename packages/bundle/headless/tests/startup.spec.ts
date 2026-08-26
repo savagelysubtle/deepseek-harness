@@ -53,6 +53,8 @@ export const apply = ctx => globalThis.__headlessStartupApply(ctx)
     `  inject: [${HEADLESS_STARTUP_SERVICE}]`,
     '  config:',
     '    task: !!js ctx.headlessStartup.task',
+    '    sessionName: !!js ctx.headlessStartup.sessionName',
+    '    format: !!js ctx.headlessStartup.format',
     '- id: headless-startup',
     `  name: ${pathToFileURL(join(dir, 'startup.mjs')).href}`,
     '',
@@ -83,9 +85,53 @@ export const apply = ctx => globalThis.__headlessStartupApply(ctx)
 describe('headless command-line provider', () => {
   it('joins the task positional into the runner config', async () => {
     const { task, observed } = await bootStartup(['run', 'the', 'tests'])
+    // The runner schema declares the text default; startup passes only what
+    // the invocation stated.
     expect(task).toEqual({ task: 'run the tests' })
-    expect(observed.runnerConfig).toEqual({ task: 'run the tests' })
+    expect(observed.runnerConfig).toMatchObject({ task: 'run the tests' })
     expect(observed.exits).toEqual([])
+  })
+
+  it('passes the named-session and format flags into the runner config', async () => {
+    const { task, observed } = await bootStartup([
+      '--session-name', 'fix-build',
+      '--format', 'json',
+      'finish', 'it',
+    ])
+    expect(task).toEqual({ task: 'finish it', sessionName: 'fix-build', format: 'json' })
+    expect(observed.runnerConfig).toEqual({
+      task: 'finish it',
+      sessionName: 'fix-build',
+      format: 'json',
+    })
+  })
+
+  it.each([
+    { args: ['--session-name', 'sl/ash', 'task'] },
+    { args: ['--session-name', 'has space', 'task'] },
+    { args: ['--session-name', 'x'.repeat(65), 'task'] },
+  ])('rejects a malformed --session-name ($args)', async ({ args }) => {
+    const { task, observed } = await bootStartup(args)
+    expect(observed.out).toContain('invalid --session-name')
+    expect(task).toBeUndefined()
+    expect(observed.runnerConfig).toBeUndefined()
+    expect(observed.exits).toEqual([1])
+  })
+
+  it('rejects an unknown --format value as a usage failure', async () => {
+    const { task, observed } = await bootStartup(['--format', 'yaml', 'task'])
+    expect(observed.out).toContain('invalid --format "yaml"')
+    expect(task).toBeUndefined()
+    expect(observed.runnerConfig).toBeUndefined()
+    expect(observed.exits).toEqual([1])
+  })
+
+  it('still requires the task positional when --session-name is given', async () => {
+    const { task, observed } = await bootStartup(['--session-name', 'fix-build'])
+    expect(observed.out).toContain('a task is required')
+    expect(task).toBeUndefined()
+    expect(observed.runnerConfig).toBeUndefined()
+    expect(observed.exits).toEqual([1])
   })
 
   it.each([{ args: [] }, { args: ['   '] }])('rejects an invocation with no non-whitespace task ($args)', async ({ args }) => {

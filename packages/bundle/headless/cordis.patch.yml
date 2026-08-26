@@ -1,8 +1,9 @@
 # The dsh-headless bundle patch: one-shot task mode directly over dsh-base.
 # It mounts no Host, HTTP server, Web runtime, or browser plugin. An ordinary
 # provider plugin injects `cmdlineArgs`, parses the task positional
-# (`dsh --profile headless "<task>"`) and this app's --help, then the direct
-# driver creates an Agent through the core registry and prints its durable result.
+# (`dsh --profile headless "<task>"`), the `--session-name` / `--format`
+# flags, and this app's --help; the direct driver then creates or resumes an
+# Agent through the core registry and reports its durable result.
 
 - id: system-prompt
   config:
@@ -27,9 +28,11 @@
     - id: headless-startup
       name: '@deepseek-ai/dsh-headless/startup'
 
-    # Reads its task from the ordinary headlessStartup provider.
+    # Reads its task and output flags from the ordinary headlessStartup provider.
     - id: headless-runner
       name: '@deepseek-ai/dsh-headless'
       inject: [headlessStartup]
       config:
         task: !!js ctx.headlessStartup.task
+        sessionName: !!js ctx.headlessStartup.sessionName
+        format: !!js ctx.headlessStartup.format

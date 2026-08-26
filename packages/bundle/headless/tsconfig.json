@@ -21,6 +21,15 @@
       "path": "../../core/agent"
     },
     {
+      "path": "../../core/agent-loop"
+    },
+    {
+      "path": "../../core/system-prompt"
+    },
+    {
+      "path": "../../core/tools"
+    },
+    {
       "path": "../../core/agent-default-model"
     },
     {
@@ -34,6 +43,18 @@
     },
     {
       "path": "../../boot/cmdline"
+    },
+    {
+      "path": "../../session/session-persistence"
+    },
+    {
+      "path": "../../session/session-persistence-jsonl"
+    },
+    {
+      "path": "../../util/home-paths"
+    },
+    {
+      "path": "../../../vendor/include"
     }
   ]
 }
