@@ -92,7 +92,7 @@ export class MailboxLocal extends Service {
     this.store = new SqliteMailboxStore(openMailboxDatabase(path))
     ctx.effect(() => {
       const dispose = ctx.mailbox.registerProvider(this.store)
-      return async () => {
+      return () => {
         dispose()
         this.store.close()
       }
