@@ -13,6 +13,7 @@ Loader 结算后，runner 读取共享的 [`ctx.agentDefaultModel`](../../core/a
 | 旗标 | 效果 |
 | --- | --- |
 | `--session-name <name>` | 定位于一个具名持久会话，而不是全新的一次性会话。任务位置参数仍然必填。 |
+| `--mailbox-namespace <namespace>` | 配合 `--session-name`：服务 `<namespace>:<name>` 的邮件——在任务回合之前先准入一批有界待送消息（界限是 [`@deepseek-ai/dsh-mailbox-bridge`](../../mailbox/bridge/README.zh.md) 中的 headless 常量）。要求组合了已解析默认提供方的邮箱注册表；缺少 `--session-name` 时为用法错误（退出码 1）。 |
 | `--format <text\|json>` | 输出格式；默认为 `text`。未知值是用法错误（退出码 1）。 |
 
 ## 具名会话

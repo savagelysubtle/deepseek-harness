@@ -39,6 +39,12 @@
       "path": "../../core/session"
     },
     {
+      "path": "../../mailbox/mailbox"
+    },
+    {
+      "path": "../../mailbox/bridge"
+    },
+    {
       "path": "../../session/named-sessions"
     },
     {

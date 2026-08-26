@@ -13,6 +13,7 @@ The task text and output flags are this app's command line: the ordinary `headle
 | Flag | Effect |
 | --- | --- |
 | `--session-name <name>` | Target a durable named session instead of a fresh one-shot session. The task positional stays mandatory. |
+| `--mailbox-namespace <namespace>` | With `--session-name`: serve `<namespace>:<name>` mail — a bounded backlog of pending messages is admitted ahead of the task turn (bounds are the headless constants in [`@deepseek-ai/dsh-mailbox-bridge`](../../mailbox/bridge/README.md)). Requires a composed mailbox registry with its default provider resolved; without `--session-name` it is a usage failure (exit 1). |
 | `--format <text\|json>` | Output format; defaults to `text`. An unknown value is a usage failure (exit 1). |
 
 ## Named sessions
