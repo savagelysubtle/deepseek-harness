@@ -109,6 +109,8 @@
         "./packages/skill/*/src/invariant.ts",
         "./packages/compaction/*/src/invariant.ts",
         "./packages/context/*/src/invariant.ts",
+        "./packages/agui/*/src/invariant.ts",
+        "./packages/mailbox/*/src/invariant.ts",
         "./packages/goal/*/src/invariant.ts",
         "./packages/feedback/*/src/invariant.ts",
         "./packages/schedule/*/src/invariant.ts",
@@ -272,7 +274,9 @@
         "./packages/identity/*/src",
         "./packages/test-support/*/src",
         "./packages/host/*/src",
-        "./packages/client/*/src"
+        "./packages/client/*/src",
+        "./packages/agui/*/src",
+        "./packages/mailbox/*/src"
       ]
     }
   }
