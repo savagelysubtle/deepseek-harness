@@ -291,6 +291,7 @@
     { "path": "./packages/host/webserver" },
     { "path": "./packages/session/named-sessions" },
     { "path": "./packages/mailbox/mailbox" },
+    { "path": "./packages/mailbox/local" },
     { "path": "./packages/sdk/client" },
     { "path": "./packages/sdk/protocol" },
     { "path": "./packages/lsp/lsp" },
