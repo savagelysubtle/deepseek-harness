@@ -50,3 +50,11 @@ Projects session activity into outbound telemetry and delegates delivery to a co
 | [`session-telemetry-otel/`](session-telemetry-otel/README.md) | Delivers telemetry through OpenTelemetry logs in `FULL`, `FEEDBACK_ONLY`, or `DISABLED` mode. |
 
 The subsystem references: [persistence.md](../../docs/subsystems/persistence.md), [session-projection.md](../../docs/subsystems/session-projection.md), [session-title.md](../../docs/subsystems/session-title.md), and [session-telemetry.md](../../docs/subsystems/session-telemetry.md). Only one title provider may register at a time; the demo spine mounts the fallback service and leaves both model providers out of default composition.
+
+## Named sessions
+
+| Package | Role |
+|---|---|
+| [`named-sessions/`](named-sessions/README.md) | Derives durable session ids from stable names and owns the cross-process per-name lock artifact. |
+
+No `ctx` service: a pure utility plus an invariant companion, shared by every named-run consumer (headless runner today; the mailbox bridge next).

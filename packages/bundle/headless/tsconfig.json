@@ -39,6 +39,9 @@
       "path": "../../core/session"
     },
     {
+      "path": "../../session/named-sessions"
+    },
+    {
       "path": "../../runtime-diagnostics/invariants"
     },
     {

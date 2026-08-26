@@ -1,12 +1,14 @@
 /**
- * Named-session derivation and per-name locking for the one-shot driver.
+ * Named-session derivation and per-name locking, shared by every consumer
+ * that addresses a durable session by a stable human-chosen name.
  *
  * A named session has no map store: the durable session id is derived from the
  * user-chosen name, so every process recomputes the same identity from the
- * name alone. The same derivation names the per-name lock file, which is what
- * makes "one live runner per name" enforceable across processes.
+ * name alone. The same derivation names the per-name lock file under the
+ * canonical lock directory ({@link LOCK_DIR_SEGMENTS}), which is what makes
+ * "one live holder per name" enforceable across processes.
  *
- * @module @deepseek-ai/dsh-headless/named-session
+ * @module @deepseek-ai/dsh-named-sessions
  */
 
 import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from 'node:fs'
@@ -26,8 +28,12 @@ export const SESSION_NAME_PATTERN_SOURCE = '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
 
 const SESSION_NAME_PATTERN = new RegExp(SESSION_NAME_PATTERN_SOURCE)
 
-/** Directory under the Harness home holding one lock file per active named session. */
-const LOCK_DIR_SEGMENTS = ['headless', 'locks'] as const
+/**
+ * Canonical home-relative directory holding one lock file per active named
+ * session. Every consumer of this package shares the artifact location, so
+ * independently written runners exclude each other through the same files.
+ */
+export const LOCK_DIR_SEGMENTS = ['headless', 'locks'] as const
 
 /**
  * Bound on create-race takeover attempts during one acquisition. Each lost
@@ -41,7 +47,7 @@ export const LOCK_ACQUIRE_ATTEMPTS = 5
 interface LockPayload {
   /** Process id of the holder. */
   pid: number
-  /** Holder-side epoch-milliseconds timestamp, kept for diagnostics only. */
+  /** Holder-side epoch-milliseconds timestamp, kept for diagnostics and age takeover. */
   createdAt: number
 }
 
@@ -68,7 +74,7 @@ export const internals: { isPidAlive(pid: number): boolean } = {
 /**
  * Enforce the accepted session-name grammar. The bound keeps the derived
  * token a fixed-width filename component on every platform.
- * @param name - the raw `--session-name` value.
+ * @param name - the raw session-name value.
  * @throws when the name violates the accepted grammar.
  */
 export function assertValidSessionName(name: string): void {
@@ -133,16 +139,33 @@ export interface NamedSessionLock {
   release(): void
 }
 
+/** Optional acquisition bounds; absent fields keep the shipped semantics. */
+export interface AcquireNamedSessionLockOptions {
+  /**
+   * Take over a lock whose live holder recorded a `createdAt` older than this
+   * many milliseconds — a bounded-wait escape for holders that cannot be
+   * trusted to release. Absent (the default): pid liveness is the only
+   * takeover path, so an alive holder always rejects acquisition.
+   */
+  readonly maxAgeMs?: number
+}
+
 /**
  * Take the per-name lock for one named run, failing loud while another live
  * process holds it and taking over an abandoned file whose holder pid is no
- * longer alive (or whose content names no readable holder). The lock must be
- * held across agent creation/resumption and released after the run settles.
+ * longer alive (or whose content names no readable holder). With
+ * `maxAgeMs`, a live holder older than the bound also loses the artifact.
+ * The lock must be held across agent creation/resumption and released after
+ * the run settles.
  * @param name - a validated session name.
+ * @param options - optional bounds; see {@link AcquireNamedSessionLockOptions}.
  * @returns the held lock.
  * @throws when a live process holds the lock: `session "<name>" is active in another process`.
  */
-export function acquireNamedSessionLock(name: string): NamedSessionLock {
+export function acquireNamedSessionLock(
+  name: string,
+  options: AcquireNamedSessionLockOptions = {},
+): NamedSessionLock {
   const path = namedLockPath(name)
   mkdirSync(dirname(path), { recursive: true })
   // Written once per acquisition; release compares it verbatim so a
@@ -154,9 +177,10 @@ export function acquireNamedSessionLock(name: string): NamedSessionLock {
       handle = openSync(path, 'wx')
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-      throwIfLiveHolder(path, name)
+      throwIfLiveHolder(path, name, options.maxAgeMs)
       // No provable live owner: the file is abandoned (dead holder,
-      // unreadable content, or removed between the failed open and the read).
+      // unreadable content, removed between the failed open and the read,
+      // or — with `maxAgeMs` — a live holder past the age bound).
       unlinkAbandoned(path)
     }
   }
@@ -192,14 +216,16 @@ export function acquireNamedSessionLock(name: string): NamedSessionLock {
 }
 
 /**
- * Read a lock file's holder and reject when that holder is provably alive.
- * Unreadable or malformed content names no provable owner and counts as
- * abandoned.
+ * Read a lock file's holder and reject when that holder must be honored:
+ * provably alive and not aged out by `maxAgeMs`. Unreadable or malformed
+ * content names no provable owner and counts as abandoned; a live holder
+ * without a readable timestamp cannot be proved old, so it still rejects.
  * @param path - the contended lock file.
  * @param name - the session name the lock belongs to, for the failure message.
- * @throws when the recorded holder process is alive.
+ * @param maxAgeMs - the caller's age-takeover bound, when one was set.
+ * @throws when the recorded holder process must be honored.
  */
-function throwIfLiveHolder(path: string, name: string): void {
+function throwIfLiveHolder(path: string, name: string, maxAgeMs: number | undefined): void {
   let payload: LockPayload
   try {
     payload = JSON.parse(readFileSync(path, 'utf8')) as LockPayload
@@ -209,9 +235,17 @@ function throwIfLiveHolder(path: string, name: string): void {
     return
   }
   if (typeof payload.pid !== 'number' || !Number.isInteger(payload.pid) || payload.pid < 1) return
-  if (internals.isPidAlive(payload.pid)) {
-    throw new Error(`session "${name}" is active in another process`)
+  if (!internals.isPidAlive(payload.pid)) return
+  if (
+    maxAgeMs !== undefined
+    && typeof payload.createdAt === 'number'
+    && Number.isFinite(payload.createdAt)
+    && Date.now() - payload.createdAt > maxAgeMs
+  ) {
+    // Live but older than the caller's bound: the artifact reverts to abandoned.
+    return
   }
+  throw new Error(`session "${name}" is active in another process`)
 }
 
 /**

@@ -13,7 +13,7 @@ import {
   deriveNamedSessionId,
   internals,
   namedLockPath,
-} from '../src/named-session.ts'
+} from '../src/index.ts'
 
 const originalInternals = { ...internals }
 let home: string | undefined
@@ -26,7 +26,7 @@ afterEach(() => {
 
 /** Point DSH_HOME at a fresh temp directory so tests never touch the user home. */
 function useTempHome(): string {
-  home = mkdtempSync(join(tmpdir(), 'dsh-headless-named-'))
+  home = mkdtempSync(join(tmpdir(), 'dsh-named-sessions-'))
   process.env.DSH_HOME = home
   return home
 }
@@ -103,9 +103,16 @@ describe('per-name lock', () => {
   })
 
   it('probes liveness through the operating system', async () => {
-    const deadPid = await new Promise<number>((resolve) => {
+    const deadPid = await new Promise<number>((resolve, reject) => {
       const child = spawn('true')
-      child.on('exit', () => { resolve(child.pid) })
+      if (child.pid === undefined) {
+        child.kill()
+        reject(new Error('spawn could not create a process'))
+        return
+      }
+      const { pid } = child
+      child.on('error', reject)
+      child.on('exit', () => { resolve(pid) })
     })
     expect(internals.isPidAlive(deadPid)).toBe(false)
     expect(internals.isPidAlive(process.pid)).toBe(true)
@@ -118,5 +125,42 @@ describe('per-name lock', () => {
     writeFileSync(path, JSON.stringify({ pid: 424_242, createdAt: 2 }))
     lock.release()
     expect(JSON.parse(readFileSync(path, 'utf8'))).toMatchObject({ pid: 424_242 })
+  })
+})
+
+describe('maxAgeMs takeover bound', () => {
+  it('takes over a live holder older than the bound', () => {
+    useTempHome()
+    const path = namedLockPath('aged')
+    mkdirSync(join(path, '..'), { recursive: true })
+    writeFileSync(path, JSON.stringify({ pid: process.pid, createdAt: Date.now() - 10_000 }))
+    internals.isPidAlive = () => true
+    const lock = acquireNamedSessionLock('aged', { maxAgeMs: 5_000 })
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toMatchObject({ pid: process.pid })
+    lock.release()
+    expect(existsSync(path)).toBe(false)
+  })
+
+  it('rejects a live holder younger than the bound and keeps its artifact', () => {
+    useTempHome()
+    const path = namedLockPath('fresh')
+    mkdirSync(join(path, '..'), { recursive: true })
+    writeFileSync(path, JSON.stringify({ pid: process.pid, createdAt: Date.now() }))
+    internals.isPidAlive = () => true
+    expect(() => acquireNamedSessionLock('fresh', { maxAgeMs: 60_000 }))
+      .toThrow('session "fresh" is active in another process')
+    expect(existsSync(path)).toBe(true)
+  })
+
+  it('still rejects a live holder without a readable timestamp even with the bound set', () => {
+    useTempHome()
+    const path = namedLockPath('undated')
+    mkdirSync(join(path, '..'), { recursive: true })
+    // A malformed-but-alive holder cannot be proved old; honoring it beats
+    // silently stealing an artifact whose age is unknown.
+    writeFileSync(path, JSON.stringify({ pid: process.pid }))
+    internals.isPidAlive = () => true
+    expect(() => acquireNamedSessionLock('undated', { maxAgeMs: 1 }))
+      .toThrow('session "undated" is active in another process')
   })
 })

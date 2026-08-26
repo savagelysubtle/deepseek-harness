@@ -182,7 +182,9 @@ describe('named sessions over the real composition', () => {
     expect(firstRun.code).toBe(0)
     const lines = firstRun.out.split('\n').filter(line => line !== '')
     expect(lines).toHaveLength(1)
-    const line = JSON.parse(lines[0]) as {
+    const firstLine = lines[0]
+    if (firstLine === undefined) throw new Error('the json run produced no output line')
+    const line = JSON.parse(firstLine) as {
       type: string
       sessionID: string
       part: { type: string; text: string }
@@ -190,7 +192,9 @@ describe('named sessions over the real composition', () => {
     expect(line.type).toBe('text')
     expect(line.sessionID).toMatch(/^named-[0-9a-f]{32}$/)
     expect(line.part).toEqual({ type: 'text', text: 'first answer' })
-    expect(first.requests[0].messages.at(-1)).toMatchObject({
+    const firstLastMessage = first.requests.at(-1)?.messages.at(-1)
+    if (firstLastMessage === undefined) throw new Error('the first run produced no model message')
+    expect(firstLastMessage).toMatchObject({
       role: 'user',
       content: [{ type: 'text', text: 'first task' }],
     })
@@ -199,10 +203,12 @@ describe('named sessions over the real composition', () => {
     const secondRun = await boot(['--session-name', 'comp-test', 'second task'], second)
     expect(secondRun.code).toBe(0)
     expect(secondRun.out).toBe('second answer\n')
-    const conversation = JSON.stringify(second.requests[0].messages)
+    const conversation = JSON.stringify(second.requests[0]?.messages)
     expect(conversation).toContain('first task')
     expect(conversation).toContain('first answer')
-    expect(second.requests[0].messages.at(-1)).toMatchObject({
+    const lastMessage = second.requests.at(-1)?.messages.at(-1)
+    if (lastMessage === undefined) throw new Error('the resumed run produced no model message')
+    expect(lastMessage).toMatchObject({
       role: 'user',
       content: [{ type: 'text', text: 'second task' }],
     })

@@ -3,47 +3,25 @@
  * @module @deepseek-ai/dsh-headless/invariant
  */
 
-import { existsSync } from 'node:fs'
+/* jscpd:ignore-start */
 import type { Context } from '@deepseek-ai/cordis'
-import type { InvariantFailure, InvariantInstaller } from '@deepseek-ai/dsh-invariants'
-import type { Session } from '@deepseek-ai/dsh-session'
-import {
-  lockPathForToken,
-  NAMED_SESSION_ID_PREFIX,
-  NAMED_SESSION_TOKEN_PATTERN_SOURCE,
-} from './named-session.ts'
+import type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'
 
 const PACKAGE_NAME = '@deepseek-ai/dsh-headless'
 
 /** Cordis companion plugin name. */
 export const name = 'headless-invariant'
-/** Service required before the companion can register. */
+/** Service required before the companion can reserve package ownership. */
 export const inject = ['invariants']
 
-const DERIVED_ID_PATTERN = new RegExp(`^${NAMED_SESSION_ID_PREFIX}${NAMED_SESSION_TOKEN_PATTERN_SOURCE}$`)
-
 /**
- * Id/lock relation invariant: every announced session whose id carries the
- * named-run derivation must hold its per-name lock at that moment. The runner
- * acquires the lock before agent creation/resumption and releases it after
- * the run settles, so a lock-less announcement means a named id reached the
- * registry without passing through {@link ./named-session.ts} acquisition.
- * The id's token and the lock filename share one derivation, so existence of
- * `headless/locks/<token>.lock` is the whole checkable relation.
+ * No runtime invariant: the named id/lock relation this package used to pin
+ * moved with its derivation to `@deepseek-ai/dsh-named-sessions`, whose
+ * companion now guards it for every named-run consumer. The remaining
+ * one-shot output contract (final text vs NDJSON stream, exit codes) is
+ * asserted by the unit and composition suites.
  */
-const install: InvariantInstaller = (ctx: Context, fail: InvariantFailure): void => {
-  ctx.on('session/created', (session: Session) => {
-    const id = String(session.id)
-    if (!id.startsWith(NAMED_SESSION_ID_PREFIX)) return
-    if (!DERIVED_ID_PATTERN.test(id)) {
-      fail(`a named-prefixed session id "${id}" must be the derivation's ${NAMED_SESSION_ID_PREFIX}<32 hex> form`)
-    }
-    const lockPath = lockPathForToken(id.slice(NAMED_SESSION_ID_PREFIX.length))
-    if (!existsSync(lockPath)) {
-      fail(`named session "${id}" was announced without its held per-name lock at ${lockPath}`)
-    }
-  }, { global: true })
-}
+const install: InvariantInstaller = () => {}
 
 /**
  * Register this package's invariant companion.
@@ -52,3 +30,4 @@ const install: InvariantInstaller = (ctx: Context, fail: InvariantFailure): void
  */
 export const apply = (ctx: Context): Promise<() => void> =>
   Promise.resolve(ctx.invariants.register(PACKAGE_NAME, install))
+/* jscpd:ignore-end */

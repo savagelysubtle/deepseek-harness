@@ -12,7 +12,11 @@ import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
 import type { Session, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
 import { apply, Config, internals, resolveRunSpec } from '../src/index.ts'
-import { acquireNamedSessionLock, deriveNamedSessionId, namedLockPath } from '../src/named-session.ts'
+import {
+  acquireNamedSessionLock,
+  deriveNamedSessionId,
+  namedLockPath,
+} from '@deepseek-ai/dsh-named-sessions'
 
 const originalInternals = { ...internals }
 afterEach(() => {
@@ -118,8 +122,10 @@ async function bench(script: Script): Promise<{
       resumed.push(options.resumeSessionId)
       if (script.resumeRejects !== undefined) throw new Error(script.resumeRejects)
       return buildAgent(ownerCtx, options.resumeSessionId, {
-        agentOptions: options.agentOptions,
-        setup: options.setup,
+        // ResumeAgentOptions carries these as optional; the builder's contract
+        // requires present values, and the resume path always supplies them.
+        agentOptions: options.agentOptions as NonNullable<ResumeAgentOptions['agentOptions']>,
+        setup: options.setup as NonNullable<ResumeAgentOptions['setup']>,
         meta: { cwd: process.cwd() },
       })
     },
@@ -434,7 +440,7 @@ describe('headless named sessions', () => {
   })
 
   it('validates config: unknown formats fail loud at the schema, bad names in the resolver', () => {
-    expect(() => new Config({ task: 't', format: 'yaml' })).toThrow()
+    expect(() => new Config({ task: 't', format: 'yaml' as never })).toThrow()
     expect(() => resolveRunSpec({ task: 't', sessionName: '-bad' })).toThrow('invalid session name')
     expect(resolveRunSpec({ task: 't', format: 'json', sessionName: 'ok.Name-1' })).toEqual({
       kind: 'named',

@@ -10,7 +10,7 @@ import { Command } from 'commander'
 import type { Context } from '@deepseek-ai/cordis'
 import { parseCmdline } from '@deepseek-ai/dsh-cmdline'
 import type { OutputFormat } from './index.ts'
-import { assertValidSessionName } from './named-session.ts'
+import { assertValidSessionName } from '@deepseek-ai/dsh-named-sessions'
 
 /** Stable Cordis plugin name. */
 export const name = 'headless-startup'

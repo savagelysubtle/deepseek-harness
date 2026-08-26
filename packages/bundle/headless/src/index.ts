@@ -32,7 +32,7 @@ import {
   assertValidSessionName,
   deriveNamedSessionId,
   type NamedSessionLock,
-} from './named-session.ts'
+} from '@deepseek-ai/dsh-named-sessions'
 
 /** Stable Cordis plugin name. */
 export const name = 'headless-runner'

@@ -17,7 +17,7 @@ Loader 结算后，runner 读取共享的 [`ctx.agentDefaultModel`](../../core/a
 
 ## 具名会话
 
-传入 `--session-name <name>` 时，会话 id 从名称确定性地派生：`named-<sha256(name) 的前 32 个十六进制位>`（[`src/named-session.ts`](src/named-session.ts)）。不存在需要创建或损坏的「名称→id」映射存储——每个进程对同一名称计算派生都会得到同一个持久 id。若该 id 下没有已持久化的日志，runner 调用 `agents.create`；若已存在，则调用 `agents.resume`。「日志存在但无法加载」时会大声抛出持久化后端的错误，而不是悄悄重建。名称必须匹配 `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/`，因为它要作为磁盘上的文件名组成部分；非法名称是用法错误（退出码 1）。
+传入 `--session-name <name>` 时，会话 id 从名称确定性地派生：`named-<sha256(name) 的前 32 个十六进制位>`（[`@deepseek-ai/dsh-named-sessions`](../../session/named-sessions/README.zh.md)）。不存在需要创建或损坏的「名称→id」映射存储——每个进程对同一名称计算派生都会得到同一个持久 id。若该 id 下没有已持久化的日志，runner 调用 `agents.create`；若已存在，则调用 `agents.resume`。「日志存在但无法加载」时会大声抛出持久化后端的错误，而不是悄悄重建。名称必须匹配 `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/`，因为它要作为磁盘上的文件名组成部分；非法名称是用法错误（退出码 1）。
 
 同一名称的并发调用通过 `<home>/headless/locks/<hash>.lock`（`DSH_HOME`，默认 `~/.dsh`）的每名称锁工件互斥。该工件以 `O_EXCL` 创建，内容为 `{pid, createdAt}`。持有进程 pid 已死（`ESRCH`）即视为过期并接管其工件；持有进程仍存活则调用大声失败：`session "<name>" is active in another process`（退出码 1）。锁在本次运行落定后释放，包括失败路径。
 
