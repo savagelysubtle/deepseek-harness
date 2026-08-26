@@ -167,6 +167,33 @@ describe('publish/claim/settle', () => {
     store.close()
   })
 
+  it('isolates a foreign malformed-payload row and keeps its batch siblings deliverable', async () => {
+    const { clock } = fakeClock()
+    const path = tempDbPath()
+    const store = storeWith(clock, path)
+    const goodA = await store.publish({ to: OPS, from: 'guest:x', subject: 'a' })
+    // Hand-write a poisoned row exactly like an external writer could.
+    const raw = new DatabaseSync(path)
+    raw.prepare(
+      "INSERT INTO messages (id, to_address, from_address, payload, state, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
+    ).run('poison-1', OPS, 'guest:x', '{"broken"', clock())
+    raw.close()
+    const goodB = await store.publish({ to: OPS, from: 'guest:x', subject: 'b' })
+
+    const leases = await store.claim(filter([OPS]))
+    expect(leases).toHaveLength(2)
+    expect(new Set(leases.map(lease => lease.message.id))).toEqual(new Set([goodA, goodB]))
+
+    const after = new DatabaseSync(path)
+    const poison = after.prepare('SELECT state, result FROM messages WHERE id = ?').get('poison-1') as { state: string; result: string }
+    after.close()
+    expect(poison.state).toBe('failed')
+    expect(JSON.parse(poison.result)).toEqual({ reason: 'malformed-payload' })
+    // The batch is not wedged: a follow-up cycle finds nothing stuck behind it.
+    expect(await store.claim(filter([OPS]))).toHaveLength(0)
+    store.close()
+  })
+
   it('keeps a failed settlement terminal and unclaimable', async () => {
     const { clock, advance } = fakeClock()
     const store = storeWith(clock)

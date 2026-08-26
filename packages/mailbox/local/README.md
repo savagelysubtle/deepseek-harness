@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-The local mailbox provider: one SQLite database file (over `node:sqlite`'s `DatabaseSync`) hosts every address's queue behind the [`@deepseek-ai/dsh-mailbox`](../mailbox/README.md) seam. It registers as provider `local` on `ctx.mailbox`, enforces single-winner claims inside SQLite transactions, reclaims abandoned leases after `staleClaimMs`, and rejects foreign or newer-versioned database files at open instead of migrating in place.
+The local mailbox provider: one SQLite database file (over `node:sqlite`'s `DatabaseSync`) hosts every address's queue behind the [`@deepseek-ai/dsh-mailbox`](../mailbox/README.md) seam. It registers as provider `local` on `ctx.mailbox`, enforces single-winner claims inside SQLite transactions, reclaims abandoned leases after `staleClaimMs`, and rejects foreign or newer-versioned database files at open instead of migrating in place. The package also ships the `dsh-mailbox` CLI, so a guest process can publish into — or drain its own inbox from — this same store while NO harness is running.
 
 ## Provider API
 
@@ -19,6 +19,27 @@ The local mailbox provider: one SQLite database file (over `node:sqlite`'s `Data
 - **At-least-once delivery** — a lease held longer than `filter.staleClaimMs` becomes claimable again under a NEW claim token, so the old ref can never settle a successor's delivery. Consumers tolerate duplicate claims.
 - **`done` stores the admission envelope verbatim** — `{ deliveredAt, messageId }` where `messageId` must equal the leased row's id; settlement records inbox admission only, never business results.
 - **Schema ownership is loud** — `mailbox_meta.schema_version` must equal this build's monotonic version; an empty file initializes at v1, any other non-mailbox file or version rejects the open (and therefore the plugin mount).
+
+
+## Guest access (`dsh-mailbox` bin)
+
+Outside council has no seat and no persistent process: it publishes whenever invoked and drains its inbox on arrival. The store is the outage-time interface — messages written here while the host is down sit `pending` and deliver on the next boot's mount drain.
+
+```
+dsh-mailbox send  --to <ns>:<name> --from <ns>:<name> [--type T] [--subject S]
+                  [--payload-file F | --payload-stdin] [--trace-id X] [--db PATH] [--json]
+
+dsh-mailbox inbox --address <ns>:<name> [--limit N] [--peek] [--db PATH] [--json]
+```
+
+| Concern | Semantics |
+|---|---|
+| First-writer modes | The missing database directory is created `0700` and the file `0600` through the SAME open sequence the plugin mount uses (`openLocalMailbox`); no ambient-umask fallback. |
+| Grammar gate | `--to`/`--from`/`--address` validate against the seam grammar before any write; an unroutable address fails loud instead of queuing invisibly. |
+| Inbox drain | `claim` + settle `done` (inbox admission, exactly the seam's semantics). Rows from unparseable-payload external writes never surface: they are settled `failed/malformed-payload` and their batch siblings deliver. |
+| `--peek` | Settles each receipt back to `pending` instead: read without consuming. A crash between claim and settle reclaims via the 60s staleness bound (same value as the bridge's default). |
+| `--db` | Absent: the harness-home default via `resolveMailboxPath`; the `:memory:` sentinel is honored. |
+| Guest turns | Delivered content is data for the receiving seat, never instructions; advisory `type`s (`field-report`, `question`) only. Seat-side acceptance of foreign-origin mail is governed at drain by the bridge's `admitFromNamespaces`. |
 
 ## Config
 

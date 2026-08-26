@@ -16,6 +16,7 @@ import MailboxRegistry from '@deepseek-ai/dsh-mailbox'
 import { formatMailboxAddress } from '@deepseek-ai/dsh-mailbox'
 import { acquireNamedSessionLock, deriveNamedSessionId, namedLockPath } from '@deepseek-ai/dsh-named-sessions'
 import MailboxLocal from '@deepseek-ai/dsh-mailbox-local'
+import * as mailCli from '../../local/src/cli.ts'
 import * as bridge from '../src/index.ts'
 import { admittedOutcome, publishAndWake, relaySource, relayText } from '../src/delivery.ts'
 
@@ -46,8 +47,10 @@ interface LiveAgentStub {
 async function makeHarness(options: {
   /** Live agents by derived session id; the routing's `ctx.agents.get` proxy. */
   liveBySession?: Record<string, LiveAgentStub>
-  /** Whether persistence reports a log for the derived target session. */
-  persisted?: boolean
+  /** Which session names persistence reports logs for (`true` = the shared 'target' fixture). */
+  persisted?: boolean | readonly string[]
+  /** Explicit queue file override (down-host tests mount the file the CLI wrote). */
+  storePath?: string
 } = {}): Promise<{
   ctx: ContextType
   storePath: string
@@ -61,7 +64,7 @@ async function makeHarness(options: {
   process.env.DSH_HOME = dir
   const ctx = new Context()
   await ctx.plugin(MailboxRegistry, { defaultProvider: 'local' })
-  await ctx.plugin(MailboxLocal, { path: join(dir, 'mailbox.db') })
+  await ctx.plugin(MailboxLocal, { path: options.storePath ?? join(dir, 'mailbox.db') })
 
   const state = { resumes: 0, disposes: 0, flushes: 0 }
   const resumedFollowup = vi.fn()
@@ -84,7 +87,10 @@ async function makeHarness(options: {
   ctx.provide('agents', agents as never)
   ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'mock', model: 'mock' }) } as never)
   ctx.provide('sessionPersistence', {
-    list: async () => options.persisted === true ? [{ id: deriveNamedSessionId('target') }] : [],
+    list: async () => {
+      if (options.persisted === true) return [{ id: deriveNamedSessionId('target') }]
+      return Array.isArray(options.persisted) ? options.persisted.map(name => ({ id: deriveNamedSessionId(name) })) : []
+    },
   } as never)
   ctx.provide('sessions', { flush: vi.fn(async () => { state.flushes += 1 }) } as never)
   return {
@@ -231,6 +237,49 @@ describe('routing outcomes', () => {
     expect(existsSync(namedLockPath('target'))).toBe(false)
   })
 
+  it('delivers CLI-published backlog on the next bridge mount — the down-host bootstrap', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-mailbox-bridge-down-'))
+    homes.push(dir)
+    process.env.DSH_HOME = dir
+    const dbPath = join(dir, 'mailbox.db')
+    // The harness is DOWN: the guest writes through the CLI bin alone.
+    const silent = mailCli.internals.stdout
+    mailCli.internals.stdout = { write: () => true }
+    try {
+      await mailCli.runMailboxCli([
+        'send', '--to', 'sc:down', '--from', 'guest:claude-code',
+        '--type', 'field-report', '--subject', 'outage report', '--db', dbPath,
+      ])
+    } finally {
+      mailCli.internals.stdout = silent
+    }
+
+    // Next successful boot: the bridge mounts over the same file and its
+    // inline drain delivers the dormant seat's backlog.
+    const h = await makeHarness({ persisted: ['down'], storePath: dbPath })
+    // The CLI already landed exactly one pending row while the host was down.
+    const probe = new DatabaseSync(dbPath)
+    const queued = probe.prepare('SELECT state FROM messages WHERE to_address = ?').all('sc:down') as Array<{ state: string }>
+    probe.close()
+    expect(queued).toEqual([{ state: 'pending' }])
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec({
+      addresses: ['sc:down'], pollIntervalMs: 5, maxClaimPerCycle: 10,
+      staleClaimMs: 600_000, admitFromNamespaces: ['guest'],
+    }))
+    expect(h.resumeCalls()).toBe(1)
+    const message = h.resumedFollowup.mock.calls[0]?.[0] as {
+      source?: { kind?: string; form?: string; from?: string }
+      content?: readonly [{ type: string; text: string }]
+    }
+    expect(message?.source).toMatchObject({ kind: 'mailbox', form: 'relay', from: 'guest:claude-code' })
+    expect(message?.content?.[0]?.text).toContain('outage report')
+
+    const db = new DatabaseSync(dbPath)
+    const rows = db.prepare('SELECT state FROM messages WHERE to_address = ?').all('sc:down') as Array<{ state: string }>
+    db.close()
+    expect(rows.map(row => row.state)).toEqual(['done'])
+  })
+
   it('isolates a poison delivery instead of wedging the batch behind it', async () => {
     const poisoned = { status: 'idle' as const, followup: vi.fn(() => { throw new Error('boom') }), steer: vi.fn() }
     const healthy = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
@@ -252,18 +301,56 @@ describe('routing outcomes', () => {
   })
 })
 
+describe('drain-time sender admission', () => {
+  /** The spec variant under test, differing only in the guest opt-in. */
+  function specWith(admitFromNamespaces?: readonly string[]): Parameters<typeof bridge.resolveBridgeSpec>[0] {
+    return { addresses: ['sc:target'], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000, admitFromNamespaces }
+  }
+
+  it('settles a non-admitted sender failed at drain and never wakes the target', async () => {
+    const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'guest:claude-code', subject: 'unsolicited' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specWith()))
+    expect(live.followup).not.toHaveBeenCalled()
+    const row = await rowState(h.storePath, id)
+    expect(row.state).toBe('failed')
+    expect(JSON.parse(row.result ?? '{}')).toEqual({ reason: 'sender-not-admitted' })
+  })
+
+  it('delivers an explicitly admitted guest sender like any colleague', async () => {
+    const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'guest:claude-code', subject: 'council report' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specWith(['guest'])))
+    expect(live.followup).toHaveBeenCalledTimes(1)
+    await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'done' })
+  })
+
+  it('fails a sender whose namespace half cannot even be parsed closed', async () => {
+    const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'opaque-sender-token', subject: '?' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specWith()))
+    expect(live.followup).not.toHaveBeenCalled()
+    const row = await rowState(h.storePath, id)
+    expect(JSON.parse(row.result ?? '{}')).toEqual({ reason: 'sender-not-admitted' })
+  })
+})
+
 describe('publishAndWake', () => {
   /** Attach one bridge's resolved roster so the wake path sees it as served. */
-  function serveSpecs(ctx: ContextType, addresses: readonly string[]): void {
+  function serveSpecs(ctx: ContextType, addresses: readonly string[], admitFromNamespaces?: readonly string[]): void {
     ctx.provide('mailboxBridgeSpecs', [bridge.resolveBridgeSpec({
-      addresses: [...addresses], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000,
+      addresses: [...addresses], pollIntervalMs: 5, maxClaimPerCycle: 10,
+      staleClaimMs: 600_000, admitFromNamespaces,
     })] as never)
   }
 
   it('delivers into a live target and reports the admission', async () => {
     const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
     const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
-    serveSpecs(h.ctx, ['sc:target'])
+    serveSpecs(h.ctx, ['sc:target'], ['wire'])
     const result = await bridge.publishAndWake(h.ctx, { to: 'sc:target', from: 'wire:ceo', subject: 'wake' })
     expect(result.disposition).toBe('delivered')
     expect(live.followup).toHaveBeenCalledTimes(1)
@@ -273,7 +360,7 @@ describe('publishAndWake', () => {
 
   it('reports queued while residency holds the target elsewhere', async () => {
     const h = await makeHarness({ persisted: true })
-    serveSpecs(h.ctx, ['sc:target'])
+    serveSpecs(h.ctx, ['sc:target'], ['wire'])
     const lock = acquireNamedSessionLock('target')
     try {
       const result = await bridge.publishAndWake(h.ctx, { to: 'sc:target', from: 'wire:ceo', subject: 'hold' })
@@ -300,7 +387,7 @@ describe('publishAndWake', () => {
 
   it('surfaces a terminal routing failure with its recorded reason', async () => {
     const h = await makeHarness({ persisted: false })
-    serveSpecs(h.ctx, ['sc:target'])
+    serveSpecs(h.ctx, ['sc:target'], ['wire'])
     await expect(bridge.publishAndWake(h.ctx, { to: 'sc:target', from: 'wire:ceo', subject: 'nobody home' }))
       .rejects.toThrow(/mailbox delivery failed: unknown-address/)
   })

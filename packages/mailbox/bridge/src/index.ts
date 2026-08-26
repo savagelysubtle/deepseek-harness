@@ -66,6 +66,13 @@ export interface Config {
    * Absent (the default): pid liveness is the only takeover path.
    */
   readonly lockStaleMs?: number
+  /**
+   * Sender namespaces whose mail this bridge's addresses will accept. Empty
+   * (the default) admits no external-origin mail at all: an outside writer
+   * bypasses every write-side check by construction, so admission is decided
+   * here at drain, where the store can actually enforce it.
+   */
+  readonly admitFromNamespaces?: readonly string[]
 }
 
 /** Schemastery validator for {@link Config}. */
@@ -75,6 +82,7 @@ export const Config = z.object({
   maxClaimPerCycle: z.number().step(1).min(1).default(DEFAULT_MAX_CLAIM_PER_CYCLE),
   staleClaimMs: z.number().step(1).min(1).default(DEFAULT_STALE_CLAIM_MS),
   lockStaleMs: z.number().step(1).min(1),
+  admitFromNamespaces: z.array(z.string()),
 })
 
 /** Resolved serving parameters; every fallback decision happens here once. */
@@ -85,6 +93,8 @@ export interface BridgeSpec {
   readonly maxClaimPerCycle: number
   readonly staleClaimMs: number
   readonly lockStaleMs: number | undefined
+  /** Sender namespaces admitted beyond each address's own namespace. */
+  readonly admitFromNamespaces: readonly string[]
 }
 
 /**
@@ -104,6 +114,7 @@ export function resolveBridgeSpec(config: Config): BridgeSpec {
     maxClaimPerCycle: config.maxClaimPerCycle ?? DEFAULT_MAX_CLAIM_PER_CYCLE,
     staleClaimMs: config.staleClaimMs ?? DEFAULT_STALE_CLAIM_MS,
     lockStaleMs: config.lockStaleMs,
+    admitFromNamespaces: config.admitFromNamespaces ?? [],
   }
 }
 
@@ -139,6 +150,16 @@ function deliverToLive(agent: Agent, message: UserMessage): void {
  */
 async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease): Promise<RouteResult> {
   const mailbox = ctx.mailbox
+  // Drain-time admission (the store cannot police an external writer): a
+  // sender namespace must be one this roster serves or explicitly admitted.
+  // An unparseable `from` fails closed like any foreign namespace.
+  const fromSeparator = lease.message.from.indexOf(':')
+  const senderNamespace = fromSeparator <= 0 ? lease.message.from : lease.message.from.slice(0, fromSeparator)
+  const servedNamespaces = spec.addresses.map(address => String(address).slice(0, String(address).indexOf(':')))
+  if (!servedNamespaces.includes(senderNamespace) && !spec.admitFromNamespaces.includes(senderNamespace)) {
+    await mailbox.settle(lease.leaseRef, { state: 'failed', result: { reason: 'sender-not-admitted' } })
+    return { kind: 'failed', reason: 'sender-not-admitted' }
+  }
   // Both halves of every served address were grammar-checked at mount, so the
   // name half slices out directly — routing adds no second encoding.
   const separatorAt = lease.message.to.indexOf(':')

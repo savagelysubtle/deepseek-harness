@@ -10,6 +10,7 @@
 
 import { closeSync, mkdirSync, openSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
+import type { DatabaseSync } from 'node:sqlite'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
@@ -68,6 +69,23 @@ function createDatabaseFile(path: string): void {
 }
 
 /**
+ * Open one mailbox database for writing, establishing the owner-only file
+ * mode when this caller is the first writer: the missing directory is created
+ * `0o700`, a missing file reserved `0o600`. The shared sequence for every
+ * writer of this store — plugin mount and `dsh-mailbox` CLI alike — so an
+ * out-of-harness first write never falls back to the ambient umask.
+ * @param path - resolved database path (`:memory:` skips filesystem setup).
+ * @returns the open handle from {@link openMailboxDatabase}.
+ */
+export function openLocalMailbox(path: string): DatabaseSync {
+  if (path !== ':memory:') {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+    createDatabaseFile(path)
+  }
+  return openMailboxDatabase(path)
+}
+
+/**
  * Mount the SQLite store as mailbox provider {@link PROVIDER_NAME}. Load via
  * the Loader (`inject: ['mailbox']`) or construct directly in tests; either
  * way the provider unregisters and the database closes on fiber disposal.
@@ -83,13 +101,9 @@ export class MailboxLocal extends Service {
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'mailboxLocal')
     const path = resolveMailboxPath(config.path)
-    if (path !== ':memory:') {
-      mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
-      createDatabaseFile(path)
-    }
     // Synchronous open: a foreign or incompatible database rejects the mount
     // itself, leaving nothing half-registered behind.
-    this.store = new SqliteMailboxStore(openMailboxDatabase(path))
+    this.store = new SqliteMailboxStore(openLocalMailbox(path))
     ctx.effect(() => {
       const dispose = ctx.mailbox.registerProvider(this.store)
       return () => {

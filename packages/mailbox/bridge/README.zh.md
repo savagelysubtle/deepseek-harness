@@ -24,6 +24,7 @@
 | `maxClaimPerCycle` | number? | `10` | 每周期认领租约上限。 |
 | `staleClaimMs` | number? | `60000` | 被遗弃的认领可回收的年龄阈值。 |
 | `lockStaleMs` | number? | 缺省 | 冷恢复对楔死锁的接管界限；缺省保持出厂 pid 存活语义。 |
+| `admitFromNamespaces` | string[]? | `[]` | 在本花名册自身命名空间之外额外准入的发送方命名空间。空即 FAIL-CLOSED：访客/外部来源邮件在排水时落定 `failed/sender-not-admitted`（存储无法在写入侧约束外部写入者）。chairs-only 由组合自然成立——只有主席桥选择加入 `['guest']`。 |
 
 轮询计时器从不钉住宿主事件循环（`unref`）：只为服务邮件而存在的部署须通过其他句柄维持自身存活。挂载后的结构性失败会清除计时器并抛出，而不是永远静默空转。
 

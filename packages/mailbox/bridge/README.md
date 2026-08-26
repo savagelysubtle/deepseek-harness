@@ -24,6 +24,7 @@ Every delivered turn carries the merged [`mailbox` message source](../mailbox/sr
 | `maxClaimPerCycle` | number? | `10` | Upper bound on leases claimed per cycle. |
 | `staleClaimMs` | number? | `60000` | Age past which an abandoned claim becomes reclaimable. |
 | `lockStaleMs` | number? | absent | Cold-resume takeover bound for wedged locks; absent keeps shipped pid-liveness semantics. |
+| `admitFromNamespaces` | string[]? | `[]` | Sender namespaces admitted beyond this roster's own. Empty is FAIL-CLOSED: guest/external-origin mail settles `failed/sender-not-admitted` at drain (the store cannot police outside writers at write time). Chairs-only falls out of composition — only chair bridges opt into `['guest']`. |
 
 The interval timer never pins the host event loop (`unref`): deployments that exist only to serve mail hold themselves up through other handles. Structural failures after mount clear the timer and throw rather than ticking silently forever.
 

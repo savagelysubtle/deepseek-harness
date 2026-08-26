@@ -241,13 +241,31 @@ export class SqliteMailboxStore implements MailboxProvider {
         WHERE id = ? AND (state = 'pending' OR (state = 'claimed' AND claimed_at <= ?))
       `)
       const leases: MailboxLease[] = []
+      /** Rows whose payload did not parse; owned via a claim ref each, settled terminal after commit. */
+      const malformed: MailboxLeaseRef[] = []
       for (const row of rows) {
+        // An external writer controls every byte of a stored row, so a
+        // non-JSON payload is an expected input shape, not corruption:
+        // isolate that one row and let its batch siblings deliver.
+        let message: MailboxMessage
+        try {
+          message = rowToMessage(row)
+        } catch {
+          const token = randomUUID()
+          if (claim.run(now, token, row.id, cutoff).changes === 1) {
+            malformed.push(formatLeaseRef(row.id, token))
+          }
+          continue
+        }
         const token = randomUUID()
         if (claim.run(now, token, row.id, cutoff).changes !== 1) continue
-        leases.push({ message: rowToMessage(row), leaseRef: formatLeaseRef(row.id, token), claimedAt: now })
+        leases.push({ message, leaseRef: formatLeaseRef(row.id, token), claimedAt: now })
       }
       this.db.exec('COMMIT')
       began = false
+      for (const leaseRef of malformed) {
+        await this.settle(leaseRef, { state: 'failed', result: { reason: 'malformed-payload' } })
+      }
       return leases
     } finally {
       /* v8 ignore start -- reached only when a claim SQL statement fails

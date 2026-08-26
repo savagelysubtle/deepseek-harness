@@ -80,9 +80,9 @@ function makeEnv(): { home: string; sessionsRoot: string; storePath: string } {
  * @param storePath - the database file to publish into.
  * @param address - the destination address to publish to.
  */
-async function seed(storePath: string, address: string): Promise<string> {
+async function seed(storePath: string, address: string, from = 'comp:sender'): Promise<string> {
   const store = new SqliteMailboxStore(openMailboxDatabase(storePath))
-  const id = await store.publish({ to: address as never, from: 'comp:sender', subject: 'wake up' })
+  const id = await store.publish({ to: address as never, from, subject: 'wake up' })
   store.close()
   return id
 }
@@ -324,6 +324,67 @@ describe('mailbox delivery over real compositions', () => {
         form: 'relay', address: 'comp:hook-target', from: 'comp:sender', messageId: id,
       })
       expect(mail.content[0]?.text).toBe('wake up')
+    },
+  )
+
+  it(
+    'settles guest-origin mail sender-not-admitted by default and delivers it once the roster opts in',
+    { timeout: 240_000 },
+    async () => {
+      // Fail-closed composition (no admitFromNamespaces): the bridge settles
+      // the guest row terminal WITHOUT waking or resuming anything.
+      const envA = makeEnv()
+      await boot(envA, {
+        responses: ['warm reply'],
+        args: ['--session-name', 'hook-gate', 'warmup task'],
+        settled: async () => {},
+      })
+      const rejectedId = await seed(envA.storePath, 'comp:hook-gate', 'guest:council')
+      await boot(envA, {
+        responses: [],
+        awaitQuiescence: false,
+        extraRows: [
+          "- name: '@deepseek-ai/dsh-mailbox-bridge'",
+          '  config:',
+          '    addresses: ["comp:hook-gate"]',
+          '    pollIntervalMs: 10',
+        ],
+        settled: () => until(() => storedState(envA.storePath, rejectedId) === 'failed'),
+      })
+      expect(storedState(envA.storePath, rejectedId)).toBe('failed')
+
+      // Opted-in composition: the same guest origin delivers like any colleague.
+      const envB = makeEnv()
+      await boot(envB, {
+        responses: ['warm reply'],
+        args: ['--session-name', 'hook-gate', 'warmup task'],
+        settled: async () => {},
+      })
+      const admittedId = await seed(envB.storePath, 'comp:hook-gate', 'guest:council')
+      const second = await boot(envB, {
+        responses: ['reply after guest wake'],
+        awaitQuiescence: false,
+        extraRows: [
+          "- name: '@deepseek-ai/dsh-mailbox-bridge'",
+          '  config:',
+          '    addresses: ["comp:hook-gate"]',
+          '    pollIntervalMs: 10',
+          '    admitFromNamespaces: ["guest"]',
+        ],
+        settled: () => until(() => storedState(envB.storePath, admittedId) === 'done'),
+      })
+      const mailboxMessages = second.adapter.requests
+        .flatMap(request => request.messages)
+        .filter(message => (message as { source?: { kind?: string } }).source?.kind === 'mailbox')
+      expect(mailboxMessages.length).toBeGreaterThanOrEqual(1)
+      const mail = mailboxMessages[0] as {
+        source: { address: string; from: string; messageId: string }
+        content: readonly [{ type: string; text: string }]
+      }
+      expect(mail.source).toMatchObject({
+        address: 'comp:hook-gate', from: 'guest:council', messageId: admittedId,
+      })
+      expect(storedState(envB.storePath, admittedId)).toBe('done')
     },
   )
 

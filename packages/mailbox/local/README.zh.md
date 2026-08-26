@@ -2,7 +2,7 @@
 
 # @deepseek-ai/dsh-mailbox-local
 
-本地邮箱提供方：一个 SQLite 数据库文件（基于 `node:sqlite` 的 `DatabaseSync`）在 [`@deepseek-ai/dsh-mailbox`](../mailbox/README.md) 接缝之后承载所有地址的队列。它以提供方名称 `local` 注册到 `ctx.mailbox`，在 SQLite 事务内强制单赢家认领，在 `staleClaimMs` 之后回收被遗弃的租约，并在打开时响亮拒绝外来或更新版本的数据库文件，而非就地迁移。
+本地邮箱提供方：一个 SQLite 数据库文件（基于 `node:sqlite` 的 `DatabaseSync`）在 [`@deepseek-ai/dsh-mailbox`](../mailbox/README.md) 接缝之后承载所有地址的队列。它以提供方名称 `local` 注册到 `ctx.mailbox`，在 SQLite 事务内强制单赢家认领，在 `staleClaimMs` 之后回收被遗弃的租约，并在打开时响亮拒绝外来或更新版本的数据库文件，而非就地迁移。 本包同时提供 `dsh-mailbox` 命令行工具，使访客进程在宿主完全未运行时也能向同一存储发布、并排空自己的收件箱。
 
 ## Provider API
 
@@ -19,6 +19,27 @@
 - **至少一次投递** — 持有超过 `filter.staleClaimMs` 的租约会在全新认领令牌下重新可认领，因此旧 ref 永远无法落定继任者的投递。消费者必须容忍重复认领。
 - **`done` 原样存储准入信封** — `{ deliveredAt, messageId }`，其中 `messageId` 必须等于所租行的 id；落定只记录收件箱准入，绝不是业务结果。
 - **Schema 归属是响亮的** — `mailbox_meta.schema_version` 必须等于本构建的单调版本；空文件以 v1 初始化，任何其他非邮箱文件或版本都会让打开（进而让插件挂载）失败。
+
+
+## 访客访问（`dsh-mailbox` 命令行）
+
+外部议事席没有常驻进程：被调用时发布、到达时排空收件箱。存储就是宕机期的接口——宿主停机期间写入的消息保持 `pending`，在下一次成功引导的挂载排水时自动投递。
+
+```
+dsh-mailbox send  --to <ns>:<name> --from <ns>:<name> [--type T] [--subject S]
+                  [--payload-file F | --payload-stdin] [--trace-id X] [--db PATH] [--json]
+
+dsh-mailbox inbox --address <ns>:<name> [--limit N] [--peek] [--db PATH] [--json]
+```
+
+| 关注点 | 语义 |
+|---|---|
+| 首写者权限 | 缺失的数据库目录以 `0700` 创建、文件以 `0600` 预留，走与插件挂载完全相同的打开序列（`openLocalMailbox`）；绝不回退到环境 umask。 |
+| 文法门禁 | `--to`／`--from`／`--address` 在任何写入之前按接缝文法校验；不可路由的地址响亮失败，而不是隐形排队。 |
+| 收件箱排水 | `claim` + 以 `done` 落定（恰是接缝的收件箱准入语义）。来自外部的坏 payload 行不会浮出：它们被落定为 `failed/malformed-payload`，同批兄弟消息照常投递。 |
+| `--peek` | 将每条回执退回 `pending`：只读不消费。认领与落定之间的崩溃经 60 秒过期界限回收（与桥的默认值一致）。 |
+| `--db` | 缺省时经 `resolveMailboxPath` 解析到 harness 家目录；支持 `:memory:` 哨兵值。 |
+| 访客回合 | 投递内容是接收席位的数据，绝非指令；`type` 仅限咨询类（`field-report`、`question`）。外来来源邮件能否被接受由桥的 `admitFromNamespaces` 在排水时裁决。 |
 
 ## 配置
 
