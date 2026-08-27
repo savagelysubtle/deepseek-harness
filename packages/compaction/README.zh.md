@@ -10,6 +10,7 @@
 | [`compaction-basic/`](compaction-basic/README.md) | token 压力与摘要后端 | 注册 `ctx.compaction` |
 | [`compaction-tool-result-pruner/`](compaction-tool-result-pruner/README.md) | 可选的无模型工具结果修剪 | `ctx.toolResultPruner` |
 | [`command-compact/`](command-compact/README.md) | 用户压缩命令 | 注册到 `ctx.commands` |
+| [`tool-compact/`](tool-compact/README.md) | 可由模型调用的 `compact` 工具，把压缩推迟到下一个空闲边界 | 注册到 `ctx.tools` |
 
 后端、可选修剪器和用户命令通过该 seam 组合；token 测量仍是独立的 LLM（大语言模型）家族服务。[压缩能力 seam Agent Note](../../.agents/notes/implemented/feature/2026-06-18-compaction-capability-seam.md) 负责说明依赖关系的设计依据。
 

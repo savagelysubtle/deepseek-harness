@@ -87,3 +87,11 @@
     retainRatio: 0.16
     maxTokens: 8192
     compactionRetries: 1
+
+# Opt-in beside the compaction backend: durable pressure warnings and the
+# model-callable deferred compact tool.
+- id: context-pressure
+  name: '@deepseek-ai/dsh-context-pressure'
+
+- id: tool-compact
+  name: '@deepseek-ai/dsh-tool-compact'

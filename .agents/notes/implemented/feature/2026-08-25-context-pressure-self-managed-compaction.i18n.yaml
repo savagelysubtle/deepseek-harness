@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-25-context-pressure-self-managed-compaction.md
+2026-08-25-context-pressure-self-managed-compaction.md: b633a7d4c15df24b2b0496d20fc6443c0e72ac8a
+2026-08-25-context-pressure-self-managed-compaction.zh.md: cea25da4e105e731169162ff9b558e961a36a56b

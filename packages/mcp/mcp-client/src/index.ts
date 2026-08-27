@@ -35,6 +35,20 @@ export const inject = ['tools']
 /** Default timeout for individual MCP tool calls (ms). */
 const DEFAULT_TOOL_CALL_TIMEOUT_MS = 60_000
 
+/**
+ * Bound on waiting for a late-registering `credentials` service before an
+ * OAuth-configured instance fails loud. `inject = ['tools']` gives this
+ * plugin no ordering guarantee relative to `@deepseek-ai/dsh-credentials-local`
+ * (a hard `inject` on `credentials` would break every non-OAuth instance in
+ * deployments that never mount it, e.g. the stdio-only mcp-memory examples),
+ * so a same-boot-wave race is expected and worth a short wait rather than an
+ * immediate false-negative.
+ */
+const CREDENTIALS_WAIT_TIMEOUT_MS = 10_000
+
+/** Poll granularity while waiting on {@link CREDENTIALS_WAIT_TIMEOUT_MS}. */
+const CREDENTIALS_POLL_INTERVAL_MS = 50
+
 /** Valid `serverName`, kept below the public tool-name budget. */
 const SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]{1,32}$/
 
@@ -193,9 +207,25 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       )
     }
     if (ctx.get('credentials') === undefined) {
-      throw new Error(
-        `mcp-client(${config.serverName}): auth.oauth requires the credential-reference service — mount @deepseek-ai/dsh-credentials-local`,
-      )
+      // Not present *yet* is not the same as never mounted: `credentials` and
+      // this plugin both activate during the same boot wave, and nothing
+      // orders one ahead of the other. `ctx.get` only returns a service once
+      // its owning fiber reaches ACTIVE — for credentials-local that is after
+      // its own async init (reading `.credentials.yaml`, arming the file
+      // watcher) settles, which routinely outlasts this plugin's synchronous
+      // activation. Poll the same strict check resolveAuthProvider uses below
+      // rather than `ctx.inject`, whose dependency-satisfaction signal fires
+      // on registration, not on that ACTIVE transition — failing loud only if
+      // credentials genuinely never shows up within the bound.
+      const deadline = Date.now() + CREDENTIALS_WAIT_TIMEOUT_MS
+      while (ctx.get('credentials') === undefined) {
+        if (Date.now() >= deadline) {
+          throw new Error(
+            `mcp-client(${config.serverName}): auth.oauth requires the credential-reference service — mount @deepseek-ai/dsh-credentials-local`,
+          )
+        }
+        await new Promise(resolve => setTimeout(resolve, CREDENTIALS_POLL_INTERVAL_MS))
+      }
     }
   }
 

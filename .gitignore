@@ -33,6 +33,8 @@ python/**/.pytest_cache/
 apps/web/dist/
 .artifacts/
 .playwright-mcp/
+.playwright-cli/
+.alfred-reports/
 .orig
 .worktrees/
 worktrees/

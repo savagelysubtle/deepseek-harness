@@ -29,7 +29,7 @@ Every setting is optional. Top-level policy fields are defaults for every routed
 
 | Key | Required | Meaning |
 |---|---|---|
-| `thresholdRatio` | no (default `0.8`) | Compact at `floor(routedContextWindow × ratio)`. |
+| `thresholdRatio` | no (default `0.95`) | Compact at `floor(routedContextWindow × ratio)`. Pressure warnings handle earlier planning; the automatic flush is the hard backstop. |
 | `retainRatio` | no (default `0.16`) | Recent surface budget kept verbatim as a fraction of the routed context window; mutually exclusive with `retainTokens`. |
 | `retainTokens` | no | Absolute recent surface budget kept verbatim; mutually exclusive with `retainRatio` and must be below the resolved threshold. |
 | `summarizationProvider` | no (default `''`) | Set together with `summarizationModel`; an empty pair resolves the latest logged request target, then the `AgentOptions` pair. |

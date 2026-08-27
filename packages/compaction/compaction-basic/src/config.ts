@@ -16,8 +16,12 @@ import type {
   ResolvedTargetPolicy,
 } from './types.ts'
 
-/** Default request-pressure fraction for every routed model. */
-const DEFAULT_THRESHOLD_RATIO = 0.8
+/**
+ * Default request-pressure fraction for every routed model. Pressure warnings
+ * handle earlier planning, so the automatic flush is the hard backstop and sits
+ * near the window edge; context-overflow retry remains the last resort.
+ */
+const DEFAULT_THRESHOLD_RATIO = 0.95
 
 /** Default verbatim-tail fraction for every routed model. */
 const DEFAULT_RETAIN_RATIO = 0.16

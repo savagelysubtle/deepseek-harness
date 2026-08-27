@@ -147,6 +147,7 @@ describe('jsonrpc-agent keyless smoke', () => {
       expect(modelRequests[0]?.max_tokens).toBe(1234)
       expect(tools.map(tool => tool.function?.name).sort()).toEqual([
         'bash',
+        'compact',
         'edit',
         'read',
         'subagent',

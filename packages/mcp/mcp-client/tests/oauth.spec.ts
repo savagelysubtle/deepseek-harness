@@ -53,6 +53,10 @@ describe('OAuth config schema', () => {
       url: 'http://127.0.0.1/mcp',
       auth: { mode: 'oauth' },
     } as never)
+    // transport is Config's discriminant: auth exists only on the streamable-http branch.
+    if (resolved.transport !== 'streamable-http') {
+      throw new Error('the streamable-http config resolved into the stdio branch')
+    }
     expect(resolved.auth).toEqual({ mode: 'oauth', redirectPort: DEFAULT_OAUTH_REDIRECT_PORT })
   })
 
@@ -87,6 +91,10 @@ describe('OAuth config schema', () => {
 })
 
 describe('fail-loud wiring', () => {
+  // Shipped activation polls up to 10s (CREDENTIALS_WAIT_TIMEOUT_MS) for a
+  // late-mounting credential service before rejecting; the reject path under
+  // test is the exhausted poll, so this case's budget clears that bound.
+  const credentialsWaitBudgetMs = 15_000
   it('rejects activation when auth is configured without the credential service', async () => {
     const fixture = await startOAuthFixture()
     try {
@@ -98,7 +106,7 @@ describe('fail-loud wiring', () => {
     } finally {
       await fixture.close()
     }
-  })
+  }, credentialsWaitBudgetMs)
 })
 
 describe('consent CLI and host pickup', () => {
