@@ -5,7 +5,7 @@
  * mail ahead of its own task turn.
  */
 
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -25,6 +25,7 @@ import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SessionStore from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import { deriveNamedSessionId } from '@deepseek-ai/dsh-named-sessions'
 import MailboxRegistry from '@deepseek-ai/dsh-mailbox'
 import MailboxLocal, { openMailboxDatabase, SqliteMailboxStore } from '@deepseek-ai/dsh-mailbox-local'
 import * as HeadlessRunnerModule from '../../../bundle/headless/src/index.ts'
@@ -57,6 +58,21 @@ class ScriptedAdapter extends LlmAdapter {
 }
 
 let roots: string[] = []
+
+/**
+ * The scripted model behind one finished boot. A boot without an explicit
+ * `adapter` option always registers this spec's own ScriptedAdapter, so
+ * asserting through its request log needs the concrete class; a stray
+ * explicit-adapter boot fails loud instead of misreading its traffic.
+ * @param outcome - the completed boot outcome to inspect.
+ * @returns that boot's ScriptedAdapter instance.
+ */
+function scriptedAdapterOf(outcome: BootOutcome): ScriptedAdapter {
+  if (!(outcome.adapter instanceof ScriptedAdapter)) {
+    throw new Error('composition test bug: expected the spec-local scripted adapter')
+  }
+  return outcome.adapter
+}
 
 afterEach(() => {
   for (const dir of roots) rmSync(dir, { recursive: true, force: true })
@@ -99,19 +115,21 @@ function storedState(storePath: string, messageId: string): string {
 }
 
 /** Poll a condition until it holds or the budget expires. */
-async function until(holds: () => boolean, budgetMs = 20_000): Promise<void> {
+async function until(holds: () => boolean, budgetMs = 120_000): Promise<void> {
   const started = Date.now()
   while (!holds()) {
     if (Date.now() - started > budgetMs) throw new Error('composition condition never settled')
-    await new Promise<void>(resolve => { setTimeout(resolve, 50) })
+    await new Promise<void>((resolve) => { setTimeout(resolve, 50) })
   }
 }
 
 interface BootOptions {
   /** Extra yml rows beyond the shared agent stack and mailbox pair. */
   readonly extraRows?: readonly string[]
-  /** The scripted model answers, consumed per streamed request. */
-  readonly responses: readonly string[]
+  /** Externally owned adapter override (steer probe holds streams itself). */
+  readonly adapter?: LlmAdapter
+  /** The scripted model answers, consumed per streamed request; unused when `adapter` overrides. */
+  readonly responses?: readonly string[]
   /** Inner command line for the launcher; absent boots run without one. */
   readonly args?: readonly string[]
   /** Resolves once the boot may dispose (run exited / delivery observed). */
@@ -127,7 +145,7 @@ interface BootOptions {
 
 interface BootOutcome {
   code: number
-  adapter: ScriptedAdapter
+  adapter: LlmAdapter | ScriptedAdapter
 }
 
 /**
@@ -184,7 +202,7 @@ async function boot(env: ReturnType<typeof makeEnv>, options: BootOptions): Prom
   ]
   await writeFile(configPath, rows.join('\n'))
 
-  const adapter = new ScriptedAdapter(options.responses)
+  const adapter = options.adapter ?? new ScriptedAdapter(options.responses ?? [])
   const globals = globalThis as unknown as { __mailboxCompositionRegisterModel?: ((ctx: ContextType) => void) | undefined }
   globals.__mailboxCompositionRegisterModel = (ctx: ContextType) => {
     ctx.llm.registerAdapter(['mock'], adapter)
@@ -261,7 +279,7 @@ async function boot(env: ReturnType<typeof makeEnv>, options: BootOptions): Prom
         : Promise.resolve(),
     ])
     // One scheduler turn so late microtasks finish before teardown.
-    await new Promise<void>(resolve => { setTimeout(resolve, 25) })
+    await new Promise<void>((resolve) => { setTimeout(resolve, 25) })
   } finally {
     await ctx.fiber.dispose()
     if (options.capture !== undefined) Object.assign(headlessInternals, originalInternals)
@@ -284,18 +302,20 @@ describe('mailbox delivery over real compositions', () => {
         capture,
         settled: async () => {},
       })
+      const warmupScripted = scriptedAdapterOf(warmup)
       expect(warmup.code,
-        `phase1 diagnostics: stdout=${JSON.stringify(capture.stdout)} stderr=${JSON.stringify(capture.stderr)} requests=${warmup.adapter.requests.length}`,
+        `phase1 diagnostics: stdout=${JSON.stringify(capture.stdout)} stderr=${JSON.stringify(capture.stderr)} requests=${warmupScripted.requests.length}`,
       ).toBe(0)
-      expect(warmup.adapter.requests.length,
+      expect(warmupScripted.requests.length,
         `phase1 had no model traffic; stdout=${JSON.stringify(capture.stdout)}`,
       ).toBeGreaterThanOrEqual(1)
 
       const id = await seed(env.storePath, 'comp:hook-target')
 
       // Phase 2 — the bridge claims the seeded mail and resumes the dormant log.
-      const second = await boot(env, {
-        responses: ['reply after wake'],
+      const secondAdapter = new ScriptedAdapter(['reply after wake'])
+      await boot(env, {
+        adapter: secondAdapter,
         awaitQuiescence: false,
         extraRows: [
           "- name: '@deepseek-ai/dsh-mailbox-bridge'",
@@ -304,26 +324,28 @@ describe('mailbox delivery over real compositions', () => {
           '    pollIntervalMs: 10',
         ],
         settled: async () => {
-          // Admission settles before the delivered turn streams; give the
-          // resumed agent's model exchange one bounded beat so the scripted
-          // adapter records the request before teardown disposes the tree.
+          // Admission settles before the delivered turn streams; wait for the
+          // scripted model to record the woken exchange itself — a fixed beat
+          // races teardown under aggregate-run contention.
           await until(() => storedState(env.storePath, id) === 'done')
-          await new Promise<void>(resolve => { setTimeout(resolve, 400) })
+          await until(() => secondAdapter.requests.some(request =>
+            request.messages.some(message =>
+              (message as { source?: { kind?: string } }).source?.kind === 'mailbox')))
         },
       })
 
-      const mailboxMessages = second.adapter.requests
+      const mailboxMessages = secondAdapter.requests
         .flatMap(request => request.messages)
         .filter(message => (message as { source?: { kind?: string } }).source?.kind === 'mailbox')
       expect(mailboxMessages.length).toBeGreaterThanOrEqual(1)
       const mail = mailboxMessages[0] as {
         source: { form: string; address: string; from: string; messageId: string }
-        content: readonly [{ type: string; text: string }]
+        content?: ReadonlyArray<{ type: string; text?: string }>
       }
       expect(mail.source).toMatchObject({
         form: 'relay', address: 'comp:hook-target', from: 'comp:sender', messageId: id,
       })
-      expect(mail.content[0]?.text).toBe('wake up')
+      expect(mail.content?.[0]?.text).toBe('wake up')
     },
   )
 
@@ -361,8 +383,9 @@ describe('mailbox delivery over real compositions', () => {
         settled: async () => {},
       })
       const admittedId = await seed(envB.storePath, 'comp:hook-gate', 'guest:council')
-      const second = await boot(envB, {
-        responses: ['reply after guest wake'],
+      const secondAdapter = new ScriptedAdapter(['reply after guest wake'])
+      await boot(envB, {
+        adapter: secondAdapter,
         awaitQuiescence: false,
         extraRows: [
           "- name: '@deepseek-ai/dsh-mailbox-bridge'",
@@ -371,15 +394,21 @@ describe('mailbox delivery over real compositions', () => {
           '    pollIntervalMs: 10',
           '    admitFromNamespaces: ["guest"]',
         ],
-        settled: () => until(() => storedState(envB.storePath, admittedId) === 'done'),
+        settled: async () => {
+          // Same observed-delivery condition as the cold-resume case: settle
+          // alone does not prove the resumed turn reached the scripted model.
+          await until(() => storedState(envB.storePath, admittedId) === 'done')
+          await until(() => secondAdapter.requests.some(request =>
+            request.messages.some(message =>
+              (message as { source?: { kind?: string } }).source?.kind === 'mailbox')))
+        },
       })
-      const mailboxMessages = second.adapter.requests
+      const mailboxMessages = secondAdapter.requests
         .flatMap(request => request.messages)
         .filter(message => (message as { source?: { kind?: string } }).source?.kind === 'mailbox')
       expect(mailboxMessages.length).toBeGreaterThanOrEqual(1)
       const mail = mailboxMessages[0] as {
         source: { address: string; from: string; messageId: string }
-        content: readonly [{ type: string; text: string }]
       }
       expect(mail.source).toMatchObject({
         address: 'comp:hook-gate', from: 'guest:council', messageId: admittedId,
@@ -405,17 +434,154 @@ describe('mailbox delivery over real compositions', () => {
 
       expect(run.code).toBe(0)
       expect(capture.stdout.join('')).toContain('final task reply')
-      const firstTurnMessages = run.adapter.requests[0]?.messages ?? []
+      const runScripted = scriptedAdapterOf(run)
+      const firstTurnMessages = runScripted.requests[0]?.messages ?? []
       const delivered = firstTurnMessages.at(-1) as {
         source?: { kind?: string; form?: string; messageId?: string }
-        content?: readonly [{ type: string; text: string }]
+        content?: ReadonlyArray<{ type: string; text?: string }>
       }
       expect(delivered?.source).toMatchObject({ kind: 'mailbox', form: 'relay', messageId: id })
       expect(delivered?.content?.[0]?.text).toBe('wake up')
-      const taskMessage = run.adapter.requests.at(-1)?.messages.at(-1) as {
-        content?: readonly [{ type: string; text: string }]
+      const taskMessage = runScripted.requests.at(-1)?.messages.at(-1) as {
+        content?: ReadonlyArray<{ type: string; text?: string }>
       }
       expect(taskMessage?.content?.[0]?.text).toBe('final task')
+    },
+  )
+
+  it(
+    'routes sender mail into a running seat immediately without aborting held generation',
+    { timeout: 240_000 },
+    async () => {
+      const env = makeEnv()
+      let released = false
+
+      class HeldFirstAdapter extends LlmAdapter {
+        readonly requests: GenerateOptions[] = []
+        override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+          this.requests.push(options)
+          const holdsWork = !options.messages.some(message =>
+            (message as { source?: { kind?: string } }).source?.kind === 'mailbox')
+          while (holdsWork && !released && !options.signal?.aborted) {
+            await new Promise<void>((resolve) => { setTimeout(resolve, 25) })
+          }
+          const text = options.signal?.aborted ? 'held work output (aborted)' : holdsWork ? 'held work output' : 'post-wake reply'
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+        }
+      }
+      const heldAdapter = new HeldFirstAdapter()
+
+      const run = await boot(env, {
+        responses: [],
+        args: ['--session-name', 'steer-live', 'held task'],
+        adapter: heldAdapter,
+        extraRows: [
+          "- name: '@deepseek-ai/dsh-mailbox-bridge'",
+          '  config:',
+          '    addresses: ["comp:steer-live"]',
+          '    pollIntervalMs: 10',
+          '    admitFromNamespaces:',
+          '      - founder',
+        ],
+        settled: async () => {
+          // Nothing pre-published: against a session whose runner has not
+          // registered yet, the inline mount drain would (correctly) settle
+          // mail `unknown-address`. Hold first…
+          await until(() => heldAdapter.requests.length === 1)
+          // …then publish mid-generation; the next drain STEERs it into the
+          // live turn within one poll beat even though the seat stays busy.
+          const mailedId = await seed(env.storePath, 'comp:steer-live')
+          try {
+            await until(() => storedState(env.storePath, mailedId) === 'done')
+          } catch {
+            const db = new DatabaseSync(env.storePath)
+            const rows = db.prepare('SELECT state, result FROM messages WHERE id = ?').all(mailedId)
+            db.close()
+            throw new Error(`mail ${mailedId} unsettled: rows=${JSON.stringify(rows)} reqs=${heldAdapter.requests.length}`)
+          }
+          released = true
+        },
+      })
+      expect(run.code).toBe(0)
+
+      const kinds = heldAdapter.requests.map(request =>
+        ((request.messages.at(-1) as { source?: { kind?: string } }).source?.kind ?? 'user'))
+      expect(kinds).toEqual(['user', 'mailbox'])
+
+      const mail = heldAdapter.requests
+        .flatMap(request => request.messages)
+        .find(message => (message as { source?: { kind?: string } }).source?.kind === 'mailbox') as {
+          content?: ReadonlyArray<{ type: string; text?: string }>
+        } | undefined
+      expect(mail?.content?.[0]?.text).toBe('wake up')
+
+      const db = new DatabaseSync(env.storePath)
+      const bounces = db.prepare("SELECT COUNT(*) AS n FROM messages WHERE type = 'bounce'").get() as { n: number }
+      db.close()
+      expect(bounces.n).toBe(0)
+
+      // NOTHING aborted: held generation completed on its own terms. The
+      // jsonl root mixes files and per-session directories — read files only.
+      const logText = readdirSync(env.sessionsRoot)
+        .map(entry => join(env.sessionsRoot, String(entry)))
+        .filter(path => statSync(path).isFile())
+        .map(path => readFileSync(path, 'utf8'))
+        .join('')
+      expect(logText.includes('"kind":"aborted"')).toBe(false)
+    },
+  )
+
+  it(
+    'wakes an idle aliased web-seat session through a real yml-configured bridge',
+    { timeout: 240_000 },
+    async () => {
+      // Chair post-land scenario verbatim: warmup persists the seat's REAL
+      // session; the patch row aliases a WEB namespace address to that exact
+      // id; mail published while the seat is IDLE cold-resumes and steers it.
+      const env = makeEnv()
+      const warmup = await boot(env, {
+        responses: ['warm reply'],
+        args: ['--session-name', 'gotham-seat', 'warmup task'],
+        settled: async () => {},
+      })
+      expect(warmup.code).toBe(0)
+
+      const aliasedId = deriveNamedSessionId('gotham-seat')
+      const id = await seed(env.storePath, 'web:alfred', 'console:ceo')
+
+      const run = await boot(env, {
+        responses: ['seat wake reply'],
+        awaitQuiescence: false,
+        extraRows: [
+          "- name: '@deepseek-ai/dsh-mailbox-bridge'",
+          '  config:',
+          '    addresses:',
+          '      - web:alfred',
+          '    pollIntervalMs: 10',
+          '    admitFromNamespaces:',
+          '      - console',
+          '    seatAliases:',
+          '      - address: web:alfred',
+          '        sessionId: ' + JSON.stringify(String(aliasedId)),
+        ],
+        settled: () => until(() => storedState(env.storePath, id) === 'done'),
+      })
+
+      const mailboxMessages = scriptedAdapterOf(run).requests
+        .flatMap(request => request.messages)
+        .filter(message => (message as { source?: { kind?: string } }).source?.kind === 'mailbox')
+      expect(mailboxMessages.length).toBeGreaterThanOrEqual(1)
+      const mail = mailboxMessages[0] as {
+        source: { address: string; from: string; messageId: string }
+        content?: ReadonlyArray<{ type: string; text?: string }>
+      }
+      expect(mail.source).toMatchObject({
+        address: 'web:alfred', from: 'console:ceo', messageId: id,
+      })
+      expect(mail.content?.[0]?.text).toBe('wake up')
     },
   )
 })

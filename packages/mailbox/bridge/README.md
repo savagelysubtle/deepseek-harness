@@ -9,9 +9,11 @@ The mailbox consumer: a polling bridge that turns claimed messages into ordinary
 | Step | Semantics |
 |---|---|
 | `claim` | Up to `maxClaimPerCycle` pending-or-stale messages per cycle across the configured `addresses`, through the registry's default provider. |
-| **Live target** | The derived session id resolves on `ctx.agents`: deliver steering into the running turn first (publish-side wake must land promptly); a turn-boundary rejection falls back to an ordinary queued turn. Settles `done` at admission. |
+| **Live target** | The derived session id resolves on `ctx.agents`: delivery STEERS into the live turn immediately — no busyness inference, regardless of message type (founder model: all mail interrupts; senders mark `blocking`, receivers judge prioritization). A turn-boundary rejection falls back to an ordinary queued turn. Settles `done` at admission. |
 | **Dormant target** | Takes the named-session lock (`lockStaleMs` bounds live-holder takeover; absent keeps pid-liveness as the only takeover path), probes persistence: an absent log settles `failed` with reason `unknown-address`; a present log resumes the agent, delivers as a FIFO turn, settles `done` AT ADMISSION, awaits quiescence, flushes, and disposes before releasing. |
 | **Resident elsewhere** | Lock acquisition loses to a live holder: settles `pending` so a later cycle retries. |
+
+Every terminal failure (`unknown-address`, `sender-not-admitted`, per-lease crashes) also publishes a best-effort `bounce` notice addressed back to the original sender — type `bounce`, carrying the original `traceId` and the recorded reason in its payload — so a drop is never silent to whoever sent it. An undrained bounce is just an unread row, never a hang.
 
 Every delivered turn carries the merged [`mailbox` message source](../mailbox/src/source.ts) (`{ kind: 'mailbox', form: 'relay', address, from, messageId, traceId? }`), so transcripts credit relayed mail to its sender address instead of an anonymous user turn. Per-lease failures settle `failed` with the reason instead of wedging the roster behind one poison message.
 
@@ -25,6 +27,7 @@ Every delivered turn carries the merged [`mailbox` message source](../mailbox/sr
 | `staleClaimMs` | number? | `60000` | Age past which an abandoned claim becomes reclaimable. |
 | `lockStaleMs` | number? | absent | Cold-resume takeover bound for wedged locks; absent keeps shipped pid-liveness semantics. |
 | `admitFromNamespaces` | string[]? | `[]` | Sender namespaces admitted beyond this roster's own. Empty is FAIL-CLOSED: guest/external-origin mail settles `failed/sender-not-admitted` at drain (the store cannot police outside writers at write time). Chairs-only falls out of composition — only chair bridges opt into `['guest']`. |
+| `seatAliases` | {address, sessionId}[]? | absent | Explicit live-seat roster for addresses whose target session is NOT name-derived (web-host seat sessions). Alias routes steer/cold-resume to that exact session id; unlisted names keep derivation. Absent keeps pure-derivation default. |
 
 The interval timer never pins the host event loop (`unref`): deployments that exist only to serve mail hold themselves up through other handles. Structural failures after mount clear the timer and throw rather than ticking silently forever.
 

@@ -6,8 +6,10 @@
  * messages and routes each:
  *
  * 1. **Live in-process** — the derived session id resolves through
- *    `ctx.agents`: deliver steering into the running turn (queue fallback),
- *    settle `done` at admission.
+ *    `ctx.agents`: STEER into the live turn immediately, whatever its state
+ *    or the sender's type (founder model: all mail interrupts; senders mark
+ *    `blocking` and receivers judge prioritization), settle `done` at
+ *    admission.
  * 2. **Dormant** — take the per-name residency lock, probe persistence for
  *    the derived id: an absent log settles `failed` with reason
  *    `unknown-address`; a present log cold-resumes the agent, delivers as a
@@ -15,6 +17,10 @@
  *    flushes, and disposes the handle before releasing the lock.
  * 3. **Resident elsewhere** — lock acquisition loses to a live holder: settle
  *    `pending` so a later cycle retries.
+ *
+ * Every terminal failure settles the recipient's row failed AND publishes a
+ * best-effort `bounce` notice back to the sender (same store, original
+ * traceId, the recorded reason), so a drop is never silent to whoever sent.
  *
  * @module @deepseek-ai/dsh-mailbox-bridge
  */
@@ -32,6 +38,7 @@ import {
 } from '@deepseek-ai/dsh-named-sessions'
 import { parseMailboxAddress } from '@deepseek-ai/dsh-mailbox'
 import type { MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxMessageId } from '@deepseek-ai/dsh-mailbox'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { admittedOutcome, relayUserMessage } from './delivery.ts'
 
@@ -45,6 +52,7 @@ export const DEFAULT_MAX_CLAIM_PER_CYCLE = 10
 
 /** Default age past which another claimer's abandoned lease is reclaimable. */
 export const DEFAULT_STALE_CLAIM_MS = 60_000
+
 
 /** Plugin configuration. */
 export interface Config {
@@ -73,6 +81,13 @@ export interface Config {
    * here at drain, where the store can actually enforce it.
    */
   readonly admitFromNamespaces?: readonly string[]
+  /**
+   * Explicit live-seat roster: full served addresses routed to an EXISTING
+   * session id instead of the name-derivation default. This is how web-host
+   * seat sessions (whose ids are not named-derived) become reachable. Absent
+   * (the default): pure derivation — fail-closed, no discovery magic.
+   */
+  readonly seatAliases?: readonly { readonly address: string; readonly sessionId: string }[]
 }
 
 /** Schemastery validator for {@link Config}. */
@@ -83,6 +98,9 @@ export const Config = z.object({
   staleClaimMs: z.number().step(1).min(1).default(DEFAULT_STALE_CLAIM_MS),
   lockStaleMs: z.number().step(1).min(1),
   admitFromNamespaces: z.array(z.string()),
+  seatAliases: z.array(
+    z.object({ address: z.string().min(1), sessionId: z.string().min(1) }),
+  ),
 })
 
 /** Resolved serving parameters; every fallback decision happens here once. */
@@ -95,6 +113,8 @@ export interface BridgeSpec {
   readonly lockStaleMs: number | undefined
   /** Sender namespaces admitted beyond each address's own namespace. */
   readonly admitFromNamespaces: readonly string[]
+  /** Grammar-checked alias rows for non-derived (web-host seat) targets. */
+  readonly seatAliases: ReadonlyMap<MailboxAddress, SessionId>
 }
 
 /**
@@ -108,6 +128,20 @@ export function resolveBridgeSpec(config: Config): BridgeSpec {
   if (rawAddresses.length === 0) {
     throw new Error('mailbox-bridge: addresses must name at least one served "<namespace>:<name>" endpoint')
   }
+  const seatAliases = new Map<MailboxAddress, SessionId>()
+  for (const alias of config.seatAliases ?? []) {
+    // Brand both halves at the resolution boundary (compile-time casts —
+    // this contract's opaque ids carry no runtime structure). Address grammar
+    // is enforced here, so an invalid row fails the mount.
+    const address = parseMailboxAddress(alias.address)
+    if (alias.sessionId.trim().length === 0) {
+      throw new Error(`mailbox-bridge: seat alias "${alias.address}" carries an empty session id`)
+    }
+    if (seatAliases.has(address)) {
+      throw new Error(`mailbox-bridge: seat alias for "${alias.address}" declared more than once`)
+    }
+    seatAliases.set(address, String(alias.sessionId) as SessionId)
+  }
   return {
     addresses: rawAddresses.map(address => parseMailboxAddress(address)),
     pollIntervalMs: config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
@@ -115,26 +149,27 @@ export function resolveBridgeSpec(config: Config): BridgeSpec {
     staleClaimMs: config.staleClaimMs ?? DEFAULT_STALE_CLAIM_MS,
     lockStaleMs: config.lockStaleMs,
     admitFromNamespaces: config.admitFromNamespaces ?? [],
+    seatAliases,
   }
 }
 
 /**
- * Deliver one claimed lease to its live agent: steering interrupts a running
- * turn first (Steve directive — publish-side wake must land promptly), and any
- * rejection falls back to an ordinary queued turn. Either way admission is
- * immediate; the caller settles.
+ * Deliver one claimed lease to its live agent under the FOUNDER MODEL (chair
+ * revision on Doc 1 §2): ALL mail steers into a live turn immediately — no
+ * busyness inference, no type-based interrupt requests. Whether the delivered
+ * content preempts mental focus or waits behind the current task is the
+ * RECEIVER's judging call, driven by the sender's `blocking` mark rendered
+ * visibly in the turn. A boundary refusal between admission and steer falls
+ * back to an ordinary queued turn so nothing is ever lost. Either way
+ * admission is immediate; the caller settles.
  * @param agent - the live agent addressed by the lease.
  * @param message - the rendered delivery turn.
  */
 function deliverToLive(agent: Agent, message: UserMessage): void {
-  if (agent.status === 'idle') {
-    agent.followup(message)
-    return
-  }
   try {
     agent.steer(message)
   } catch {
-    // A turn boundary refused the interruption between status read and steer;
+    // A boundary refused the interruption between admission and steer;
     // an ordinary queued turn still admits the message this cycle.
     agent.followup(message)
   }
@@ -148,6 +183,38 @@ function deliverToLive(agent: Agent, message: UserMessage): void {
  * @param lease - the lease claimed this cycle.
  * @returns what the settlement recorded, observed by {@link internals.drainOnce}.
  */
+/**
+ * Record one terminal routing failure and make it visible: settle the
+ * recipient's row `failed`, then publish a best-effort `bounce` notice back
+ * to the original sender — same-store reply path, carrying the original
+ * traceId and the recorded reason. Skips bounce-of-bounce (no ping-pong) and
+ * senders whose address would not parse; an undrainable bounce is an unread
+ * row, never a hang, and never masks the primary failure.
+ * @param ctx - plugin context carrying the mailbox registry.
+ * @param lease - the failed lease.
+ * @param reason - the terminal reason recorded on both rows.
+ */
+async function failTerminal(ctx: Context, lease: MailboxLease, reason: string): Promise<void> {
+  await ctx.mailbox.settle(lease.leaseRef, { state: 'failed', result: { reason } }).catch(() => {
+    // The settlement surface itself is down; re-raising would mask its cause.
+  })
+  const { type, id, traceId } = lease.message
+  if (type === 'bounce' || id === undefined) return
+  try {
+    parseMailboxAddress(lease.message.from)
+    await ctx.mailbox.publish({
+      to: lease.message.from as never,
+      from: lease.message.to,
+      type: 'bounce',
+      subject: `undeliverable: ${reason}`,
+      payload: { bouncedMessageId: String(id), reason },
+      ...traceId !== undefined ? { traceId } : {},
+    })
+  } catch {
+    // The primary failure is already durably recorded above.
+  }
+}
+
 async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease): Promise<RouteResult> {
   const mailbox = ctx.mailbox
   // Drain-time admission (the store cannot police an external writer): a
@@ -157,14 +224,17 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
   const senderNamespace = fromSeparator <= 0 ? lease.message.from : lease.message.from.slice(0, fromSeparator)
   const servedNamespaces = spec.addresses.map(address => String(address).slice(0, String(address).indexOf(':')))
   if (!servedNamespaces.includes(senderNamespace) && !spec.admitFromNamespaces.includes(senderNamespace)) {
-    await mailbox.settle(lease.leaseRef, { state: 'failed', result: { reason: 'sender-not-admitted' } })
+    await failTerminal(ctx, lease, 'sender-not-admitted')
     return { kind: 'failed', reason: 'sender-not-admitted' }
   }
   // Both halves of every served address were grammar-checked at mount, so the
-  // name half slices out directly — routing adds no second encoding.
+  // name half slices out directly. An explicit seat-alias row routes to that
+  // EXISTING session id (web-host seats are not name-derived); anything else
+  // falls back to pure derivation — routing adds no second encoding.
   const separatorAt = lease.message.to.indexOf(':')
   const name = lease.message.to.slice(separatorAt + 1)
-  const sessionId = deriveNamedSessionId(name)
+  const sessionId = spec.seatAliases.get(lease.message.to as MailboxAddress)
+    ?? deriveNamedSessionId(name)
 
   const live = ctx.agents.get(sessionId)
   if (live !== undefined) {
@@ -189,7 +259,7 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
     }
     const persisted = (await persistence.list()).some(header => header.id === sessionId)
     if (!persisted) {
-      await mailbox.settle(lease.leaseRef, { state: 'failed', result: { reason: 'unknown-address' } })
+      await failTerminal(ctx, lease, 'unknown-address')
       return { kind: 'failed', reason: 'unknown-address' }
     }
     const { agent, dispose } = await resumeTarget(ctx, sessionId)
@@ -280,12 +350,7 @@ export const internals = {
         onSettled?.(String(lease.message.id), result)
       } catch (error) {
         const reason = error instanceof Error ? `${error.message}` : String(error)
-        await ctx.mailbox.settle(lease.leaseRef, {
-          state: 'failed',
-          result: { reason },
-        }).catch(() => {
-          // The settlement surface itself is down; re-raising would mask its cause.
-        })
+        await failTerminal(ctx, lease, reason)
         onSettled?.(String(lease.message.id), { kind: 'failed', reason })
       }
     }

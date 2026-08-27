@@ -46,6 +46,15 @@ export interface MailboxMessage {
   readonly payload?: unknown
   /** Optional correlation id threaded through producer→delivery chains. */
   readonly traceId?: string
+  /**
+   * Whether the SENDER is blocked waiting on an answer to this message
+   * (default false). Transport ignores it — all mail steers into a live turn
+   * under the founder model — and the receiver JUDGES it: a blocking message
+   * means a coworker or boss is stuck until this seat replies (handle now,
+   * resume current work after), while non-blocking mail queues mentally for
+   * the next natural gap. Delivered turns render the mark visibly (`[BLOCKING]`).
+   */
+  readonly blocking?: boolean
 }
 
 /**

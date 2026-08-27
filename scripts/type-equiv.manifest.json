@@ -2,6 +2,66 @@
   "comment": "Maps each primary ` ```ts type-equiv ` or ` ```ts public-api ` block (by doc + declared symbol + projection) to the source declaration and original JSDoc it must match. Paired `.zh.md` blocks are byte-identical derivatives checked through their unsuffixed sibling and have no duplicate entry. Omit projection for the complete declaration; use public-api with a ` ```ts public-api ` block for a body-stripped public class declaration. verify-type-equiv.ts enforces a 1:1 correspondence between primary blocks and entries. Add an entry when you add a primary source-equivalence block; remove it when you remove the block.",
   "entries": [
     {
+      "doc": "docs/subsystems/mailbox.md",
+      "symbol": "MailboxAddress",
+      "source": "packages/mailbox/mailbox/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/mailbox.md",
+      "symbol": "MailboxMessageId",
+      "source": "packages/mailbox/mailbox/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/mailbox.md",
+      "symbol": "MailboxLeaseRef",
+      "source": "packages/mailbox/mailbox/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/mailbox.md",
+      "symbol": "MailboxState",
+      "source": "packages/mailbox/mailbox/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/mailbox.md",
+      "symbol": "MailboxMessage",
+      "source": "packages/mailbox/mailbox/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/mailbox.md",
+      "symbol": "MailboxClaimFilter",
+      "source": "packages/mailbox/mailbox/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/mailbox.md",
+      "symbol": "MailboxLease",
+      "source": "packages/mailbox/mailbox/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/mailbox.md",
+      "symbol": "MailboxOutcome",
+      "source": "packages/mailbox/mailbox/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/mailbox.md",
+      "symbol": "MailboxMessageSource",
+      "source": "packages/mailbox/mailbox/src/source.ts"
+    },
+    {
+      "doc": "docs/subsystems/memory.md",
+      "symbol": "MemoryEntry",
+      "source": "packages/memory/memory/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/memory.md",
+      "symbol": "MemoryMatch",
+      "source": "packages/memory/memory/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/memory.md",
+      "symbol": "MemoryWriteResult",
+      "source": "packages/memory/memory/src/types.ts"
+    },
+    {
       "doc": "docs/subsystems/core.md",
       "symbol": "Branded",
       "source": "packages/util/brand/src/index.ts"

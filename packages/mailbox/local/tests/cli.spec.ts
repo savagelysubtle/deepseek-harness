@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { formatMailboxAddress } from '@deepseek-ai/dsh-mailbox'
-import { openMailboxDatabase, SCHEMA_VERSION } from '../src/sqlite.ts'
+import { openMailboxDatabase, SCHEMA_VERSION, SqliteMailboxStore } from '../src/sqlite.ts'
 import * as cli from '../src/cli.ts'
 
 const TARGET = formatMailboxAddress('sc', 'target')
@@ -49,7 +49,12 @@ describe('dsh-mailbox send/inbox round-trip', () => {
       '--subject', 'outage', '--trace-id', 't-1', '--payload-file', payloadFile])
 
     const peeked = JSON.parse(await run(['inbox', '--address', String(TARGET), '--peek', '--json'])) as Array<{
-      messageId: string; from: string; type?: string; subject?: string; payload?: unknown; traceId?: string
+      messageId: string
+      from: string
+      type?: string
+      subject?: string
+      payload?: unknown
+      traceId?: string
     }>
     expect(peeked).toHaveLength(1)
     const first = peeked[0]
@@ -69,9 +74,28 @@ describe('dsh-mailbox send/inbox round-trip', () => {
   it('renders human-readable blocks without --json including an empty mailbox', async () => {
     await run(['send', '--to', String(TARGET), '--from', 'guest:gemini'])
     const out = await run(['inbox', '--address', String(TARGET)])
-    expect(out).toContain(`from guest:gemini`)
+    expect(out).toContain('from guest:gemini')
     const empty = await run(['inbox', '--address', String(TARGET)])
     expect(empty).toContain('(empty)')
+  })
+
+  it('projects a store-published blocking mark onto json inbox entries alone', async () => {
+    const dir = tempDir()
+    const dbPath = join(dir, 'marked.db')
+    const store = new SqliteMailboxStore(openMailboxDatabase(dbPath))
+    await store.publish({ to: TARGET, from: 'sc:chair', blocking: true })
+    await store.publish({ to: TARGET, from: 'sc:ally', subject: 'fyi' })
+    store.close()
+
+    const drained = JSON.parse(await run(['inbox', '--address', String(TARGET), '--db', dbPath, '--json'])) as Array<{
+      messageId: string
+      from: string
+      blocking?: true
+      subject?: string
+    }>
+    expect(drained.map(entry => entry.from)).toEqual(['sc:chair', 'sc:ally'])
+    expect(drained[0]?.blocking).toBe(true)
+    expect(drained[1]).not.toHaveProperty('blocking')
   })
 })
 

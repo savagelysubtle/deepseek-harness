@@ -49,6 +49,9 @@ export function admittedOutcome(lease: MailboxLease): MailboxOutcome {
  */
 export function relayText(lease: MailboxLease): string {
   const parts: string[] = []
+  // Founder-model visibility rule: a blocked sender is distinguishable at a
+  // glance in the transcript, before any model reasoning weighs the content.
+  if (lease.message.blocking === true) parts.push('[BLOCKING]')
   if (lease.message.subject !== undefined) parts.push(lease.message.subject)
   if (lease.message.payload !== undefined) {
     parts.push(typeof lease.message.payload === 'string' ? lease.message.payload : JSON.stringify(lease.message.payload, null, 2))

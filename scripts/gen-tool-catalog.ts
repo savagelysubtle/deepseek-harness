@@ -10,6 +10,7 @@ import { globSync, readFileSync, writeFileSync } from 'node:fs'
 import { basename, resolve } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
+import LlmRuntime from '@deepseek-ai/dsh-llm'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createScope } from '@deepseek-ai/dsh-scope'
@@ -63,6 +64,9 @@ import * as ToolWeb from '@deepseek-ai/dsh-tool-web'
 import VmWorkflowEngine from '@deepseek-ai/dsh-workflow-worker-thread'
 import * as ToolRalph from '@deepseek-ai/dsh-tool-ralph'
 import * as ToolWorkflow from '@deepseek-ai/dsh-tool-workflow'
+import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
+import TokenMeter from '@deepseek-ai/dsh-token-meter'
+import * as ToolCompact from '@deepseek-ai/dsh-tool-compact'
 import { githubSlug } from './verify-md-links.ts'
 
 /** Attachment seam marker that makes the attachments-conditional `read_image` schema harvestable. */
@@ -517,6 +521,26 @@ const TOOL_PACKAGES: ToolPackage[] = [
     },
     note:
       'todo_write is session-owned state; UIs render the latest todo/write event as a checklist. `allowParallelInProgress` is required with no default, so the catalog states its choice: `true`, whose description invites several `in_progress` items. A deployment choosing `false` receives the same tool with a description asking for exactly one active task.',
+  },
+  {
+    pkg: '@deepseek-ai/dsh-tool-compact',
+    dir: 'tool-compact',
+    source: 'packages/compaction/tool-compact/src/index.ts',
+    requires: ['ctx.tools', 'ctx.compaction (engine takes llm, tokenMeter, sessions)'],
+    writes: ['tool/call', 'tool/result', 'compaction/start once the current turn ends'],
+    async mount(ctx) {
+      // Schema harvest never runs a turn, so the engine's dependencies only
+      // need to be present, not exercised: shipped providers plus the
+      // session/projection registry the meter reads.
+      await ctx.plugin(SessionStore)
+      await ctx.plugin(SessionProjectionRegistry)
+      await ctx.plugin(LlmRuntime)
+      await ctx.plugin(TokenMeter)
+      await ctx.plugin(BasicCompactionEngine)
+      await ctx.plugin(ToolCompact)
+    },
+    note:
+      'Scheduling is accept-immediately: the request arms process-local state and real condensation claims the next idle boundary through the engine\'s compaction/start lock.',
   },
   {
     pkg: '@deepseek-ai/dsh-tool-workflow',

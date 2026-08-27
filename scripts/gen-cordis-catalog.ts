@@ -75,6 +75,8 @@ export const SERVICE_PAGE: Record<string, string> = {
   llm: 'llm-streaming.md',
   lsp: 'lsp.md',
   messageFeedback: 'feedback.md',
+  mailbox: 'mailbox.md',
+  memory: 'memory.md',
   permissionPresets: 'permission-presets.md',
   planMode: 'plan.md',
   terminals: 'terminal.md',
@@ -127,6 +129,7 @@ export const SERVICE_PAGE: Record<string, string> = {
  * to a model as `cordis_runtime_inspect what:"client"`).
  */
 export const SERVICE_WALK_EXEMPTIONS: Record<string, string> = {
+  mailboxBridgeSpecs: 'deployment routing config mirror (BridgeSpec list) projected from bridge Config, not an independently registered service — packages/mailbox/bridge/README.md owns the semantics',
   agent: 'not a service: the DX accessor field on Agent.ctx (root accessor defaulting to undefined) — docs/subsystems/core.md owns the Agent handle',
   appExit: 'not a service: launcher-provided bounded process-exit callback — packages/boot/cmdline/README.md owns the launcher contract',
   cmdlineArgs: 'not a service: launcher-provided immutable app argument accessor — packages/boot/cmdline/README.md owns the launcher contract',
@@ -495,6 +498,7 @@ export const FOUNDATION_TYPE_NAMES: ReadonlySet<string> = new Set([
   'Context',
   'Error',
   'Map',
+  'Omit',
   'Partial',
   'Pick',
   'Promise',
@@ -505,6 +509,16 @@ export const FOUNDATION_TYPE_NAMES: ReadonlySet<string> = new Set([
 
 /** Project types deliberately documented outside the subsystems catalog. */
 export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
+  MailboxProvider: 'mailbox storage provider contract is owned by packages/mailbox/mailbox/README.md',
+  MailboxMessage: 'mailbox durable message record is owned by packages/mailbox/mailbox/README.md',
+  MailboxMessageId: 'provider-assigned mailbox message identity is owned by packages/mailbox/mailbox/README.md',
+  MailboxClaimFilter: 'mailbox claim filter input is owned by packages/mailbox/mailbox/README.md',
+  MailboxLease: 'mailbox claim lease view is owned by packages/mailbox/mailbox/README.md',
+  MailboxLeaseRef: 'store-owned lease settlement handle is owned by packages/mailbox/mailbox/README.md',
+  MailboxOutcome: 'mailbox settlement outcome is owned by packages/mailbox/mailbox/README.md',
+  MemoryWriteResult: 'memory write receipt is owned by packages/memory/memory/README.md',
+  MemoryEntry: 'memory list entry is owned by packages/memory/memory/README.md',
+  MemoryMatch: 'memory search match is owned by packages/memory/memory/README.md',
   z: 'schemastery schema constructor is owned by vendor/schemastery (vendored upstream)',
   BeginCommandRequest: 'event-local request contract is owned by packages/client/ui-input-trigger/src/types.ts',
   InsertReferenceRequest: 'event-local request contract is owned by packages/client/ui-input-trigger/src/types.ts',

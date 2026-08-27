@@ -8,6 +8,7 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Context as ContextType } from '@deepseek-ai/cordis'
@@ -62,6 +63,7 @@ async function mountMailbox(dir: string, addresses: readonly string[], options: 
   if (options.liveName !== undefined) {
     // The registry pins agent.id to session.id, so the stub carries the
     // DERIVED id on both sides; deliveries only exercise the recording fns.
+    // Founder model routes every delivery through steer(), so record there.
     const sessionId = deriveNamedSessionId(options.liveName)
     const session = { id: sessionId, events: [], header: { seedLength: 0 } } as never
     liveFollowup = vi.fn()
@@ -70,8 +72,8 @@ async function mountMailbox(dir: string, addresses: readonly string[], options: 
       session,
       inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
       status: 'idle',
-      followup: liveFollowup,
-      steer: vi.fn(),
+      followup: vi.fn(),
+      steer: liveFollowup,
     } as unknown as Agent
     ctx.agents.register(agent)
   }
@@ -116,6 +118,39 @@ describe('mailbox.publish over the host API', () => {
     expect(message.source).toMatchObject({
       kind: 'mailbox', form: 'relay', address: 'webceo:ceo', messageId: result.value.messageId,
     })
+  })
+
+  it('carries a blocking mark through to the stored and delivered turn, forwarding none without it', async () => {
+    const dir = tempDir()
+    const { ctx, liveFollowup } = await mountMailbox(dir, ['webceo:ceo'], { liveName: 'ceo' })
+    expect(liveFollowup).toBeDefined()
+
+    const flagged = await publish(ctx, 'mb-blocking', {
+      namespace: 'webceo', name: 'ceo', from: 'console:human', subject: 'halt', blocking: true,
+    })
+    const plain = await publish(ctx, 'mb-unmarked', {
+      namespace: 'webceo', name: 'ceo', from: 'console:human', subject: 'carry on',
+    })
+    expect(flagged.ok).toBe(true)
+    if (!flagged.ok || !plain.ok) return
+    expect(flagged.value.disposition).toBe('delivered')
+    expect(plain.value.disposition).toBe('delivered')
+    expect(liveFollowup).toHaveBeenCalledTimes(2)
+    const flaggedTurn = liveFollowup!.mock.calls[0]?.[0] as { content: readonly [{ text: string }] }
+    expect(flaggedTurn.content[0]?.text).toContain('[BLOCKING]')
+    const plainTurn = liveFollowup!.mock.calls[1]?.[0] as { content: readonly [{ text: string }] }
+    expect(plainTurn.content[0]?.text).not.toContain('[BLOCKING]')
+    // The durable end-state encodes the mark exactly as the provider writes it.
+    const db = new DatabaseSync(join(dir, 'mailbox.db'))
+    try {
+      const rows = db.prepare('SELECT id, blocking FROM messages ORDER BY created_at').all() as Array<{ id: string; blocking: number | null }>
+      expect(rows).toEqual([
+        { id: flagged.value.messageId, blocking: 1 },
+        { id: plain.value.messageId, blocking: null },
+      ])
+    } finally {
+      db.close()
+    }
   })
 
   it('queues while residency holds the target elsewhere', async () => {

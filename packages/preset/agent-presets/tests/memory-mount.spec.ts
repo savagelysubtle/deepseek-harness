@@ -38,7 +38,7 @@ const STANDARD_FILE = join(REPO_ROOT, 'apps/cli/config/agent-presets/standard/ag
 declare module '@deepseek-ai/cordis' {
   interface Context {
     /** Published by the real preset's memory group behind an entry-local realm. */
-    memory: unknown
+    memory: MemoryService
   }
 }
 
@@ -135,7 +135,7 @@ describe('the real standard preset memory group', () => {
       expect(names).toContain('memory')
 
       // The realm-scoped service resolved live inside the mount.
-      const liveMounts = livePresetMounts(ctx)
+      const liveMounts = livePresetMounts()
       expect(liveMounts.length).toBeGreaterThan(0)
 
       // Round-trip proof through the mounted composition: resolve the memory

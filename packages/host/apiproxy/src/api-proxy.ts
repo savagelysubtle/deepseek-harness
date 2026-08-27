@@ -50,6 +50,9 @@ import {
   type SessionLogExportReady,
   type SessionLogCompressionLevel,
 } from './session-export.ts'
+import {
+  FOLLOW_SWEEP_INTERVAL_MS, FollowTailer, listLiveOwnedSessionIds, liveHeadlessOwner,
+} from './follow-tail.ts'
 import type { SessionRawArtifact } from '@deepseek-ai/dsh-session-persistence'
 import {
   SESSION_SEARCH_RESULT_LIMIT,
@@ -1031,6 +1034,13 @@ class SessionCwdConflict extends Error {
   }
 }
 
+/** Requested identity is a named session a live headless process currently owns. */
+class SessionFollowedByOwner extends Error {
+  constructor(readonly sessionId: SessionId, readonly pid: number) {
+    super(`session "${sessionId}" is owned by an active headless process (pid ${pid}); it can be viewed but not driven from here`)
+  }
+}
+
 /** An explicit Host naming operation would duplicate another Workspace title. */
 class WorkspaceNameConflictError extends Error {
   constructor(readonly workspaceName: string) {
@@ -1240,17 +1250,91 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   // composition, and the header is written once at creation. Reading the
   // header here would silently undo the switch on the next restart and
   // restore that history under the old tool set.
-  const agentFor = createApiRemoteAgentResolver(ctx, {
+  const resolveAgentFor = createApiRemoteAgentResolver(ctx, {
     agentOptions,
     setup: async ({ meta, events }) =>
       (await composeAgent(resolveSessionPreset({ header: meta, events }))).setup,
   })
+
+  /**
+   * Refuse to resolve a live Agent for a session a live headless process
+   * already owns, instead of resuming or creating a second writer on its
+   * log. Every generic entry point that can start a turn — prompt, models,
+   * commands — resolves through this one wrapper, so none of them can
+   * reopen the same double-attach this file's follow-mode check exists to
+   * close. (Typert's own internal agent lookup, registered inside
+   * `createApiRemoteAgentResolver` itself, is not reachable from here; it
+   * already carried the same no-lock-check gap before this change.)
+   */
+  const agentFor = async (sessionId: SessionId): ReturnType<typeof resolveAgentFor> => {
+    const owner = await liveHeadlessOwner(sessionId)
+    if (owner !== undefined) {
+      return {
+        error: {
+          code: 'agent-busy',
+          message: `session "${sessionId}" is owned by an active headless process (pid ${owner.pid}); it can be viewed but not driven from here`,
+          details: { reason: 'headless-owned' },
+        },
+      }
+    }
+    return resolveAgentFor(sessionId)
+  }
 
   /** Send one transient frame to every connected mux consumer. */
   function broadcast(payload: MuxFrame): void {
     const envelope = frame(payload)
     for (const queue of muxQueues) queue.push(envelope)
   }
+
+  // Poll-tails a followed session's on-disk log and pushes its new events as
+  // real `session/event` frames — see follow-tail.ts for the full contract.
+  const followTailer = new FollowTailer({
+    locate: header => ctx.get('sessionPersistence')?.locate(header),
+    liveOwner: liveHeadlessOwner,
+    push: (sessionId, event) => { broadcast({ type: 'session/event', sessionId, event }) },
+  })
+
+  /**
+   * Start a tail for every named session a headless process currently owns,
+   * independent of any client read.
+   *
+   * `historySourceFor` also starts one, but ONLY as a side effect of a
+   * `history()` call — which fires when a client opens or repairs a
+   * transcript, and never again while it simply sits open. In the real
+   * sequence the founder tests (open the thread FIRST, then run
+   * `dsh --profile headless --session-name <seat>`), the only read happens
+   * before the owner exists: it takes the no-owner branch, stops the tailer,
+   * and nothing ever re-reads. The turn lands on disk and the open page shows
+   * nothing — the precise failure this whole feature exists to kill, produced
+   * by a tail whose only trigger cannot fire in the case that matters.
+   *
+   * Sweeping the lock directory removes the dependency on client behaviour
+   * entirely: ownership is discovered from the same files headless already
+   * writes, so a tail begins within one interval of the owner appearing no
+   * matter what any browser is or is not doing. Cost is one small readdir per
+   * tick plus a signal-0 probe per lock; `start` is idempotent, so an
+   * already-followed session re-enters no work, and a tail whose owner exits
+   * self-stops on its own liveness re-probe.
+   */
+  async function sweepFollowedSessions(): Promise<void> {
+    for (const sessionId of await listLiveOwnedSessionIds()) {
+      if (followTailer.isFollowing(sessionId)) continue
+      try {
+        const inspected = await inspectServable(sessionId)
+        followTailer.start(sessionId, inspected.meta, inspected.events)
+      } catch {
+        // Not a session this host can serve (another project's bucket, or a
+        // log mid-creation). The next tick re-tries at no cost.
+      }
+    }
+  }
+
+  const followSweep = setInterval(() => { void sweepFollowedSessions() }, FOLLOW_SWEEP_INTERVAL_MS)
+  followSweep.unref()
+  ctx.effect(() => () => {
+    clearInterval(followSweep)
+    followTailer.disposeAll()
+  }, 'api-proxy: follow-tail teardown')
 
   // Projection change feed → session/projection push frames. The carrier
   // mints the wire frame (the Service Definition package holds no wire vocabulary); the
@@ -1502,11 +1586,30 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
    * Resolve which session one transcript read is served from, without
    * acquiring an Agent owner. This is the read's only asynchronous step
    * besides ensuring the composition; {@link historyCutOf} takes the cut.
+   *
+   * A live headless owner takes priority over this host's own attached copy:
+   * `dsh --profile headless --session-name <name>` (including every mailbox
+   * wake) may hold and append to the SAME named session's log in another
+   * process, with no cross-process check anywhere else in this file. Serving
+   * from the file and starting the follow-tail keeps this host a reader only
+   * — it never resumes or attaches an identity a live owner already holds,
+   * which is what let two independent next-seq counters corrupt a log before
+   * this check existed.
    * @param sessionId - the transcript being read.
    * @returns the attached session, or the inspected detached header and events.
    * @throws {@link ApiRemoteSessionNotFound} when no project-backed session has that identity.
    */
   async function historySourceFor(sessionId: SessionId): Promise<HistorySource> {
+    const owner = await liveHeadlessOwner(sessionId)
+    if (owner !== undefined) {
+      const inspected = await inspectServable(sessionId)
+      followTailer.start(sessionId, inspected.meta, inspected.events)
+      return { kind: 'detached', header: inspected.meta, events: inspected.events }
+    }
+    // Defensive and idempotent: the tailer also self-stops once ITS OWN
+    // liveness re-probe sees the owner gone, but a read landing in between
+    // must not wait for that tick to stop following too.
+    followTailer.stop(sessionId)
     const attached = ctx.sessions.get(sessionId)
     if (attached !== undefined) return { kind: 'attached', session: attached }
     const inspected = await inspectServable(sessionId)
@@ -1600,6 +1703,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     let creation = sessionCreations.get(sessionId)
     if (creation === undefined) {
       creation = (async () => {
+        // Checked before touching this process's own registries: a live
+        // headless owner outranks even an already-attached local copy,
+        // because the alternative is two writers appending to the same log
+        // with independent next-seq counters.
+        const owner = await liveHeadlessOwner(sessionId)
+        if (owner !== undefined) throw new SessionFollowedByOwner(sessionId, owner.pid)
         const attached = ctx.sessions.get(sessionId)
         const live = ctx.agents.get(sessionId)
         if (attached !== undefined && hasSubagentOwner(attached, live)) {
@@ -2160,6 +2269,13 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           }
           if (error instanceof SubagentSessionOwnership) {
             return err(request, subagentOwnershipError(error.sessionId))
+          }
+          if (error instanceof SessionFollowedByOwner) {
+            return err(request, {
+              code: 'agent-busy',
+              message: error.message,
+              details: { reason: 'headless-owned' },
+            })
           }
           return err(request, {
             code: 'internal',
@@ -3320,7 +3436,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
     mailbox: {
       async publish(request) {
-        const { address, namespace, name, type, subject, payload, traceId } = request.payload
+        const { address, namespace, name, type, subject, payload, traceId, blocking } = request.payload
         // The admitting operation builds the address once, here: exactly one
         // of the two addressing forms must be present.
         let to: string
@@ -3345,6 +3461,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             ...subject !== undefined ? { subject } : {},
             payload,
             ...traceId !== undefined ? { traceId } : {},
+            ...blocking === true ? { blocking: true } : {},
           })
           return ok(request, result)
         } catch (error: unknown) {

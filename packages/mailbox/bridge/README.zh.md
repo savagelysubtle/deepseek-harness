@@ -9,9 +9,11 @@
 | 步骤 | 语义 |
 |---|---|
 | `claim` | 每个周期跨配置的 `addresses` 经注册表默认提供方认领至多 `maxClaimPerCycle` 条 pending 或过期消息。 |
-| **存活目标** | 派生的会话 id 在 `ctx.agents` 上命中：优先向运行中的回合注入 steering（发布侧唤醒必须及时落位）；回合边界拒绝时回退为普通排队回合。在准入即落定 `done`。 |
+| **存活目标** | 派生的会话 id 在 `ctx.agents` 上命中：投递立即以 STEER 注入活跃回合——不推断忙碌程度、不看消息类型（创始人模型：一切邮件皆打断；发送方标记 `blocking`，由接收方裁决优先级）。回合边界拒绝时回退为普通排队回合。在准入即落定 `done`。 |
 | **休眠目标** | 取具名会话锁（`lockStaleMs` 约束活持有者接管；缺省保持 pid 存活性为唯一接管路径），探测持久化：日志缺失以 `unknown-address` 落定 `failed`；日志存在则恢复 agent，作为 FIFO 回合投递，在准入即落定 `done`，等待静默、flush、注销后再释放锁。 |
 | **驻留他处** | 锁获取输给存活的持有者：落定 `pending`，由后续周期重试。 |
+
+每个终态失败（`unknown-address`、`sender-not-admitted`、单租约崩溃）还会向原始发送方回发一条尽力而为的 `bounce` 通知——类型为 `bounce`，载荷携带原 `traceId` 与记录的原因——使丢弃对发送者绝不再静默。未被排空的退信只是一行未读消息，绝不会挂起。
 
 每个投递回合携带合并的 [`mailbox` 消息来源](../mailbox/src/source.ts)（`{ kind: 'mailbox', form: 'relay', address, from, messageId, traceId? }`），使转录把中继邮件归因到发送方地址而非匿名用户回合。单条租约失败会以原因落定 `failed`，不会让毒消息卡住整个花名册。
 
@@ -25,6 +27,7 @@
 | `staleClaimMs` | number? | `60000` | 被遗弃的认领可回收的年龄阈值。 |
 | `lockStaleMs` | number? | 缺省 | 冷恢复对楔死锁的接管界限；缺省保持出厂 pid 存活语义。 |
 | `admitFromNamespaces` | string[]? | `[]` | 在本花名册自身命名空间之外额外准入的发送方命名空间。空即 FAIL-CLOSED：访客/外部来源邮件在排水时落定 `failed/sender-not-admitted`（存储无法在写入侧约束外部写入者）。chairs-only 由组合自然成立——只有主席桥选择加入 `['guest']`。 |
+| `seatAliases` | {address, sessionId}[]? | 缺省 | 面向非派生目标会话（web 宿主席位会话）的显式活席花名册：别名行将 steer/冷恢复路由到那个确切会话 id；未列入的名称仍走派生。缺省保持纯派生默认。 |
 
 轮询计时器从不钉住宿主事件循环（`unref`）：只为服务邮件而存在的部署须通过其他句柄维持自身存活。挂载后的结构性失败会清除计时器并抛出，而不是永远静默空转。
 

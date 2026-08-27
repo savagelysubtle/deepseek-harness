@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-26-mailbox-founder-model-and-bounces.md
+2026-08-26-mailbox-founder-model-and-bounces.md: 9065aed7572f915bfad86faff4d27517bfe34b4f
+2026-08-26-mailbox-founder-model-and-bounces.zh.md: 17212529bed3f333752c643eb9f258d969e92ac4

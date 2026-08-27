@@ -18,6 +18,7 @@ export const mailboxPublishRequestSchema = z.object({
   subject: z.string().min(1).optional(),
   payload: z.unknown().optional(),
   traceId: z.string().min(1).optional(),
+  blocking: z.boolean().optional(),
 }) satisfies z.ZodType<Wire<MailboxPublishPayload>>
 
 /** Admission result: store id plus what the immediate wake achieved. */

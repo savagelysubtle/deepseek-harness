@@ -310,6 +310,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     description: 'Root interface of the unified API. New client-request domain = one new file pair + one field here + one map row.',
     methods: [
       {
+        signature: 'mailbox: MailboxApi',
+        description: 'Host-wire face for non-dsh callers admitting mail into served namespaces.',
+        parameters: [],
+      },
+      {
         signature: 'downloads: DownloadsApi',
         description: 'Host-only download surfaces (GET, no wire envelope); absent from IApiClient.',
         parameters: [],
@@ -884,6 +889,80 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Select a provider by the file\'s extension and run one query. Selection is per-query and order-independent; no match throws `LspError` `LSP_UNAVAILABLE`.',
         parameters: [{ name: 'request', description: 'the normalized query.' }, { name: 'signal', description: 'optional cancellation forwarded to the selected provider.' }],
         returns: 'the normalized, closed-union result.',
+      },
+    ],
+  },
+  {
+    key: 'mailbox',
+    summary: 'Registry over the process\'s mailbox providers plus default-resolved conveniences.',
+    description: 'Registry over the process\'s mailbox providers plus default-resolved conveniences. Registering the same provider name twice fails loud; the returned disposer unregisters, and a later re-registration of that name is legitimate (provider swap across reloads).',
+    methods: [
+      {
+        signature: 'registerProvider(provider: MailboxProvider): () => void',
+        description: 'Register one storage provider under its own name.',
+        parameters: [{ name: 'provider', description: 'the provider implementation to admit.' }],
+        returns: 'the disposer that unregisters this provider; fiber disposal triggers it automatically.',
+        throws: ['when a live provider already holds `provider.name`.'],
+      },
+      {
+        signature: 'getProvider(name: string): MailboxProvider | undefined',
+        description: 'Look up one registered provider by exact name.',
+        parameters: [{ name: 'name', description: 'the provider\'s registry name.' }],
+        returns: 'the provider, or undefined when the name is not live.',
+      },
+      {
+        signature: 'list(): readonly MailboxProvider[]',
+        description: 'Enumerate the live providers in registration order.',
+        parameters: [],
+        returns: 'the borrowed providers; mutating them is the owner\'s concern.',
+      },
+      {
+        signature: 'async publish(message: Omit<MailboxMessage, \'id\'>, signal?: AbortSignal): Promise<MailboxMessageId>',
+        description: 'Publish through the configured default provider after validating the destination address grammar.',
+        parameters: [{ name: 'message', description: 'message content without an id.' }, { name: 'signal', description: 'caller cancellation owning admission.' }],
+        returns: 'the provider-assigned durable id.',
+      },
+      {
+        signature: 'async claim(filter: MailboxClaimFilter, signal?: AbortSignal): Promise<readonly MailboxLease[]>',
+        description: 'Claim through the configured default provider after validating every filter address against the grammar.',
+        parameters: [{ name: 'filter', description: 'address selection, batch bound, and staleness bound.' }, { name: 'signal', description: 'caller cancellation owning the claim attempt.' }],
+        returns: 'the claimed leases.',
+      },
+      {
+        signature: 'async settle(leaseRef: MailboxLeaseRef, outcome: MailboxOutcome, signal?: AbortSignal): Promise<void>',
+        description: 'Settle through the configured default provider.',
+        parameters: [{ name: 'leaseRef', description: 'the ref received from the claiming call.' }, { name: 'outcome', description: 'delivery-envelope outcome.' }, { name: 'signal', description: 'caller cancellation owning the settlement write.' }],
+      },
+    ],
+  },
+  {
+    key: 'memory',
+    summary: 'Abstract memory service.',
+    description: 'Abstract memory service. Providers implement the four operations over one storage root; every operation resolves the project scope from the caller\'s absolute `cwd`, so two checkouts never share notes and one checkout shares them across every session, restart, and seat.',
+    methods: [
+      {
+        signature: 'abstract read(cwd: string, path: string): Promise<string>',
+        description: 'Read one entry\'s full text.',
+        parameters: [{ name: 'cwd', description: 'absolute working directory naming the project scope.' }, { name: 'path', description: 'scope-relative POSIX path; jailed before any I/O.' }],
+        returns: 'the file content verbatim, frontmatter included.',
+      },
+      {
+        signature: 'abstract write(cwd: string, path: string, content: string): Promise<MemoryWriteResult>',
+        description: 'Create or replace one entry atomically enough for human co-editors: temp-file plus rename inside the target directory, so a reader never sees a torn write.',
+        parameters: [{ name: 'cwd', description: 'absolute working directory naming the project scope.' }, { name: 'path', description: 'scope-relative POSIX path; missing directories are created.' }, { name: 'content', description: 'complete replacement text (UTF-8).' }],
+        returns: 'the normalized path and stored byte size.',
+      },
+      {
+        signature: 'abstract list(cwd: string): Promise<MemoryEntry[]>',
+        description: 'List every entry in the project scope, recursive, sorted by path.',
+        parameters: [{ name: 'cwd', description: 'absolute working directory naming the project scope.' }],
+        returns: 'all entries with their byte sizes.',
+      },
+      {
+        signature: 'abstract search(cwd: string, query: string, limit?: number): Promise<MemoryMatch[]>',
+        description: 'Case-insensitive substring search across the scoped entries\' lines. Empty files and oversized skips are silent; results are bounded by {@linkcode MAX_SEARCH_LIMIT} regardless of the requested limit.',
+        parameters: [{ name: 'cwd', description: 'absolute working directory naming the project scope.' }, { name: 'query', description: 'substring to find; empty queries reject.' }, { name: 'limit', description: 'maximum matches to return (default {@link DEFAULT_SEARCH_LIMIT}).' }],
+        returns: 'ordered by path, then line number.',
       },
     ],
   },
@@ -3364,8 +3443,64 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface LspRange {\n    readonly start: LspPosition;\n    readonly end: LspPosition;\n}',
   },
   {
+    name: 'MailboxAddress',
+    declaration: 'export type MailboxAddress = Branded<\'mailbox-address\'>;',
+  },
+  {
+    name: 'MailboxApi',
+    declaration: 'export interface MailboxApi {\n    publish(request: RpcRequest<MailboxPublishPayload>): Promise<RpcResponse<MailboxPublishValue>>;\n}',
+  },
+  {
+    name: 'MailboxClaimFilter',
+    declaration: 'export interface MailboxClaimFilter {\n    readonly addresses: readonly MailboxAddress[];\n    readonly limit: number;\n    readonly staleClaimMs: number;\n}',
+  },
+  {
+    name: 'MailboxLease',
+    declaration: 'export interface MailboxLease {\n    readonly message: MailboxMessage;\n    readonly leaseRef: MailboxLeaseRef;\n    readonly claimedAt: number;\n}',
+  },
+  {
+    name: 'MailboxLeaseRef',
+    declaration: 'export type MailboxLeaseRef = Branded<\'mailbox-lease-ref\'>;',
+  },
+  {
+    name: 'MailboxMessage',
+    declaration: 'export interface MailboxMessage {\n    readonly id?: MailboxMessageId;\n    readonly to: MailboxAddress;\n    readonly from: string;\n    readonly type?: string;\n    readonly subject?: string;\n    readonly payload?: unknown;\n    readonly traceId?: string;\n    readonly blocking?: boolean;\n}',
+  },
+  {
+    name: 'MailboxMessageId',
+    declaration: 'export type MailboxMessageId = Branded<\'mailbox-message-id\'>;',
+  },
+  {
+    name: 'MailboxOutcome',
+    declaration: 'export type MailboxOutcome = {\n    readonly state: \'done\';\n    readonly result: {\n        readonly deliveredAt: number;\n        readonly messageId: MailboxMessageId;\n    };\n} | {\n    readonly state: \'failed\';\n    readonly result: {\n        readonly reason: string;\n    };\n} | {\n    readonly state: \'pending\';\n    readonly result: undefined;\n};',
+  },
+  {
+    name: 'MailboxProvider',
+    declaration: 'export interface MailboxProvider {\n    readonly name: string;\n    publish(message: Omit<MailboxMessage, \'id\'>, signal?: AbortSignal): Promise<MailboxMessageId>;\n    claim(filter: MailboxClaimFilter, signal?: AbortSignal): Promise<readonly MailboxLease[]>;\n    settle(leaseRef: MailboxLease[\'leaseRef\'], outcome: MailboxOutcome, signal?: AbortSignal): Promise<void>;\n}',
+  },
+  {
+    name: 'MailboxPublishPayload',
+    declaration: 'export interface MailboxPublishPayload {\n    readonly address?: string;\n    readonly namespace?: string;\n    readonly name?: string;\n    readonly from: string;\n    readonly type?: string;\n    readonly subject?: string;\n    readonly payload?: unknown;\n    readonly traceId?: string;\n    readonly blocking?: boolean;\n}',
+  },
+  {
+    name: 'MailboxPublishValue',
+    declaration: 'export interface MailboxPublishValue {\n    readonly messageId: string;\n    readonly disposition: \'delivered\' | \'queued\';\n}',
+  },
+  {
     name: 'ManualCompactAgentContext',
     declaration: 'export interface ManualCompactAgentContext extends CompactionAgentContext {\n    runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>;\n}',
+  },
+  {
+    name: 'MemoryEntry',
+    declaration: 'export interface MemoryEntry {\n    readonly path: string;\n    readonly bytes: number;\n}',
+  },
+  {
+    name: 'MemoryMatch',
+    declaration: 'export interface MemoryMatch {\n    readonly path: string;\n    readonly line: number;\n    readonly excerpt: string;\n}',
+  },
+  {
+    name: 'MemoryWriteResult',
+    declaration: 'export interface MemoryWriteResult {\n    readonly path: string;\n    readonly bytes: number;\n}',
   },
   {
     name: 'Message',
@@ -3477,7 +3612,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'OneShotSubagentDescriptorData',
-    declaration: 'export interface OneShotSubagentDescriptorData extends SubagentDescriptorBase {\n    readonly mode: \'one-shot\';\n    readonly label?: string;\n}',
+    declaration: 'export interface OneShotSubagentDescriptorData extends SubagentDescriptorBase {\n    readonly mode: \'one-shot\';\n    readonly label?: string;\n    readonly agentProvider?: string;\n    readonly agentModel?: string;\n}',
   },
   {
     name: 'PermissionSelect',
@@ -3654,6 +3789,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'RpcReceipt',
     declaration: 'export type RpcReceipt = {\n    accepted: true;\n} | {\n    accepted: false;\n    reason: \'not-pending\' | \'bad-response\';\n};',
+  },
+  {
+    name: 'RpcRequest',
+    declaration: 'export interface RpcRequest<P> {\n    rpcId: RpcId;\n    payload: P;\n}',
+  },
+  {
+    name: 'RpcResponse',
+    declaration: 'export interface RpcResponse<T> {\n    rpcId: RpcId;\n    result: RpcResult<T>;\n}',
   },
   {
     name: 'RpcResult',

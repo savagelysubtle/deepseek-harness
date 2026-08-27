@@ -103,6 +103,38 @@ describe('publish/claim/settle', () => {
     store.close()
   })
 
+  it('round-trips a blocking mark through publish and claim', async () => {
+    const { clock } = fakeClock()
+    const store = storeWith(clock)
+    await store.publish({ to: OPS, from: 'gotham:batman', blocking: true })
+    const [lease] = await store.claim(filter([OPS]))
+    expect(lease?.message.blocking).toBe(true)
+    store.close()
+  })
+
+  it('stores no blocking column value unless the sender marked itself blocked', async () => {
+    const { clock } = fakeClock()
+    const path = tempDbPath()
+    const store = storeWith(clock, path)
+    const explicitFalse = await store.publish({ to: OPS, from: 'gotham:alfred', blocking: false })
+    const silent = await store.publish({ to: OPS, from: 'gotham:cane' })
+    const leases = await store.claim(filter([OPS]))
+    for (const lease of leases) {
+      expect('blocking' in lease.message).toBe(false)
+    }
+    // Both unmarked encodings land as an exact NULL column value.
+    const db = new DatabaseSync(path)
+    try {
+      for (const id of [explicitFalse, silent]) {
+        const row = db.prepare('SELECT blocking FROM messages WHERE id = ?').get(id) as { blocking: number | null }
+        expect(row.blocking).toBeNull()
+      }
+    } finally {
+      db.close()
+    }
+    store.close()
+  })
+
   it('scopes claims to the requested addresses only', async () => {
     const { clock } = fakeClock()
     const store = storeWith(clock)

@@ -106,6 +106,22 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'The host commits accepted images before session events; provider adapters resolve authorized durable references into provider-native content.',
   },
   {
+    key: 'mailbox',
+    pkg: 'mailbox',
+    title: 'Durable agent-to-agent mailbox',
+    mode: 'seam',
+    implementations: ['local'],
+    consumers: ['bridge'],
+    note: 'The service definition resolves one storage provider per deployment; the SQLite local provider owns leases and settlement, and the delivery bridge steers claimed messages into addressed agent turns (see docs/subsystems/mailbox.md).',
+  },
+  {
+    key: 'memory',
+    pkg: 'memory',
+    title: 'Workspace-scoped durable memory',
+    mode: 'core',
+    note: 'One package ships the ctx.memory service, the project-scoped local provider behind it, and the model-facing tool consumer in a shared realm (see docs/subsystems/memory.md).',
+  },
+  {
     key: 'llm',
     pkg: 'llm',
     title: 'LLM adapter registry',

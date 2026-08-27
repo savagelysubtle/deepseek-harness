@@ -25,7 +25,7 @@ import type { MailboxClock, MessageRow } from './types.ts'
  * a file stamped with any other version — newer or older — rejects loud
  * instead of migrating in place.
  */
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 2
 
 /** Meta-table key stamping {@link SCHEMA_VERSION}. */
 const SCHEMA_VERSION_KEY = 'schema_version'
@@ -47,6 +47,7 @@ const CREATE_SCHEMA = `
     subject      TEXT,
     payload      TEXT,
     trace_id     TEXT,
+    blocking     INTEGER,
     state        TEXT NOT NULL CHECK (state IN ('pending', 'claimed', 'done', 'failed')),
     created_at   INTEGER NOT NULL,
     claimed_at   INTEGER,
@@ -132,7 +133,7 @@ function assertCompatibleSchema(db: DatabaseSync, path: string): void {
 }
 
 /** Columns a claim needs to rebuild the message; kept narrow on purpose. */
-type ClaimRow = Pick<MessageRow, 'id' | 'to_address' | 'from_address' | 'type' | 'subject' | 'payload' | 'trace_id'>
+type ClaimRow = Pick<MessageRow, 'id' | 'to_address' | 'from_address' | 'type' | 'subject' | 'payload' | 'trace_id' | 'blocking'>
 
 /**
  * Reconstruct a {@link MailboxMessage} from a claim-selected row. `NULL`
@@ -150,6 +151,7 @@ function rowToMessage(row: ClaimRow): MailboxMessage {
     ...row.subject !== null ? { subject: row.subject } : {},
     ...row.payload !== null ? { payload: JSON.parse(row.payload) as unknown } : {},
     ...row.trace_id !== null ? { traceId: row.trace_id } : {},
+    ...row.blocking === 1 ? { blocking: true } : {},
   }
 }
 
@@ -201,8 +203,8 @@ export class SqliteMailboxStore implements MailboxProvider {
     // a non-serializable body never lands half-stored.
     const payload = message.payload === undefined ? null : JSON.stringify(message.payload)
     this.db.prepare(`
-      INSERT INTO messages (id, to_address, from_address, type, subject, payload, trace_id, state, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+      INSERT INTO messages (id, to_address, from_address, type, subject, payload, trace_id, blocking, state, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
     `).run(
       id,
       message.to,
@@ -211,6 +213,7 @@ export class SqliteMailboxStore implements MailboxProvider {
       message.subject ?? null,
       payload,
       message.traceId ?? null,
+      message.blocking === true ? 1 : null,
       this.clock(),
     )
     return id
@@ -228,7 +231,7 @@ export class SqliteMailboxStore implements MailboxProvider {
     let began = true
     try {
       const rows = this.db.prepare(`
-        SELECT id, to_address, from_address, type, subject, payload, trace_id
+        SELECT id, to_address, from_address, type, subject, payload, trace_id, blocking
         FROM messages
         WHERE to_address IN (${placeholders})
           AND (state = 'pending' OR (state = 'claimed' AND claimed_at <= ?))

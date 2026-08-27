@@ -277,6 +277,13 @@ export class FakeApiClient implements IApiClient {
     discoverModels: payload => this.record('llm.discoverModels', payload, Promise.resolve(ok({ models: [] }))),
   }
 
+  readonly mailbox: IApiClient['mailbox'] = {
+    publish: payload => this.record('mailbox.publish', payload, Promise.resolve(ok({
+      messageId: 'fake-mail',
+      disposition: 'queued',
+    }))),
+  }
+
   /** When true, streams never fire onOpen (misbehaving-carrier material for the handshake timeout guard). */
   suppressStreamOpen = false
 

@@ -34,8 +34,14 @@ export const INBOX_DEFAULT_LIMIT = 20
  */
 export const INBOX_STALE_CLAIM_MS = 60_000
 
+/** Process-facing effects of one invocation: the two output streams the runner writes to. */
+interface MailboxCliIo {
+  stdout: { write(chunk: string): unknown }
+  stderr: { write(chunk: string): unknown }
+}
+
 /** Output sinks the runner writes to; tests substitute captures. */
-export const internals = { stdout: process.stdout, stderr: process.stderr }
+export const internals: MailboxCliIo = { stdout: process.stdout, stderr: process.stderr }
 
 /** Parsed arguments of one `send` invocation. */
 interface SendArgs {
@@ -169,6 +175,8 @@ function spreadPayload(values: Map<string, string>): { payload: unknown } | Reco
 interface InboxEntryView {
   readonly messageId: string
   readonly from: string
+  /** Present only when the sender marked itself blocked waiting for an answer. */
+  readonly blocking?: true
   readonly type?: string
   readonly subject?: string
   readonly payload?: unknown
@@ -183,6 +191,7 @@ function toEntry(lease: MailboxLeaseView): InboxEntryView {
   return {
     messageId: id,
     from,
+    ...lease.message.blocking === true ? { blocking: true as const } : {},
     ...type !== undefined ? { type } : {},
     ...subject !== undefined ? { subject } : {},
     ...payload !== undefined ? { payload } : {},
@@ -244,9 +253,10 @@ export async function runMailboxCli(argv: readonly string[]): Promise<number> {
     // Receipts first — exactly what the seam calls inbox admission; a crash
     // before this loop finishes reclaims through the staleness bound.
     for (const { lease, entry } of pairs) {
-      await args.peek
+      const settle = args.peek
         ? store.settle(lease.leaseRef, { state: 'pending', result: undefined })
         : store.settle(lease.leaseRef, { state: 'done', result: { deliveredAt: Date.now(), messageId: entry.messageId as MailboxMessageId } })
+      await settle
     }
     internals.stdout.write(args.json ? `${JSON.stringify(pairs.map(({ entry }) => entry))}\n` : '')
     if (!args.json) printHuman(pairs.map(({ entry }) => entry), internals)

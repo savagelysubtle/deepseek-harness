@@ -33,6 +33,18 @@ import {
 import { ensureDurableDirectoryWin32, publishNewFileWin32 } from './win32.ts'
 
 export type { JsonlCompression } from './format.ts'
+/**
+ * Re-exported so a cross-package caller (e.g. a host-side log tailer) can
+ * decode this backend's on-disk frames without reaching into `./zstd.ts`
+ * directly: that subpath serves raw TypeScript source, which the runtime
+ * boot path parses with Node's built-in type-stripping loader — erasable
+ * syntax only, no codegen. `zstd-private-decoder.ts` (imported transitively
+ * by `zstd.ts`) uses TS parameter properties, which that loader cannot
+ * transform, so a raw `/src/zstd.ts` import crashes plugin-tree boot with
+ * `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` even though it type-checks and tests
+ * clean under tsc/tsdown/vitest, which all fully transform TS.
+ */
+export { decompressZstdFrame, scanZstdFrames } from './zstd.ts'
 
 const DEFAULT_PACK_CHUNKS = true
 const DEFAULT_COMPRESSION: JsonlCompression = 'zstd'

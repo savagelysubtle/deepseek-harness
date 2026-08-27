@@ -29,6 +29,9 @@
       name: '@deepseek-ai/dsh-headless/startup'
 
     # Reads its task and output flags from the ordinary headlessStartup provider.
+    # mailboxNamespace forwards the --mailbox-namespace flag into the runner;
+    # the flag fails loud at task start when no mailbox registry is composed
+    # and drives the named-session backlog drain before the task turn.
     - id: headless-runner
       name: '@deepseek-ai/dsh-headless'
       inject: [headlessStartup]
@@ -36,3 +39,4 @@
         task: !!js ctx.headlessStartup.task
         sessionName: !!js ctx.headlessStartup.sessionName
         format: !!js ctx.headlessStartup.format
+        mailboxNamespace: !!js ctx.headlessStartup.mailboxNamespace

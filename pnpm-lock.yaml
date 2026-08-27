@@ -1276,6 +1276,9 @@ importers:
       '@deepseek-ai/dsh-mailbox-bridge':
         specifier: workspace:^
         version: link:../../mailbox/bridge
+      '@deepseek-ai/dsh-mailbox-local':
+        specifier: workspace:^
+        version: link:../../mailbox/local
       '@deepseek-ai/dsh-named-sessions':
         specifier: workspace:^
         version: link:../../session/named-sessions
@@ -4871,6 +4874,9 @@ importers:
       '@deepseek-ai/dsh-mailbox-bridge':
         specifier: workspace:^
         version: link:../../mailbox/bridge
+      '@deepseek-ai/dsh-named-sessions':
+        specifier: workspace:^
+        version: link:../../session/named-sessions
       '@deepseek-ai/dsh-native-command':
         specifier: workspace:^
         version: link:../../util/native-command
@@ -4880,6 +4886,9 @@ importers:
       '@deepseek-ai/dsh-session-persistence':
         specifier: workspace:^
         version: link:../../session/session-persistence
+      '@deepseek-ai/dsh-session-persistence-jsonl':
+        specifier: workspace:^
+        version: link:../../session/session-persistence-jsonl
       '@deepseek-ai/dsh-session-projection':
         specifier: workspace:^
         version: link:../../session/session-projection
@@ -5649,6 +5658,9 @@ importers:
       '@deepseek-ai/dsh-home-paths':
         specifier: workspace:^
         version: link:../../util/home-paths
+      '@deepseek-ai/dsh-mailbox':
+        specifier: workspace:^
+        version: link:../mailbox
       '@deepseek-ai/schemastery':
         specifier: link:../../../vendor/schemastery
         version: link:../../../vendor/schemastery
@@ -5659,9 +5671,6 @@ importers:
       '@deepseek-ai/dsh-invariants':
         specifier: workspace:^
         version: link:../../runtime-diagnostics/invariants
-      '@deepseek-ai/dsh-mailbox':
-        specifier: workspace:^
-        version: link:../mailbox
 
   packages/mailbox/mailbox:
     dependencies:

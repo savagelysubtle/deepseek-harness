@@ -25,6 +25,11 @@ export interface MailboxPublishPayload {
   readonly payload?: unknown
   /** Optional correlation id threaded into the delivered turn's source. */
   readonly traceId?: string
+  /**
+   * Marks the caller blocked waiting on an answer (default false). Transport
+   * still interrupts immediately; recipients judge this flag to prioritize.
+   */
+  readonly blocking?: boolean
 }
 
 /** Result of one woken admission. */

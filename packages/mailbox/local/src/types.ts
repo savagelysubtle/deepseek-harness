@@ -20,6 +20,8 @@ export interface MessageRow {
   /** JSON-encoded payload; `null` when the message carries none. */
   payload: string | null
   trace_id: string | null
+  /** `1` iff the sender marked itself blocked waiting for an answer; `null` = false. */
+  blocking: number | null
   state: 'pending' | 'claimed' | 'done' | 'failed'
   created_at: number
   claimed_at: number | null

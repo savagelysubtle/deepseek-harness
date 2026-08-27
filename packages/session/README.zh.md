@@ -50,3 +50,11 @@
 | [`session-telemetry-otel/`](session-telemetry-otel/README.md) | 通过 OpenTelemetry 日志以 `FULL`、`FEEDBACK_ONLY` 或 `DISABLED` 模式投递遥测。 |
 
 子系统参考：[persistence.md](../../docs/subsystems/persistence.md)、[session-projection.md](../../docs/subsystems/session-projection.md)、[session-title.md](../../docs/subsystems/session-title.md) 与 [session-telemetry.md](../../docs/subsystems/session-telemetry.md)。同一时间只允许一个标题提供方注册；demo 主干挂载回退服务，两个模型提供方都留在默认组合之外。
+
+## 命名会话
+
+| 包 | 职责 |
+|---|---|
+| [`named-sessions/`](named-sessions/README.md) | 从稳定名称派生持久会话 id，并持有跨进程的按名称锁文件。 |
+
+无 `ctx` 服务：纯工具加不变量伴随包，由所有命名运行消费者共享（当前为 headless 运行器；邮箱桥接紧随其后）。

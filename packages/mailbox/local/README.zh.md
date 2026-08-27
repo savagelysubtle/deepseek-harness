@@ -38,6 +38,7 @@ dsh-mailbox inbox --address <ns>:<name> [--limit N] [--peek] [--db PATH] [--json
 | 文法门禁 | `--to`／`--from`／`--address` 在任何写入之前按接缝文法校验；不可路由的地址响亮失败，而不是隐形排队。 |
 | 收件箱排水 | `claim` + 以 `done` 落定（恰是接缝的收件箱准入语义）。来自外部的坏 payload 行不会浮出：它们被落定为 `failed/malformed-payload`，同批兄弟消息照常投递。 |
 | `--peek` | 将每条回执退回 `pending`：只读不消费。认领与落定之间的崩溃经 60 秒过期界限回收（与桥的默认值一致）。 |
+| 发送方阻塞邮件 | 以 `blocking: true` 发布的消息会在 `--json` 输出中显示为 `"blocking": true`，标记发送方正等待答复。 |
 | `--db` | 缺省时经 `resolveMailboxPath` 解析到 harness 家目录；支持 `:memory:` 哨兵值。 |
 | 访客回合 | 投递内容是接收席位的数据，绝非指令；`type` 仅限咨询类（`field-report`、`question`）。外来来源邮件能否被接受由桥的 `admitFromNamespaces` 在排水时裁决。 |
 

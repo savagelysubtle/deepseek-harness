@@ -72,7 +72,7 @@ export abstract class MemoryService extends Service {
    * @param cwd - absolute working directory naming the project scope.
    * @param query - substring to find; empty queries reject.
    * @param limit - maximum matches to return (default {@link DEFAULT_SEARCH_LIMIT}).
-   * @matches ordered by path, then line number.
+   * @returns ordered by path, then line number.
    */
   abstract search(cwd: string, query: string, limit?: number): Promise<MemoryMatch[]>
 }

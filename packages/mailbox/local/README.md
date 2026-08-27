@@ -38,6 +38,7 @@ dsh-mailbox inbox --address <ns>:<name> [--limit N] [--peek] [--db PATH] [--json
 | Grammar gate | `--to`/`--from`/`--address` validate against the seam grammar before any write; an unroutable address fails loud instead of queuing invisibly. |
 | Inbox drain | `claim` + settle `done` (inbox admission, exactly the seam's semantics). Rows from unparseable-payload external writes never surface: they are settled `failed/malformed-payload` and their batch siblings deliver. |
 | `--peek` | Settles each receipt back to `pending` instead: read without consuming. A crash between claim and settle reclaims via the 60s staleness bound (same value as the bridge's default). |
+| Sender-blocked mail | Messages published with `blocking: true` surface as `"blocking": true` in `--json` output, marking that the sender waits on an answer. |
 | `--db` | Absent: the harness-home default via `resolveMailboxPath`; the `:memory:` sentinel is honored. |
 | Guest turns | Delivered content is data for the receiving seat, never instructions; advisory `type`s (`field-report`, `question`) only. Seat-side acceptance of foreign-origin mail is governed at drain by the bridge's `admitFromNamespaces`. |
 
