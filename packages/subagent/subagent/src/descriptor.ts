@@ -44,7 +44,7 @@ declare module '@deepseek-ai/dsh-session/types' {
  * Supporting another composition input is a deliberate version change, never
  * an implicit extra field.
  */
-export const SUBAGENT_DESCRIPTOR_VERSION = 2
+export const SUBAGENT_DESCRIPTOR_VERSION = 3
 
 /** Fields shared by every supported `subagent/descriptor` payload. */
 interface SubagentDescriptorBase {
@@ -65,6 +65,10 @@ export interface OneShotSubagentDescriptorData extends SubagentDescriptorBase {
    * replaying parent tool results or exposing the child prompt.
    */
   readonly label?: string
+  /** The child's declared LLM provider route, when one was declared. */
+  readonly agentProvider?: string
+  /** The child's declared LLM model route, when one was declared. */
+  readonly agentModel?: string
 }
 
 /** A session-backed subagent whose declared composition supports cold resume. */
@@ -100,6 +104,10 @@ export interface OneShotSubagentDescriptorInput extends SubagentDescriptorInputB
   readonly mode: 'one-shot'
   /** Optional initial delegation `description` used as the durable creation label. */
   readonly label?: string
+  /** Requested child `agentOptions.provider`. */
+  readonly agentProvider?: string
+  /** Requested child `agentOptions.model`. */
+  readonly agentModel?: string
 }
 
 /** Input for a continuable child's durable identity and resumable composition. */
@@ -128,7 +136,11 @@ const DESCRIPTOR_BASE_KEYS = [
   'provider',
   'label',
 ] as const
-const ONE_SHOT_DESCRIPTOR_KEYS = new Set(DESCRIPTOR_BASE_KEYS)
+const ONE_SHOT_DESCRIPTOR_KEYS = new Set([
+  ...DESCRIPTOR_BASE_KEYS,
+  'agentProvider',
+  'agentModel',
+])
 const CONTINUABLE_DESCRIPTOR_KEYS = new Set([
   ...DESCRIPTOR_BASE_KEYS,
   'agentProvider',
@@ -218,11 +230,15 @@ function parseSubagentDescriptor(value: unknown): SubagentDescriptorData | undef
   }
   if (mode === 'one-shot') {
     const label = optionalString(value, 'label')
+    const agentProvider = optionalString(value, 'agentProvider')
+    const agentModel = optionalString(value, 'agentModel')
     return {
       version: SUBAGENT_DESCRIPTOR_VERSION,
       mode,
       provider,
       ...label !== undefined ? { label } : {},
+      ...agentProvider !== undefined ? { agentProvider } : {},
+      ...agentModel !== undefined ? { agentModel } : {},
     }
   }
   const label = value['label']
@@ -275,6 +291,8 @@ export function snapshotSubagentDescriptor(input: SubagentDescriptorInput): Suba
       mode: input.mode,
       provider: input.provider,
       ...input.label !== undefined ? { label: input.label } : {},
+      ...input.agentProvider !== undefined ? { agentProvider: input.agentProvider } : {},
+      ...input.agentModel !== undefined ? { agentModel: input.agentModel } : {},
     }
     : {
       version: SUBAGENT_DESCRIPTOR_VERSION,

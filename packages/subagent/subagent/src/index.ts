@@ -416,10 +416,17 @@ export class SubagentRuntime extends Service {
     this.assertCapabilities(provider, request)
     assertSubagentMaxDepth(request.maxDepth)
     if (request.outputSchema !== undefined) assertObjectJsonSchema(request.outputSchema)
+    // Same resolved-route convention as the continuable snapshot in
+    // continuation.ts: the declared override, else the parent's own route.
+    // Direct service callers may supply minimal agents without options.
+    const agentProvider = request.agentOptions?.provider ?? request.parent.options?.provider
+    const agentModel = request.agentOptions?.model ?? request.parent.options?.model
     const descriptor = snapshotSubagentDescriptor({
       mode: 'one-shot',
       provider: name,
       ...request.label !== undefined ? { label: request.label } : {},
+      ...agentProvider !== undefined ? { agentProvider } : {},
+      ...agentModel !== undefined ? { agentModel } : {},
     })
     const resolved: ResolvedSubagentStartRequest = { ...request, descriptor }
     return observeRun(this.emitLifecycle, name, request.parent, await provider.start(resolved))

@@ -23,10 +23,18 @@ export type SubagentListEntry =
     | {
       mode: 'one-shot'
       label?: string
+      /** Declared LLM provider route from the descriptor, when present. */
+      provider?: string
+      /** Declared LLM model route from the descriptor, when present. */
+      model?: string
     }
     | {
       mode: 'continuable'
       label: string
+      /** Declared LLM provider route from the descriptor, when present. */
+      provider?: string
+      /** Declared LLM model route from the descriptor, when present. */
+      model?: string
     }
   )
   | {

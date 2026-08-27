@@ -159,6 +159,30 @@ describe('SubagentCatalogAction', () => {
     expect(input.setCatalogOpen).toHaveBeenLastCalledWith(PARENT, false)
   })
 
+  it('renders the declared LLM route on rows whose descriptor recorded it', () => {
+    const input = props(catalog({
+      entries: [
+        {
+          kind: 'child', id: CHILD, mode: 'continuable', label: 'worker',
+          activity: 'running', hasChildren: false,
+        },
+        {
+          kind: 'child', id: 'routed' as SessionId, mode: 'continuable', label: 'routed worker',
+          provider: 'deepseek', model: 'chat',
+          activity: 'inactive', hasChildren: false,
+        },
+      ],
+    }))
+    render(<SubagentCatalogAction {...input} />)
+    fireEvent.click(screen.getByRole('button', { name: /2 个子代理/ }))
+
+    // Route-absent rows keep their existing secondary text; routed rows name
+    // the declared model between summary and mode.
+    expect(screen.getByText('正在扫描项目文件 · 可继续 · 正在运行')).toBeTruthy()
+    expect(screen.getByText(/routed worker/)).toBeTruthy()
+    expect(screen.getByText('deepseek/chat · 可继续 · 当前未运行')).toBeTruthy()
+  })
+
   it('selects singular count keys for one descendant', () => {
     const base = props(catalog({
       entries: [{

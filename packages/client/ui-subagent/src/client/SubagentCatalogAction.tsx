@@ -273,7 +273,12 @@ function CatalogRows({
         const label = entry.label ?? entry.id
         const mode = entry.mode === 'one-shot' ? t('mode.oneShot') : t('mode.continuable')
         const activity = entry.activity === 'running' ? t('activity.running') : t('activity.inactive')
-        const secondary = [summary?.title, mode, activity]
+        // Declared LLM route from the durable descriptor, when recorded
+        // (v3+); absent for older children — shown as plain data, not copy.
+        const route = [entry.provider, entry.model]
+          .filter(value => value !== undefined)
+          .join('/')
+        const secondary = [summary?.title, route === '' ? undefined : route, mode, activity]
           .filter(value => value !== undefined)
           .join(' · ')
         const totalTokens = tokenTotal(summary?.projectionValues?.tokenUsage)

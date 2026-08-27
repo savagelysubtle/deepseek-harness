@@ -61,12 +61,20 @@ export type SubagentListEntry =
       readonly mode: 'one-shot'
       /** Optional durable creation label from the child's descriptor. */
       readonly label?: string
+      /** Declared LLM provider route from the descriptor, when present. */
+      readonly provider?: string
+      /** Declared LLM model route from the descriptor, when present. */
+      readonly model?: string
     }
     | {
       /** A resumable conversation. */
       readonly mode: 'continuable'
       /** Durable creation label from the child's descriptor. */
       readonly label: string
+      /** Declared LLM provider route from the descriptor, when present. */
+      readonly provider?: string
+      /** Declared LLM model route from the descriptor, when present. */
+      readonly model?: string
     }
   )
   | {
@@ -415,12 +423,19 @@ function childRow(
   activity: 'running' | 'inactive',
   hasChildren: boolean,
 ): SubagentListEntry {
+  const route = identity.provider !== undefined || identity.model !== undefined
+    ? {
+      ...identity.provider !== undefined ? { provider: identity.provider } : {},
+      ...identity.model !== undefined ? { model: identity.model } : {},
+    }
+    : {}
   return identity.mode === 'one-shot'
     ? {
       kind: 'child',
       id,
       mode: 'one-shot',
       ...identity.label !== undefined ? { label: identity.label } : {},
+      ...route,
       activity,
       hasChildren,
     }
@@ -429,6 +444,7 @@ function childRow(
       id,
       mode: 'continuable',
       label: identity.label,
+      ...route,
       activity,
       hasChildren,
     }

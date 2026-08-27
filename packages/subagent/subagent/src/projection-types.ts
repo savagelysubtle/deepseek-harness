@@ -18,10 +18,11 @@ export interface SubagentTimingProjection {
 }
 
 /**
- * Durable identity of one descriptor-backed subagent session: lifecycle mode
- * plus creation label, folded last-wins from `subagent/descriptor` events.
- * Label strength follows the descriptor schema: a continuable child always
- * carries one, a one-shot child may omit it.
+ * Durable identity of one descriptor-backed subagent session: lifecycle mode,
+ * creation label, and the child's declared LLM route when one was recorded,
+ * folded last-wins from `subagent/descriptor` events. Label strength follows
+ * the descriptor schema: a continuable child always carries one, a one-shot
+ * child may omit it.
  */
 export type SubagentIdentityProjection =
   | {
@@ -29,6 +30,10 @@ export type SubagentIdentityProjection =
     mode: 'one-shot'
     /** Optional durable creation label from the child's descriptor. */
     label?: string
+    /** Declared LLM provider route from the descriptor, when present. */
+    provider?: string
+    /** Declared LLM model route from the descriptor, when present. */
+    model?: string
     /**
      * Seq of the `subagent/descriptor` event this identity was folded from.
      * `seq >= header.seedLength` proves the identity comes from the child's
@@ -42,6 +47,10 @@ export type SubagentIdentityProjection =
     mode: 'continuable'
     /** Durable creation label from the child's descriptor. */
     label: string
+    /** Declared LLM provider route from the descriptor, when present. */
+    provider?: string
+    /** Declared LLM model route from the descriptor, when present. */
+    model?: string
     /** Seq of the folded descriptor event; see the one-shot arm for the own-suffix proof. */
     seq: number
   }

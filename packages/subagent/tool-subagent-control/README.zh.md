@@ -58,7 +58,7 @@
 
 #### 模型看到的内容
 
-按稳定目录顺序，每个可继续 child 占一行：渲染为 `<id> [<status>] — <label>`（`running` 表示 driver 活跃，`idle` 表示驻留但处于轮次之间，`ready` 表示仅存于存储；可恢复而非终态，也不表示有结果等待收集——处于该状态的直接 child 可通过 `send_message` 恢复），另为无法读取的候选项渲染 `<id> [diagnostic: <reason>]`（`corrupt`、`unsupported` 或 `unavailable`）。`descendants` scope 会在每行 label 破折号之前插入 ` parent=<id> depth=<n>`，按 pre-order 排列。一次性 child 会被有意排除；`(no subagents)` 表示投影后没有留下可继续 child 或 diagnostic。诊断信息绝不会暴露描述符内容。
+按稳定目录顺序，每个可继续 child 占一行：渲染为 `<id> [<status>] — <label>`（`running` 表示 driver 活跃，`idle` 表示驻留但处于轮次之间，`ready` 表示仅存于存储；可恢复而非终态，也不表示有结果等待收集——处于该状态的直接 child 可通过 `send_message` 恢复），另为无法读取的候选项渲染 `<id> [diagnostic: <reason>]`（`corrupt`、`unsupported` 或 `unavailable`）。描述符记录了声明 LLM 路由的 child 会在状态之后渲染 ` model=<provider>/<model>`；没有路由的旧 child 保持原有渲染。`descendants` scope 会在每行 label 破折号之前插入 ` parent=<id> depth=<n>`，按 pre-order 排列。一次性 child 会被有意排除；`(no subagents)` 表示投影后没有留下可继续 child 或 diagnostic。诊断信息绝不会暴露描述符内容。
 
 #### Token 影响
 

@@ -99,16 +99,22 @@ const identitySchema = z.discriminatedUnion('mode', [
   z.object({
     mode: z.literal('one-shot'),
     label: z.string().optional(),
+    provider: z.string().optional(),
+    model: z.string().optional(),
     seq: z.number().int().nonnegative(),
   }).strict(),
   z.object({
     mode: z.literal('continuable'),
     label: z.string(),
+    provider: z.string().optional(),
+    model: z.string().optional(),
     seq: z.number().int().nonnegative(),
   }).strict(),
 ]).nullable() as unknown as z.ZodType<SubagentIdentityProjection | null>
 
-/** Interpret one `subagent/descriptor` event's identity; no value when the payload cannot be trusted. */
+/**
+ * Interpret one `subagent/descriptor` event's identity; no value when the payload cannot be trusted.
+ */
 function descriptorIdentity(event: SessionEvent): SubagentIdentityProjection | undefined {
   let descriptor: SubagentDescriptorData | undefined
   try {
@@ -119,13 +125,20 @@ function descriptorIdentity(event: SessionEvent): SubagentIdentityProjection | u
     descriptor = undefined
   }
   if (descriptor === undefined) return undefined
+  const route = descriptor.agentProvider !== undefined || descriptor.agentModel !== undefined
+    ? {
+      ...descriptor.agentProvider !== undefined ? { provider: descriptor.agentProvider } : {},
+      ...descriptor.agentModel !== undefined ? { model: descriptor.agentModel } : {},
+    }
+    : {}
   return descriptor.mode === 'one-shot'
     ? {
       mode: 'one-shot',
       ...descriptor.label !== undefined ? { label: descriptor.label } : {},
+      ...route,
       seq: event.seq,
     }
-    : { mode: 'continuable', label: descriptor.label, seq: event.seq }
+    : { mode: 'continuable', label: descriptor.label, ...route, seq: event.seq }
 }
 
 /**
@@ -150,7 +163,9 @@ ProjectionDefinition<'subagent', IdentityState> = {
     return identity === undefined ? {} : { identity }
   },
   view: state => state.identity ?? null,
-  // Bumped when the identity gained its `seq` field: an older checkpoint row
-  // would replay into a value the schema rejects, so it must refold instead.
-  stateVersion: 2,
+  // Bumped when the identity gained its `seq` field, and again for the
+  // optional provider/model route fields: an older checkpoint row would
+  // replay into a value the schema rejects (or silently drop), so it must
+  // refold instead.
+  stateVersion: 3,
 }

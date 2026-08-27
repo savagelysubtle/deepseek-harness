@@ -219,7 +219,9 @@ describe('dsh-tool-subagent-control/list-agents', () => {
     await waitNoActivation(ctx, started.childId)
     const result = await callTool(ctx, 'list_agents', {}, parent)
     expect(result.isError).toBe(false)
-    expect(text(result)).toBe(`${started.childId} [ready] — summarize the doc`)
+    // The mock parent's resolved route reaches the render through the v3
+    // descriptor: the full spawn→descriptor→fold→row→render chain.
+    expect(text(result)).toBe(`${started.childId} [ready] model=mock/mock — summarize the doc`)
   })
 
   it('describes ready as resumable and pins the status vocabulary', async () => {
@@ -294,8 +296,8 @@ describe('dsh-tool-subagent-control/list-agents', () => {
     const result = await callTool(ctx, 'list_agents', { scope: 'descendants' }, parent)
     expect(result.isError).toBe(false)
     expect(text(result)).toBe(
-      `${started.childId} [idle] parent=${parent.id} depth=1 — waiting branch\n`
-      + `${grandchild.childId} [running] parent=${started.childId} depth=2 — nested leaf`,
+      `${started.childId} [idle] model=mock/mock parent=${parent.id} depth=1 — waiting branch\n`
+      + `${grandchild.childId} [running] model=mock/mock parent=${started.childId} depth=2 — nested leaf`,
     )
 
     releaseGrandchild.resolve(undefined)

@@ -197,6 +197,7 @@ describe('SubagentRuntime.listChildren', () => {
     expect(entries).toEqual([
       {
         kind: 'child', id: childId, label: 'summarize the doc', mode: 'continuable',
+        provider: 'mock', model: 'mock',
         activity: 'inactive', hasChildren: false,
       },
     ])
@@ -220,6 +221,8 @@ describe('SubagentRuntime.listChildren', () => {
       kind: 'child',
       id: oneShotId,
       mode: 'one-shot',
+      provider: 'mock',
+      model: 'mock',
       activity: 'inactive',
       hasChildren: false,
     })
@@ -228,6 +231,8 @@ describe('SubagentRuntime.listChildren', () => {
       id: continuableId,
       label: 'continuable child',
       mode: 'continuable',
+      provider: 'mock',
+      model: 'mock',
       activity: 'inactive',
       hasChildren: false,
     })
@@ -328,6 +333,7 @@ describe('SubagentRuntime.listChildren', () => {
     const entries = await ctx.subagents.listChildren(parent.id)
     expect(entries).toContainEqual({
       kind: 'child', id: settled, label: 'settled child', mode: 'continuable',
+      provider: 'mock', model: 'mock',
       activity: 'inactive', hasChildren: false,
     })
     expect(entries).toContainEqual({
@@ -360,6 +366,7 @@ describe('SubagentRuntime.listChildren', () => {
     })
     expect(entries).toContainEqual({
       kind: 'child', id: healthy, label: 'healthy sibling', mode: 'continuable',
+      provider: 'mock', model: 'mock',
       activity: 'inactive', hasChildren: false,
     })
   })
@@ -486,6 +493,7 @@ describe('SubagentRuntime.listChildren', () => {
     expect(entries).toContainEqual({ kind: 'diagnostic', id: reborn, reason: 'corrupt' })
     expect(entries).toContainEqual({
       kind: 'child', id: healthy, label: 'healthy sibling', mode: 'continuable',
+      provider: 'mock', model: 'mock',
       activity: 'inactive', hasChildren: false,
     })
   })
@@ -603,6 +611,7 @@ describe('SubagentRuntime.listChildren', () => {
     expect(entries).toContainEqual({ kind: 'diagnostic', id: poisoned, reason: 'corrupt' })
     expect(entries).toContainEqual({
       kind: 'child', id: healthy, label: 'healthy sibling', mode: 'continuable',
+      provider: 'mock', model: 'mock',
       activity: 'inactive', hasChildren: false,
     })
   })
@@ -659,6 +668,7 @@ describe('SubagentRuntime.listChildren', () => {
     expect(degraded).toContainEqual({ kind: 'diagnostic', id: flaky, reason: 'unavailable' })
     expect(degraded).toContainEqual({
       kind: 'child', id: healthy, label: 'healthy sibling', mode: 'continuable',
+      provider: 'mock', model: 'mock',
       activity: 'inactive', hasChildren: false,
     })
     // Nothing is memoized: with the backend healthy again, the next listing
@@ -726,6 +736,7 @@ describe('SubagentRuntime.listChildren', () => {
     expect(entries).toEqual([
       {
         kind: 'child', id: childId, label: 'direct child', mode: 'continuable',
+        provider: 'mock', model: 'mock',
         activity: 'inactive', hasChildren: true,
       },
     ])
@@ -775,6 +786,7 @@ describe('SubagentRuntime.listChildren', () => {
     const inspect = vi.spyOn(ctx.sessionPersistence, 'inspect')
     await expect(ctx.subagents.listChildren(parent.id)).resolves.toEqual([{
       kind: 'child', id: childId, label: 'cached child', mode: 'continuable',
+      provider: 'mock', model: 'mock',
       activity: 'inactive', hasChildren: false,
     }])
     expect(inspect).not.toHaveBeenCalled()
@@ -847,6 +859,7 @@ describe('SubagentRuntime.listChildren', () => {
 
     await expect(ctx.subagents.listChildren(parent.id)).resolves.toEqual([{
       kind: 'child', id: childId, label: 'direct child', mode: 'continuable',
+      provider: 'mock', model: 'mock',
       activity: 'inactive', hasChildren: false,
     }])
   })
@@ -864,6 +877,7 @@ describe('SubagentRuntime.listChildren', () => {
     ])
     await expect(ctx.subagents.listChildren(parent.id)).resolves.toEqual([{
       kind: 'child', id: childId, label: 'direct child', mode: 'continuable',
+      provider: 'mock', model: 'mock',
       activity: 'inactive', hasChildren: true,
     }])
   })

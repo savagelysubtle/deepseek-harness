@@ -340,6 +340,23 @@ describe('subagent descriptors', () => {
       provider: 'spawn',
       label: 'child work',
     })).toEqual({ ...minimal, label: 'child work' })
+    const routed = snapshotSubagentDescriptor({
+      mode: 'one-shot',
+      provider: 'spawn',
+      agentProvider: 'deepseek',
+      agentModel: 'chat',
+    })
+    expect(routed).toEqual({
+      version: SUBAGENT_DESCRIPTOR_VERSION,
+      mode: 'one-shot',
+      provider: 'spawn',
+      agentProvider: 'deepseek',
+      agentModel: 'chat',
+    })
+    expect(foldSubagentDescriptor([event(routed)])).toEqual(routed)
+    // Route fields are optional on the one-shot arm, so a minimal snapshot
+    // stays free of them — the v2 shape carries forward under v3.
+    expect(Object.keys(minimal)).not.toContain('agentProvider')
     const complete = {
       version: SUBAGENT_DESCRIPTOR_VERSION,
       mode: 'continuable' as const,

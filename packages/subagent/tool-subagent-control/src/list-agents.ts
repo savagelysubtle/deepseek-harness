@@ -33,6 +33,10 @@ type ListAgentsEntry =
     readonly id: SessionId
     readonly label: string
     readonly status: 'running' | 'idle' | 'ready'
+    /** Declared LLM provider route from the child's descriptor, when present. */
+    readonly provider?: string
+    /** Declared LLM model route from the child's descriptor, when present. */
+    readonly model?: string
     readonly parent?: SessionId
     readonly depth?: number
   }
@@ -80,6 +84,8 @@ function project(
     id: entry.id,
     label: entry.label,
     status: statusOf(agents, entry.id),
+    ...entry.provider !== undefined ? { provider: entry.provider } : {},
+    ...entry.model !== undefined ? { model: entry.model } : {},
     ...at,
   }
 }
@@ -123,6 +129,8 @@ export function apply(ctx: Context): void {
                 id: { type: 'string', required: true },
                 label: { type: 'string', required: true },
                 status: { type: 'string', required: true, enum: ['running', 'idle', 'ready'] },
+                provider: { type: 'string' },
+                model: { type: 'string' },
                 parent: { type: 'string' },
                 depth: { type: 'number' },
               },
@@ -154,8 +162,12 @@ export function apply(ctx: Context): void {
               const at = request.scope === 'descendants'
                 ? ` parent=${String(entry.parent)} depth=${String(entry.depth)}`
                 : ''
+              const route = entry.kind === 'child'
+                ? [entry.provider, entry.model].filter(part => part !== undefined).join('/')
+                : ''
+              const withRoute = entry.kind === 'child' && route.length > 0 ? ` model=${route}` : ''
               return entry.kind === 'child'
-                ? `${entry.id} [${entry.status}]${at} — ${entry.label}`
+                ? `${entry.id} [${entry.status}]${withRoute}${at} — ${entry.label}`
                 : `${entry.id} [diagnostic: ${entry.reason}]${at}`
             }).join('\n'),
         }]

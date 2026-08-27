@@ -458,7 +458,7 @@ describe('subagent ownership fence', () => {
         type: 'subagent/descriptor',
         seq: 2,
         time: 3,
-        data: { version: 2, mode: 'continuable', provider: 'spawn', label: 'child' },
+        data: { version: 3, mode: 'continuable', provider: 'spawn', label: 'child' },
       },
       { type: 'turn/end', seq: 3, time: 4, data: { turn: 1, reason: { kind: 'completed' } } },
     ] as SessionEvent[]
@@ -514,7 +514,7 @@ describe('subagent ownership fence', () => {
         type: 'subagent/descriptor',
         seq: 0,
         time: 1,
-        data: { version: 2, mode: 'continuable', provider: 'spawn', label: 'child' },
+        data: { version: 3, mode: 'continuable', provider: 'spawn', label: 'child' },
       },
     ] as SessionEvent[]
     ctx.provide('sessionPersistence', {
@@ -608,7 +608,7 @@ describe('subagent ownership fence', () => {
         type: 'subagent/descriptor',
         seq: 0,
         time: 1,
-        data: { version: 2, mode: 'continuable', provider: 'spawn', label: 'ancestor' },
+        data: { version: 3, mode: 'continuable', provider: 'spawn', label: 'ancestor' },
       }],
       meta: { cwd: '/proj', parentSession: sid('session-source'), seedLength: 1 },
     })
