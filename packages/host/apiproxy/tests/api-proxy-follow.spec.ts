@@ -39,11 +39,11 @@ const FOREIGN_PID = process.pid + 1
 /**
  * Hold the seat's lock as ANOTHER process would.
  *
- * The real `acquireNamedSessionLock` records `process.pid`, and the probe
- * deliberately ignores a self-held lock — `mailbox-bridge` mounted in this
- * host takes exactly that lock while cold-resuming a seat to deliver mail, so
- * a host reading its own lock as a rival would fence itself out. Simulating a
- * FOREIGN owner therefore means writing the same payload with another pid.
+ * The real `acquireNamedSessionLock` records `process.pid`, and a test cannot
+ * hold a genuinely foreign lock through the real API — simulating a FOREIGN
+ * owner therefore means writing the same payload with another pid. This host
+ * has no legitimate self-held case: any held lock names a foreign owner (the
+ * one-writer rule, docs/architecture.md § "Session log").
  */
 function holdForeignLock(name: string): { release(): void } {
   const path = lockPathForToken(deriveNamedSessionId(name).slice('named-'.length))

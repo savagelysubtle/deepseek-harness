@@ -31,6 +31,10 @@ Every delivered turn carries the merged [`mailbox` message source](../mailbox/sr
 
 The interval timer never pins the host event loop (`unref`): deployments that exist only to serve mail hold themselves up through other handles. Structural failures after mount clear the timer and throw rather than ticking silently forever.
 
+## Wire admission
+
+Non-dsh callers reach the same drain through the host API's `mailbox.publish` ([the apiproxy](../../host/apiproxy/README.md)), which wraps the exported [`publishAndWake`](./src/index.ts): loud roster validation against every mounted bridge's addresses, one store write through the default provider, one immediate routing pass, and a `delivered`/`queued` disposition taken from what this wake's settlements observed. Terminal routing failures reject with the recorded reason instead of a false-fast acknowledgment.
+
 ## Model Experience
 
 ### Delivered mailbox messages
@@ -47,12 +51,8 @@ Conditional and real: every delivered message appends its rendered turn to the t
 
 Append-only per target session. Each admitted mail extends the transcript after the existing prefix, so previously cached prefixes stay reusable; a stale-lease redelivery can append a duplicate turn after a crash window, replacing nothing but adding tokens consumers must tolerate duplicates of.
 
-## Wire admission
-
-Non-dsh callers reach the same drain through the host API's `mailbox.publish` ([the apiproxy](../../host/apiproxy/README.md)), which wraps the exported [`publishAndWake`](./src/index.ts): loud roster validation against every mounted bridge's addresses, one store write through the default provider, one immediate routing pass, and a `delivered`/`queued` disposition taken from what this wake's settlements observed. Terminal routing failures reject with the recorded reason instead of a false-fast acknowledgment.
-
 ## Known Limitations and Deferred Work
 
-- **No pending-directory discovery** — the roster is configuration-declared; scanning a store's unknown addresses needs a provider enumeration surface the Service Definition does not ship yet (`discoverPending` stays unplanned until then).
+- **Roster stays configuration-declared** — the bridge delivers to the addresses its config names; pending-address discovery exists on the provider seam (`claimableAddresses`, consumed by the seat-runner daemon), but the bridge does not self-extend its roster from the store.
 - **Single-store resolution** — deliveries ride the registry's default provider only; per-address provider routing waits for a consumer need.
 - **Steering refusal is best-effort** — a boundary rejection silently degrades to queueing within the same cycle; there is no retry-later signal distinct from admission.

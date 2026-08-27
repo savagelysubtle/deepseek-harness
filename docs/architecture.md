@@ -95,6 +95,8 @@ The session log is the source of the context the model sees. `deriveMessages()` 
 
 **Model-visible means logged.** Anything that reaches a model request must be reconstructable from the log, and a runtime invariant asserts it. This is why a new model-visible input requires a new session event: extend `SessionEventMap` and render from the log.
 
+**One writer per session log.** A named session's log has exactly one legitimate writer at a time: the process holding its per-name lock file. Every path that runs the session's turns — a terminal command, a scripted run, a mail-triggered wake — goes through the same headless entrypoint and takes the same lock, so two contenders resolve cleanly: one acquires the lock, the other receives a busy error. The always-on web host is never a writer for a named session; while a live owner holds the lock, the host follows the owner's log read-only (see [packages/host/apiproxy](../packages/host/apiproxy/README.md)).
+
 ## Capability seams
 
 A **seam** is a swappable capability with three roles: a **Service Definition** declaring the interface, a **Service Provider** implementing it, and a **Consumer** using it, commonly a model-facing tool. A package may combine roles, but one role alone is not a seam; adding a capability means designing all three ([capability graph](capability-seams.md)).

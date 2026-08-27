@@ -126,15 +126,18 @@ type MailboxOutcome =
 
 ## 提供方契约
 
-提供方在“一个部署命名空间对应一个逻辑存储”上实现这三种操作；地址不携带提供方限定符，因此今天不存在跨提供方寻址。
+提供方在“一个部署命名空间对应一个逻辑存储”上实现这四种操作；地址不携带提供方限定符，因此今天不存在跨提供方寻址。
 
 | 操作 | 契约 |
 |---|---|
 | `publish(message, signal?)` | 把一条消息持久化存储并分配新 id；signal 拥有从发起到存储接受之间的准入。 |
 | `claim(filter, signal?)` | 原子地把可认领的赢家移到 `claimed` 并返回其租约；返回少于 `limit` 属正常。 |
 | `settle(leaseRef, outcome, signal?)` | 记录一条租约的终态，或以 `pending` 顺延；只有现行 ref 才能落定。 |
+| `claimableAddresses(filter, signal?)` | 枚举持有至少一条可认领消息的地址，镜像 `claim` 的选择；唤醒驱动器通过它发现工作，而不是自持座位花名册。 |
 
 地址解析策略（chair-to-chair 别名）叠加在文法之上：保留的 `AddressResolutionExtension = never` 在 [`provider.ts`](../../packages/mailbox/mailbox/src/provider.ts) 中标记该扩展点，目前没有任何解析策略随附发布。随附的存储是 [dsh-mailbox-local](../../packages/mailbox/local)，以提供方名称 `local` 注册：基于 `node:sqlite` 的单个 SQLite 文件，其单调 `SCHEMA_VERSION` 戳记（当前为 2）使打开任何外来、更旧或更新的数据库响亮失败而非就地迁移，其守卫式事务认领保证每条消息恰有一个赢家（[sqlite.ts](../../packages/mailbox/local/src/sqlite.ts)）。
+
+[seat-runner 守护进程](../../packages/mailbox/seat-runner/README.md) 消费 `claimableAddresses`，在宿主旁边启动唤醒运行——与人工运行相同的 headless 入口点和按名称锁，因此邮件永远不会把宿主变成会话日志的写入者（[architecture.md](../architecture.md) § "会话日志"中的一次写入规则）。
 
 ## 投递
 

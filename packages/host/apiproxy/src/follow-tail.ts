@@ -53,14 +53,13 @@ function namedSessionToken(sessionId: SessionId): string | undefined {
  * owner" rather than throwing. Only a lock file naming a pid that is
  * currently provably alive counts as a live owner.
  *
- * A lock held by THIS process is never a foreign owner. `mailbox-bridge`
- * mounted in this host takes the very same per-name lock while it cold-resumes
- * a dormant seat to deliver mail (`deliverLease`), recording our own pid.
- * Without this check the host would read its own lock as a rival, refuse its
- * own UI input with `agent-busy`, and start tailing a log it is itself
- * writing — fighting itself for every wake-on-arrival delivery.
+ * A held lock naming a live pid is a foreign owner unconditionally — this
+ * host never writes a named session's log, so no holder can be itself (the
+ * one-writer rule in `docs/architecture.md` § "Session log"). The host's UI
+ * input for a followed session refuses with `agent-busy` for exactly that
+ * reason: the lock already belongs to another process.
  * @param sessionId - the transcript identity a caller wants to read or write.
- * @returns the live FOREIGN owner, or undefined when this session has none (or is not a named session at all).
+ * @returns the live owner, or undefined when this session has none (or is not a named session at all).
  */
 export async function liveHeadlessOwner(sessionId: SessionId): Promise<LiveHeadlessOwner | undefined> {
   const token = namedSessionToken(sessionId)
@@ -72,7 +71,6 @@ export async function liveHeadlessOwner(sessionId: SessionId): Promise<LiveHeadl
     return undefined
   }
   if (typeof payload.pid !== 'number' || !Number.isInteger(payload.pid) || payload.pid < 1) return undefined
-  if (payload.pid === process.pid) return undefined
   return namedSessionInternals.isPidAlive(payload.pid) ? { pid: payload.pid } : undefined
 }
 

@@ -34,7 +34,7 @@ Providers implement [`MailboxProvider`](./src/provider.ts) and register through 
 
 ## Model Experience
 
-None, as this package registers no tools, prompts, or context sections; its only model-visible contribution arrives when a consumer delivers messages as user turns attributed to the merged `mailbox` message source.
+Indirectly, through its consumers: the bridge and the headless runner render admitted messages as user turns attributed to the merged `mailbox` message source; the seam registers no prompt or schema of its own.
 
 #### KV Cache effect
 

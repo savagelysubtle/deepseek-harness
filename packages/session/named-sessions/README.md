@@ -22,7 +22,7 @@ Callers own the name→address map (channel routing, dashboards); this package o
 
 ## Model Experience
 
-None — nothing here reaches a model request.
+None, as the package derives session ids and lock artifacts with no tool, prompt, or context registration of its own.
 
 #### KV Cache effect
 

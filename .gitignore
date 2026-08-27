@@ -41,4 +41,5 @@ worktrees/
 .agents/worktrees/
 .typert-*/
 interagentstuff/
+interagent/
 *.code-workspace

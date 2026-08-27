@@ -7,7 +7,7 @@
  * @module @deepseek-ai/dsh-mailbox/provider
  */
 
-import type { MailboxClaimFilter, MailboxLease, MailboxMessage, MailboxMessageId, MailboxOutcome } from './types.ts'
+import type { MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxMessage, MailboxMessageId, MailboxOutcome, MailboxStalenessFilter } from './types.ts'
 
 /**
  * One swappable mailbox storage backend. Providers own durability and
@@ -49,6 +49,19 @@ export interface MailboxProvider {
    * @param signal - caller cancellation owning the settlement write.
    */
   settle(leaseRef: MailboxLease['leaseRef'], outcome: MailboxOutcome, signal?: AbortSignal): Promise<void>
+
+  /**
+   * Enumerate every address holding at least one claimable message —
+   * `pending`, or `claimed` past the staleness bound — mirroring
+   * {@link claim}'s selection exactly. A wake driver discovers work through
+   * this instead of maintaining its own seat roster; a returned address
+   * yields at least one lease from a subsequent claim against it, unless a
+   * concurrent claimer wins the message first (the at-least-once contract).
+   * @param filter - the staleness bound shared with {@link claim}.
+   * @param signal - caller cancellation owning the scan.
+   * @returns the addresses with claimable work, in provider-determined order.
+   */
+  claimableAddresses(filter: MailboxStalenessFilter, signal?: AbortSignal): Promise<readonly MailboxAddress[]>
 }
 
 /**

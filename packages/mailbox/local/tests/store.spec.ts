@@ -271,6 +271,35 @@ describe('service mounting', () => {
   })
 })
 
+describe('claimableAddresses', () => {
+  it('lists addresses with pending work, sorted, and drops them once claimed', async () => {
+    const store = storeWith(fakeClock().clock)
+    await store.publish({ to: FIELD, from: 'gotham:alfred' })
+    await store.publish({ to: OPS, from: 'gotham:alfred' })
+    await expect(store.claimableAddresses({ staleClaimMs: 30_000 })).resolves.toEqual([FIELD, OPS])
+    await store.claim(filter([OPS]))
+    await expect(store.claimableAddresses({ staleClaimMs: 30_000 })).resolves.toEqual([FIELD])
+    store.close()
+  })
+
+  it('counts a stale-claimed row as claimable but not a fresh claim', async () => {
+    const { clock, advance } = fakeClock()
+    const store = storeWith(clock)
+    await store.publish({ to: OPS, from: 'gotham:alfred' })
+    await store.claim(filter([OPS]))
+    await expect(store.claimableAddresses({ staleClaimMs: 30_000 })).resolves.toEqual([])
+    advance(31_000)
+    await expect(store.claimableAddresses({ staleClaimMs: 30_000 })).resolves.toEqual([OPS])
+    store.close()
+  })
+
+  it('returns nothing for an empty store', async () => {
+    const store = storeWith(fakeClock().clock)
+    await expect(store.claimableAddresses({ staleClaimMs: 30_000 })).resolves.toEqual([])
+    store.close()
+  })
+})
+
 describe('config resolution', () => {
   it('defaults to the harness home, resolves configured paths absolutely, keeps the memory sentinel, rejects blanks', () => {
     expect(resolveMailboxPath()).toMatch(/mailbox[/\\]mailbox\.db$/)

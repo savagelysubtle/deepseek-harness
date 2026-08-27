@@ -15,8 +15,8 @@
 import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import type {
-  MailboxClaimFilter, MailboxLease, MailboxLeaseRef, MailboxMessage,
-  MailboxMessageId, MailboxOutcome, MailboxProvider,
+  MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxLeaseRef, MailboxMessage,
+  MailboxMessageId, MailboxOutcome, MailboxProvider, MailboxStalenessFilter,
 } from '@deepseek-ai/dsh-mailbox'
 import type { MailboxClock, MessageRow } from './types.ts'
 
@@ -104,6 +104,12 @@ export function openMailboxDatabase(path: string): DatabaseSync {
   // local disk. Rollback-journal fallbacks for network mounts stay deferred
   // until a deployment needs them (see README Known Limitations).
   db.exec('PRAGMA journal_mode = WAL')
+  // Fixed busy timeout: WAL admits concurrent readers and still serializes
+  // writers, and SQLite's default busy timeout is zero — a second writer
+  // overlapping an open transaction fails with SQLITE_BUSY immediately. The
+  // store's contract is concurrent multi-process publishers and claimers, so
+  // a contended writer waits for the holder instead of failing the send.
+  db.exec('PRAGMA busy_timeout = 5000')
   return db
 }
 
@@ -318,6 +324,24 @@ export class SqliteMailboxStore implements MailboxProvider {
     if (changes !== 1) {
       throw new Error(`mailbox settlement rejected: the lease for message "${id}" is unknown, already settled, or was reclaimed after going stale`)
     }
+  }
+
+  /**
+   * Enumerate addresses holding at least one claimable row — `pending`, or
+   * `claimed` past the staleness bound — mirroring {@link claim}'s WHERE
+   * clause exactly, so a wake driver's discovery and the claim's admission
+   * can never disagree about what counts as work.
+   */
+  async claimableAddresses(filter: MailboxStalenessFilter, signal?: AbortSignal): Promise<readonly MailboxAddress[]> {
+    signal?.throwIfAborted()
+    const cutoff = this.clock() - filter.staleClaimMs
+    const rows = this.db.prepare(`
+      SELECT DISTINCT to_address
+      FROM messages
+      WHERE state = 'pending' OR (state = 'claimed' AND claimed_at <= ?)
+      ORDER BY to_address
+    `).all(cutoff) as unknown as Array<{ to_address: string }>
+    return rows.map(row => row.to_address as MailboxAddress)
   }
 
   /** Release the database handle; the store is unusable afterwards. */

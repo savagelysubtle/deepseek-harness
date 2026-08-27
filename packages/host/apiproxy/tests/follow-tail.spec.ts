@@ -42,10 +42,8 @@ const FOREIGN_PID = process.pid + 1
 /**
  * Write a lock naming ANOTHER process, in the exact format
  * `acquireNamedSessionLock` writes. A test cannot take a genuinely foreign
- * lock through the real API — that records `process.pid`, which the probe
- * deliberately ignores (the bridge mounted in this host holds those while it
- * cold-resumes a seat to deliver mail, and a host must not read its own lock
- * as a rival).
+ * lock through the real API — that records `process.pid` — so foreign-holding
+ * scenarios write the file directly and pair it with a stubbed liveness probe.
  */
 function writeForeignLock(name: string, pid = FOREIGN_PID): void {
   const path = lockPathForToken(deriveNamedSessionId(name).slice('named-'.length))
@@ -72,14 +70,15 @@ describe('liveHeadlessOwner', () => {
       .resolves.toEqual({ pid: FOREIGN_PID })
   })
 
-  it('ignores a lock held by THIS process, so a host never fences itself out', async () => {
-    // The bridge mounted in this host takes exactly this lock while it
-    // cold-resumes a seat to deliver mail. Reading it as a foreign owner would
-    // make the host refuse its own UI input and tail a log it is writing.
+  it('reads the host\'s own lock as a live owner — any holder is foreign', async () => {
+    // The one-writer rule gives this host no legitimate way to hold a named
+    // session's lock: a lock naming this pid is a holder to fence against,
+    // not a self-exemption (docs/architecture.md § "Session log").
     process.env.DSH_HOME = tempDir('dsh-follow-home-')
     const lock = acquireNamedSessionLock('self-held-seat')
     try {
-      await expect(liveHeadlessOwner(deriveNamedSessionId('self-held-seat'))).resolves.toBeUndefined()
+      await expect(liveHeadlessOwner(deriveNamedSessionId('self-held-seat')))
+        .resolves.toEqual({ pid: process.pid })
     } finally {
       lock.release()
     }

@@ -51,7 +51,7 @@ None outbound. Consumers of the frame stream implement any AG-UI client; the pro
 
 ## Model Experience
 
-None — nothing here reaches a model request. The projection reads the log and writes sockets.
+None, as the server only projects the session log onto outbound AG-UI sockets and registers nothing model-facing.
 
 #### KV Cache effect
 

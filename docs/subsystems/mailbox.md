@@ -126,15 +126,18 @@ type MailboxOutcome =
 
 ## The provider contract
 
-A provider implements the three operations over one logical store per deployment namespace; addresses carry no provider qualifier, so cross-provider addressing does not exist today.
+A provider implements the four operations over one logical store per deployment namespace; addresses carry no provider qualifier, so cross-provider addressing does not exist today.
 
 | Operation | Contract |
 |---|---|
 | `publish(message, signal?)` | Stores one message durably and assigns it a fresh id; the signal owns admission until the store accepts. |
 | `claim(filter, signal?)` | Atomically moves claimable winners to `claimed` and returns their leases; fewer than `limit` is normal. |
 | `settle(leaseRef, outcome, signal?)` | Records one lease's terminal outcome, deferring with `pending`; only a current ref settles. |
+| `claimableAddresses(filter, signal?)` | Enumerates addresses holding at least one claimable message, mirroring `claim`'s selection; wake drivers discover work through it instead of keeping their own seat roster. |
 
 Address-resolution policies (chair-to-chair aliasing) layer ON TOP of the grammar: the reserved `AddressResolutionExtension = never` marks the extension point in [`provider.ts`](../../packages/mailbox/mailbox/src/provider.ts), and no resolution policy ships today. The shipped store is [dsh-mailbox-local](../../packages/mailbox/local), registering as provider `local`: one SQLite file over `node:sqlite` whose monotonic `SCHEMA_VERSION` stamp (currently 2) makes opening any foreign, older, or newer database fail loud instead of migrating, and whose guarded transaction claims admit exactly one winner per message ([sqlite.ts](../../packages/mailbox/local/src/sqlite.ts)).
+
+The [seat-runner daemon](../../packages/mailbox/seat-runner/README.md) consumes `claimableAddresses` to start wake runs beside the host — the same headless entrypoint and per-name lock a human run takes, so mail never turns the host into a session-log writer (the one-writer rule in [architecture.md](../architecture.md) § "Session log").
 
 ## Delivery
 

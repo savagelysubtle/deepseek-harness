@@ -17,9 +17,13 @@ import { parseMailboxAddress } from './address.ts'
 import './source.ts'
 
 export { parseMailboxAddress, formatMailboxAddress, MAILBOX_ADDRESS_SEPARATOR, MAILBOX_SEGMENT_PATTERN_SOURCE } from './address.ts'
-export type { MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxLeaseRef, MailboxMessage, MailboxMessageId, MailboxOutcome, MailboxState } from './types.ts'
+export type { MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxLeaseRef, MailboxMessage, MailboxMessageId, MailboxOutcome, MailboxState, MailboxStalenessFilter } from './types.ts'
 export type { AddressResolutionExtension, MailboxProvider } from './provider.ts'
 export type { MailboxMessageSource } from './source.ts'
+export {
+  findOrgRegistryRoute, loadOrgRegistry, orgRegistryAllows, parseOrgRegistry, resolveSeatCwd,
+} from './org-registry.ts'
+export type { OrgRegistry, OrgRegistryEdge, OrgRegistryParseOptions, OrgRegistrySeat } from './org-registry.ts'
 
 /** Deployment config of the registry service. */
 export interface Config {

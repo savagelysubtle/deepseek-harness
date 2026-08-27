@@ -90,3 +90,9 @@ export interface MailboxClaimFilter {
   /** Age (milliseconds) past which an abandoned `claimed` message reverts to claimable. */
   readonly staleClaimMs: number
 }
+
+/** Staleness bound for enumerating claimable work. */
+export interface MailboxStalenessFilter {
+  /** Age (milliseconds) past which an abandoned `claimed` message counts as claimable again; mirrors `MailboxClaimFilter.staleClaimMs`. */
+  readonly staleClaimMs: number
+}
