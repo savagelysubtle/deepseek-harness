@@ -28,11 +28,11 @@ afterEach(() => {
   homes = []
 })
 
-const TARGET = formatMailboxAddress('sc', 'target')
+const TARGET = formatMailboxAddress('target')
 
-/** The spec every routing test drains with: one address, permissive staleness. */
-function targetSpec(addresses = ['sc:target']): Parameters<typeof bridge.resolveBridgeSpec>[0] {
-  return { addresses, pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000 }
+/** The spec every routing test drains with: one address, permissive staleness, the fixture peer sender admitted. */
+function targetSpec(addresses = ['target']): Parameters<typeof bridge.resolveBridgeSpec>[0] {
+  return { addresses, pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000, admitFrom: ['sender'] }
 }
 
 interface LiveAgentStub {
@@ -107,7 +107,7 @@ async function makeHarness(options: {
 }
 
 async function publishHello(ctx: ContextType): Promise<string> {
-  return ctx.mailbox.publish({ to: TARGET, from: 'sc:sender', subject: 'hello' })
+  return ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'hello' })
 }
 
 /** Read one message's stored lifecycle row straight out of the provider file. */
@@ -134,7 +134,7 @@ describe('spec resolution', () => {
 
   it('brands served addresses and applies explicit values over defaults', () => {
     const spec = bridge.resolveBridgeSpec({
-      addresses: ['sc:target'],
+      addresses: ['target'],
       pollIntervalMs: 5,
       maxClaimPerCycle: 2,
       staleClaimMs: 3,
@@ -145,7 +145,7 @@ describe('spec resolution', () => {
     expect(spec.maxClaimPerCycle).toBe(2)
     expect(spec.staleClaimMs).toBe(3)
     expect(spec.lockStaleMs).toBe(4)
-    const defaulted = bridge.resolveBridgeSpec({ addresses: ['sc:target'] })
+    const defaulted = bridge.resolveBridgeSpec({ addresses: ['target'] })
     expect(defaulted.pollIntervalMs).toBe(bridge.DEFAULT_POLL_INTERVAL_MS)
     expect(defaulted.maxClaimPerCycle).toBe(bridge.DEFAULT_MAX_CLAIM_PER_CYCLE)
     expect(defaulted.staleClaimMs).toBe(bridge.DEFAULT_STALE_CLAIM_MS)
@@ -156,18 +156,18 @@ describe('spec resolution', () => {
 describe('seatAliases resolution validation', () => {
   it('rejects invalid addresses, empty session ids, and duplicate rows loud', () => {
     expect(() => bridge.resolveBridgeSpec({
-      addresses: ['sc:target'],
+      addresses: ['target'],
       seatAliases: [{ address: 'no separator', sessionId: 'session-x' }],
     })).toThrow(/invalid mailbox address/)
     expect(() => bridge.resolveBridgeSpec({
-      addresses: ['sc:target'],
-      seatAliases: [{ address: 'sc:target', sessionId: '   ' }],
+      addresses: ['target'],
+      seatAliases: [{ address: 'target', sessionId: '   ' }],
     })).toThrow(/carries an empty session id/)
     expect(() => bridge.resolveBridgeSpec({
-      addresses: ['sc:target'],
+      addresses: ['target'],
       seatAliases: [
-        { address: 'sc:target', sessionId: 'session-one' },
-        { address: 'sc:target', sessionId: 'session-two' },
+        { address: 'target', sessionId: 'session-one' },
+        { address: 'target', sessionId: 'session-two' },
       ],
     })).toThrow(/declared more than once/)
   })
@@ -175,28 +175,28 @@ describe('seatAliases resolution validation', () => {
 
 describe('delivery rendering', () => {
   it('joins subject and payload bodies and keeps provenance in the merged source', () => {
-    const base = { id: 'm-1' as never, to: TARGET, from: 'sc:sender' }
+    const base = { id: 'm-1' as never, to: TARGET, from: 'sender' }
     expect(relayText({ message: base, leaseRef: 'r' as never, claimedAt: 1 })).toBe('')
     expect(relayText({ message: { ...base, subject: 'hello', payload: { op: 'ping' } }, leaseRef: 'r' as never, claimedAt: 1 }))
       .toBe('hello\n\n{\n  "op": "ping"\n}')
     expect(relayText({ message: { ...base, payload: 'plain body' }, leaseRef: 'r' as never, claimedAt: 1 })).toBe('plain body')
     const sourced = relaySource({ message: { ...base, traceId: 't-9' }, leaseRef: 'r' as never, claimedAt: 1 })
     expect(sourced).toMatchObject({
-      kind: 'mailbox', form: 'relay', address: TARGET, from: 'sc:sender', messageId: 'm-1', traceId: 't-9',
+      kind: 'mailbox', form: 'relay', address: TARGET, from: 'sender', messageId: 'm-1', traceId: 't-9',
     })
     expect(relaySource({ message: base, leaseRef: 'r' as never, claimedAt: 1 })).not.toHaveProperty('traceId')
-    expect(() => relaySource({ message: { to: TARGET, from: 'sc:sender' }, leaseRef: 'r' as never, claimedAt: 1 })).toThrow(/no provider id/)
+    expect(() => relaySource({ message: { to: TARGET, from: 'sender' }, leaseRef: 'r' as never, claimedAt: 1 })).toThrow(/no provider id/)
     expect(admittedOutcome({ message: base, leaseRef: 'r' as never, claimedAt: 1 }).state).toBe('done')
   })
 
   it('marks a blocking sender with the literal [BLOCKING] token ahead of the content', () => {
-    const base = { id: 'm-1' as never, to: TARGET, from: 'sc:sender' }
+    const base = { id: 'm-1' as never, to: TARGET, from: 'sender' }
     expect(relayText({ message: { ...base, blocking: true, subject: 'wake now' }, leaseRef: 'r' as never, claimedAt: 1 }))
       .toBe('[BLOCKING]\n\nwake now')
   })
 
   it('renders non-blocking turns without the [BLOCKING] token anywhere', () => {
-    const base = { id: 'm-1' as never, to: TARGET, from: 'sc:sender' }
+    const base = { id: 'm-1' as never, to: TARGET, from: 'sender' }
     expect(relayText({ message: { ...base, subject: 'routine note' }, leaseRef: 'r' as never, claimedAt: 1 })).toBe('routine note')
     expect(relayText({ message: { ...base, subject: 'routine note', blocking: false }, leaseRef: 'r' as never, claimedAt: 1 }))
       .toBe('routine note')
@@ -238,7 +238,7 @@ describe('routing outcomes', () => {
       liveBySession: { [derived]: refusing },
       persisted: ['target'],
     })
-    const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'sc:chair', subject: 'abort now' })
+    const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'abort now' })
     await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec()))
     expect(refusing.steer).toHaveBeenCalledTimes(1)
     expect(refusing.followup).toHaveBeenCalledTimes(1)
@@ -296,7 +296,7 @@ describe('routing outcomes', () => {
     mailCli.internals.stdout = { write: () => true }
     try {
       await mailCli.runMailboxCli([
-        'send', '--to', 'sc:down', '--from', 'guest:claude-code',
+        'send', '--to', 'down', '--from', 'claude-code',
         '--type', 'field-report', '--subject', 'outage report', '--db', dbPath,
       ])
     } finally {
@@ -308,23 +308,23 @@ describe('routing outcomes', () => {
     const h = await makeHarness({ persisted: ['down'], storePath: dbPath })
     // The CLI already landed exactly one pending row while the host was down.
     const probe = new DatabaseSync(dbPath)
-    const queued = probe.prepare('SELECT state FROM messages WHERE to_address = ?').all('sc:down') as Array<{ state: string }>
+    const queued = probe.prepare('SELECT state FROM messages WHERE to_address = ?').all('down') as Array<{ state: string }>
     probe.close()
     expect(queued).toEqual([{ state: 'pending' }])
     await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec({
-      addresses: ['sc:down'], pollIntervalMs: 5, maxClaimPerCycle: 10,
-      staleClaimMs: 600_000, admitFromNamespaces: ['guest'],
+      addresses: ['down'], pollIntervalMs: 5, maxClaimPerCycle: 10,
+      staleClaimMs: 600_000, admitFrom: ['claude-code'],
     }))
     expect(h.resumeCalls()).toBe(1)
     const message = h.resumedFollowup.mock.calls[0]?.[0] as {
       source?: { kind?: string; form?: string; from?: string }
       content?: readonly [{ type: string; text: string }]
     }
-    expect(message?.source).toMatchObject({ kind: 'mailbox', form: 'relay', from: 'guest:claude-code' })
+    expect(message?.source).toMatchObject({ kind: 'mailbox', form: 'relay', from: 'claude-code' })
     expect(message?.content?.[0]?.text).toContain('outage report')
 
     const db = new DatabaseSync(dbPath)
-    const rows = db.prepare('SELECT state FROM messages WHERE to_address = ?').all('sc:down') as Array<{ state: string }>
+    const rows = db.prepare('SELECT state FROM messages WHERE to_address = ?').all('down') as Array<{ state: string }>
     db.close()
     expect(rows.map(row => row.state)).toEqual(['done'])
   })
@@ -346,9 +346,9 @@ describe('routing outcomes', () => {
     })
     const bad = await publishHello(h.ctx)
     const good = await h.ctx.mailbox.publish({
-      to: formatMailboxAddress('sc', 'other'), from: 'sc:sender', subject: 'fine',
+      to: formatMailboxAddress('other'), from: 'sender', subject: 'fine',
     })
-    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(['sc:target', 'sc:other'])))
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(['target', 'other'])))
     const badRow = await rowState(h.storePath, bad)
     expect(badRow.state).toBe('failed')
     expect(JSON.parse(badRow.result ?? '{}').reason).toContain('boom')
@@ -369,13 +369,13 @@ describe('seat-alias routing (web-host live seats)', () => {
         [derived]: { status: 'idle', followup: vi.fn(), steer: vi.fn() },
         ['session-seat-arbitrary-id']: seatLive,
       },
-      seatAliases: [{ address: 'sc:batman', sessionId: 'session-seat-arbitrary-id' }],
+      seatAliases: [{ address: 'batman', sessionId: 'session-seat-arbitrary-id' }],
     })
-    const id = await h.ctx.mailbox.publish({ to: formatMailboxAddress('sc', 'batman'), from: 'gotham:alfred', subject: 'wake' })
+    const id = await h.ctx.mailbox.publish({ to: formatMailboxAddress('batman'), from: 'alfred', subject: 'wake' })
     await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec({
-      addresses: ['sc:batman'], pollIntervalMs: 5, maxClaimPerCycle: 10,
-      staleClaimMs: 600_000, admitFromNamespaces: ['gotham'],
-      seatAliases: [{ address: 'sc:batman', sessionId: 'session-seat-arbitrary-id' }],
+      addresses: ['batman'], pollIntervalMs: 5, maxClaimPerCycle: 10,
+      staleClaimMs: 600_000, admitFrom: ['alfred'],
+      seatAliases: [{ address: 'batman', sessionId: 'session-seat-arbitrary-id' }],
     }))
     expect(seatLive.steer).toHaveBeenCalledTimes(1)
     expect((seatLive.steer.mock.calls[0]?.[0] as { source: { messageId: string } }).source.messageId).toBe(id)
@@ -408,21 +408,21 @@ describe('seat-alias routing (web-host live seats)', () => {
     } as never)
     ctx.provide('sessions', { flush: vi.fn(async () => {}) } as never)
 
-    await ctx.mailbox.publish({ to: formatMailboxAddress('sc', 'robin'), from: 'guest:council', subject: 'briefing' })
+    await ctx.mailbox.publish({ to: formatMailboxAddress('robin'), from: 'council', subject: 'briefing' })
     await bridge.internals.drainOnce(ctx, bridge.resolveBridgeSpec({
-      addresses: ['sc:robin'], pollIntervalMs: 5, maxClaimPerCycle: 10,
-      staleClaimMs: 600_000, admitFromNamespaces: ['guest'],
-      seatAliases: [{ address: 'sc:robin', sessionId: 'session-seat-arbitrary-id' }],
+      addresses: ['robin'], pollIntervalMs: 5, maxClaimPerCycle: 10,
+      staleClaimMs: 600_000, admitFrom: ['council'],
+      seatAliases: [{ address: 'robin', sessionId: 'session-seat-arbitrary-id' }],
     }))
     expect(resumeCalls).toEqual(['session-seat-arbitrary-id'])
   })
 
   it('an unserved address stays parked — nobody drains what no roster serves', async () => {
     const { ctx, storePath } = await makeHarness({})
-    const unserved = formatMailboxAddress('sc', 'off-roster')
-    await ctx.mailbox.publish({ to: unserved, from: 'gotham:alfred', subject: 'nobody home' })
+    const unserved = formatMailboxAddress('off-roster')
+    await ctx.mailbox.publish({ to: unserved, from: 'alfred', subject: 'nobody home' })
     // A drain over a DIFFERENT roster must leave the off-roster row untouched.
-    await bridge.internals.drainOnce(ctx, bridge.resolveBridgeSpec(targetSpec(['sc:target'])))
+    await bridge.internals.drainOnce(ctx, bridge.resolveBridgeSpec(targetSpec(['target'])))
     const db = new DatabaseSync(storePath)
     const rows = db.prepare('SELECT state FROM messages WHERE to_address = ?').all(String(unserved)) as Array<{ state: string }>
     db.close()
@@ -430,21 +430,21 @@ describe('seat-alias routing (web-host live seats)', () => {
     // And publishAndWake keeps refusing it loud (existing behavior preserved):
     // mount a real roster first so the check reaches the not-served branch.
     ctx.provide('mailboxBridgeSpecs', [bridge.resolveBridgeSpec(targetSpec())] as never)
-    await expect(bridge.publishAndWake(ctx, { to: String(unserved), from: 'gotham:alfred' }))
+    await expect(bridge.publishAndWake(ctx, { to: String(unserved), from: 'alfred' }))
       .rejects.toThrow(/not served by any mounted mailbox bridge/)
   })
 })
 
 describe('drain-time sender admission', () => {
   /** The spec variant under test, differing only in the guest opt-in. */
-  function specWith(admitFromNamespaces: readonly string[]): Parameters<typeof bridge.resolveBridgeSpec>[0] {
-    return { addresses: ['sc:target'], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000, admitFromNamespaces }
+  function specWith(admitFrom: readonly string[]): Parameters<typeof bridge.resolveBridgeSpec>[0] {
+    return { addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000, admitFrom }
   }
 
   it('settles a non-admitted sender failed at drain and never wakes the target', async () => {
     const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
     const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
-    const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'guest:claude-code', subject: 'unsolicited' })
+    const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'claude-code', subject: 'unsolicited' })
     await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specWith([])))
     expect(live.followup).not.toHaveBeenCalled()
     const row = await rowState(h.storePath, id)
@@ -455,8 +455,8 @@ describe('drain-time sender admission', () => {
   it('delivers an explicitly admitted guest sender like any colleague', async () => {
     const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
     const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
-    const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'guest:claude-code', subject: 'council report' })
-    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specWith(['guest'])))
+    const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'claude-code', subject: 'council report' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specWith(['claude-code'])))
     expect(live.steer).toHaveBeenCalledTimes(1)
     await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'done' })
   })
@@ -493,10 +493,10 @@ describe('terminal-failure bounces (every drop visible)', () => {
   it("bounce round-trip: rejected guest mail produces a 'bounce' row carrying the original traceId and reason", async () => {
     const h = await makeHarness({})
     const id = await h.ctx.mailbox.publish({
-      to: TARGET, from: 'guest:council', subject: 'request', traceId: 'tr-42',
+      to: TARGET, from: 'council', subject: 'request', traceId: 'tr-42',
     })
     await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec()))
-    const bounces = rowsTo(h.storePath, 'guest:council').filter(row => row.type === 'bounce')
+    const bounces = rowsTo(h.storePath, 'council').filter(row => row.type === 'bounce')
     expect(bounces).toHaveLength(1)
     const bounceRow = bounces[0]
     expect(bounceRow?.trace_id).toBe('tr-42')
@@ -511,12 +511,12 @@ describe('terminal-failure bounces (every drop visible)', () => {
 
   it("'unknown-address' bounces too — the fix is general, not guest-specific", async () => {
     const h = await makeHarness({ persisted: false })
-    const ghost = formatMailboxAddress('sc', 'ghost')
-    await h.ctx.mailbox.publish({ to: ghost, from: 'sc:alice', subject: 'typo send' })
+    const ghost = formatMailboxAddress('ghost')
+    await h.ctx.mailbox.publish({ to: ghost, from: 'alice', subject: 'typo send' })
     // The roster serves both names: the typo'd one fails route-time discovery
     // while remaining grammatically servable.
-    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(['sc:alice', 'sc:ghost'])))
-    const bounces = rowsTo(h.storePath, 'sc:alice').filter(row => row.type === 'bounce')
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(['alice', 'ghost'])))
+    const bounces = rowsTo(h.storePath, 'alice').filter(row => row.type === 'bounce')
     expect(bounces).toHaveLength(1)
     expect(bounces[0]?.trace_id).toBeNull()
     expect(JSON.parse(bounces[0]?.payload ?? '{}').reason).toBe('unknown-address')
@@ -527,31 +527,31 @@ describe('terminal-failure bounces (every drop visible)', () => {
     const db = new DatabaseSync(h.storePath)
     db.prepare(
       "INSERT INTO messages (id, to_address, from_address, type, state, created_at) VALUES (?, ?, ?, 'bounce', 'pending', 500)",
-    ).run('bb-1', String(formatMailboxAddress('sc', 'ghost')), 'sc:bouncer')
+    ).run('bb-1', String(formatMailboxAddress('ghost')), 'bouncer')
     db.prepare(
       "INSERT INTO messages (id, to_address, from_address, state, created_at) VALUES (?, ?, ?, 'pending', 501)",
     ).run('up-1', String(TARGET), 'opaque-sender-token')
     db.close()
-    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(['sc:bouncer'])))
-    expect(rowsTo(h.storePath, 'sc:bouncer')).toEqual([])
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(['bouncer'])))
+    expect(rowsTo(h.storePath, 'bouncer')).toEqual([])
     expect(rowsTo(h.storePath, 'opaque-sender-token')).toEqual([])
   })
 })
 
 describe('publishAndWake', () => {
   /** Attach one bridge's resolved roster so the wake path sees it as served. */
-  function serveSpecs(ctx: ContextType, addresses: readonly string[], admitFromNamespaces: readonly string[]): void {
+  function serveSpecs(ctx: ContextType, addresses: readonly string[], admitFrom: readonly string[]): void {
     ctx.provide('mailboxBridgeSpecs', [bridge.resolveBridgeSpec({
       addresses: [...addresses], pollIntervalMs: 5, maxClaimPerCycle: 10,
-      staleClaimMs: 600_000, admitFromNamespaces,
+      staleClaimMs: 600_000, admitFrom,
     })] as never)
   }
 
   it('delivers into a live target and reports the admission', async () => {
     const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
     const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
-    serveSpecs(h.ctx, ['sc:target'], ['wire'])
-    const result = await bridge.publishAndWake(h.ctx, { to: 'sc:target', from: 'wire:ceo', subject: 'wake' })
+    serveSpecs(h.ctx, ['target'], ['ceo'])
+    const result = await bridge.publishAndWake(h.ctx, { to: 'target', from: 'ceo', subject: 'wake' })
     expect(result.disposition).toBe('delivered')
     expect(live.steer).toHaveBeenCalledTimes(1)
     expect((live.steer.mock.calls[0]?.[0] as { source: { messageId: string } }).source.messageId).toBe(result.messageId)
@@ -560,10 +560,10 @@ describe('publishAndWake', () => {
 
   it('reports queued while residency holds the target elsewhere', async () => {
     const h = await makeHarness({ persisted: true })
-    serveSpecs(h.ctx, ['sc:target'], ['wire'])
+    serveSpecs(h.ctx, ['target'], ['ceo'])
     const lock = acquireNamedSessionLock('target')
     try {
-      const result = await bridge.publishAndWake(h.ctx, { to: 'sc:target', from: 'wire:ceo', subject: 'hold' })
+      const result = await bridge.publishAndWake(h.ctx, { to: 'target', from: 'ceo', subject: 'hold' })
       expect(result.disposition).toBe('queued')
       await expect(rowState(h.storePath, result.messageId)).resolves.toMatchObject({ state: 'pending' })
     } finally {
@@ -573,28 +573,28 @@ describe('publishAndWake', () => {
 
   it('rejects grammar violations before anything is stored', async () => {
     const h = await makeHarness({ persisted: true })
-    serveSpecs(h.ctx, ['sc:target'], [])
-    await expect(bridge.publishAndWake(h.ctx, { to: 'no separator', from: 'wire:ceo' }))
+    serveSpecs(h.ctx, ['target'], [])
+    await expect(bridge.publishAndWake(h.ctx, { to: 'no separator', from: 'ceo' }))
       .rejects.toThrow(/invalid mailbox address/)
   })
 
   it('rejects addresses outside every mounted roster loud', async () => {
     const h = await makeHarness({ persisted: true })
-    serveSpecs(h.ctx, ['sc:target'], [])
-    await expect(bridge.publishAndWake(h.ctx, { to: 'sc:stranger', from: 'wire:ceo' }))
+    serveSpecs(h.ctx, ['target'], [])
+    await expect(bridge.publishAndWake(h.ctx, { to: 'stranger', from: 'ceo' }))
       .rejects.toThrow(/not served by any mounted mailbox bridge/)
   })
 
   it('surfaces a terminal routing failure with its recorded reason', async () => {
     const h = await makeHarness({ persisted: false })
-    serveSpecs(h.ctx, ['sc:target'], ['wire'])
-    await expect(bridge.publishAndWake(h.ctx, { to: 'sc:target', from: 'wire:ceo', subject: 'nobody home' }))
+    serveSpecs(h.ctx, ['target'], ['ceo'])
+    await expect(bridge.publishAndWake(h.ctx, { to: 'target', from: 'ceo', subject: 'nobody home' }))
       .rejects.toThrow(/mailbox delivery failed: unknown-address/)
   })
 
   it('refuses to publish when no bridge is composed at all', async () => {
     const h = await makeHarness({ persisted: true })
-    await expect(bridge.publishAndWake(h.ctx, { to: 'sc:target', from: 'wire:ceo' }))
+    await expect(bridge.publishAndWake(h.ctx, { to: 'target', from: 'ceo' }))
       .rejects.toThrow(/no mailbox bridge is composed/)
   })
 })

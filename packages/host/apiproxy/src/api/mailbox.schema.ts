@@ -8,10 +8,9 @@ import { z } from 'zod'
 import type { MailboxPublishPayload, MailboxPublishValue } from './mailbox.ts'
 import type { Wire } from './rpc.schema.ts'
 
-/** One addressed publish request: full `address` form or `namespace`+`name` form. */
+/** One addressed publish request: bare seat address either way. */
 export const mailboxPublishRequestSchema = z.object({
   address: z.string().min(1).optional(),
-  namespace: z.string().min(1).optional(),
   name: z.string().min(1).optional(),
   from: z.string().min(1),
   type: z.string().min(1).optional(),

@@ -29,8 +29,6 @@ export interface HeadlessStartupValues {
   sessionName?: string
   /** The `--format` value; absent lets the runner schema default to `text`. */
   format?: OutputFormat
-  /** The `--mailbox-namespace` value; absent serves no mailbox address. */
-  mailboxNamespace?: string
 }
 
 /**
@@ -65,7 +63,7 @@ export function apply(ctx: Context): void {
     const task = program.args.join(' ')
     if (task.trim() === '') program.error('error: a task is required, for example: dsh --profile headless "run the tests"')
     const values: HeadlessStartupValues = { task }
-    const opts = program.opts<{ sessionName?: string; format?: string; mailboxNamespace?: string }>()
+    const opts = program.opts<{ sessionName?: string; format?: string }>()
     const sessionName = opts.sessionName
     if (sessionName !== undefined) {
       try {
@@ -76,13 +74,6 @@ export function apply(ctx: Context): void {
         program.error(`error: invalid --session-name "${sessionName}": use 1-64 characters of A-Za-z0-9._- starting with A-Za-z0-9`)
       }
       values.sessionName = sessionName
-    }
-    const namespace = opts.mailboxNamespace
-    if (namespace !== undefined) {
-      if (sessionName === undefined) {
-        program.error('error: --mailbox-namespace requires --session-name; an anonymous run has no address to serve')
-      }
-      values.mailboxNamespace = namespace
     }
     const format = opts.format
     if (format !== undefined) {

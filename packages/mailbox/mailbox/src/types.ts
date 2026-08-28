@@ -8,9 +8,10 @@
 import type { Branded } from '@deepseek-ai/dsh-brand'
 
 /**
- * Opaque wire identity of one mailbox endpoint, `<namespace>:<name>`.
- * Grammar and validation live in {@link ./address.ts}; this brand keeps raw
- * strings from crossing a provider boundary unvalidated.
+ * Opaque wire identity of one mailbox endpoint: the seat's bare name, using
+ * the named-session name grammar. Grammar and validation live in
+ * {@link ./address.ts}; this brand keeps raw strings from crossing a
+ * provider boundary unvalidated.
  */
 export type MailboxAddress = Branded<'mailbox-address'>
 
@@ -34,9 +35,9 @@ export type MailboxState = 'pending' | 'claimed' | 'done' | 'failed'
 export interface MailboxMessage {
   /** Provider-assigned durable id; absent on publish input. */
   readonly id?: MailboxMessageId
-  /** Destination address in the `<namespace>:<name>` grammar. */
+  /** Destination address: the recipient seat's bare name. */
   readonly to: MailboxAddress
-  /** Sender address in the same grammar; free-form provenance, never validated against live endpoints. */
+  /** Sender address; free-form provenance, never validated against live endpoints. */
   readonly from: string
   /** Optional machine-readable intent (`notice`, `task`, …) consumers may switch on. */
   readonly type?: string

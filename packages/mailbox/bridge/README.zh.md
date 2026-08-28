@@ -21,7 +21,7 @@
 
 | 字段 | 类型 | 默认 | 语义 |
 |---|---|---|---|
-| `addresses` | string[]? | 缺省 | 服务的完整 `<namespace>:<name>` 端点；空花名册或格式错误在挂载即失败。 |
+| `addresses` | string[]? | 缺省 | 服务的裸座位名端点；空花名册或格式错误在挂载即失败。 |
 | `pollIntervalMs` | number? | `5000` | 排水周期之间的停顿。 |
 | `maxClaimPerCycle` | number? | `10` | 每周期认领租约上限。 |
 | `staleClaimMs` | number? | `60000` | 被遗弃的认领可回收的年龄阈值。 |

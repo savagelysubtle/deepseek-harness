@@ -13,7 +13,7 @@ import { formatMailboxAddress } from '@deepseek-ai/dsh-mailbox'
 import { openMailboxDatabase, SCHEMA_VERSION, SqliteMailboxStore } from '../src/sqlite.ts'
 import * as cli from '../src/cli.ts'
 
-const TARGET = formatMailboxAddress('sc', 'target')
+const TARGET = formatMailboxAddress('target')
 
 let dirs: string[] = []
 const originalStdout = cli.internals.stdout
@@ -45,7 +45,7 @@ describe('dsh-mailbox send/inbox round-trip', () => {
     const dir = tempDir()
     const payloadFile = join(dir, 'payload.json')
     writeFileSync(payloadFile, '{"op":"field-report","detail":"harness web boot dead"}')
-    await run(['send', '--to', String(TARGET), '--from', 'guest:claude-code', '--type', 'field-report',
+    await run(['send', '--to', String(TARGET), '--from', 'claude-code', '--type', 'field-report',
       '--subject', 'outage', '--trace-id', 't-1', '--payload-file', payloadFile])
 
     const peeked = JSON.parse(await run(['inbox', '--address', String(TARGET), '--peek', '--json'])) as Array<{
@@ -59,7 +59,7 @@ describe('dsh-mailbox send/inbox round-trip', () => {
     expect(peeked).toHaveLength(1)
     const first = peeked[0]
     expect(first).toMatchObject({
-      from: 'guest:claude-code', type: 'field-report', subject: 'outage', traceId: 't-1',
+      from: 'claude-code', type: 'field-report', subject: 'outage', traceId: 't-1',
       payload: { op: 'field-report', detail: 'harness web boot dead' },
     })
 
@@ -72,9 +72,9 @@ describe('dsh-mailbox send/inbox round-trip', () => {
   })
 
   it('renders human-readable blocks without --json including an empty mailbox', async () => {
-    await run(['send', '--to', String(TARGET), '--from', 'guest:gemini'])
+    await run(['send', '--to', String(TARGET), '--from', 'gemini'])
     const out = await run(['inbox', '--address', String(TARGET)])
-    expect(out).toContain('from guest:gemini')
+    expect(out).toContain('from gemini')
     const empty = await run(['inbox', '--address', String(TARGET)])
     expect(empty).toContain('(empty)')
   })
@@ -106,19 +106,19 @@ describe('dsh-mailbox failure paths', () => {
     const foreign = openMailboxDatabase(dbPath)
     foreign.prepare('UPDATE mailbox_meta SET value = ?').run(String(SCHEMA_VERSION + 1))
     foreign.close()
-    await expect(cli.runMailboxCli(['send', '--to', String(TARGET), '--from', 'guest:claude-code', '--db', dbPath]))
+    await expect(cli.runMailboxCli(['send', '--to', String(TARGET), '--from', 'claude-code', '--db', dbPath]))
       .rejects.toThrow(`incompatible with this build (${SCHEMA_VERSION})`)
   })
 
   it('rejects malformed addresses before any write', async () => {
     tempDir()
-    await expect(cli.runMailboxCli(['send', '--to', 'no separator', '--from', 'guest:claude-code']))
+    await expect(cli.runMailboxCli(['send', '--to', 'no separator', '--from', 'claude-code']))
       .rejects.toThrow(/invalid mailbox address/)
   })
 
   it('refuses both payload sources together and unknown flags', async () => {
     tempDir()
-    await expect(cli.runMailboxCli(['send', '--to', String(TARGET), '--from', 'guest:c', '--payload-file', 'x.json', '--payload-stdin']))
+    await expect(cli.runMailboxCli(['send', '--to', String(TARGET), '--from', 'c', '--payload-file', 'x.json', '--payload-stdin']))
       .rejects.toThrow(/not both/)
     await expect(cli.runMailboxCli(['inbox', '--wat'])).rejects.toThrow(/unknown argument/)
   })
@@ -126,7 +126,7 @@ describe('dsh-mailbox failure paths', () => {
   it('creates a missing database owner-only when the CLI is the first writer (POSIX)', { skip: process.platform === 'win32' }, async () => {
     const dir = tempDir()
     const nested = join(dir, 'a', 'b', 'mailbox.db')
-    await cli.runMailboxCli(['send', '--to', String(TARGET), '--from', 'guest:claude-code', '--db', nested])
+    await cli.runMailboxCli(['send', '--to', String(TARGET), '--from', 'claude-code', '--db', nested])
     expect(existsSync(nested)).toBe(true)
     expect(statSync(nested).mode & 0o777).toBe(0o600)
     expect(statSync(join(dir, 'a')).mode & 0o777).toBe(0o700)
@@ -138,7 +138,7 @@ describe('dsh-mailbox failure paths', () => {
     execFileSync(
       process.execPath,
       ['--import', 'tsx/esm', join(import.meta.dirname, '../src/cli.ts'), 'send',
-        '--to', String(TARGET), '--from', 'guest:gemini', '--payload-stdin', '--db', dbPath],
+        '--to', String(TARGET), '--from', 'gemini', '--payload-stdin', '--db', dbPath],
       { input: '{"piped": true}', env: { ...process.env, DSH_HOME: dir }, encoding: 'utf8' },
     )
     const drained = JSON.parse(await run(['inbox', '--address', String(TARGET), '--db', dbPath, '--json'])) as Array<{ payload?: unknown }>
@@ -148,7 +148,7 @@ describe('dsh-mailbox failure paths', () => {
   it('leaves no db litter behind for pure validation failures', async () => {
     const dir = tempDir()
     const dbPath = join(dir, 'never.db')
-    await expect(cli.runMailboxCli(['send', '--to', String(TARGET), '--from', 'guest:claude-code', '--payload-file', join(dir, 'missing.json'), '--db', dbPath]))
+    await expect(cli.runMailboxCli(['send', '--to', String(TARGET), '--from', 'claude-code', '--payload-file', join(dir, 'missing.json'), '--db', dbPath]))
       .rejects.toThrow()
     expect(existsSync(dbPath)).toBe(false)
   })

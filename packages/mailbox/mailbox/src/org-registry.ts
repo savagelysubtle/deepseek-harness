@@ -1,11 +1,11 @@
 /**
  * The org registry: the machine-readable roster and topology behind mailbox
- * addressing — seats with their workspaces and namespaces, undirected edges
- * between seats that may exchange mail directly, and the call-up exception.
- * The loader, the sending tool, and the seat-runner daemon read *a* registry
- * and enforce whatever graph it describes; none of them name seats from any
- * particular deployment, so a second project ships by writing a new registry
- * file, never new code.
+ * addressing — seats with their workspaces, undirected edges between seats
+ * that may exchange mail directly, and the call-up exception. The loader,
+ * the sending tool, and the host's wake path read *a* registry and enforce
+ * whatever graph it describes; none of them name seats from any particular
+ * deployment, so a second project ships by writing a new registry file,
+ * never new code.
  *
  * Validation fails loud at parse with the offending key named: an org chart
  * that only exists as prose gets drift of exactly the kind this file exists
@@ -22,15 +22,13 @@ import { MAILBOX_SEGMENT_PATTERN_SOURCE } from './address.ts'
 
 const SEGMENT_PATTERN = new RegExp(MAILBOX_SEGMENT_PATTERN_SOURCE)
 
-/** One seat's roster entry: where it runs and which mailbox namespace it answers. */
+/** One seat's roster entry: where it runs. Its name is its mailbox address. */
 export interface OrgRegistrySeat {
   /**
    * Workspace the seat's runs execute in: an absolute path, or a path
    * relative to the registry's {@link OrgRegistry.baseDir}.
    */
   readonly cwd: string
-  /** Namespace half of the seat's mailbox address (`<namespace>:<name>`). */
-  readonly namespace: string
   /** Marks a department head; documentation metadata, not enforcement data. */
   readonly lead?: boolean
 }
@@ -42,7 +40,7 @@ export type OrgRegistryEdge = readonly [from: string, to: string]
 export interface OrgRegistry {
   /** Absolute base every relative seat `cwd` resolves against. */
   readonly baseDir: string
-  /** Roster keyed by seat name; names are address name halves. */
+  /** Roster keyed by seat name; seat names are mailbox addresses. */
   readonly seats: Readonly<Record<string, OrgRegistrySeat>>
   /** Undirected seat-to-seat edges that permit direct mail. */
   readonly edges: readonly OrgRegistryEdge[]
@@ -95,21 +93,17 @@ export function parseOrgRegistry(text: string, options: OrgRegistryParseOptions 
   const seats: Record<string, OrgRegistrySeat> = {}
   for (const name of seatNames) {
     if (!SEGMENT_PATTERN.test(name)) {
-      throw new Error(`org registry seat ${JSON.stringify(name)}: names must match ${MAILBOX_SEGMENT_PATTERN_SOURCE} (they are mailbox address name halves)`)
+      throw new Error(`org registry seat ${JSON.stringify(name)}: names must match ${MAILBOX_SEGMENT_PATTERN_SOURCE} (seat names are mailbox addresses)`)
     }
     const seat: unknown = seatsField[name]
     assertObject(seat, `seats.${name}`)
     assertNonEmptyString(seat.cwd, `seats.${name}.cwd`)
-    assertNonEmptyString(seat.namespace, `seats.${name}.namespace`)
-    if (!SEGMENT_PATTERN.test(seat.namespace)) {
-      throw new Error(`org registry seats.${name}.namespace ${JSON.stringify(seat.namespace)}: must match ${MAILBOX_SEGMENT_PATTERN_SOURCE}`)
-    }
     if (seat.lead !== undefined && typeof seat.lead !== 'boolean') {
       throw new Error(`org registry field seats.${name}.lead must be a boolean when present`)
     }
     seats[name] = seat.lead === undefined
-      ? { cwd: expandTilde(seat.cwd, home), namespace: seat.namespace }
-      : { cwd: expandTilde(seat.cwd, home), namespace: seat.namespace, lead: seat.lead }
+      ? { cwd: expandTilde(seat.cwd, home) }
+      : { cwd: expandTilde(seat.cwd, home), lead: seat.lead }
   }
 
   const edges: OrgRegistryEdge[] = []

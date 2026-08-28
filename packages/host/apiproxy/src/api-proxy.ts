@@ -3436,19 +3436,19 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
     mailbox: {
       async publish(request) {
-        const { address, namespace, name, type, subject, payload, traceId, blocking } = request.payload
+        const { address, name, type, subject, payload, traceId, blocking } = request.payload
         // The admitting operation builds the address once, here: exactly one
         // of the two addressing forms must be present.
         let to: string
         if (address !== undefined) {
-          if (namespace !== undefined || name !== undefined) {
-            return err(request, mailboxRejected('pass either "address" or "namespace"+"name", not both addressing forms'))
+          if (name !== undefined) {
+            return err(request, mailboxRejected('pass either "address" or "name", not both addressing forms'))
           }
           to = address
-        } else if (typeof namespace === 'string' && typeof name === 'string') {
-          to = `${namespace}:${name}`
+        } else if (typeof name === 'string') {
+          to = name
         } else {
-          return err(request, mailboxRejected('mailbox publish requires an "address" or both "namespace" and "name"'))
+          return err(request, mailboxRejected('mailbox publish requires an "address" or a "name"'))
         }
         if (ctx.get('mailbox') === undefined) {
           return err(request, mailboxRejected('no mailbox registry is composed in this deployment'))

@@ -16,7 +16,7 @@ import type { MailboxProvider } from './provider.ts'
 import { parseMailboxAddress } from './address.ts'
 import './source.ts'
 
-export { parseMailboxAddress, formatMailboxAddress, MAILBOX_ADDRESS_SEPARATOR, MAILBOX_SEGMENT_PATTERN_SOURCE } from './address.ts'
+export { parseMailboxAddress, formatMailboxAddress, MAILBOX_SEGMENT_PATTERN_SOURCE } from './address.ts'
 export type { MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxLeaseRef, MailboxMessage, MailboxMessageId, MailboxOutcome, MailboxState, MailboxStalenessFilter } from './types.ts'
 export type { AddressResolutionExtension, MailboxProvider } from './provider.ts'
 export type { MailboxMessageSource } from './source.ts'

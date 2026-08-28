@@ -7,7 +7,7 @@ import type { MailboxProvider } from '../src/provider.ts'
 import MailboxRegistryModule from '../src/index.ts'
 import { formatMailboxAddress } from '../src/address.ts'
 
-const ADDRESS = formatMailboxAddress('ns', 'target')
+const ADDRESS = formatMailboxAddress('target')
 
 /** Deterministic in-memory fake; the seam's contract is what varies here. */
 function fakeProvider(name: string): MailboxProvider {
@@ -16,6 +16,7 @@ function fakeProvider(name: string): MailboxProvider {
     name,
     publish: async () => `id-${++next}` as MailboxMessageId,
     claim: async () => [],
+    claimableAddresses: async () => [],
     settle: async () => {},
   }
 }
@@ -67,12 +68,14 @@ describe('default-provider resolution', () => {
       name: 'other',
       publish: async () => { calls.push('other.publish'); return 'x' as MailboxMessageId },
       claim: async () => { calls.push('other.claim'); return [] },
+      claimableAddresses: async () => [],
       settle: async () => { calls.push('other.settle') },
     })
     registry.registerProvider({
       name: 'chosen',
       publish: async () => { calls.push('chosen.publish'); return 'y' as MailboxMessageId },
       claim: async () => { calls.push('chosen.claim'); return [] },
+      claimableAddresses: async () => [],
       settle: async () => { settled = true },
     })
     await registry.publish({ to: ADDRESS, from: 'ns:sender' })
@@ -104,14 +107,14 @@ describe('default-provider resolution', () => {
   it('validates the destination grammar in the admitting operation', async () => {
     const { registry } = await setup({ defaultProvider: 'p' })
     registry.registerProvider(fakeProvider('p'))
-    await expect(registry.publish({ to: 'no-separator' as never, from: 'ns:s' }))
+    await expect(registry.publish({ to: 'bad address' as never, from: 'sender' }))
       .rejects.toThrow('invalid mailbox address')
   })
 
   it('validates every claim-filter address against the grammar', async () => {
     const { registry } = await setup({ defaultProvider: 'p' })
     registry.registerProvider(fakeProvider('p'))
-    await expect(registry.claim({ addresses: ['ns:ok', 'bad address'] as never[], limit: 1, staleClaimMs: 1_000 }))
+    await expect(registry.claim({ addresses: ['ok', 'bad address'] as never[], limit: 1, staleClaimMs: 1_000 }))
       .rejects.toThrow('invalid mailbox address')
   })
 })

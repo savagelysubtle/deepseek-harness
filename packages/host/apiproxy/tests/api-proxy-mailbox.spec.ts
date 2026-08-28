@@ -1,8 +1,9 @@
 /**
- * The mailbox wire face: non-dsh callers admit mail into served namespaces
- * through `mailbox.publish` — both addressing forms deliver, residency-held
- * targets queue, and every refusal (ambiguous halves, bad grammar, unknown
- * namespace, absent registry, terminal routing failure) rejects loud.
+ * The mailbox wire face: non-dsh callers admit mail into served seat
+ * addresses through `mailbox.publish` — both addressing forms deliver,
+ * residency-held targets queue, and every refusal (ambiguous forms, bad
+ * grammar, unserved address, absent registry, terminal routing failure)
+ * rejects loud.
  */
 
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -77,7 +78,7 @@ async function mountMailbox(dir: string, addresses: readonly string[], options: 
     } as unknown as Agent
     ctx.agents.register(agent)
   }
-  await ctx.plugin(Bridge, { addresses: [...addresses], pollIntervalMs: 3_600_000, admitFromNamespaces: ['console'] })
+  await ctx.plugin(Bridge, { addresses: [...addresses], pollIntervalMs: 3_600_000, admitFrom: ['human'] })
   return { ctx, liveFollowup }
 }
 
@@ -102,12 +103,12 @@ async function publish(ctx: ContextType, rpcId: string, payload: Record<string, 
 }
 
 describe('mailbox.publish over the host API', () => {
-  it('delivers a namespace+name publish into a live target', async () => {
-    const { ctx, liveFollowup } = await mountMailbox(tempDir(), ['webceo:ceo'], { liveName: 'ceo' })
+  it('delivers a name publish into a live target', async () => {
+    const { ctx, liveFollowup } = await mountMailbox(tempDir(), ['ceo'], { liveName: 'ceo' })
     expect(liveFollowup).toBeDefined()
 
     const result = await publish(ctx, 'mb-happy', {
-      namespace: 'webceo', name: 'ceo', from: 'console:human', subject: 'hello seat',
+      name: 'ceo', from: 'human', subject: 'hello seat',
     })
     expect(result.ok).toBe(true)
     if (!result.ok) return
@@ -116,20 +117,20 @@ describe('mailbox.publish over the host API', () => {
     expect(liveFollowup).toHaveBeenCalledTimes(1)
     const message = liveFollowup!.mock.calls[0]?.[0] as { source: { kind: string; form: string; address: string; messageId: string } }
     expect(message.source).toMatchObject({
-      kind: 'mailbox', form: 'relay', address: 'webceo:ceo', messageId: result.value.messageId,
+      kind: 'mailbox', form: 'relay', address: 'ceo', messageId: result.value.messageId,
     })
   })
 
   it('carries a blocking mark through to the stored and delivered turn, forwarding none without it', async () => {
     const dir = tempDir()
-    const { ctx, liveFollowup } = await mountMailbox(dir, ['webceo:ceo'], { liveName: 'ceo' })
+    const { ctx, liveFollowup } = await mountMailbox(dir, ['ceo'], { liveName: 'ceo' })
     expect(liveFollowup).toBeDefined()
 
     const flagged = await publish(ctx, 'mb-blocking', {
-      namespace: 'webceo', name: 'ceo', from: 'console:human', subject: 'halt', blocking: true,
+      name: 'ceo', from: 'human', subject: 'halt', blocking: true,
     })
     const plain = await publish(ctx, 'mb-unmarked', {
-      namespace: 'webceo', name: 'ceo', from: 'console:human', subject: 'carry on',
+      name: 'ceo', from: 'human', subject: 'carry on',
     })
     expect(flagged.ok).toBe(true)
     if (!flagged.ok || !plain.ok) return
@@ -155,12 +156,12 @@ describe('mailbox.publish over the host API', () => {
 
   it('queues while residency holds the target elsewhere', async () => {
     const dir = tempDir()
-    const { ctx } = await mountMailbox(dir, ['webceo:ceo'])
+    const { ctx } = await mountMailbox(dir, ['ceo'])
     // Same DSH_HOME, so this is exactly the artifact the route's own
     // acquisition attempt will lose to.
     const lock = acquireNamedSessionLock('ceo')
     try {
-      const result = await publish(ctx, 'mb-defer', { address: 'webceo:ceo', from: 'console:human' })
+      const result = await publish(ctx, 'mb-defer', { address: 'ceo', from: 'human' })
       expect(result.ok).toBe(true)
       if (!result.ok) return
       expect(result.value.disposition).toBe('queued')
@@ -170,20 +171,20 @@ describe('mailbox.publish over the host API', () => {
   })
 
   it('rejects ambiguous, incomplete, unserved, and malformed addressing loud before storing', async () => {
-    const { ctx } = await mountMailbox(tempDir(), ['webceo:ceo'])
+    const { ctx } = await mountMailbox(tempDir(), ['ceo'])
 
-    const ambiguous = await publish(ctx, 'mb-amb', { address: 'webceo:ceo', namespace: 'webceo', name: 'ceo', from: 'console:c' })
+    const ambiguous = await publish(ctx, 'mb-amb', { address: 'ceo', name: 'ceo', from: 'c' })
     expect(ambiguous.ok).toBe(false)
     if (!ambiguous.ok) expect(ambiguous.error.code).toBe('mailbox-rejected')
 
-    const incomplete = await publish(ctx, 'mb-half', { namespace: 'webceo', from: 'console:c' })
+    const incomplete = await publish(ctx, 'mb-empty', { address: '', from: 'c' })
     expect(incomplete.ok).toBe(false)
 
-    const unserved = await publish(ctx, 'mb-stranger', { address: 'stranger:seat', from: 'console:c' })
+    const unserved = await publish(ctx, 'mb-stranger', { address: 'stranger', from: 'c' })
     expect(unserved.ok).toBe(false)
     if (!unserved.ok) expect(unserved.error.details.reason).toContain('not served')
 
-    const malformed = await publish(ctx, 'mb-bad', { address: 'no separator', from: 'console:c' })
+    const malformed = await publish(ctx, 'mb-bad', { address: 'no separator', from: 'c' })
     expect(malformed.ok).toBe(false)
     if (!malformed.ok) expect(malformed.error.details.reason).toContain('invalid mailbox address')
   })
@@ -191,9 +192,9 @@ describe('mailbox.publish over the host API', () => {
   it('rejects a terminal routing failure loud with the recorded reason', async () => {
     // No session-persistence backend composed at all: cold-resume cannot work,
     // and the absent agent registry hit defers the route into that failure.
-    const { ctx } = await mountMailbox(tempDir(), ['webceo:ghost'])
+    const { ctx } = await mountMailbox(tempDir(), ['ghost'])
 
-    const failed = await publish(ctx, 'mb-fail', { address: 'webceo:ghost', from: 'console:c' })
+    const failed = await publish(ctx, 'mb-fail', { address: 'ghost', from: 'human' })
     expect(failed.ok).toBe(false)
     if (!failed.ok) expect(failed.error.details.reason).toContain('cold-resume requires')
   })
@@ -201,7 +202,7 @@ describe('mailbox.publish over the host API', () => {
   it('refuses when no mailbox registry is composed', async () => {
     const ctx = new Context()
     await mountFloor(ctx)
-    const refused = await publish(ctx, 'mb-none', { address: 'webceo:ceo', from: 'console:c' })
+    const refused = await publish(ctx, 'mb-none', { address: 'ceo', from: 'c' })
     expect(refused.ok).toBe(false)
     if (!refused.ok) expect(refused.error.details.reason).toContain('no mailbox registry')
   })

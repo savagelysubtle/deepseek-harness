@@ -17,7 +17,7 @@ The mailbox capability seam: durable, cross-process agent messaging with publish
 
 ## Contracts
 
-- **Address grammar** — `<namespace>:<name>`, both segments reusing the named-session name pattern (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`), so the bridge can derive target session ids from the name half with no second encoding. `parseMailboxAddress`/`formatMailboxAddress` round-trip by construction.
+- **Address grammar** — the seat's bare name, reusing the named-session name pattern (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`); one name names one seat, so the bridge derives target session ids with no second encoding. `parseMailboxAddress`/`formatMailboxAddress` round-trip by construction.
 - **At-least-once delivery** — a crashed claimer's lease is reclaimed after `staleClaimMs`; consumers tolerate duplicate claims.
 - **`done` = inbox admission** — settlement records that the message reached its target's queue, never an answer; replies travel as newly published messages. The `result` column of an outcome is the delivery envelope only, never business payload.
 - **Default resolution fails loud** — conveniences without a registered configured default throw at call time naming the gap; named-provider calls are unaffected.

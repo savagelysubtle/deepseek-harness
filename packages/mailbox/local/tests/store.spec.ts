@@ -40,8 +40,8 @@ function storeWith(clock: MailboxClock, path = tempDbPath()): SqliteMailboxStore
   return new SqliteMailboxStore(openMailboxDatabase(path), clock)
 }
 
-const OPS = formatMailboxAddress('gotham', 'operations')
-const FIELD = formatMailboxAddress('gotham', 'field')
+const OPS = formatMailboxAddress('operations')
+const FIELD = formatMailboxAddress('field')
 
 function filter(addresses: readonly MailboxAddress[], limit = 10, staleClaimMs = 30_000): MailboxClaimFilter {
   return { addresses, limit, staleClaimMs }

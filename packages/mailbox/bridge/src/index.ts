@@ -1,7 +1,7 @@
 /**
  * The mailbox consumer: a polling bridge that turns claimed messages into
  * delivered user-role turns on the addressed named-session agents. Routing is
- * pure derivation — the address's name half IS the session name, so no
+ * pure derivation — the address IS the session name, so no
  * directory lives here. One drain cycle claims up to `maxClaimPerCycle`
  * messages and routes each:
  *
@@ -57,9 +57,9 @@ export const DEFAULT_STALE_CLAIM_MS = 60_000
 /** Plugin configuration. */
 export interface Config {
   /**
-   * The full `<namespace>:<name>` addresses the bridge serves. Every grammar
-   * violation fails schema-adjacent resolution at mount; routing derives each
-   * target's session id from the name half with no second encoding.
+   * The bare seat addresses the bridge serves. Every grammar violation fails
+   * schema-adjacent resolution at mount; routing derives each target's
+   * session id from the address with no second encoding.
    */
   readonly addresses?: readonly string[]
   /** Pause between drain cycles in milliseconds. */
@@ -75,12 +75,13 @@ export interface Config {
    */
   readonly lockStaleMs?: number
   /**
-   * Sender namespaces whose mail this bridge's addresses will accept. Empty
-   * (the default) admits no external-origin mail at all: an outside writer
-   * bypasses every write-side check by construction, so admission is decided
-   * here at drain, where the store can actually enforce it.
+   * Sender addresses whose mail this bridge's addresses will accept beyond
+   * the served roster. Empty (the default) admits no external-origin mail at
+   * all: an outside writer bypasses every write-side check by construction,
+   * so admission is decided here at drain, where the store can actually
+   * enforce it.
    */
-  readonly admitFromNamespaces?: readonly string[]
+  readonly admitFrom?: readonly string[]
   /**
    * Explicit live-seat roster: full served addresses routed to an EXISTING
    * session id instead of the name-derivation default. This is how web-host
@@ -97,7 +98,7 @@ export const Config = z.object({
   maxClaimPerCycle: z.number().step(1).min(1).default(DEFAULT_MAX_CLAIM_PER_CYCLE),
   staleClaimMs: z.number().step(1).min(1).default(DEFAULT_STALE_CLAIM_MS),
   lockStaleMs: z.number().step(1).min(1),
-  admitFromNamespaces: z.array(z.string()),
+  admitFrom: z.array(z.string()),
   seatAliases: z.array(
     z.object({ address: z.string().min(1), sessionId: z.string().min(1) }),
   ),
@@ -111,8 +112,8 @@ export interface BridgeSpec {
   readonly maxClaimPerCycle: number
   readonly staleClaimMs: number
   readonly lockStaleMs: number | undefined
-  /** Sender namespaces admitted beyond each address's own namespace. */
-  readonly admitFromNamespaces: readonly string[]
+  /** Sender addresses admitted beyond the served roster. */
+  readonly admitFrom: readonly string[]
   /** Grammar-checked alias rows for non-derived (web-host seat) targets. */
   readonly seatAliases: ReadonlyMap<MailboxAddress, SessionId>
 }
@@ -126,7 +127,7 @@ export interface BridgeSpec {
 export function resolveBridgeSpec(config: Config): BridgeSpec {
   const rawAddresses = config.addresses ?? []
   if (rawAddresses.length === 0) {
-    throw new Error('mailbox-bridge: addresses must name at least one served "<namespace>:<name>" endpoint')
+    throw new Error('mailbox-bridge: addresses must name at least one served seat endpoint')
   }
   const seatAliases = new Map<MailboxAddress, SessionId>()
   for (const alias of config.seatAliases ?? []) {
@@ -148,7 +149,7 @@ export function resolveBridgeSpec(config: Config): BridgeSpec {
     maxClaimPerCycle: config.maxClaimPerCycle ?? DEFAULT_MAX_CLAIM_PER_CYCLE,
     staleClaimMs: config.staleClaimMs ?? DEFAULT_STALE_CLAIM_MS,
     lockStaleMs: config.lockStaleMs,
-    admitFromNamespaces: config.admitFromNamespaces ?? [],
+    admitFrom: config.admitFrom ?? [],
     seatAliases,
   }
 }
@@ -218,21 +219,18 @@ async function failTerminal(ctx: Context, lease: MailboxLease, reason: string): 
 async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease): Promise<RouteResult> {
   const mailbox = ctx.mailbox
   // Drain-time admission (the store cannot police an external writer): a
-  // sender namespace must be one this roster serves or explicitly admitted.
-  // An unparseable `from` fails closed like any foreign namespace.
-  const fromSeparator = lease.message.from.indexOf(':')
-  const senderNamespace = fromSeparator <= 0 ? lease.message.from : lease.message.from.slice(0, fromSeparator)
-  const servedNamespaces = spec.addresses.map(address => String(address).slice(0, String(address).indexOf(':')))
-  if (!servedNamespaces.includes(senderNamespace) && !spec.admitFromNamespaces.includes(senderNamespace)) {
+  // sender must be one of the served addresses or explicitly admitted. An
+  // unparseable `from` fails closed like any foreign sender.
+  const served = spec.addresses.map(String)
+  if (!served.includes(lease.message.from) && !spec.admitFrom.includes(lease.message.from)) {
     await failTerminal(ctx, lease, 'sender-not-admitted')
     return { kind: 'failed', reason: 'sender-not-admitted' }
   }
-  // Both halves of every served address were grammar-checked at mount, so the
-  // name half slices out directly. An explicit seat-alias row routes to that
-  // EXISTING session id (web-host seats are not name-derived); anything else
-  // falls back to pure derivation — routing adds no second encoding.
-  const separatorAt = lease.message.to.indexOf(':')
-  const name = lease.message.to.slice(separatorAt + 1)
+  // Every served address was grammar-checked at mount, and the address IS
+  // the session name. An explicit seat-alias row routes to that EXISTING
+  // session id (web-host seats are not name-derived); anything else falls
+  // back to pure derivation — routing adds no second encoding.
+  const name = String(lease.message.to)
   const sessionId = spec.seatAliases.get(lease.message.to as MailboxAddress)
     ?? deriveNamedSessionId(name)
 
@@ -400,7 +398,7 @@ export type MailboxWakeDisposition = 'delivered' | 'queued'
 
 /** Addressed publish input shared by every wire caller. */
 export interface PublishAndWakeRequest {
-  /** Destination address in the `<namespace>:<name>` grammar. */
+  /** Destination address: the recipient seat's bare name. */
   readonly to: string
   /** Sender address; free-form provenance, never validated against live endpoints. */
   readonly from: string

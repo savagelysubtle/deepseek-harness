@@ -1,4 +1,4 @@
-/** Address grammar: round-trips, rejections, and segment rules. */
+/** Address grammar: round-trips, rejections, and the seat-name coupling. */
 
 import { describe, expect, it } from 'vitest'
 import {
@@ -9,32 +9,29 @@ import {
 
 describe('mailbox address grammar', () => {
   it('round-trips a formatted address through parse', () => {
-    const address = formatMailboxAddress('web-designs', 'operations')
+    const address = formatMailboxAddress('operations')
     expect(parseMailboxAddress(address)).toBe(address)
   })
 
-  it('parses a valid raw address into its segments', () => {
-    expect(parseMailboxAddress('ceo-web:operations')).toBe('ceo-web:operations')
-    expect(parseMailboxAddress('a.1_b:x-y-name')).toBe('a.1_b:x-y-name')
+  it('accepts bare seat names', () => {
+    expect(parseMailboxAddress('batman')).toBe('batman')
+    expect(parseMailboxAddress('a.1_b')).toBe('a.1_b')
   })
 
   it.each([
-    ['', 'missing separator'],
-    ['nonamespace', 'expected "<namespace>:<name>"'],
-    [':leading', 'invalid mailbox namespace'],
-    ['trailing:', 'invalid mailbox name'],
-    ['has space:name', 'invalid mailbox namespace'],
-    ['ns:sl/ash', 'invalid mailbox name'],
-    ['ns:double:colon', 'invalid mailbox name'],
-    [`ns:${'x'.repeat(65)}`, 'invalid mailbox name'],
-    [`${'x'.repeat(65)}:name`, 'invalid mailbox namespace'],
+    ['', 'must match'],
+    ['has space', 'must match'],
+    ['sl/ash', 'must match'],
+    ['double:colon', 'must match'],
+    ['batman:alfred', 'must match'],
+    [`${'x'.repeat(65)}`, 'must match'],
   ])('rejects %j loudly', (raw) => {
     expect(() => parseMailboxAddress(raw)).toThrow()
   })
 
-  it('keeps the documented segment grammar in sync with the session-name grammar', () => {
-    // Both halves reuse the named-session vocabulary so bridge-side id
-    // derivation needs no second encoding; this pins the coupling.
+  it('keeps the address grammar identical to the session-name grammar', () => {
+    // One name names one seat across the deployment, so a derived session id
+    // can be computed from an address with no second encoding.
     expect(MAILBOX_SEGMENT_PATTERN_SOURCE).toBe('^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
   })
 })

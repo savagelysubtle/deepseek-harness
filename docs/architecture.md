@@ -95,7 +95,7 @@ The session log is the source of the context the model sees. `deriveMessages()` 
 
 **Model-visible means logged.** Anything that reaches a model request must be reconstructable from the log, and a runtime invariant asserts it. This is why a new model-visible input requires a new session event: extend `SessionEventMap` and render from the log.
 
-**One writer per session log.** A named session's log has exactly one legitimate writer at a time: the process holding its per-name lock file. Every path that runs the session's turns — a terminal command, a scripted run, a mail-triggered wake — goes through the same headless entrypoint and takes the same lock, so two contenders resolve cleanly: one acquires the lock, the other receives a busy error. The always-on web host is never a writer for a named session; while a live owner holds the lock, the host follows the owner's log read-only (see [packages/host/apiproxy](../packages/host/apiproxy/README.md)).
+**One writer per seat session log: the host.** A named seat session's log has exactly one legitimate writer: the dsh host process that owns it, the way a messenger server owns account history (Telegram's cloud chats, Matrix's homeservers). Every surface that talks to a seat — the web UI, the CLI, a mail-triggered wake, and later a phone — submits input to the host; the host orders it into the log and streams the result to all attached clients. Processes that write session logs themselves (one-shot headless tasks) own anonymous logs no seat shares. No second process ever appends to a seat's log: two writers are not raced or reconciled — the second writer does not exist.
 
 ## Capability seams
 

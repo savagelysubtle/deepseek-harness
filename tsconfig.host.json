@@ -131,7 +131,6 @@
     { "path": "./packages/core/scope" },
     { "path": "./packages/agui/ag-ui" },
     { "path": "./packages/context/context-pressure" },
-    { "path": "./packages/mailbox/seat-runner" },
     { "path": "./packages/typert/protocol" },
     { "path": "./packages/typert/registry" },
     { "path": "./packages/api/gateway/tsconfig.host.json" },

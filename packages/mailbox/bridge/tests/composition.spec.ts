@@ -96,7 +96,7 @@ function makeEnv(): { home: string; sessionsRoot: string; storePath: string } {
  * @param storePath - the database file to publish into.
  * @param address - the destination address to publish to.
  */
-async function seed(storePath: string, address: string, from = 'comp:sender'): Promise<string> {
+async function seed(storePath: string, address: string, from = 'sender'): Promise<string> {
   const store = new SqliteMailboxStore(openMailboxDatabase(storePath))
   const id = await store.publish({ to: address as never, from, subject: 'wake up' })
   store.close()
@@ -310,7 +310,7 @@ describe('mailbox delivery over real compositions', () => {
         `phase1 had no model traffic; stdout=${JSON.stringify(capture.stdout)}`,
       ).toBeGreaterThanOrEqual(1)
 
-      const id = await seed(env.storePath, 'comp:hook-target')
+      const id = await seed(env.storePath, 'hook-target')
 
       // Phase 2 — the bridge claims the seeded mail and resumes the dormant log.
       const secondAdapter = new ScriptedAdapter(['reply after wake'])
@@ -320,8 +320,10 @@ describe('mailbox delivery over real compositions', () => {
         extraRows: [
           "- name: '@deepseek-ai/dsh-mailbox-bridge'",
           '  config:',
-          '    addresses: ["comp:hook-target"]',
+          '    addresses: ["hook-target"]',
           '    pollIntervalMs: 10',
+          '    admitFrom:',
+          '      - sender',
         ],
         settled: async () => {
           // Admission settles before the delivered turn streams; wait for the
@@ -343,7 +345,7 @@ describe('mailbox delivery over real compositions', () => {
         content?: ReadonlyArray<{ type: string; text?: string }>
       }
       expect(mail.source).toMatchObject({
-        form: 'relay', address: 'comp:hook-target', from: 'comp:sender', messageId: id,
+        form: 'relay', address: 'hook-target', from: 'sender', messageId: id,
       })
       expect(mail.content?.[0]?.text).toBe('wake up')
     },
@@ -353,7 +355,7 @@ describe('mailbox delivery over real compositions', () => {
     'settles guest-origin mail sender-not-admitted by default and delivers it once the roster opts in',
     { timeout: 240_000 },
     async () => {
-      // Fail-closed composition (no admitFromNamespaces): the bridge settles
+      // Fail-closed composition (no admitFrom): the bridge settles
       // the guest row terminal WITHOUT waking or resuming anything.
       const envA = makeEnv()
       await boot(envA, {
@@ -361,14 +363,14 @@ describe('mailbox delivery over real compositions', () => {
         args: ['--session-name', 'hook-gate', 'warmup task'],
         settled: async () => {},
       })
-      const rejectedId = await seed(envA.storePath, 'comp:hook-gate', 'guest:council')
+      const rejectedId = await seed(envA.storePath, 'hook-gate', 'council')
       await boot(envA, {
         responses: [],
         awaitQuiescence: false,
         extraRows: [
           "- name: '@deepseek-ai/dsh-mailbox-bridge'",
           '  config:',
-          '    addresses: ["comp:hook-gate"]',
+          '    addresses: ["hook-gate"]',
           '    pollIntervalMs: 10',
         ],
         settled: () => until(() => storedState(envA.storePath, rejectedId) === 'failed'),
@@ -382,7 +384,7 @@ describe('mailbox delivery over real compositions', () => {
         args: ['--session-name', 'hook-gate', 'warmup task'],
         settled: async () => {},
       })
-      const admittedId = await seed(envB.storePath, 'comp:hook-gate', 'guest:council')
+      const admittedId = await seed(envB.storePath, 'hook-gate', 'council')
       const secondAdapter = new ScriptedAdapter(['reply after guest wake'])
       await boot(envB, {
         adapter: secondAdapter,
@@ -390,9 +392,9 @@ describe('mailbox delivery over real compositions', () => {
         extraRows: [
           "- name: '@deepseek-ai/dsh-mailbox-bridge'",
           '  config:',
-          '    addresses: ["comp:hook-gate"]',
+          '    addresses: ["hook-gate"]',
           '    pollIntervalMs: 10',
-          '    admitFromNamespaces: ["guest"]',
+          '    admitFrom: ["council"]',
         ],
         settled: async () => {
           // Same observed-delivery condition as the cold-resume case: settle
@@ -411,41 +413,9 @@ describe('mailbox delivery over real compositions', () => {
         source: { address: string; from: string; messageId: string }
       }
       expect(mail.source).toMatchObject({
-        address: 'comp:hook-gate', from: 'guest:council', messageId: admittedId,
+        address: 'hook-gate', from: 'council', messageId: admittedId,
       })
       expect(storedState(envB.storePath, admittedId)).toBe('done')
-    },
-  )
-
-  it(
-    'admits queued backlog ahead of the task turn via the served-address hook',
-    { timeout: 180_000 },
-    async () => {
-      const env = makeEnv()
-      const id = await seed(env.storePath, 'comp:hook-drain')
-      const capture = { stdout: [] as string[], stderr: [] as string[] }
-
-      const run = await boot(env, {
-        responses: ['backlog reply', 'final task reply'],
-        args: ['--session-name', 'hook-drain', 'final task', '--mailbox-namespace', 'comp'],
-        capture,
-        settled: async () => {},
-      })
-
-      expect(run.code).toBe(0)
-      expect(capture.stdout.join('')).toContain('final task reply')
-      const runScripted = scriptedAdapterOf(run)
-      const firstTurnMessages = runScripted.requests[0]?.messages ?? []
-      const delivered = firstTurnMessages.at(-1) as {
-        source?: { kind?: string; form?: string; messageId?: string }
-        content?: ReadonlyArray<{ type: string; text?: string }>
-      }
-      expect(delivered?.source).toMatchObject({ kind: 'mailbox', form: 'relay', messageId: id })
-      expect(delivered?.content?.[0]?.text).toBe('wake up')
-      const taskMessage = runScripted.requests.at(-1)?.messages.at(-1) as {
-        content?: ReadonlyArray<{ type: string; text?: string }>
-      }
-      expect(taskMessage?.content?.[0]?.text).toBe('final task')
     },
   )
 
@@ -481,10 +451,10 @@ describe('mailbox delivery over real compositions', () => {
         extraRows: [
           "- name: '@deepseek-ai/dsh-mailbox-bridge'",
           '  config:',
-          '    addresses: ["comp:steer-live"]',
+          '    addresses: ["steer-live"]',
           '    pollIntervalMs: 10',
-          '    admitFromNamespaces:',
-          '      - founder',
+          '    admitFrom:',
+          '      - sender',
         ],
         settled: async () => {
           // Nothing pre-published: against a session whose runner has not
@@ -493,7 +463,7 @@ describe('mailbox delivery over real compositions', () => {
           await until(() => heldAdapter.requests.length === 1)
           // …then publish mid-generation; the next drain STEERs it into the
           // live turn within one poll beat even though the seat stays busy.
-          const mailedId = await seed(env.storePath, 'comp:steer-live')
+          const mailedId = await seed(env.storePath, 'steer-live')
           try {
             await until(() => storedState(env.storePath, mailedId) === 'done')
           } catch {
@@ -550,7 +520,7 @@ describe('mailbox delivery over real compositions', () => {
       expect(warmup.code).toBe(0)
 
       const aliasedId = deriveNamedSessionId('gotham-seat')
-      const id = await seed(env.storePath, 'web:alfred', 'console:ceo')
+      const id = await seed(env.storePath, 'alfred', 'console')
 
       const run = await boot(env, {
         responses: ['seat wake reply'],
@@ -559,12 +529,12 @@ describe('mailbox delivery over real compositions', () => {
           "- name: '@deepseek-ai/dsh-mailbox-bridge'",
           '  config:',
           '    addresses:',
-          '      - web:alfred',
+          '      - alfred',
           '    pollIntervalMs: 10',
-          '    admitFromNamespaces:',
+          '    admitFrom:',
           '      - console',
           '    seatAliases:',
-          '      - address: web:alfred',
+          '      - address: alfred',
           '        sessionId: ' + JSON.stringify(String(aliasedId)),
         ],
         settled: () => until(() => storedState(env.storePath, id) === 'done'),
@@ -579,7 +549,7 @@ describe('mailbox delivery over real compositions', () => {
         content?: ReadonlyArray<{ type: string; text?: string }>
       }
       expect(mail.source).toMatchObject({
-        address: 'web:alfred', from: 'console:ceo', messageId: id,
+        address: 'alfred', from: 'console', messageId: id,
       })
       expect(mail.content?.[0]?.text).toBe('wake up')
     },

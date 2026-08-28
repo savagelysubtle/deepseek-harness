@@ -1,19 +1,17 @@
 /**
  * mailbox domain contract: the wire face for NON-dsh callers to admit mail
- * into a served `<namespace>:<name>` address without local file access. The
- * host routes publication through the mailbox registry's default provider and
- * wakes the bridge immediately; the response reports what the wake achieved.
+ * into a served seat address without local file access. The host routes
+ * publication through the mailbox registry's default provider and wakes the
+ * bridge immediately; the response reports what the wake achieved.
  */
 
 import type { RpcRequest, RpcResponse } from './rpc.ts'
 
-/** Addressed publish request: a full `address`, or `namespace` + `name`. */
+/** Addressed publish request: a full `address`, or just the seat `name`. */
 export interface MailboxPublishPayload {
-  /** Full destination address in the `<namespace>:<name>` grammar. */
+  /** Full destination address; exclusive with `name`. */
   readonly address?: string
-  /** Namespace half, required together with `name`; exclusive with `address`. */
-  readonly namespace?: string
-  /** Name half (the target agent's session name), required with `namespace`. */
+  /** The seat's bare name (its address), exclusive with `address`. */
   readonly name?: string
   /** Sender address; free-form provenance shown to the recipient. */
   readonly from: string

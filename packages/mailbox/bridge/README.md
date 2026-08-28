@@ -21,7 +21,7 @@ Every delivered turn carries the merged [`mailbox` message source](../mailbox/sr
 
 | Field | Type | Default | Semantics |
 |---|---|---|---|
-| `addresses` | string[]? | absent | Full `<namespace>:<name>` endpoints served; an empty or malformed roster fails at mount. |
+| `addresses` | string[]? | absent | Bare seat-name endpoints served; an empty or malformed roster fails at mount. |
 | `pollIntervalMs` | number? | `5000` | Pause between drain cycles. |
 | `maxClaimPerCycle` | number? | `10` | Upper bound on leases claimed per cycle. |
 | `staleClaimMs` | number? | `60000` | Age past which an abandoned claim becomes reclaimable. |

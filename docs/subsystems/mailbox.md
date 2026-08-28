@@ -6,13 +6,13 @@ The mailbox seam — durable agent-to-agent messaging delivered as user turns wi
 
 ## Addresses
 
-An endpoint's wire identity is a `<namespace>:<name>` address whose segments both reuse the named-session name grammar (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`), so routing derives the target session id from the name half with no second encoding ([named-sessions](../../packages/session/named-sessions/README.md)). A full address is hard-bounded at 160 characters, and because the name segment grammar forbids `:`, validating the name half alone rejects multi-colon forms.
+An endpoint's wire identity is its bare seat name — one segment reusing the named-session name grammar (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`) — so routing derives the target session id from the address with no second encoding ([named-sessions](../../packages/session/named-sessions/README.md)). One name names one seat across the deployment.
 
 [`parseMailboxAddress`](../../packages/mailbox/mailbox/src/address.ts) validates one raw address against the segment grammar and brands it ([branded ids](core.md#branded-ids)); `formatMailboxAddress` composes from validated parts, so the pair round-trips by construction and raw strings cannot cross a provider boundary unvalidated.
 
 ```ts type-equiv
 /**
- * Opaque wire identity of one mailbox endpoint, `<namespace>:<name>`.
+ * Opaque wire identity of one mailbox endpoint: the seat's bare name.
  * Grammar and validation live in {@link ./address.ts}; this brand keeps raw
  * strings from crossing a provider boundary unvalidated.
  */
@@ -50,7 +50,7 @@ type MailboxState = 'pending' | 'claimed' | 'done' | 'failed'
 interface MailboxMessage {
   /** Provider-assigned durable id; absent on publish input. */
   readonly id?: MailboxMessageId
-  /** Destination address in the `<namespace>:<name>` grammar. */
+  /** Destination address: the recipient seat's bare name. */
   readonly to: MailboxAddress
   /** Sender address in the same grammar; free-form provenance, never validated against live endpoints. */
   readonly from: string

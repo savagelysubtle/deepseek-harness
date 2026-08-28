@@ -6,13 +6,13 @@
 
 ## 地址
 
-端点的线路身份是一个 `<namespace>:<name>` 地址，两段均复用具名会话名称文法（`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`），因此路由可由名称段直接派生目标会话 id，无需第二套编码（[named-sessions](../../packages/session/named-sessions/README.md)）。完整地址硬性上限 160 字符；且由于名称段文法禁止 `:`，仅校验名称段即可拒绝多冒号形式。
+端点的线路身份是其裸座位名——单一段，复用具名会话名称文法（`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`）——因此路由可由地址直接派生目标会话 id，无需第二套编码（[named-sessions](../../packages/session/named-sessions/README.md)）。一个名字在整个部署中只命名一个座位。
 
 [`parseMailboxAddress`](../../packages/mailbox/mailbox/src/address.ts) 针对段文法校验一条原始地址并为其加品牌（[品牌化 id](core.md#branded-ids)）；`formatMailboxAddress` 由已校验的部分组合地址，这对函数天然往返一致，未经校验的裸字符串无法越过提供方边界。
 
 ```ts type-equiv
 /**
- * Opaque wire identity of one mailbox endpoint, `<namespace>:<name>`.
+ * Opaque wire identity of one mailbox endpoint: the seat's bare name.
  * Grammar and validation live in {@link ./address.ts}; this brand keeps raw
  * strings from crossing a provider boundary unvalidated.
  */
@@ -50,7 +50,7 @@ type MailboxState = 'pending' | 'claimed' | 'done' | 'failed'
 interface MailboxMessage {
   /** Provider-assigned durable id; absent on publish input. */
   readonly id?: MailboxMessageId
-  /** Destination address in the `<namespace>:<name>` grammar. */
+  /** Destination address: the recipient seat's bare name. */
   readonly to: MailboxAddress
   /** Sender address in the same grammar; free-form provenance, never validated against live endpoints. */
   readonly from: string

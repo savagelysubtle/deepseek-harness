@@ -15,17 +15,9 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
-import type { Agent, AgentSetup, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { AgentSetup, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import {
-  HEADLESS_BACKLOG_LIMIT, HEADLESS_BACKLOG_STALE_CLAIM_MS,
-  admittedOutcome, relayUserMessage,
-} from '@deepseek-ai/dsh-mailbox-bridge'
-// The real import binds the context merge; the format helper validates the
-// served address grammar in the same operation that derives it.
-import { formatMailboxAddress } from '@deepseek-ai/dsh-mailbox'
-import type {} from '@deepseek-ai/dsh-mailbox'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
@@ -62,21 +54,12 @@ export interface Config {
   sessionName?: string
   /** Output mode; the schema default is `text`. */
   format?: OutputFormat
-  /**
-   * Serve mailbox mail as `<namespace>:<sessionName>` for this run: before the
-   * task turn, one bounded backlog of pending messages is admitted ahead of
-   * it (fixed bounds — see `@deepseek-ai/dsh-mailbox-bridge`'s headless
-   * constants). Requires a composed mailbox registry with its default
-   * provider resolved; naming a namespace without one fails the run loud.
-   */
-  mailboxNamespace?: string
 }
 
 export const Config: z<Config> = z.object({
   task: z.string().required(),
   sessionName: z.string(),
   format: z.union(['text', 'json'] as const).default('text'),
-  mailboxNamespace: z.string(),
 })
 
 /** Resolved execution parameters for one runner invocation. */
@@ -124,15 +107,11 @@ export const internals: { stdout: HeadlessIo['stdout']; stderr: HeadlessIo['stde
  * already declares.
  * @param config - validated plugin config.
  * @returns the resolved execution parameters.
- * @throws when `config.sessionName` violates the accepted name grammar, or
- *   when `mailboxNamespace` is set on an anonymous run.
+ * @throws when `config.sessionName` violates the accepted name grammar.
  */
 export function resolveRunSpec(config: Config): RunSpec {
   const json = config.format === 'json'
   if (config.sessionName === undefined) {
-    if (config.mailboxNamespace !== undefined) {
-      throw new Error('headless-runner: mailboxNamespace requires sessionName; an anonymous run has no address to serve')
-    }
     return { kind: 'one-shot', json }
   }
   assertValidSessionName(config.sessionName)
@@ -220,36 +199,6 @@ function emitOutcome(spec: RunSpec, events: readonly SessionEvent[], firstSeq: n
 }
 
 /**
- * Admit one bounded backlog of pending mail addressed to this run before its
- * task turn. Every admitted message rides the merged `mailbox` message source
- * as a queued FIFO turn, so the task always arrives last in a clean inbox.
- * @param ctx - plugin context carrying the optional mailbox registry.
- * @param agent - this run's created or resumed agent; deliveries queue on it.
- * @param namespace - configured namespace half of the served address.
- * @param name - this run's validated session name.
- * @throws when a namespace is named but no mailbox registry is composed, or
- *   when the registry has no resolvable default provider at claim time.
- */
-async function serveMailboxBacklog(ctx: Context, agent: Agent, namespace: string, name: string): Promise<void> {
-  const mailbox = ctx.get('mailbox')
-  if (mailbox === undefined) {
-    throw new Error(`headless-runner: mailboxNamespace "${namespace}" is set but no mailbox registry is composed`)
-  }
-  const address = formatMailboxAddress(namespace, name)
-  const leases = await mailbox.claim({
-    addresses: [address],
-    limit: HEADLESS_BACKLOG_LIMIT,
-    staleClaimMs: HEADLESS_BACKLOG_STALE_CLAIM_MS,
-  })
-  for (const lease of leases) {
-    // Queued turns only: the one-shot runner never interrupts itself, and the
-    // task followup below must stay the last message of the run's last turn.
-    agent.followup(relayUserMessage(lease))
-    await mailbox.settle(lease.leaseRef, admittedOutcome(lease))
-  }
-}
-
-/**
  * Run one task through a freshly created or resumed Agent and request process
  * exit. A named run takes its per-name lock across the whole body, resumes
  * when a persisted log exists for the derived id (a present-but-unloadable log
@@ -307,12 +256,6 @@ async function run(ctx: Context, config: Config, io: HeadlessIo): Promise<void> 
         agentOptions,
         setup,
       })
-    // The served-address hook admits queued mail BEFORE the task turn so the
-    // run wakes on its backlog with the task still last in the inbox.
-    // resolveRunSpec already rejected the anonymous-plus-namespace shape.
-    if (spec.kind === 'named' && config.mailboxNamespace !== undefined) {
-      await serveMailboxBacklog(ctx, agent, config.mailboxNamespace, spec.name)
-    }
     await agent.whenIdle()
     const firstSeq = agent.session.seq
     const stopStreaming = spec.json ? streamAssistantText(ctx, agent.session.id, firstSeq, io) : undefined
