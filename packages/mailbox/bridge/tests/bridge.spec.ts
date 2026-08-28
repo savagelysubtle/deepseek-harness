@@ -50,6 +50,8 @@ async function makeHarness(options: {
   liveBySession?: Record<string, LiveAgentStub>
   /** Which session names persistence reports logs for (`true` = the shared 'target' fixture). */
   persisted?: boolean | readonly string[]
+  /** Compose NO session-persistence backend at all (terminal wake failure). */
+  noPersistence?: boolean
   /** Explicit queue file override (down-host tests mount the file the CLI wrote). */
   storePath?: string
   /** Explicit live-seat roster passed through to the spec (web-seat tests). */
@@ -58,6 +60,7 @@ async function makeHarness(options: {
   ctx: ContextType
   storePath: string
   resumeCalls: () => number
+  createdSessions: () => string[]
   resumedFollowup: ReturnType<typeof vi.fn>
   disposeCalls: () => number
   flushes: () => number
@@ -69,37 +72,54 @@ async function makeHarness(options: {
   await ctx.plugin(MailboxRegistry, { defaultProvider: 'local' })
   await ctx.plugin(MailboxLocal, { path: options.storePath ?? join(dir, 'mailbox.db') })
 
-  const state = { resumes: 0, disposes: 0, flushes: 0 }
+  const state = { resumes: 0, disposes: 0, flushes: 0, creates: [] as string[] }
   const resumedFollowup = vi.fn()
+  /** Handles the stub registry "registered" via resume/create — what ctx.agents.get returns. */
+  const registered = new Map<string, unknown>()
+  const makeHandle = () => {
+    // The real registry registers the AGENT under the session id and returns
+    // the handle from resume/create; the stub mirrors both facts with one
+    // shared agent object so path-1 and resident deliveries hit the same fns.
+    const agent = {
+      status: 'idle',
+      followup: resumedFollowup,
+      steer: vi.fn(),
+      whenIdle: async () => {},
+      session: { events: [] },
+    }
+    return { agent, handle: { agent, dispose: async () => { state.disposes += 1 } } }
+  }
   const agents = {
-    get: (id: string) => options.liveBySession?.[id],
-    resume: vi.fn(async () => {
+    get: (id: string) => options.liveBySession?.[id] ?? registered.get(id),
+    resume: vi.fn(async (resumeOptions: { resumeSessionId: SessionId }) => {
       state.resumes += 1
-      return {
-        agent: {
-          status: 'idle',
-          followup: resumedFollowup,
-          steer: vi.fn(),
-          whenIdle: async () => {},
-          session: { events: [] },
-        },
-        dispose: async () => { state.disposes += 1 },
-      }
+      const { agent, handle } = makeHandle()
+      registered.set(String(resumeOptions.resumeSessionId), agent)
+      return handle
+    }),
+    create: vi.fn(async (createOptions: { sessionId: SessionId }) => {
+      state.creates.push(String(createOptions.sessionId))
+      const { agent, handle } = makeHandle()
+      registered.set(String(createOptions.sessionId), agent)
+      return handle
     }),
   }
   ctx.provide('agents', agents as never)
   ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'mock', model: 'mock' }) } as never)
-  ctx.provide('sessionPersistence', {
-    list: async () => {
-      if (options.persisted === true) return [{ id: deriveNamedSessionId('target') }]
-      return Array.isArray(options.persisted) ? options.persisted.map(name => ({ id: deriveNamedSessionId(name) })) : []
-    },
-  } as never)
+  if (options.noPersistence !== true) {
+    ctx.provide('sessionPersistence', {
+      list: async () => {
+        if (options.persisted === true) return [{ id: deriveNamedSessionId('target') }]
+        return Array.isArray(options.persisted) ? options.persisted.map(name => ({ id: deriveNamedSessionId(name) })) : []
+      },
+    } as never)
+  }
   ctx.provide('sessions', { flush: vi.fn(async () => { state.flushes += 1 }) } as never)
   return {
     ctx,
     storePath: join(dir, 'mailbox.db'),
     resumeCalls: () => state.resumes,
+    createdSessions: () => state.creates,
     resumedFollowup,
     disposeCalls: () => state.disposes,
     flushes: () => state.flushes,
@@ -245,7 +265,7 @@ describe('routing outcomes', () => {
     await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'done' })
   })
 
-  it('cold-resumes a dormant persisted target: queued turn, done at admission, flush, dispose, lock released', async () => {
+  it('cold-resumes a dormant persisted target and keeps it resident', async () => {
     const h = await makeHarness({ persisted: true })
     const id = await publishHello(h.ctx)
     await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec()))
@@ -255,21 +275,42 @@ describe('routing outcomes', () => {
     expect(message.source.kind).toBe('mailbox')
     expect(message.content[0]?.text).toBe('hello')
     await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'done' })
-    // Settled AT ADMISSION, not after quiescence — but idle/flush/dispose still ran.
+    // Residency: the agent stays warm under the host's pen — no dispose, no
+    // flush at delivery, and the lock is still held so a stray headless run
+    // refuses cleanly.
+    expect(h.disposeCalls()).toBe(0)
+    expect(h.flushes()).toBe(0)
+    expect(existsSync(namedLockPath('target'))).toBe(true)
+    // A second mail rides the SAME resident agent — no second resume.
+    const second = await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec()))
+    expect(h.resumeCalls()).toBe(1)
+    await expect(rowState(h.storePath, second)).resolves.toMatchObject({ state: 'done' })
+    expect(existsSync(namedLockPath('target'))).toBe(true)
+  })
+
+  it('disposes and releases the lock at the idle bound when residency is zero', async () => {
+    const h = await makeHarness({ persisted: true })
+    const id = await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec({ ...targetSpec(), residencyIdleMs: 0 }))
+    expect(h.resumeCalls()).toBe(1)
+    await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'done' })
+    // Immediate-retire mode: flush and dispose ran before the drain returned.
     expect(h.flushes()).toBe(1)
     expect(h.disposeCalls()).toBe(1)
     expect(existsSync(namedLockPath('target'))).toBe(false)
   })
 
-  it("settles failed with reason 'unknown-address' for an unpersisted name", async () => {
+  it('creates a first session for an unpersisted name — the basic wake-up', async () => {
     const h = await makeHarness({ persisted: false })
     const id = await publishHello(h.ctx)
     await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec()))
     expect(h.resumeCalls()).toBe(0)
+    expect(h.createdSessions()).toContain(String(deriveNamedSessionId('target')))
     const row = await rowState(h.storePath, id)
-    expect(row.state).toBe('failed')
-    expect(JSON.parse(row.result ?? '{}')).toEqual({ reason: 'unknown-address' })
-    expect(existsSync(namedLockPath('target'))).toBe(false)
+    expect(row.state).toBe('done')
+    // Residency held for the fresh seat too.
+    expect(existsSync(namedLockPath('target'))).toBe(true)
   })
 
   it('defers back to pending while residency is held elsewhere', async () => {
@@ -509,17 +550,23 @@ describe('terminal-failure bounces (every drop visible)', () => {
     })
   })
 
-  it("'unknown-address' bounces too — the fix is general, not guest-specific", async () => {
+  it('a typo send into a served roster provisions the seat instead of bouncing', async () => {
     const h = await makeHarness({ persisted: false })
     const ghost = formatMailboxAddress('ghost')
     await h.ctx.mailbox.publish({ to: ghost, from: 'alice', subject: 'typo send' })
-    // The roster serves both names: the typo'd one fails route-time discovery
-    // while remaining grammatically servable.
+    // The roster serves both names: the typo'd one provisions a fresh seat —
+    // the basic wake-up — rather than dropping the mail on the floor.
     await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(['alice', 'ghost'])))
-    const bounces = rowsTo(h.storePath, 'alice').filter(row => row.type === 'bounce')
-    expect(bounces).toHaveLength(1)
-    expect(bounces[0]?.trace_id).toBeNull()
-    expect(JSON.parse(bounces[0]?.payload ?? '{}').reason).toBe('unknown-address')
+    expect(h.createdSessions()).toContain(String(deriveNamedSessionId('ghost')))
+    const rows = rowsTo(h.storePath, 'alice').filter(row => row.type === 'bounce')
+    expect(rows).toHaveLength(0)
+    const db = new DatabaseSync(h.storePath)
+    try {
+      const states = db.prepare('SELECT state FROM messages WHERE to_address = ?').all('ghost') as Array<{ state: string }>
+      expect(states.map(row => row.state)).toEqual(['done'])
+    } finally {
+      db.close()
+    }
   })
 
   it('never bounces a bounce and never fabricates addresses for unparseable senders', async () => {
@@ -586,10 +633,12 @@ describe('publishAndWake', () => {
   })
 
   it('surfaces a terminal routing failure with its recorded reason', async () => {
-    const h = await makeHarness({ persisted: false })
+    // No persistence backend at all: the wake can neither resume nor create,
+    // so the terminal reason reaches the wire caller verbatim.
+    const h = await makeHarness({ noPersistence: true })
     serveSpecs(h.ctx, ['target'], ['ceo'])
     await expect(bridge.publishAndWake(h.ctx, { to: 'target', from: 'ceo', subject: 'nobody home' }))
-      .rejects.toThrow(/mailbox delivery failed: unknown-address/)
+      .rejects.toThrow(/mailbox delivery failed: .*wake requires a configured session-persistence backend/)
   })
 
   it('refuses to publish when no bridge is composed at all', async () => {

@@ -190,13 +190,14 @@ describe('mailbox.publish over the host API', () => {
   })
 
   it('rejects a terminal routing failure loud with the recorded reason', async () => {
-    // No session-persistence backend composed at all: cold-resume cannot work,
-    // and the absent agent registry hit defers the route into that failure.
+    // No session-persistence backend composed at all: the wake can neither
+    // resume nor create, and the absent backend fails the route into that
+    // terminal failure.
     const { ctx } = await mountMailbox(tempDir(), ['ghost'])
 
     const failed = await publish(ctx, 'mb-fail', { address: 'ghost', from: 'human' })
     expect(failed.ok).toBe(false)
-    if (!failed.ok) expect(failed.error.details.reason).toContain('cold-resume requires')
+    if (!failed.ok) expect(failed.error.details.reason).toContain('requires a configured session-persistence backend')
   })
 
   it('refuses when no mailbox registry is composed', async () => {

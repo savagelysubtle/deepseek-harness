@@ -53,6 +53,17 @@ export const DEFAULT_MAX_CLAIM_PER_CYCLE = 10
 /** Default age past which another claimer's abandoned lease is reclaimable. */
 export const DEFAULT_STALE_CLAIM_MS = 60_000
 
+/** Default idle time a woken agent stays resident before disposal. */
+export const DEFAULT_RESIDENCY_IDLE_MS = 600_000
+
+/** One resident seat: its agent handle plus the residency's release path. */
+export interface ResidentSeat {
+  /** Dispose the agent and release the per-name lock (idle expiry or replacement). */
+  release(): void
+  /** Reset the idle timer after a delivery keeps the seat in use. */
+  keepAlive(): void
+}
+
 
 /** Plugin configuration. */
 export interface Config {
@@ -74,6 +85,13 @@ export interface Config {
    * Absent (the default): pid liveness is the only takeover path.
    */
   readonly lockStaleMs?: number
+  /**
+   * Idle milliseconds a woken seat's agent stays resident in this host after
+   * its last delivery, so the operator's composer and later mail steer it in
+   * place instead of cold-starting. Zero disposes immediately (delivery-time
+   * semantics). Absent: the default bound.
+   */
+  readonly residencyIdleMs?: number
   /**
    * Sender addresses whose mail this bridge's addresses will accept beyond
    * the served roster. Empty (the default) admits no external-origin mail at
@@ -98,6 +116,7 @@ export const Config = z.object({
   maxClaimPerCycle: z.number().step(1).min(1).default(DEFAULT_MAX_CLAIM_PER_CYCLE),
   staleClaimMs: z.number().step(1).min(1).default(DEFAULT_STALE_CLAIM_MS),
   lockStaleMs: z.number().step(1).min(1),
+  residencyIdleMs: z.number().step(1).min(0),
   admitFrom: z.array(z.string()),
   seatAliases: z.array(
     z.object({ address: z.string().min(1), sessionId: z.string().min(1) }),
@@ -112,10 +131,14 @@ export interface BridgeSpec {
   readonly maxClaimPerCycle: number
   readonly staleClaimMs: number
   readonly lockStaleMs: number | undefined
+  /** Idle bound for resident seats; zero disposes each agent after delivery. */
+  readonly residencyIdleMs: number
   /** Sender addresses admitted beyond the served roster. */
   readonly admitFrom: readonly string[]
   /** Grammar-checked alias rows for non-derived (web-host seat) targets. */
   readonly seatAliases: ReadonlyMap<MailboxAddress, SessionId>
+  /** Live resident seats keyed by address; the host's one-writer pen. */
+  readonly residents: Map<string, ResidentSeat>
 }
 
 /**
@@ -149,8 +172,10 @@ export function resolveBridgeSpec(config: Config): BridgeSpec {
     maxClaimPerCycle: config.maxClaimPerCycle ?? DEFAULT_MAX_CLAIM_PER_CYCLE,
     staleClaimMs: config.staleClaimMs ?? DEFAULT_STALE_CLAIM_MS,
     lockStaleMs: config.lockStaleMs,
+    residencyIdleMs: config.residencyIdleMs ?? DEFAULT_RESIDENCY_IDLE_MS,
     admitFrom: config.admitFrom ?? [],
     seatAliases,
+    residents: new Map(),
   }
 }
 
@@ -234,13 +259,20 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
   const sessionId = spec.seatAliases.get(lease.message.to as MailboxAddress)
     ?? deriveNamedSessionId(name)
 
+  // Host-resident delivery: an agent this process already owns takes the
+  // message directly. The operator's composer rides the same residency, so
+  // human input and mail converge on one agent with no fence in between.
   const live = ctx.agents.get(sessionId)
   if (live !== undefined) {
     deliverToLive(live, relayUserMessage(lease))
     await mailbox.settle(lease.leaseRef, admittedOutcome(lease))
+    // A delivery keeps the seat's residency warm — idle expiry measures time
+    // since the seat was last used, not since it was woken.
+    spec.residents.get(name)?.keepAlive()
     return { kind: 'done' }
   }
 
+  const residency = spec.residencyIdleMs
   let lock: NamedSessionLock | undefined
   try {
     // Losing the acquire means a live process holds residency elsewhere: defer
@@ -253,30 +285,103 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
   try {
     const persistence = ctx.get('sessionPersistence')
     if (persistence === undefined) {
-      throw new Error('mailbox-bridge: cold-resume requires a configured session-persistence backend')
+      throw new Error('mailbox-bridge: wake requires a configured session-persistence backend')
     }
     const persisted = (await persistence.list()).some(header => header.id === sessionId)
-    if (!persisted) {
-      await failTerminal(ctx, lease, 'unknown-address')
-      return { kind: 'failed', reason: 'unknown-address' }
-    }
-    const { agent, dispose } = await resumeTarget(ctx, sessionId)
-    try {
-      // A freshly resumed agent takes the delivery as an ordinary FIFO turn;
-      // steering a cold resume would skip reconstructing prior context.
-      agent.followup(relayUserMessage(lease))
-      await mailbox.settle(lease.leaseRef, admittedOutcome(lease))
-      await agent.whenIdle()
+    const handle = persisted
+      ? await resumeTarget(ctx, sessionId)
+      : await createTarget(ctx, sessionId)
+    // A freshly resident agent takes the delivery as an ordinary FIFO turn;
+    // steering a cold resume would skip reconstructing prior context.
+    handle.agent.followup(relayUserMessage(lease))
+    await mailbox.settle(lease.leaseRef, admittedOutcome(lease))
+    // The agent STAYS resident — the operator's composer and later mail all
+    // reach it without any cold start — until the idle bound releases the
+    // lock and disposes it (the one-writer pen stays with the host).
+    if (residency <= 0) {
       const sessions = ctx.get('sessions')
-      if (sessions === undefined) throw new Error('mailbox-bridge: cold-resume requires the session store service')
-      await sessions.flush(agent.session)
-    } finally {
-      await dispose()
+      if (sessions === undefined) throw new Error('mailbox-bridge: wake requires the session store service')
+      await handle.agent.whenIdle()
+      await sessions.flush(handle.agent.session)
+      await handle.dispose()
+      lock.release()
+      return { kind: 'done' }
     }
+    retainResident(ctx, spec, name, handle, lock, residency)
     return { kind: 'done' }
-  } finally {
+  } catch (error) {
+    lock.release()
+    throw error
+  }
+}
+
+/**
+ * Keep one woken agent resident under this bridge's pen: the per-name lock
+ * stays held (stray headless runs refuse cleanly), the agent stays registered
+ * so the operator's composer and later mail steer it in place, and an idle
+ * timer flushes, disposes the agent, and releases the lock after `idleMs`.
+ * @param ctx - plugin context carrying the session store service.
+ * @param spec - resolved serving parameters carrying the residency map.
+ * @param name - the seat's address (its session name).
+ * @param handle - the resident agent handle.
+ * @param lock - the per-name lock acquired for this residency.
+ * @param idleMs - idle milliseconds before the resident disposes.
+ */
+function retainResident(
+  ctx: Context,
+  spec: BridgeSpec,
+  name: string,
+  handle: AgentHandle,
+  lock: NamedSessionLock,
+  idleMs: number,
+): void {
+  const previous = spec.residents.get(name)
+  previous?.release()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const retire = (): void => {
+    spec.residents.delete(name)
+    const sessions = ctx.get('sessions')
+    void (sessions === undefined
+      ? handle.dispose()
+      : sessions.flush(handle.agent.session).catch(() => {}).then(() => handle.dispose()))
     lock.release()
   }
+  const resident: ResidentSeat = {
+    keepAlive(): void {
+      if (timer !== undefined) clearTimeout(timer)
+      arm()
+    },
+    release(): void {
+      if (timer !== undefined) clearTimeout(timer)
+      retire()
+    },
+  }
+  const arm = (): void => {
+    timer = setTimeout(retire, idleMs)
+    timer.unref()
+  }
+  spec.residents.set(name, resident)
+  arm()
+}
+
+/**
+ * Create the first session for a seat that has never run — the basic
+ * wake-up: mail alone provisions the seat, no hire script required.
+ * @param ctx - plugin context carrying the agent registry and default model.
+ * @param sessionId - the derived durable session id to create.
+ */
+async function createTarget(ctx: Context, sessionId: ReturnType<typeof deriveNamedSessionId>): Promise<AgentHandle> {
+  const defaultModel = ctx.get('agentDefaultModel')
+  if (defaultModel === undefined) {
+    throw new Error('mailbox-bridge: wake requires the default model-selection service')
+  }
+  const selection = defaultModel.currentSelection()
+  const agentOptions = { provider: selection.provider, model: selection.model }
+  const setup: AgentSetup = (agentCtx): void => {
+    const selected: ModelSelectionRef = { current: selection, assembled: undefined }
+    installModelSelection(agentCtx, selected)
+  }
+  return ctx.agents.create({ sessionId, meta: { cwd: process.cwd() }, agentOptions, setup })
 }
 
 /**
@@ -390,6 +495,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   timer.unref()
   ctx.effect(() => () => {
     clearInterval(timer)
+    // Host teardown retires every resident seat: agents dispose and the
+    // per-name locks release, so nothing fences a post-restart wake.
+    for (const resident of spec.residents.values()) resident.release()
+    spec.residents.clear()
   }, 'mailbox-bridge.poll')
 }
 

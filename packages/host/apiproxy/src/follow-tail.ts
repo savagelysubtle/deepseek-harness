@@ -18,7 +18,7 @@
 import { open, readdir, readFile, stat } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import {
-  internals as namedSessionInternals, lockPathForToken, NAMED_SESSION_ID_PREFIX,
+  isLockHolderLive, lockPathForToken, NAMED_SESSION_ID_PREFIX,
 } from '@deepseek-ai/dsh-named-sessions'
 import { decodeStorageRecord } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
@@ -29,6 +29,7 @@ import {
 /** Shape of the JSON a held headless lock file records; read-only mirror of `dsh-named-sessions`'s internal payload. */
 interface HeadlessLockPayload {
   readonly pid: number
+  readonly startTicks?: number
 }
 
 /** A live headless owner detected for a named session. */
@@ -71,7 +72,7 @@ export async function liveHeadlessOwner(sessionId: SessionId): Promise<LiveHeadl
     return undefined
   }
   if (typeof payload.pid !== 'number' || !Number.isInteger(payload.pid) || payload.pid < 1) return undefined
-  return namedSessionInternals.isPidAlive(payload.pid) ? { pid: payload.pid } : undefined
+  return isLockHolderLive(payload) ? { pid: payload.pid } : undefined
 }
 
 /** How often the host re-scans the lock directory for newly-owned sessions to follow. */

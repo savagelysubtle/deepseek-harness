@@ -49,13 +49,24 @@ interface LockPayload {
   pid: number
   /** Holder-side epoch-milliseconds timestamp, kept for diagnostics and age takeover. */
   createdAt: number
+  /**
+   * Holder process start time in clock ticks since boot (`/proc/<pid>/stat`
+   * field 22), captured at acquire. A recycled pid serving a different
+   * process reports different ticks, so a lock outliving its owner reads as
+   * abandoned instead of fencing the seat forever. Absent in lock files
+   * written before this field existed, and on platforms without `/proc`.
+   */
+  startTicks?: number
 }
 
 /**
  * Process seams the unit suite substitutes; production values probe the
  * operating system directly.
  */
-export const internals: { isPidAlive(pid: number): boolean } = {
+export const internals: {
+  isPidAlive(pid: number): boolean
+  processStartTicks(pid: number): number | undefined
+} = {
   /**
    * Signal-0 liveness probe: delivery success means alive, "no such process"
    * means dead, and any other failure (for example permission) counts as
@@ -69,6 +80,43 @@ export const internals: { isPidAlive(pid: number): boolean } = {
       return (error as NodeJS.ErrnoException).code !== 'ESRCH'
     }
   },
+  /**
+   * Read a process's start time in clock ticks since boot from
+   * `/proc/<pid>/stat` (field 22). The comm field may contain spaces and is
+   * skipped by its parenthesis delimiters; after it, fields restart at
+   * state(3), so starttime(22) is entry 19 of the remaining split.
+   * Undefined when the platform has no `/proc` or the read fails — callers
+   * treat undefined as "instance identity unavailable".
+   */
+  processStartTicks(pid: number): number | undefined {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+      const after = stat.slice(stat.lastIndexOf(')') + 2)
+      const ticks = Number(after.split(' ')[19])
+      return Number.isFinite(ticks) ? ticks : undefined
+    } catch {
+      return undefined
+    }
+  },
+}
+
+/**
+ * Whether a lock holder record names a process that is both alive and the
+ * SAME process instance that wrote the record: a bare pid probe alone would
+ * honor a recycled pid, permanently fencing the seat. A record without
+ * start ticks (pre-hardening file, or a platform without `/proc`) falls back
+ * to pid liveness only.
+ * @param holder - the pid plus optional start ticks read from a lock file.
+ * @returns whether the recorded holder must be honored as live.
+ */
+export function isLockHolderLive(holder: { readonly pid: number; readonly startTicks?: number }): boolean {
+  if (!internals.isPidAlive(holder.pid)) return false
+  if (holder.startTicks === undefined) return true
+  const current = internals.processStartTicks(holder.pid)
+  // No /proc on this platform: instance identity is unavailable, so the
+  // pid liveness result stands rather than fencing a seat on missing data.
+  if (current === undefined) return true
+  return current === holder.startTicks
 }
 
 /**
@@ -170,7 +218,14 @@ export function acquireNamedSessionLock(
   mkdirSync(dirname(path), { recursive: true })
   // Written once per acquisition; release compares it verbatim so a
   // taken-over artifact is never removed by its previous holder.
-  const payload = JSON.stringify({ pid: process.pid, createdAt: Date.now() } satisfies LockPayload)
+  const payload = JSON.stringify({
+    pid: process.pid,
+    createdAt: Date.now(),
+    ...(() => {
+      const startTicks = internals.processStartTicks(process.pid)
+      return startTicks === undefined ? {} : { startTicks }
+    })(),
+  } satisfies LockPayload)
   let handle: number | undefined
   for (let attempt = 0; attempt < LOCK_ACQUIRE_ATTEMPTS && handle === undefined; attempt += 1) {
     try {
@@ -235,7 +290,7 @@ function throwIfLiveHolder(path: string, name: string, maxAgeMs: number | undefi
     return
   }
   if (typeof payload.pid !== 'number' || !Number.isInteger(payload.pid) || payload.pid < 1) return
-  if (!internals.isPidAlive(payload.pid)) return
+  if (!isLockHolderLive(payload)) return
   if (
     maxAgeMs !== undefined
     && typeof payload.createdAt === 'number'

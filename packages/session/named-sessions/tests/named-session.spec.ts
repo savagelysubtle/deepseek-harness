@@ -12,6 +12,7 @@ import {
   assertValidSessionName,
   deriveNamedSessionId,
   internals,
+  isLockHolderLive,
   namedLockPath,
 } from '../src/index.ts'
 
@@ -90,6 +91,31 @@ describe('per-name lock', () => {
     expect(JSON.parse(readFileSync(path, 'utf8'))).toMatchObject({ pid: process.pid })
     lock.release()
     expect(existsSync(path)).toBe(false)
+  })
+
+  it('takes over the artifact when a recycled pid no longer matches the recorded start ticks', () => {
+    useTempHome()
+    const path = namedLockPath('recycled')
+    mkdirSync(join(path, '..'), { recursive: true })
+    // A live pid (this one) holding a record whose start ticks name a
+    // DIFFERENT process instance — the signature of pid reuse after a crash.
+    writeFileSync(path, JSON.stringify({ pid: process.pid, createdAt: 1, startTicks: 42 }))
+    const lock = acquireNamedSessionLock('recycled')
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toMatchObject({ pid: process.pid })
+    lock.release()
+    expect(existsSync(path)).toBe(false)
+  })
+
+  it('records the holder process start ticks in a fresh lock and honors the match', () => {
+    useTempHome()
+    const lock = acquireNamedSessionLock('ticked')
+    try {
+      const payload = JSON.parse(readFileSync(namedLockPath('ticked'), 'utf8'))
+      expect(payload.startTicks).toBe(internals.processStartTicks(process.pid))
+      expect(isLockHolderLive(payload)).toBe(true)
+    } finally {
+      lock.release()
+    }
   })
 
   it('takes over a torn artifact that records no holder', () => {
