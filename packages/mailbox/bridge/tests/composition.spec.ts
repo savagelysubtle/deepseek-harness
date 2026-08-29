@@ -5,7 +5,7 @@
  * mail ahead of its own task turn.
  */
 
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -31,6 +31,29 @@ import MailboxLocal, { openMailboxDatabase, SqliteMailboxStore } from '@deepseek
 import * as HeadlessRunnerModule from '../../../bundle/headless/src/index.ts'
 import * as HeadlessStartupModule from '../../../bundle/headless/src/startup.ts'
 import * as bridge from '../src/index.ts'
+
+/**
+ * A throwaway org registry for one test file.
+ *
+ * The bridge defaults to `~/.dsh/org/registry.yml` when no path is configured.
+ * A test that falls back to it reads — and could mutate — the operator's live
+ * roster, which is both a flake source and a real hazard.
+ */
+let cachedRegistryPath: string | undefined
+function testRegistryPath(): string {
+  if (cachedRegistryPath !== undefined) return cachedRegistryPath
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-composition-registry-'))
+  const path = join(dir, 'registry.yml')
+  const seats = ['hook-target', 'hook-gate', 'target', 'gotham-seat']
+  writeFileSync(
+    path,
+    `baseDir: ${dir}\nseats:\n${seats.map(seat => `  ${seat}: { cwd: . }`).join('\n')}\nedges: []\n`,
+    'utf8',
+  )
+  cachedRegistryPath = path
+  return path
+}
+
 
 /** The headless launcher's swappable process streams, captured per boot. */
 const headlessInternals = HeadlessRunnerModule.internals
@@ -320,6 +343,9 @@ describe('mailbox delivery over real compositions', () => {
         extraRows: [
           "- name: '@deepseek-ai/dsh-mailbox-bridge'",
           '  config:',
+          // Never the user's real ~/.dsh/org/registry.yml: a test that reads live
+          // operator state is both flaky and a way to mutate it by accident.
+          `    orgRegistryPath: ${JSON.stringify(testRegistryPath())}`,
           '    addresses: ["hook-target"]',
           '    pollIntervalMs: 10',
           '    admitFrom:',
@@ -370,6 +396,9 @@ describe('mailbox delivery over real compositions', () => {
         extraRows: [
           "- name: '@deepseek-ai/dsh-mailbox-bridge'",
           '  config:',
+          // Never the user's real ~/.dsh/org/registry.yml: a test that reads live
+          // operator state is both flaky and a way to mutate it by accident.
+          `    orgRegistryPath: ${JSON.stringify(testRegistryPath())}`,
           '    addresses: ["hook-gate"]',
           '    pollIntervalMs: 10',
         ],
@@ -392,6 +421,9 @@ describe('mailbox delivery over real compositions', () => {
         extraRows: [
           "- name: '@deepseek-ai/dsh-mailbox-bridge'",
           '  config:',
+          // Never the user's real ~/.dsh/org/registry.yml: a test that reads live
+          // operator state is both flaky and a way to mutate it by accident.
+          `    orgRegistryPath: ${JSON.stringify(testRegistryPath())}`,
           '    addresses: ["hook-gate"]',
           '    pollIntervalMs: 10',
           '    admitFrom: ["council"]',
@@ -451,6 +483,9 @@ describe('mailbox delivery over real compositions', () => {
         extraRows: [
           "- name: '@deepseek-ai/dsh-mailbox-bridge'",
           '  config:',
+          // Never the user's real ~/.dsh/org/registry.yml: a test that reads live
+          // operator state is both flaky and a way to mutate it by accident.
+          `    orgRegistryPath: ${JSON.stringify(testRegistryPath())}`,
           '    addresses: ["steer-live"]',
           '    pollIntervalMs: 10',
           '    admitFrom:',
@@ -528,6 +563,9 @@ describe('mailbox delivery over real compositions', () => {
         extraRows: [
           "- name: '@deepseek-ai/dsh-mailbox-bridge'",
           '  config:',
+          // Never the user's real ~/.dsh/org/registry.yml: a test that reads live
+          // operator state is both flaky and a way to mutate it by accident.
+          `    orgRegistryPath: ${JSON.stringify(testRegistryPath())}`,
           '    addresses:',
           '      - alfred',
           '    pollIntervalMs: 10',

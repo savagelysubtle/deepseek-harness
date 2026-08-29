@@ -25,6 +25,7 @@
  * @module @deepseek-ai/dsh-mailbox-bridge
  */
 
+import { stat } from 'node:fs/promises'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
@@ -38,6 +39,7 @@ import {
 } from '@deepseek-ai/dsh-named-sessions'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { loadOrgRegistry, parseMailboxAddress, resolveSeatCwd, resolveSeatSessionId } from '@deepseek-ai/dsh-mailbox'
+import type { OrgRegistry } from '@deepseek-ai/dsh-mailbox'
 import type { MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxMessageId } from '@deepseek-ai/dsh-mailbox'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
@@ -384,6 +386,32 @@ function retainResident(
 }
 
 /**
+ * Registry cache, keyed by path and invalidated on mtime.
+ *
+ * Delivery resolves a seat's identity and project from the registry, and a busy
+ * bridge drains on a short interval — so an uncached read here is a file read
+ * plus a YAML parse **per message**. Caching on mtime keeps a hand-edit picked
+ * up on the next cycle (the registry is edited by hand, and by the UI) while
+ * costing one `stat` on the hot path instead of a parse.
+ */
+const registryCache = new Map<string, { mtimeMs: number; registry: OrgRegistry }>()
+
+/**
+ * Load the org registry, reusing the parsed copy while the file is unchanged.
+ * @param path - the registry file.
+ * @returns the parsed registry.
+ * @throws when the file cannot be read or parsed.
+ */
+async function cachedRegistry(path: string): Promise<OrgRegistry> {
+  const { mtimeMs } = await stat(path)
+  const hit = registryCache.get(path)
+  if (hit !== undefined && hit.mtimeMs === mtimeMs) return hit.registry
+  const registry = await loadOrgRegistry(path)
+  registryCache.set(path, { mtimeMs, registry })
+  return registry
+}
+
+/**
  * Resolve the durable session id a seat's conversation lives under.
  *
  * The registry answers when it has a recorded `sessionId`; otherwise the name is
@@ -398,7 +426,7 @@ function retainResident(
 async function seatSessionId(spec: BridgeSpec, name: string): Promise<SessionId> {
   let registry
   try {
-    registry = await loadOrgRegistry(spec.orgRegistryPath)
+    registry = await cachedRegistry(spec.orgRegistryPath)
   } catch {
     // A registry that will not load cannot pin identity; derivation is the only
     // answer left, and it is the same one every prior build used.
@@ -430,7 +458,7 @@ async function seatSessionId(spec: BridgeSpec, name: string): Promise<SessionId>
 async function seatCwd(spec: BridgeSpec, name: string): Promise<string> {
   let registry
   try {
-    registry = await loadOrgRegistry(spec.orgRegistryPath)
+    registry = await cachedRegistry(spec.orgRegistryPath)
   } catch (error) {
     throw new Error(
       `mailbox-bridge: cannot provision "${name}" — org registry at `

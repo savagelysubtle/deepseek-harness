@@ -208,6 +208,9 @@ describe('session-keyed locking — the lock guards what is written', () => {
   })
 
   it('keeps one lock across a rename — the id is what is locked, not the label', () => {
+    // Temp home: this test ACQUIRES a lock, and without isolation it writes a
+    // real artifact into ~/.dsh/headless/locks that other suites race against.
+    useTempHome()
     // Identity recorded once and carried through a rename: both names resolve to
     // the same session id, so both must contend for exactly one lock. Locking by
     // name would hand them two, which is two writers on one log.
