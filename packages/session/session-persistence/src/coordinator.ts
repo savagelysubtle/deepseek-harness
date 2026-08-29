@@ -1402,6 +1402,11 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       cursor: storedEvents.length,
       materialized: true,
       owner: session,
+      // Anchor the adopted cursor to the log it was read from. Without this the
+      // external-writer guard in `appendCore` is disabled for every session the
+      // host adopts rather than cold-prepares — which is the common case, and
+      // the one the seq regression actually came in through.
+      appendIdentity: await this.backend.readAppendIdentity?.(session.header.id),
     })
     const suffix = seed.slice(storedEvents.length)
     if (suffix.length > 0) await this.appendCore(session.header.id, suffix)
