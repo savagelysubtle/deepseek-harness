@@ -814,6 +814,80 @@ describe('JsonlSessionPersistence: write path (session/event → flush)', () => 
 })
 
 
+describe('JsonlSessionPersistence: external writer detection', () => {
+  // The seq regression: a host process holds a cached cursor while ANOTHER
+  // process appends to the same log and exits. Both the live Session's
+  // `log.length` and the coordinator's `state.cursor` are in-process copies of
+  // the same stale number, so the contiguity check compares one cached value
+  // against another, passes, and writes a seq the file already used. Observed
+  // live: `seq 80` written into a log already at 170.
+  //
+  // Locking cannot catch it — the conflict is SEQUENTIAL. The other writer has
+  // exited and released by the time this append runs.
+  //
+  // sqlite is saved by its `UNIQUE (session_id, seq)` constraint (see the
+  // matching case in sqlite.spec.ts). A plain file has no constraint, so the
+  // coordinator has to refuse before writing.
+  it('refuses to append when another process advanced the log', async () => {
+    const root = await freshRoot()
+    const m = meta('external-writer')
+
+    const ctx1 = new Context()
+    await ctx1.plugin(SessionStore)
+    const f1 = await ctx1.plugin(JsonlSessionPersistence, { root, compression: 'none' })
+    await ctx1.sessionPersistence.create(m)
+    await ctx1.sessionPersistence.append(m.id, oneTurnLog())
+
+    // A second mount over the same root loads the session and adopts cursor 6.
+    const ctx2 = new Context()
+    await ctx2.plugin(SessionStore)
+    const f2 = await ctx2.plugin(JsonlSessionPersistence, { root, compression: 'none' })
+    await ctx2.sessionPersistence.load(m.id)
+
+    const turn2: SessionEvent[] = [
+      { type: 'turn/start', seq: 6, time: 7, data: { turn: 2 } },
+      { type: 'turn/end', seq: 7, time: 8, data: { turn: 2, reason: { kind: 'completed' } } },
+    ]
+    // The "other process" commits 6..7 and is done.
+    await ctx1.sessionPersistence.append(m.id, turn2)
+
+    // The stale mount still believes its cursor is 6. Before this guard it
+    // wrote seq 6 a second time and tore the log.
+    await expect(ctx2.sessionPersistence.append(m.id, turn2))
+      .rejects.toThrow(/changed on disk since this process last read it/)
+
+    // The log is intact: one copy of each seq, no duplicate 6.
+    const loaded = await ctx1.sessionPersistence.load(m.id)
+    expect(loaded.events.map(e => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
+
+    await f2.dispose()
+    await f1.dispose()
+  })
+
+  // Timestamps move whenever the file is touched, including a failed append
+  // truncated back to its original size. Identity is `dev:ino:size` precisely so
+  // the legitimate retry after a rollback is not refused.
+  it('identifies the append position by dev:ino:size only', async () => {
+    const root = await freshRoot()
+    const m = meta('identity-shape')
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const fiber = await ctx.plugin(JsonlSessionPersistence, { root, compression: 'none' })
+    await ctx.sessionPersistence.create(m)
+    await ctx.sessionPersistence.append(m.id, oneTurnLog())
+
+    const backend = ctx.sessionPersistence as unknown as {
+      readAppendIdentity(id: SessionId): Promise<string | undefined>
+    }
+    const identity = await backend.readAppendIdentity(m.id)
+    const stats = await stat(rawLogPath(root, m.cwd, m.id), { bigint: true })
+    expect(identity).toBe([stats.dev, stats.ino, stats.size].join(':'))
+
+    expect(await backend.readAppendIdentity(SessionId('no-such-session'))).toBeUndefined()
+    await fiber.dispose()
+  })
+})
+
 describe('JsonlSessionPersistence: scanLog unit', () => {
   it('requires exactly one newline-terminated header record', () => {
     const header = JSON.stringify(toHeaderLine(meta('scanner-header')))

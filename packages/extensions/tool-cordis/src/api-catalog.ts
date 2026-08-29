@@ -3476,15 +3476,19 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'MailboxProvider',
-    declaration: 'export interface MailboxProvider {\n    readonly name: string;\n    publish(message: Omit<MailboxMessage, \'id\'>, signal?: AbortSignal): Promise<MailboxMessageId>;\n    claim(filter: MailboxClaimFilter, signal?: AbortSignal): Promise<readonly MailboxLease[]>;\n    settle(leaseRef: MailboxLease[\'leaseRef\'], outcome: MailboxOutcome, signal?: AbortSignal): Promise<void>;\n}',
+    declaration: 'export interface MailboxProvider {\n    readonly name: string;\n    publish(message: Omit<MailboxMessage, \'id\'>, signal?: AbortSignal): Promise<MailboxMessageId>;\n    claim(filter: MailboxClaimFilter, signal?: AbortSignal): Promise<readonly MailboxLease[]>;\n    settle(leaseRef: MailboxLease[\'leaseRef\'], outcome: MailboxOutcome, signal?: AbortSignal): Promise<void>;\n    claimableAddresses(filter: MailboxStalenessFilter, signal?: AbortSignal): Promise<readonly MailboxAddress[]>;\n}',
   },
   {
     name: 'MailboxPublishPayload',
-    declaration: 'export interface MailboxPublishPayload {\n    readonly address?: string;\n    readonly namespace?: string;\n    readonly name?: string;\n    readonly from: string;\n    readonly type?: string;\n    readonly subject?: string;\n    readonly payload?: unknown;\n    readonly traceId?: string;\n    readonly blocking?: boolean;\n}',
+    declaration: 'export interface MailboxPublishPayload {\n    readonly address?: string;\n    readonly name?: string;\n    readonly from: string;\n    readonly type?: string;\n    readonly subject?: string;\n    readonly payload?: unknown;\n    readonly traceId?: string;\n    readonly blocking?: boolean;\n}',
   },
   {
     name: 'MailboxPublishValue',
     declaration: 'export interface MailboxPublishValue {\n    readonly messageId: string;\n    readonly disposition: \'delivered\' | \'queued\';\n}',
+  },
+  {
+    name: 'MailboxStalenessFilter',
+    declaration: 'export interface MailboxStalenessFilter {\n    readonly staleClaimMs: number;\n}',
   },
   {
     name: 'ManualCompactAgentContext',

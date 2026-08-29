@@ -199,6 +199,27 @@ export interface PersistenceBackend<TornMarker = unknown> {
   list(signal?: AbortSignal): Promise<SessionHeader[]>
 
   /**
+   * Optional identity of the stored log's APPEND POSITION — a value that changes
+   * when and only when the stored content changes. The coordinator anchors its
+   * in-memory cursor to this so an append can detect that another PROCESS
+   * advanced the log while this one stood still (see
+   * {@link PersistenceCoordinator.assertCursorMatchesDurableLog}).
+   *
+   * Deliberately NOT {@link readStoredRevision}: that carries mtime/ctime, which
+   * move on writes leaving the content unchanged — a rolled-back append that was
+   * truncated back to its original size is exactly that, and comparing
+   * timestamps would refuse the legitimate retry.
+   *
+   * Backends whose store enforces sequence uniqueness itself (a `UNIQUE
+   * (session_id, seq)` constraint) omit this: the store already refuses the
+   * duplicate, so the coordinator does not need to pre-empt it. A plain file has
+   * no such constraint, which is why the file backend implements it.
+   * @param id - the session whose stored log is being identified.
+   * @param signal - optional cancellation for the stat.
+   */
+  readAppendIdentity?(id: SessionId, signal?: AbortSignal): Promise<string | undefined>
+
+  /**
    * Optional side-effect-free artifact locator, used to point refusal
    * diagnostics ({@link SessionFormatUnsupportedError}) at the raw log.
    * Backends without one artifact per session omit it or return `undefined`.
@@ -232,6 +253,21 @@ interface SessionState {
    * same id (a collision) instead of silently no-opping.
    */
   owner?: Session
+  /**
+   * The append identity {@link cursor} was last reconciled against, for backends
+   * that report one. `cursor` alone cannot detect an external writer: it is an
+   * in-process count, and a live `Session`'s `log.length` is a second copy of the
+   * same stale number, so the contiguity check in {@link appendCore} compares one
+   * cached value against another and passes. Anchoring the cursor to the stored
+   * log's own identity is what makes "another process appended since we last
+   * looked" observable at all.
+   *
+   * NOT the full {@link SessionPersistenceRevision}: that carries mtime/ctime,
+   * which move on writes that do not change the log's contents — a rolled-back
+   * append truncated back to its original size is the case that matters, and
+   * comparing timestamps refuses the legitimate retry that follows.
+   */
+  appendIdentity?: string | undefined
 }
 
 /** One live session's initialization and bounded write-behind controller. */
@@ -701,12 +737,58 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       }
     }
 
+    await this.assertCursorMatchesDurableLog(id, state)
+
     await this.backend.appendBatch(state.meta, events, state.materialized)
     // The durable write is the transaction: mark materialized + advance the
     // cursor as soon as it commits (uniform across backends).
     state.materialized = true
     state.cursor += events.length
+    // Re-anchor to the revision this write produced. Without it the next append
+    // would compare against the pre-write revision and refuse our own change.
+    state.appendIdentity = await this.backend.readAppendIdentity?.(id)
     this.preparations.invalidate(id)
+  }
+
+  /**
+   * Refuse to append when the durable log moved since this cursor was
+   * reconciled against it.
+   *
+   * The contiguity check above compares `event.seq` to `state.cursor`, but both
+   * are in-process values: a live `Session`'s `seq` is its own `log.length`, and
+   * `state.cursor` is this coordinator's count. When another PROCESS appends —
+   * a headless run resuming the same session, then exiting — the file advances
+   * while both of ours stand still. They are stale together, so the contiguity
+   * check compares a cached number against a cached number, passes, and writes
+   * a seq the file already used. Observed: `seq 80` written into a log at 170,
+   * duplicating 80 and tearing the log on the next cold read.
+   *
+   * Locking cannot catch this. The conflict is SEQUENTIAL, not concurrent: the
+   * other writer has exited and released by the time this append runs.
+   *
+   * On mismatch the correct move is to refuse, not to repair. Events already
+   * minted by the live `Session` carry stale seqs, so advancing the cursor would
+   * still write them at the wrong positions — the session has to be reloaded.
+   * Refusing loudly is what makes that reload possible instead of silent
+   * corruption discovered days later.
+   *
+   * A narrow TOCTOU window remains between this check and the write: the host
+   * deliberately does not hold the session lock, because holding it across a
+   * turn would stall mail delivery to a busy seat for the length of that turn.
+   * That trade is owned by the Stage 1b plan section.
+   * @param id - the session being appended to.
+   * @param state - the write state whose cursor is being trusted.
+   */
+  private async assertCursorMatchesDurableLog(id: SessionId, state: SessionState): Promise<void> {
+    if (state.appendIdentity === undefined) return
+    const durable = await this.backend.readAppendIdentity?.(id)
+    if (durable === undefined || durable === state.appendIdentity) return
+    throw new Error(
+      `session "${id}" changed on disk since this process last read it `
+      + `(expected ${state.appendIdentity}, found ${durable}). Another process `
+      + `appended to this log — refusing to append at seq ${state.cursor}, which it `
+      + 'has already used. Reload the session before writing to it.',
+    )
   }
 
   /**
@@ -955,6 +1037,9 @@ export class PersistenceCoordinator<TornMarker = unknown> {
     state.meta = source.inspection.meta
     state.cursor = cursor
     state.materialized = true
+    // `isPreparedSourceCurrent` just proved the file still carries this
+    // revision, so the cursor and the stored log are reconciled as of now.
+    state.appendIdentity = await this.backend.readAppendIdentity?.(id)
     this.states.set(id, state)
     return {
       source,

@@ -249,6 +249,36 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
   }
 
   /**
+   * Identify the log's append position: device, inode and size, and nothing
+   * else. Size is the append position for an append-only file, while device and
+   * inode catch the file being replaced underneath us — which `fstat` on a held
+   * descriptor cannot see, and which the compaction ladder (plan P4c) will do.
+   *
+   * Excludes mtime/ctime on purpose. They move whenever the file is touched,
+   * including a failed append truncated back to its original size, and refusing
+   * the retry that follows would break durability rather than protect it.
+   * @param id - the session whose log is being identified.
+   * @param signal - optional cancellation for the stat.
+   * @returns `dev:ino:size`, or `undefined` when the log does not exist.
+   */
+  async readAppendIdentity(id: SessionId, signal?: AbortSignal): Promise<string | undefined> {
+    signal?.throwIfAborted()
+    await this.ensureRootEncoding()
+    signal?.throwIfAborted()
+    const path = await this.findLog(id, signal)
+    if (path === undefined) return undefined
+    try {
+      const identity = await stat(path, { bigint: true })
+      signal?.throwIfAborted()
+      return [identity.dev, identity.ino, identity.size].join(':')
+    } catch (error: unknown) {
+      signal?.throwIfAborted()
+      if (isENOENT(error)) return undefined
+      throw error
+    }
+  }
+
+  /**
    * Read a session's stored artifact text verbatim: the durable file bytes
    * decoded from this backend's physical encoding (complete zstd frames
    * concatenated, or UTF-8 plaintext). The content is the exact JSONL text the
