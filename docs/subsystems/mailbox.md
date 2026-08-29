@@ -233,5 +233,5 @@ async claim(filter: MailboxClaimFilter, signal?: AbortSignal): Promise<readonly 
 async settle(leaseRef: MailboxLeaseRef, outcome: MailboxOutcome, signal?: AbortSignal): Promise<void>
 ```
 
-Source: [`packages/mailbox/mailbox/src/index.ts:55`](../../packages/mailbox/mailbox/src/index.ts)
+Source: [`packages/mailbox/mailbox/src/index.ts:60`](../../packages/mailbox/mailbox/src/index.ts)
 <!-- END GENERATED cordis-surface -->

@@ -113,7 +113,7 @@ describe('per-name lock', () => {
     useTempHome()
     const lock = acquireNamedSessionLock('ticked')
     try {
-      const payload = JSON.parse(readFileSync(namedLockPath('ticked'), 'utf8'))
+      const payload = JSON.parse(readFileSync(namedLockPath('ticked'), 'utf8')) as { pid: number; startTicks?: number }
       expect(payload.startTicks).toBe(internals.processStartTicks(process.pid))
       expect(isLockHolderLive(payload)).toBe(true)
     } finally {

@@ -67,11 +67,10 @@ export const apply = (ctx: Context): (() => void) => {
         properties: { title: { type: 'string', required: true } },
       },
       render(_args, value) {
-        const out = value as unknown as SessionTitleToolOutput
-        return [{ type: 'text', text: `Session title set to: ${out.title}` }]
+        return [{ type: 'text', text: `Session title set to: ${value.title}` }]
       },
     },
-    async execute(args, exec): Promise<SessionTitleToolOutput> {
+    execute(args, exec): Promise<SessionTitleToolOutput> {
       const service = ctx.get('sessionTitle')
       if (service === undefined) {
         throw new Error('session_title requires the session-title service — mount @deepseek-ai/dsh-session-title')
@@ -86,7 +85,9 @@ export const apply = (ctx: Context): (() => void) => {
       }
       // rename() normalizes, rejects an empty result, and pins with source
       // `user` — the same acceptance path the UI's rename takes.
-      return { title: service.rename(session, title).title }
+      // Synchronous work behind an async signature: rename() commits in-process,
+      // so there is nothing to await and `async` would only add a tick.
+      return Promise.resolve({ title: service.rename(session, title).title })
     },
   }))
 }
