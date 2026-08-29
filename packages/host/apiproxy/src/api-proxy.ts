@@ -2408,6 +2408,14 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         }
         try {
           const accepted = titles.rename(found.agent.session, title)
+          // `rename` commits synchronously in memory and returns; persistence is a
+          // post-commit observer whose failures are contained by contract. So
+          // answering here would report success for a write that may be refused
+          // milliseconds later — and the external-writer guard DOES refuse, when
+          // another process advanced this log. Await the durability checkpoint so
+          // that refusal reaches the caller instead of dying in the drain. This is
+          // the hook's documented purpose; it throws the first listener failure.
+          await ctx.sessions.flush(found.agent.session)
           return ok(request, { title: accepted.title, seq: accepted.eventSeq })
         } catch (error: unknown) {
           // Only the input's fault maps to title-invalid (the message is

@@ -268,6 +268,18 @@ interface SessionState {
    * comparing timestamps refuses the legitimate retry that follows.
    */
   appendIdentity?: string | undefined
+  /**
+   * Set when {@link PersistenceCoordinator.assertCursorMatchesDurableLog} refused
+   * an append because another process advanced the log. The cursor is known wrong
+   * from here on, and every later append would fail the same check — so without
+   * this flag one honest error becomes the first of many, each one silent to its
+   * caller.
+   *
+   * Recovery is to RELOAD the session from disk, never to repair the cursor: the
+   * events the live `Session` already minted carry stale seqs, so advancing the
+   * cursor would still write them at the wrong positions.
+   */
+  stale?: boolean | undefined
 }
 
 /** One live session's initialization and bounded write-behind controller. */
@@ -780,9 +792,18 @@ export class PersistenceCoordinator<TornMarker = unknown> {
    * @param state - the write state whose cursor is being trusted.
    */
   private async assertCursorMatchesDurableLog(id: SessionId, state: SessionState): Promise<void> {
+    if (state.stale === true) {
+      throw new Error(
+        `session "${id}" was advanced by another process and this copy is stale. `
+        + 'Reload it before writing to it — the cursor cannot be repaired, because '
+        + 'events already minted here carry sequence numbers the log has used.',
+      )
+    }
     if (state.appendIdentity === undefined) return
     const durable = await this.backend.readAppendIdentity?.(id)
     if (durable === undefined || durable === state.appendIdentity) return
+    // Poison the state before throwing: the cursor is known wrong from here on.
+    state.stale = true
     throw new Error(
       `session "${id}" changed on disk since this process last read it `
       + `(expected ${state.appendIdentity}, found ${durable}). Another process `

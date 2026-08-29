@@ -864,6 +864,47 @@ describe('JsonlSessionPersistence: external writer detection', () => {
     await f1.dispose()
   })
 
+  // Without the stale mark, the first refusal is only the first of many: the
+  // cursor stays wrong, every later append fails the same check, and every caller
+  // that does not await durability still gets told ok. The mark makes the failure
+  // terminal until the session is reloaded.
+  it('stays refused after the first refusal, naming reload as the remedy', async () => {
+    const root = await freshRoot()
+    const m = meta('stale-sticks')
+
+    const ctx1 = new Context()
+    await ctx1.plugin(SessionStore)
+    const f1 = await ctx1.plugin(JsonlSessionPersistence, { root, compression: 'none' })
+    await ctx1.sessionPersistence.create(m)
+    await ctx1.sessionPersistence.append(m.id, oneTurnLog())
+
+    const ctx2 = new Context()
+    await ctx2.plugin(SessionStore)
+    const f2 = await ctx2.plugin(JsonlSessionPersistence, { root, compression: 'none' })
+    await ctx2.sessionPersistence.load(m.id)
+
+    const turn2: SessionEvent[] = [
+      { type: 'turn/start', seq: 6, time: 7, data: { turn: 2 } },
+      { type: 'turn/end', seq: 7, time: 8, data: { turn: 2, reason: { kind: 'completed' } } },
+    ]
+    await ctx1.sessionPersistence.append(m.id, turn2)
+
+    // First refusal: detected against the durable log.
+    await expect(ctx2.sessionPersistence.append(m.id, turn2))
+      .rejects.toThrow(/changed on disk since this process last read it/)
+
+    // Second attempt is refused from the poisoned state, and says what to do.
+    await expect(ctx2.sessionPersistence.append(m.id, turn2))
+      .rejects.toThrow(/stale\. Reload it before writing to it/)
+
+    // Still one clean copy of each seq.
+    const loaded = await ctx1.sessionPersistence.load(m.id)
+    expect(loaded.events.map(e => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
+
+    await f2.dispose()
+    await f1.dispose()
+  })
+
   // Timestamps move whenever the file is touched, including a failed append
   // truncated back to its original size. Identity is `dev:ino:size` precisely so
   // the legitimate retry after a rollback is not refused.
