@@ -23,6 +23,7 @@ export interface MessageRow {
   /** `1` iff the sender marked itself blocked waiting for an answer; `null` = false. */
   blocking: number | null
   state: 'pending' | 'claimed' | 'done' | 'failed'
+  /** Epoch-ms admission time of the message; read back unchanged as its sent time (`MailboxMessage.sentAt`). */
   created_at: number
   claimed_at: number | null
   claim_token: string | null

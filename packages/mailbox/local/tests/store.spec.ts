@@ -84,7 +84,7 @@ describe('publish/claim/settle', () => {
       payload, traceId: 'trace-1',
     })
     const [lease] = await store.claim(filter([OPS]))
-    expect(lease?.message).toEqual({ id, to: OPS, from: 'gotham:batman', type: 'task', subject: 'check in', payload, traceId: 'trace-1' })
+    expect(lease?.message).toEqual({ id, to: OPS, from: 'gotham:batman', sentAt: 1_000_000, type: 'task', subject: 'check in', payload, traceId: 'trace-1' })
     expect(lease?.claimedAt).toBe(1_000_000)
     await store.settle(lease!.leaseRef, { state: 'done', result: { deliveredAt: 1_000_500, messageId: id } })
     store.close()
@@ -109,6 +109,31 @@ describe('publish/claim/settle', () => {
     await store.publish({ to: OPS, from: 'gotham:batman', blocking: true })
     const [lease] = await store.claim(filter([OPS]))
     expect(lease?.message.blocking).toBe(true)
+    store.close()
+  })
+
+  it('dates a claimed message by its publish-time sentAt, not the claim moment', async () => {
+    const { clock, advance } = fakeClock()
+    const store = storeWith(clock)
+    await store.publish({ to: OPS, from: 'gotham:batman', subject: 'sat queued' })
+    // The message sits queued well past its admission, so a claim-time stamp
+    // would misdate it to the reader.
+    advance(5_000)
+    const [lease] = await store.claim(filter([OPS]))
+    expect(lease?.message.sentAt).toBe(1_000_000)
+    expect(lease?.claimedAt).toBe(1_005_000)
+    store.close()
+  })
+
+  it('keeps the original sentAt across a stale-lease reclaim', async () => {
+    const { clock, advance } = fakeClock()
+    const store = storeWith(clock)
+    await store.publish({ to: OPS, from: 'gotham:alfred' })
+    await store.claim(filter([OPS]))
+    advance(31_000)
+    const [reclaimed] = await store.claim(filter([OPS]))
+    expect(reclaimed?.message.sentAt).toBe(1_000_000)
+    expect(reclaimed?.claimedAt).toBe(1_031_000)
     store.close()
   })
 
@@ -296,6 +321,51 @@ describe('claimableAddresses', () => {
   it('returns nothing for an empty store', async () => {
     const store = storeWith(fakeClock().clock)
     await expect(store.claimableAddresses({ staleClaimMs: 30_000 })).resolves.toEqual([])
+    store.close()
+  })
+})
+
+describe('lookupByTraceId', () => {
+  it('returns one entry per stored message carrying the traceId, earliest send first', async () => {
+    const { clock, advance } = fakeClock()
+    const store = storeWith(clock)
+    const question = await store.publish({ to: OPS, from: 'gotham:batman', traceId: 'trace-1', subject: 'question' })
+    advance(10)
+    const answer = await store.publish({ to: FIELD, from: 'gotham:operations', traceId: 'trace-1', subject: 'answer' })
+    await store.publish({ to: OPS, from: 'gotham:cane', traceId: 'trace-2' })
+    await expect(store.lookupByTraceId('trace-1')).resolves.toEqual([
+      { id: question, from: 'gotham:batman', to: OPS, sentAt: 1_000_000 },
+      { id: answer, from: 'gotham:operations', to: FIELD, sentAt: 1_000_010 },
+    ])
+    await expect(store.lookupByTraceId('unknown-trace')).resolves.toEqual([])
+    store.close()
+  })
+
+  it('reads terminal rows and leaves both pending and settled rows untouched', async () => {
+    const { clock } = fakeClock()
+    const path = tempDbPath()
+    const store = storeWith(clock, path)
+    const id = await store.publish({ to: OPS, from: 'gotham:alfred', traceId: 'trace-1' })
+    // The lookup is a pure read: the pending row survives for the next claim.
+    await expect(store.lookupByTraceId('trace-1')).resolves.toEqual([
+      { id, from: 'gotham:alfred', to: OPS, sentAt: 1_000_000 },
+    ])
+    const [lease] = await store.claim(filter([OPS]))
+    expect(lease?.message.id).toBe(id)
+    await store.settle(lease!.leaseRef, { state: 'done', result: { deliveredAt: 5, messageId: id } })
+    // Settled messages stay readable — the reply-direction evidence outlives
+    // the delivery — and the settlement is undisturbed.
+    await expect(store.lookupByTraceId('trace-1')).resolves.toEqual([
+      { id, from: 'gotham:alfred', to: OPS, sentAt: 1_000_000 },
+    ])
+    const db = new DatabaseSync(path)
+    try {
+      const row = db.prepare('SELECT state, claim_token FROM messages WHERE id = ?').get(id) as { state: string; claim_token: string | null }
+      expect(row.state).toBe('done')
+      expect(row.claim_token).toBeNull()
+    } finally {
+      db.close()
+    }
     store.close()
   })
 })

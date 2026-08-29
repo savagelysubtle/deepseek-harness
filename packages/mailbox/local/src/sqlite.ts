@@ -16,7 +16,8 @@ import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import type {
   MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxLeaseRef, MailboxMessage,
-  MailboxMessageId, MailboxOutcome, MailboxProvider, MailboxStalenessFilter,
+  MailboxMessageId, MailboxOutcome, MailboxProvider, MailboxPublishInput, MailboxStalenessFilter,
+  MailboxTraceEntry,
 } from '@deepseek-ai/dsh-mailbox'
 import type { MailboxClock, MessageRow } from './types.ts'
 
@@ -139,20 +140,22 @@ function assertCompatibleSchema(db: DatabaseSync, path: string): void {
 }
 
 /** Columns a claim needs to rebuild the message; kept narrow on purpose. */
-type ClaimRow = Pick<MessageRow, 'id' | 'to_address' | 'from_address' | 'type' | 'subject' | 'payload' | 'trace_id' | 'blocking'>
+type ClaimRow = Pick<MessageRow, 'id' | 'to_address' | 'from_address' | 'type' | 'subject' | 'payload' | 'trace_id' | 'blocking' | 'created_at'>
 
 /**
  * Reconstruct a {@link MailboxMessage} from a claim-selected row. `NULL`
  * optional columns map back to omitted fields rather than present-`undefined`
- * ones.
+ * ones, and the row's admission time (`created_at`) becomes the message's
+ * sent time.
  * @param row - the row selected by {@link SqliteMailboxStore.claim}.
- * @returns the delivered message with its durable id.
+ * @returns the delivered message with its durable id and sent time.
  */
 function rowToMessage(row: ClaimRow): MailboxMessage {
   return {
     id: row.id as MailboxMessageId,
     to: row.to_address as MailboxMessage['to'],
     from: row.from_address,
+    sentAt: row.created_at,
     ...row.type !== null ? { type: row.type } : {},
     ...row.subject !== null ? { subject: row.subject } : {},
     ...row.payload !== null ? { payload: JSON.parse(row.payload) as unknown } : {},
@@ -202,7 +205,7 @@ export class SqliteMailboxStore implements MailboxProvider {
    */
   constructor(private readonly db: DatabaseSync, private readonly clock: MailboxClock = Date.now) {}
 
-  async publish(message: Omit<MailboxMessage, 'id'>, signal?: AbortSignal): Promise<MailboxMessageId> {
+  async publish(message: MailboxPublishInput, signal?: AbortSignal): Promise<MailboxMessageId> {
     signal?.throwIfAborted()
     const id = randomUUID() as MailboxMessageId
     // JSON.stringify throws on circular payloads before any write happens, so
@@ -237,7 +240,7 @@ export class SqliteMailboxStore implements MailboxProvider {
     let began = true
     try {
       const rows = this.db.prepare(`
-        SELECT id, to_address, from_address, type, subject, payload, trace_id, blocking
+        SELECT id, to_address, from_address, type, subject, payload, trace_id, blocking, created_at
         FROM messages
         WHERE to_address IN (${placeholders})
           AND (state = 'pending' OR (state = 'claimed' AND claimed_at <= ?))
@@ -342,6 +345,27 @@ export class SqliteMailboxStore implements MailboxProvider {
       ORDER BY to_address
     `).all(cutoff) as unknown as Array<{ to_address: string }>
     return rows.map(row => row.to_address as MailboxAddress)
+  }
+
+  /**
+   * Read every stored message carrying `traceId`, earliest admitted first,
+   * regardless of claim or settlement state. A single `SELECT`: the store
+   * claims nothing, settles nothing, and writes nothing on this path.
+   */
+  async lookupByTraceId(traceId: string, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]> {
+    signal?.throwIfAborted()
+    const rows = this.db.prepare(`
+      SELECT id, to_address, from_address, created_at
+      FROM messages
+      WHERE trace_id = ?
+      ORDER BY created_at, id
+    `).all(traceId) as unknown as Array<Pick<MessageRow, 'id' | 'to_address' | 'from_address' | 'created_at'>>
+    return rows.map(row => ({
+      id: row.id as MailboxMessageId,
+      from: row.from_address,
+      to: row.to_address as MailboxAddress,
+      sentAt: row.created_at,
+    }))
   }
 
   /** Release the database handle; the store is unusable afterwards. */

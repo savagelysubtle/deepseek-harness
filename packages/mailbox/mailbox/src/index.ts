@@ -11,13 +11,13 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
-import type { MailboxClaimFilter, MailboxLeaseRef, MailboxLease, MailboxMessage, MailboxMessageId, MailboxOutcome } from './types.ts'
+import type { MailboxClaimFilter, MailboxLeaseRef, MailboxLease, MailboxMessageId, MailboxOutcome, MailboxPublishInput, MailboxTraceEntry } from './types.ts'
 import type { MailboxProvider } from './provider.ts'
 import { parseMailboxAddress } from './address.ts'
 import './source.ts'
 
 export { parseMailboxAddress, formatMailboxAddress, MAILBOX_SEGMENT_PATTERN_SOURCE } from './address.ts'
-export type { MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxLeaseRef, MailboxMessage, MailboxMessageId, MailboxOutcome, MailboxState, MailboxStalenessFilter } from './types.ts'
+export type { MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxLeaseRef, MailboxMessage, MailboxMessageId, MailboxOutcome, MailboxPublishInput, MailboxState, MailboxStalenessFilter, MailboxTraceEntry } from './types.ts'
 export type { AddressResolutionExtension, MailboxProvider } from './provider.ts'
 export type { MailboxMessageSource } from './source.ts'
 export {
@@ -108,12 +108,13 @@ export class MailboxRegistry extends Service {
 
   /**
    * Publish through the configured default provider after validating the
-   * destination address grammar.
-   * @param message - message content without an id.
+   * destination address grammar. The provider mints the durable id and the
+   * sent time; the caller supplies neither.
+   * @param message - message content without an id or sent time.
    * @param signal - caller cancellation owning admission.
    * @returns the provider-assigned durable id.
    */
-  async publish(message: Omit<MailboxMessage, 'id'>, signal?: AbortSignal): Promise<MailboxMessageId> {
+  async publish(message: MailboxPublishInput, signal?: AbortSignal): Promise<MailboxMessageId> {
     // Grammar enforcement happens in the operation that admits the value:
     // direct provider callers bypass this check by contract.
     parseMailboxAddress(message.to)
@@ -140,6 +141,18 @@ export class MailboxRegistry extends Service {
    */
   async settle(leaseRef: MailboxLeaseRef, outcome: MailboxOutcome, signal?: AbortSignal): Promise<void> {
     await this.resolveDefault('settle').settle(leaseRef, outcome, signal)
+  }
+
+  /**
+   * Read stored messages by traceId through the configured default provider —
+   * the same pure lookup the provider contract declares, with no address
+   * grammar to validate and no claim, settlement, or other write behind it.
+   * @param traceId - the correlation id to search for, matched exactly.
+   * @param signal - caller cancellation owning the scan.
+   * @returns one entry per stored message carrying the id, earliest send first.
+   */
+  async lookupByTraceId(traceId: string, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]> {
+    return this.resolveDefault('lookupByTraceId').lookupByTraceId(traceId, signal)
   }
 
   /**

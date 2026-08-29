@@ -18,6 +18,9 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SqliteSessionQueryEngine from '@deepseek-ai/dsh-session-query-sqlite'
 import GoalService from '@deepseek-ai/dsh-goal'
+import { MailboxRegistry } from '@deepseek-ai/dsh-mailbox'
+import MailboxLocal from '@deepseek-ai/dsh-mailbox-local'
+import * as ToolMailbox from '@deepseek-ai/dsh-tool-mailbox'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { type Config as ToolsConfig } from '@deepseek-ai/dsh-tools'
 import LocalBashExecutor from '@deepseek-ai/dsh-bash-local'
@@ -186,6 +189,22 @@ export interface ToolPackage {
  * guard proves it is exhaustive against the on-disk glob.
  */
 const TOOL_PACKAGES: ToolPackage[] = [
+  {
+    pkg: '@deepseek-ai/dsh-tool-mailbox',
+    dir: 'tool-mailbox',
+    source: 'packages/mailbox/tool-mailbox/src/index.ts',
+    requires: ['ctx.tools', 'ctx.mailbox'],
+    writes: ['tool/call', 'tool/result'],
+    async mount(ctx) {
+      // An in-memory store is enough to harvest schemas: the tools are
+      // registered at mount and neither is executed by the catalog.
+      await ctx.plugin(MailboxRegistry, { defaultProvider: 'local' })
+      await ctx.plugin(MailboxLocal, { path: ':memory:' })
+      await ctx.plugin(ToolMailbox, { sessionName: 'tool-catalog' })
+    },
+    note:
+      'mailbox_send carries NO sender field: the runtime fills `from` from the trusted session name, so a seat cannot claim to be another seat or the founder. mailbox_check_inbox takes no address and drains only the calling session\'s own endpoint. An anonymous run (no session name) fails both tools loud at call time rather than falling back to an untrusted identity.',
+  },
   {
     pkg: '@deepseek-ai/dsh-tool-ask-user',
     dir: 'tool-ask-user',

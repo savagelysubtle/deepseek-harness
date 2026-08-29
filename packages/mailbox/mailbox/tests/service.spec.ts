@@ -18,6 +18,7 @@ function fakeProvider(name: string): MailboxProvider {
     claim: async () => [],
     claimableAddresses: async () => [],
     settle: async () => {},
+    lookupByTraceId: async () => [],
   }
 }
 
@@ -70,6 +71,7 @@ describe('default-provider resolution', () => {
       claim: async () => { calls.push('other.claim'); return [] },
       claimableAddresses: async () => [],
       settle: async () => { calls.push('other.settle') },
+      lookupByTraceId: async () => [],
     })
     registry.registerProvider({
       name: 'chosen',
@@ -77,12 +79,29 @@ describe('default-provider resolution', () => {
       claim: async () => { calls.push('chosen.claim'); return [] },
       claimableAddresses: async () => [],
       settle: async () => { settled = true },
+      lookupByTraceId: async () => { calls.push('chosen.lookupByTraceId'); return [] },
     })
     await registry.publish({ to: ADDRESS, from: 'ns:sender' })
     await registry.claim({ addresses: [ADDRESS], limit: 1, staleClaimMs: 1_000 })
     await registry.settle('ref' as MailboxLeaseRef, { state: 'done', result: { deliveredAt: 0, messageId: 'y' as MailboxMessageId } })
-    expect(calls).toEqual(['chosen.publish', 'chosen.claim'])
+    await registry.lookupByTraceId('t-1')
+    expect(calls).toEqual(['chosen.publish', 'chosen.claim', 'chosen.lookupByTraceId'])
     expect(settled).toBe(true)
+  })
+
+  it('surfaces the default provider\'s trace entries through the convenience', async () => {
+    const { registry } = await setup({ defaultProvider: 'chosen' })
+    const entry = { id: 'm-1' as MailboxMessageId, from: 'ns:sender', to: ADDRESS, sentAt: 5 }
+    registry.registerProvider({
+      name: 'chosen',
+      publish: async () => 'y' as MailboxMessageId,
+      claim: async () => [],
+      claimableAddresses: async () => [],
+      settle: async () => {},
+      lookupByTraceId: async traceId => traceId === 'known' ? [entry] : [],
+    })
+    await expect(registry.lookupByTraceId('known')).resolves.toEqual([entry])
+    await expect(registry.lookupByTraceId('unknown')).resolves.toEqual([])
   })
 
   it('rejects publishing through an unregistered configured default', async () => {

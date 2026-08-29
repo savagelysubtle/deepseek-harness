@@ -22,6 +22,12 @@ export type MailboxAddress = Branded<'mailbox-address'>
 export type MailboxMessageId = Branded<'mailbox-message-id'>
 
 /**
+ * Publish input: the message content a caller supplies, without the
+ * provider-minted {@link MailboxMessage.id} and {@link MailboxMessage.sentAt}.
+ */
+export type MailboxPublishInput = Omit<MailboxMessage, 'id' | 'sentAt'>
+
+/**
  * Provider-opaque handle returned by {@link MailboxProvider.claim} and
  * consumed by {@link MailboxProvider.settle}. The issuing provider instance
  * is the only legitimate settler; refs are meaningless across providers.
@@ -39,6 +45,13 @@ export interface MailboxMessage {
   readonly to: MailboxAddress
   /** Sender address; free-form provenance, never validated against live endpoints. */
   readonly from: string
+  /**
+   * Epoch milliseconds at which the provider admitted this message — the send
+   * time its reader dates mail by, not the later delivery-claim moment
+   * (`MailboxLease.claimedAt`). Provider-minted at publish, like the id: a
+   * message that sat queued keeps its original admission time.
+   */
+  readonly sentAt: number
   /** Optional machine-readable intent (`notice`, `task`, …) consumers may switch on. */
   readonly type?: string
   /** Optional human-readable subject line. */
@@ -57,6 +70,22 @@ export interface MailboxMessage {
    * contract line: the blocking contract when true, the FYI contract otherwise.
    */
   readonly blocking?: boolean
+}
+
+/**
+ * One stored message found by a traceId lookup: the direction — sender to
+ * recipient — and send time a caller needs to establish that a prior message
+ * with that id exists and whether it traveled toward or away from an address.
+ */
+export interface MailboxTraceEntry {
+  /** The stored message's durable id. */
+  readonly id: MailboxMessageId
+  /** Sender address as recorded at publish. */
+  readonly from: string
+  /** Destination address as recorded at publish. */
+  readonly to: MailboxAddress
+  /** Epoch milliseconds at which the provider admitted the message. */
+  readonly sentAt: number
 }
 
 /**

@@ -1270,9 +1270,18 @@ importers:
       '@deepseek-ai/dsh-home-paths':
         specifier: workspace:^
         version: link:../../util/home-paths
+      '@deepseek-ai/dsh-mailbox':
+        specifier: workspace:^
+        version: link:../../mailbox/mailbox
+      '@deepseek-ai/dsh-mailbox-local':
+        specifier: workspace:^
+        version: link:../../mailbox/local
       '@deepseek-ai/dsh-named-sessions':
         specifier: workspace:^
         version: link:../../session/named-sessions
+      '@deepseek-ai/dsh-tool-mailbox':
+        specifier: workspace:^
+        version: link:../../mailbox/tool-mailbox
       '@deepseek-ai/schemastery':
         specifier: link:../../../vendor/schemastery
         version: link:../../../vendor/schemastery
@@ -5687,6 +5696,37 @@ importers:
       '@deepseek-ai/dsh-llm':
         specifier: workspace:^
         version: link:../../llm/llm
+
+  packages/mailbox/tool-mailbox:
+    dependencies:
+      '@deepseek-ai/dsh-mailbox':
+        specifier: workspace:^
+        version: link:../mailbox
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../vendor/schemastery
+        version: link:../../../vendor/schemastery
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-agent':
+        specifier: workspace:^
+        version: link:../../core/agent
+      '@deepseek-ai/dsh-invariants':
+        specifier: workspace:^
+        version: link:../../runtime-diagnostics/invariants
+      '@deepseek-ai/dsh-llm':
+        specifier: workspace:^
+        version: link:../../llm/llm
+      '@deepseek-ai/dsh-mailbox-local':
+        specifier: workspace:^
+        version: link:../local
+      '@deepseek-ai/dsh-system-prompt':
+        specifier: workspace:^
+        version: link:../../core/system-prompt
+      '@deepseek-ai/dsh-tools':
+        specifier: workspace:^
+        version: link:../../core/tools
 
   packages/mcp/mcp-client:
     dependencies:

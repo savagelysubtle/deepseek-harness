@@ -15,6 +15,7 @@ This table connects model-visible tool names to the plugin package and service s
 
 | Tool package | Model-visible names | Requires | Writes / affects | Shipped aliases | Deployment note |
 | --- | --- | --- | --- | --- | --- |
+| `@deepseek-ai/dsh-tool-mailbox` | `mailbox_check_inbox`, `mailbox_send` | `ctx.tools`, `ctx.mailbox` | `tool/call`, `tool/result` | - | mailbox_send carries NO sender field: the runtime fills `from` from the trusted session name, so a seat cannot claim to be another seat or the founder. mailbox_check_inbox takes no address and drains only the calling session's own endpoint. An anonymous run (no session name) fails both tools loud at call time rather than falling back to an untrusted identity. |
 | `@deepseek-ai/dsh-tool-ask-user` | `ask_user_question` | `ctx.tools`, `ctx.userQuestions` | `tool/call`, `tool/result after a UI/provider answers the question` | - | ask_user_question pauses the tool call until the active UI provider returns a human answer. |
 | `@deepseek-ai/dsh-tools` | `run_code` | `ctx.tools`, `ctx.codeRuntime (execution time)`, `ctx.systemPrompt` | `tool/call`, `one tool/code-dispatch-start + tool/code-dispatch pair per bridged sub-call`, `tool/result` | - | Owned by the tool registry as a reserved transport outside filterable capability layers under `mode: code` / `mode: both` (see the Code Mode Agent Note). Under `code` it is the registry's only wire contribution; the other visible capabilities are declared in a generated SDK section in the loaded runtime's language, and a program calls them through bindings scheduled under the native concurrency contract (submission-ordered starts and policy; concurrency-safe bodies overlap up to `maxParallelSubCalls`) that re-enter the complete guarded tool pipeline and link each nested execution to this outer result. |
 | `@deepseek-ai/dsh-plan-mode` | `exit_plan_mode` | `ctx.tools`, `ctx.systemPrompt`, `ctx.userQuestions (execution time, opportunistic)` | `tool/call`, `plan/mode inactive on an approved review`, `tool/result` | - | exit_plan_mode stays in the model-facing schema while planning is inactive so transitions add no tool-catalog churn on top of the plan-policy change. Its execute path rejects calls outside plan mode; in plan mode it presents the plan over the user-questions seam (approve / keep planning with feedback), and approval logs plan mode inactive at the step boundary. |
@@ -40,6 +41,60 @@ This table connects model-visible tool names to the plugin package and service s
 | `@deepseek-ai/dsh-tool-compact` | `compact` | `ctx.tools`, `ctx.compaction (engine takes llm, tokenMeter, sessions)` | `tool/call`, `tool/result`, `compaction/start once the current turn ends` | - | Scheduling is accept-immediately: the request arms process-local state and real condensation claims the next idle boundary through the engine's compaction/start lock. |
 | `@deepseek-ai/dsh-tool-workflow` | `workflow` | `ctx.tools`, `ctx.workflowEngine`, `ctx.systemPrompt`, `a calling Agent (exec.agent parents the script children)` | `tool/call`, `tool/result` | - | - |
 | `@deepseek-ai/dsh-tool-web` | `web_fetch`, `web_search` | `ctx.tools`, `ctx.web`, `ctx.systemPrompt` | `tool/call`, `tool/result` | - | web_search and web_fetch keep provider selection behind ctx.web so model-visible schemas stay stable across backend swaps. |
+
+<a id="deepseek-aidsh-tool-mailbox"></a>
+
+## `@deepseek-ai/dsh-tool-mailbox`
+
+### `mailbox_check_inbox`
+
+Drain this seat's own mailbox: claim and deliver every pending message addressed to this seat. Takes no address argument — the runtime drains this session's own address, and only that one. Each returned message is removed from the pending queue (delivered); call it whenever you expect mail, for example after learning a coworker sent you something.
+
+```json
+{
+  "type": "object",
+  "properties": {}
+}
+```
+
+Source: [`packages/mailbox/tool-mailbox/src/index.ts`](../packages/mailbox/tool-mailbox/src/index.ts)
+
+### `mailbox_send`
+
+Send a mailbox message to another seat by its bare name. The sender is filled in by the runtime from this session's trusted name and cannot be chosen or changed — the recipient sees the message as coming from this seat. Replies travel as their own mailbox_send calls, not inside this one.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "to": {
+      "type": "string",
+      "description": "The recipient seat's bare name (for example \"batman\"). One name names one seat across the whole deployment."
+    },
+    "subject": {
+      "type": "string",
+      "description": "Short human-readable subject line."
+    },
+    "body": {
+      "type": "string",
+      "description": "The message text. Keep it self-contained: the recipient may read it without this conversation's context."
+    },
+    "blocking": {
+      "type": "boolean",
+      "description": "True when you are blocked waiting on an answer to this message and the recipient should handle it now; omit for ordinary mail the recipient can absorb at a natural gap."
+    }
+  },
+  "required": [
+    "to",
+    "subject",
+    "body"
+  ]
+}
+```
+
+Source: [`packages/mailbox/tool-mailbox/src/index.ts`](../packages/mailbox/tool-mailbox/src/index.ts)
+
+mailbox_send carries NO sender field: the runtime fills `from` from the trusted session name, so a seat cannot claim to be another seat or the founder. mailbox_check_inbox takes no address and drains only the calling session's own endpoint. An anonymous run (no session name) fails both tools loud at call time rather than falling back to an untrusted identity.
 
 <a id="deepseek-aidsh-tool-ask-user"></a>
 

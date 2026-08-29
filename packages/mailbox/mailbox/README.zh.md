@@ -14,11 +14,13 @@
 | `publish(message, signal?)` | 经配置的 `defaultProvider` 的便捷操作；在准入操作中校验目标地址文法。 |
 | `claim(filter, signal?)` | 校验每个过滤地址后经默认提供方认领。 |
 | `settle(leaseRef, outcome, signal?)` | 经默认提供方落定一个租约。 |
+| `lookupByTraceId(traceId, signal?)` | 经默认提供方纯读取携带某 traceId 的全部已存消息（每条 `{ id, from, to, sentAt }`）——消费者据此识别答复方向；绝不认领或落定。 |
 
 ## 契约
 
 - **地址文法** — 座位裸名，复用具名会话名称模式（`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`）；一个名字只命名一个座位，桥侧因此直接派生目标会话 id，无需第二套编码。`parseMailboxAddress`/`formatMailboxAddress` 天然往返一致。
 - **至少一次投递** — 崩溃认领者的租约在 `staleClaimMs` 后被回收；消费者必须容忍重复认领。
+- **发送时间由提供方铸造** — 每条投递的消息都携带 `sentAt`（epoch ms），在提供方准入时打点，绝不因认领、回收或落定而重打，排队邮件因此保留原始日期；`lease.claimedAt` 仍是投递认领时刻。
 - **`done` = 收件箱准入** — 落定记录的是消息已到达目标队列，而非已获答复；答复作为新发布的消息流转。outcome 的 `result` 列只是投递信封，绝不是业务结果。
 - **默认解析响亮失败** — 未配置或默认提供方未注册时，便捷调用即刻抛出并指明缺口；具名提供方调用不受影响。
 

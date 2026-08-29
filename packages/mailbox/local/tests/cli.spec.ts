@@ -59,7 +59,7 @@ describe('dsh-mailbox send/inbox round-trip', () => {
     expect(peeked).toHaveLength(1)
     const first = peeked[0]
     expect(first).toMatchObject({
-      from: 'claude-code', type: 'field-report', subject: 'outage', traceId: 't-1',
+      from: 'guest:claude-code', type: 'field-report', subject: 'outage', traceId: 't-1',
       payload: { op: 'field-report', detail: 'harness web boot dead' },
     })
 
@@ -74,7 +74,7 @@ describe('dsh-mailbox send/inbox round-trip', () => {
   it('renders human-readable blocks without --json including an empty mailbox', async () => {
     await run(['send', '--to', String(TARGET), '--from', 'gemini'])
     const out = await run(['inbox', '--address', String(TARGET)])
-    expect(out).toContain('from gemini')
+    expect(out).toContain('from guest:gemini')
     const empty = await run(['inbox', '--address', String(TARGET)])
     expect(empty).toContain('(empty)')
   })

@@ -39,14 +39,39 @@ const TARGET = formatMailboxAddress('target')
 let registryPath: string
 
 beforeEach(() => {
-  registryPath = writeTestRegistry(['target', 'alice', 'ghost', 'other', 'batman', 'gotham-seat'])
+  registryPath = writeTestRegistry(['target', 'alice', 'ghost', 'other', 'batman', 'gotham-seat', 'island'])
 })
 
-function writeTestRegistry(seats: readonly string[]): string {
+/**
+ * Write one throwaway org registry for this suite.
+ *
+ * The default roster declares the org topology its seat-to-seat tests rely
+ * on: alice edges to target and ghost, and ghost edges onward to other, so
+ * alice→other is a legal-but-indirect pair a topology refusal can name a
+ * route for. `island` has no edges at all — the no-route refusal case.
+ * @param seats - seat names to roster.
+ * @param options - edges, test-marked seats, and call-up seats; each test
+ *   writing its own registry passes a distinct temp path, so the module-level
+ *   mtime-keyed registry cache never sees a stale file.
+ */
+function writeTestRegistry(
+  seats: readonly string[],
+  options: {
+    readonly edges?: readonly (readonly [string, string])[]
+    readonly testSeats?: readonly string[]
+    readonly callUp?: readonly string[]
+  } = {},
+): string {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-bridge-registry-'))
   const path = join(dir, 'registry.yml')
-  const rows = seats.map(seat => `  ${seat}: { cwd: ${seat} }`).join('\n')
-  writeFileSync(path, `baseDir: ${dir}\nseats:\n${rows}\nedges: []\n`, 'utf8')
+  const testSeats = new Set(options.testSeats ?? [])
+  const rows = seats.map(seat => `  ${seat}: { cwd: ${seat}${testSeats.has(seat) ? ', test: true' : ''} }`).join('\n')
+  const edges = options.edges ?? [['alice', 'target'], ['alice', 'ghost'], ['ghost', 'other']]
+  const edgeBlock = edges.length === 0
+    ? 'edges: []'
+    : `edges:\n${edges.map(([a, b]) => `  - [${a}, ${b}]`).join('\n')}`
+  const callUp = options.callUp === undefined ? '' : `\ncallUp: [${options.callUp.join(', ')}]`
+  writeFileSync(path, `baseDir: ${dir}\nseats:\n${rows}\n${edgeBlock}${callUp}\n`, 'utf8')
   for (const seat of seats) mkdirSync(join(dir, seat), { recursive: true })
   return path
 }
@@ -186,17 +211,38 @@ describe('spec resolution', () => {
       maxClaimPerCycle: 2,
       staleClaimMs: 3,
       lockStaleMs: 4,
+      admitGuests: false,
+      maxMessageChars: 11,
+      maxDepthPerAddress: 12,
+      depthWindowMs: 13,
+      repeatWindowMs: 14,
+      maxHopsPerTrace: 15,
     })
     expect(spec.addresses).toEqual([TARGET])
     expect(spec.pollIntervalMs).toBe(5)
     expect(spec.maxClaimPerCycle).toBe(2)
     expect(spec.staleClaimMs).toBe(3)
     expect(spec.lockStaleMs).toBe(4)
+    expect(spec.admitGuests).toBe(false)
+    expect(spec.maxMessageChars).toBe(11)
+    expect(spec.maxDepthPerAddress).toBe(12)
+    expect(spec.depthWindowMs).toBe(13)
+    expect(spec.repeatWindowMs).toBe(14)
+    expect(spec.maxHopsPerTrace).toBe(15)
     const defaulted = bridge.resolveBridgeSpec({ addresses: ['target'] })
     expect(defaulted.pollIntervalMs).toBe(bridge.DEFAULT_POLL_INTERVAL_MS)
     expect(defaulted.maxClaimPerCycle).toBe(bridge.DEFAULT_MAX_CLAIM_PER_CYCLE)
     expect(defaulted.staleClaimMs).toBe(bridge.DEFAULT_STALE_CLAIM_MS)
     expect(defaulted.lockStaleMs).toBeUndefined()
+    expect(defaulted.admitGuests).toBe(true)
+    expect(defaulted.maxMessageChars).toBe(bridge.DEFAULT_MAX_MESSAGE_CHARS)
+    expect(defaulted.maxDepthPerAddress).toBe(bridge.DEFAULT_MAX_DEPTH_PER_ADDRESS)
+    expect(defaulted.depthWindowMs).toBe(bridge.DEFAULT_DEPTH_WINDOW_MS)
+    expect(defaulted.repeatWindowMs).toBe(bridge.DEFAULT_REPEAT_WINDOW_MS)
+    expect(defaulted.maxHopsPerTrace).toBe(bridge.DEFAULT_MAX_HOPS_PER_TRACE)
+    // One guard state per resolved spec: the drain's memory lives here, not
+    // in module globals, so two mounted bridges never share guard counts.
+    expect(defaulted.guards).toBeInstanceOf(bridge.LoopGuards)
   })
 })
 
@@ -226,7 +272,7 @@ describe('delivery rendering', () => {
   /** The exact urgency contracts, one per blocking mark. */
   const BLOCKING_CONTRACT = "[BLOCKING] Your correspondent is blocked waiting on you. Stop what you're doing, handle this, reply so they're unblocked, then resume."
   const FYI_CONTRACT = "[FYI] Not urgent. Decide whether it needs a reply and when, or whether it's a note to absorb and carry on. If it's worth keeping beyond this session, write it to memory."
-  const base = { id: 'm-1' as never, to: TARGET, from: 'sender' }
+  const base = { id: 'm-1' as never, to: TARGET, from: 'sender', sentAt: 1 }
 
   it('frames every turn with the envelope, then renders subject and payload unchanged below it', () => {
     const text = relayText({ message: { ...base, subject: 'hello', payload: { op: 'ping' } }, leaseRef: 'r' as never, claimedAt: 1 }, 'unverified')
@@ -289,7 +335,7 @@ describe('delivery rendering', () => {
       kind: 'mailbox', form: 'relay', address: TARGET, from: 'sender', messageId: 'm-1', traceId: 't-9',
     })
     expect(relaySource({ message: base, leaseRef: 'r' as never, claimedAt: 1 })).not.toHaveProperty('traceId')
-    expect(() => relaySource({ message: { to: TARGET, from: 'sender' }, leaseRef: 'r' as never, claimedAt: 1 })).toThrow(/no provider id/)
+    expect(() => relaySource({ message: { to: TARGET, from: 'sender', sentAt: 0 }, leaseRef: 'r' as never, claimedAt: 1 })).toThrow(/no provider id/)
     expect(admittedOutcome({ message: base, leaseRef: 'r' as never, claimedAt: 1 }).state).toBe('done')
   })
 })
@@ -354,8 +400,11 @@ describe('routing outcomes', () => {
     expect(h.disposeCalls()).toBe(0)
     expect(h.flushes()).toBe(0)
     expect(existsSync(namedLockPath('target'))).toBe(true)
-    // A second mail rides the SAME resident agent — no second resume.
-    const second = await publishHello(h.ctx)
+    // A second mail rides the SAME resident agent — no second resume. The
+    // subject differs from the first because identical repeats within the
+    // repeat window are suppressed (the loop guard exercised further down);
+    // the routing this test watches is indifferent to the subject.
+    const second = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'hello again' })
     await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec()))
     expect(h.resumeCalls()).toBe(1)
     await expect(rowState(h.storePath, second)).resolves.toMatchObject({ state: 'done' })
@@ -453,7 +502,9 @@ describe('routing outcomes', () => {
       source?: { kind?: string; form?: string; from?: string }
       content?: readonly [{ type: string; text: string }]
     }
-    expect(message?.source).toMatchObject({ kind: 'mailbox', form: 'relay', from: 'claude-code' })
+    // The CLI stamps every send's sender `guest:<original>` — the guest
+    // channel this drain admits — so the relayed provenance carries the stamp.
+    expect(message?.source).toMatchObject({ kind: 'mailbox', form: 'relay', from: 'guest:claude-code' })
     expect(message?.content?.[0]?.text).toContain('outage report')
 
     const db = new DatabaseSync(dbPath)
@@ -801,5 +852,464 @@ describe('publishAndWake', () => {
     const h = await makeHarness({ persisted: true })
     await expect(bridge.publishAndWake(h.ctx, { to: 'target', from: 'ceo' }))
       .rejects.toThrow(/no mailbox bridge is composed/)
+  })
+})
+
+describe('guest admission (the outside-operator channel)', () => {
+  /** The spec variant under test, differing only in the guest knobs. */
+  type ResolveInput = Parameters<typeof bridge.resolveBridgeSpec>[0]
+
+  function specWith(overrides: Partial<ResolveInput> = {}): ResolveInput {
+    return { addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000, admitFrom: [], ...overrides }
+  }
+
+  function steeredText(live: { steer: ReturnType<typeof vi.fn> }): string {
+    return (live.steer.mock.calls[0]?.[0] as { content: readonly [{ text: string }] }).content[0]?.text ?? ''
+  }
+
+  it('admits a guest-prefixed sender by default and renders it unverified', async () => {
+    const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'guest:claude-code', subject: 'from outside' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specWith()))
+    expect(live.steer).toHaveBeenCalledTimes(1)
+    expect(steeredText(live)).toContain('- from guest:claude-code (unverified)')
+    await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'done' })
+  })
+
+  it('closes the guest channel under admitGuests: false, but keeps a stripped admitFrom match', async () => {
+    const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    // 'claude-code' is listed: the stamped form still matches it…
+    const listed = await h.ctx.mailbox.publish({ to: TARGET, from: 'guest:claude-code', subject: 'listed' })
+    // …'other' is not, and the channel itself is closed, so it refuses.
+    const unlisted = await h.ctx.mailbox.publish({ to: TARGET, from: 'guest:other', subject: 'unlisted' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specWith({ admitGuests: false, admitFrom: ['claude-code'] })))
+    await expect(rowState(h.storePath, listed)).resolves.toMatchObject({ state: 'done' })
+    const row = await rowState(h.storePath, unlisted)
+    expect(row.state).toBe('failed')
+    expect(JSON.parse(row.result ?? '{}')).toEqual({ reason: 'sender-not-admitted' })
+    expect(live.steer).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('org registry topology enforcement', () => {
+  type ResolveInput = Parameters<typeof bridge.resolveBridgeSpec>[0]
+
+  function specFor(
+    addresses: readonly string[],
+    admitFrom: readonly string[],
+    orgRegistryPath: string = registryPath,
+  ): ResolveInput {
+    return { addresses, pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000, admitFrom, orgRegistryPath }
+  }
+
+  it('refuses seat-to-seat mail with no direct edge and names the route the graph offers', async () => {
+    const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('other'))]: live } })
+    const id = await h.ctx.mailbox.publish({ to: formatMailboxAddress('other'), from: 'alice', subject: 'sideways' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specFor(['other'], ['alice'])))
+    expect(live.steer).not.toHaveBeenCalled()
+    const row = await rowState(h.storePath, id)
+    expect(row.state).toBe('failed')
+    const reason = JSON.parse(row.result ?? '{}').reason as string
+    expect(reason).toContain('org-registry-denied')
+    // The bounce tells the sender the path it should have used.
+    expect(reason).toContain('alice -> ghost -> other')
+  })
+
+  it('refuses seat-to-seat mail no route connects at all', async () => {
+    const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('island'))]: live } })
+    const id = await h.ctx.mailbox.publish({ to: formatMailboxAddress('island'), from: 'alice', subject: 'unreachable' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specFor(['island'], ['alice'])))
+    const row = await rowState(h.storePath, id)
+    expect(JSON.parse(row.result ?? '{}').reason as string).toContain('no route connects them')
+  })
+
+  it('delivers seat-to-seat mail along a declared edge', async () => {
+    const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'alice', subject: 'along the edge' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specFor(['target'], ['alice'])))
+    expect(live.steer).toHaveBeenCalledTimes(1)
+    await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'done' })
+  })
+
+  it('lets a callUp seat mail any seat, and leaves non-seat senders to admission alone', async () => {
+    const callUpPath = writeTestRegistry(['target', 'island'], { edges: [], callUp: ['island'] })
+    const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    const fromCallUp = await h.ctx.mailbox.publish({ to: TARGET, from: 'island', subject: 'from the top' })
+    const fromOutsider = await h.ctx.mailbox.publish({ to: TARGET, from: 'council', subject: 'not a seat' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specFor(['target'], ['island', 'council'], callUpPath)))
+    await expect(rowState(h.storePath, fromCallUp)).resolves.toMatchObject({ state: 'done' })
+    await expect(rowState(h.storePath, fromOutsider)).resolves.toMatchObject({ state: 'done' })
+    expect(live.steer).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('test:true boundary enforcement', () => {
+  /** Registry with a live pair and a test pair, each edged internally, nothing across. */
+  function boundaryRegistry(options: { readonly callUp?: readonly string[] } = {}): string {
+    return writeTestRegistry(['boss', 'peer', 'tt-ping', 'tt-pong'], {
+      edges: [['boss', 'peer'], ['tt-ping', 'tt-pong']],
+      testSeats: ['tt-ping', 'tt-pong'],
+      ...(options.callUp === undefined ? {} : { callUp: options.callUp }),
+    })
+  }
+
+  type ResolveInput = Parameters<typeof bridge.resolveBridgeSpec>[0]
+
+  function specFor(
+    addresses: readonly string[],
+    admitFrom: readonly string[],
+    orgRegistryPath: string,
+  ): ResolveInput {
+    return { addresses, pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000, admitFrom, orgRegistryPath }
+  }
+
+  async function failedReason(storePath: string, messageId: string): Promise<string> {
+    const row = await rowState(storePath, messageId)
+    return JSON.parse(row.result ?? '{}').reason as string
+  }
+
+  it('refuses a test seat mailing a live seat even when both are admitted', async () => {
+    const path = boundaryRegistry()
+    const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('boss'))]: live } })
+    const id = await h.ctx.mailbox.publish({ to: formatMailboxAddress('boss'), from: 'tt-ping', subject: 'escape' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specFor(['boss'], ['tt-ping', 'boss'], path)))
+    expect(live.steer).not.toHaveBeenCalled()
+    const reason = await failedReason(h.storePath, id)
+    expect(reason).toContain('test-boundary-violation')
+    expect(reason).toContain('not marked test: true')
+  })
+
+  it('refuses a live seat mailing a test seat in the other direction too', async () => {
+    const path = boundaryRegistry()
+    const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('tt-ping'))]: live } })
+    const id = await h.ctx.mailbox.publish({ to: formatMailboxAddress('tt-ping'), from: 'boss', subject: 'reach in' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specFor(['tt-ping'], ['boss', 'tt-ping'], path)))
+    expect(live.steer).not.toHaveBeenCalled()
+    expect(await failedReason(h.storePath, id)).toContain('test-boundary-violation')
+  })
+
+  it('refuses a test seat mailing an address unknown to the roster — fail closed', async () => {
+    const path = boundaryRegistry()
+    const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('stranger'))]: live } })
+    const id = await h.ctx.mailbox.publish({ to: formatMailboxAddress('stranger'), from: 'tt-ping', subject: 'unknown' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specFor(['stranger'], ['tt-ping'], path)))
+    expect(live.steer).not.toHaveBeenCalled()
+    expect(await failedReason(h.storePath, id)).toContain('test-boundary-violation')
+  })
+
+  it('delivers test-to-test mail inside the sandbox', async () => {
+    const path = boundaryRegistry()
+    const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('tt-pong'))]: live } })
+    const id = await h.ctx.mailbox.publish({ to: formatMailboxAddress('tt-pong'), from: 'tt-ping', subject: 'ping' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specFor(['tt-pong'], ['tt-ping'], path)))
+    expect(live.steer).toHaveBeenCalledTimes(1)
+    await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'done' })
+  })
+
+  it('lets a non-seat sender reach a test seat — the bootstrap path a test bed exists for', async () => {
+    const path = boundaryRegistry()
+    const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('tt-ping'))]: live } })
+    const id = await h.ctx.mailbox.publish({ to: formatMailboxAddress('tt-ping'), from: 'guest:steve', subject: 'drive the seat' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specFor(['tt-ping'], [], path)))
+    expect(live.steer).toHaveBeenCalledTimes(1)
+    await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'done' })
+  })
+
+  it('outranks callUp: a call-up seat still cannot mail across the boundary', async () => {
+    const path = boundaryRegistry({ callUp: ['boss'] })
+    const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('tt-ping'))]: live } })
+    const id = await h.ctx.mailbox.publish({ to: formatMailboxAddress('tt-ping'), from: 'boss', subject: 'from the top' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specFor(['tt-ping'], ['boss'], path)))
+    expect(live.steer).not.toHaveBeenCalled()
+    expect(await failedReason(h.storePath, id)).toContain('test-boundary-violation')
+  })
+
+  it('refuses all mail while a present registry is broken, and self-heals once it parses again', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-bridge-broken-registry-'))
+    homes.push(dir)
+    const path = join(dir, 'registry.yml')
+    writeFileSync(path, 'baseDir: [unclosed\n', 'utf8')
+    const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    const broken = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'while broken' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specFor(['target'], ['sender'], path)))
+    expect(live.steer).not.toHaveBeenCalled()
+    expect(await failedReason(h.storePath, broken)).toContain('org-registry-unavailable')
+    // Fix the file — a NEW parse the mtime-keyed cache invalidates — and the
+    // next cycle delivers what the broken one refused.
+    await new Promise<void>((resolve) => { setTimeout(resolve, 5) })
+    writeFileSync(path, `baseDir: ${dir}\nseats:\n  target: { cwd: target }\nedges: []\n`, 'utf8')
+    const fixed = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'after the fix' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specFor(['target'], ['sender'], path)))
+    expect(live.steer).toHaveBeenCalledTimes(1)
+    await expect(rowState(h.storePath, fixed)).resolves.toMatchObject({ state: 'done' })
+  })
+})
+
+describe('loop guards', () => {
+  /** Controllable clock the windowed guards read. */
+  interface Clock { at: number }
+
+  /**
+   * A resolved spec with the guard state replaced: same resolution logic,
+   * but the limits come from the test and the clock from a mutable cell, so
+   * window expiry is deterministic instead of a sleep.
+   */
+  function specWithGuards(
+    config: Parameters<typeof bridge.resolveBridgeSpec>[0],
+    limits: Partial<bridge.LoopGuardLimits>,
+    clock: Clock,
+  ): bridge.BridgeSpec {
+    const resolved = bridge.resolveBridgeSpec(config)
+    const merged: bridge.LoopGuardLimits = {
+      maxMessageChars: limits.maxMessageChars ?? resolved.maxMessageChars,
+      maxDepthPerAddress: limits.maxDepthPerAddress ?? resolved.maxDepthPerAddress,
+      depthWindowMs: limits.depthWindowMs ?? resolved.depthWindowMs,
+      repeatWindowMs: limits.repeatWindowMs ?? resolved.repeatWindowMs,
+      maxHopsPerTrace: limits.maxHopsPerTrace ?? resolved.maxHopsPerTrace,
+      maxTracedChains: limits.maxTracedChains ?? 1024,
+    }
+    return { ...resolved, guards: new bridge.LoopGuards(merged, () => clock.at) }
+  }
+
+  function liveTarget(): { live: { status: 'idle'; followup: ReturnType<typeof vi.fn>; steer: ReturnType<typeof vi.fn> } } {
+    return { live: { status: 'idle', followup: vi.fn(), steer: vi.fn() } }
+  }
+
+  it('bounces a message over the size cap naming both sizes, and admits one exactly at it', async () => {
+    const { live } = liveTarget()
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    const spec = bridge.resolveBridgeSpec({
+      addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000,
+      admitFrom: ['sender'], maxMessageChars: 10,
+    })
+    const over = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', payload: 'x'.repeat(50) })
+    const atCap = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', payload: 'x'.repeat(10) })
+    await bridge.internals.drainOnce(h.ctx, spec)
+    const overRow = await rowState(h.storePath, over)
+    expect(overRow.state).toBe('failed')
+    const reason = JSON.parse(overRow.result ?? '{}').reason as string
+    expect(reason).toContain('message-too-large')
+    expect(reason).toContain('rendered 50 chars')
+    expect(reason).toContain('10 char cap')
+    await expect(rowState(h.storePath, atCap)).resolves.toMatchObject({ state: 'done' })
+    expect(live.steer).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses beyond the per-address depth cap within the window, and resumes when it slides', async () => {
+    const { live } = liveTarget()
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    const clock: Clock = { at: 1_000_000 }
+    const spec = specWithGuards(
+      { addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000, admitFrom: ['a', 'b', 'c', 'd'] },
+      { maxDepthPerAddress: 2, depthWindowMs: 1_000 },
+      clock,
+    )
+    const first = await h.ctx.mailbox.publish({ to: TARGET, from: 'a', subject: 'one' })
+    const second = await h.ctx.mailbox.publish({ to: TARGET, from: 'b', subject: 'two' })
+    const third = await h.ctx.mailbox.publish({ to: TARGET, from: 'c', subject: 'three' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+    await expect(rowState(h.storePath, first)).resolves.toMatchObject({ state: 'done' })
+    await expect(rowState(h.storePath, second)).resolves.toMatchObject({ state: 'done' })
+    const thirdRow = await rowState(h.storePath, third)
+    expect(JSON.parse(thirdRow.result ?? '{}').reason as string).toContain('address-depth-exceeded')
+    // The window slides past every recorded admission: ordinary volume resumes.
+    clock.at += 1_001
+    const fourth = await h.ctx.mailbox.publish({ to: TARGET, from: 'd', subject: 'four' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+    await expect(rowState(h.storePath, fourth)).resolves.toMatchObject({ state: 'done' })
+    expect(live.steer).toHaveBeenCalledTimes(3)
+  })
+
+  it('suppresses an identical repeat, names the original, and never suppresses different content', async () => {
+    const { live } = liveTarget()
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    const clock: Clock = { at: 1_000_000 }
+    const spec = specWithGuards(
+      { addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000, admitFrom: ['sender'] },
+      { repeatWindowMs: 60_000 },
+      clock,
+    )
+    const original = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'status', payload: { op: 'ping' } })
+    const resend = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'status', payload: { op: 'ping' } })
+    const varied = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'status', payload: { op: 'pong' } })
+    await bridge.internals.drainOnce(h.ctx, spec)
+    await expect(rowState(h.storePath, original)).resolves.toMatchObject({ state: 'done' })
+    const resendRow = await rowState(h.storePath, resend)
+    expect(resendRow.state).toBe('failed')
+    const reason = JSON.parse(resendRow.result ?? '{}').reason as string
+    expect(reason).toContain('duplicate-suppressed')
+    expect(reason).toContain(`repeats message ${original}`)
+    expect(reason).toContain('do not resend')
+    await expect(rowState(h.storePath, varied)).resolves.toMatchObject({ state: 'done' })
+    expect(live.steer).toHaveBeenCalledTimes(2)
+  })
+
+  it('catches an alternating loop, not just an immediate resend, and forgets after the window', async () => {
+    const { live } = liveTarget()
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    const clock: Clock = { at: 1_000_000 }
+    const spec = specWithGuards(
+      { addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000, admitFrom: ['sender'] },
+      { repeatWindowMs: 1_000 },
+      clock,
+    )
+    const x1 = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'x' })
+    const y1 = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'y' })
+    const x2 = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'x' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+    await expect(rowState(h.storePath, x1)).resolves.toMatchObject({ state: 'done' })
+    await expect(rowState(h.storePath, y1)).resolves.toMatchObject({ state: 'done' })
+    expect(JSON.parse((await rowState(h.storePath, x2)).result ?? '{}').reason as string).toContain('duplicate-suppressed')
+    clock.at += 1_001
+    const x3 = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'x' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+    await expect(rowState(h.storePath, x3)).resolves.toMatchObject({ state: 'done' })
+  })
+
+  it('counts hops as they are ADMITTED, so a queued burst on one trace is judged per hop', async () => {
+    const { live } = liveTarget()
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    const spec = bridge.resolveBridgeSpec({
+      addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000,
+      admitFrom: ['sender'], maxHopsPerTrace: 2,
+    })
+    // Three messages on one trace queued BEFORE any drain: the first two
+    // hops admit as they are delivered, the third is refused — the queue
+    // ahead of a hop never counts against it.
+    const hop1 = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'burst one', traceId: 'burst' })
+    const hop2 = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'burst two', traceId: 'burst' })
+    const hop3 = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'burst three', traceId: 'burst' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+    await expect(rowState(h.storePath, hop1)).resolves.toMatchObject({ state: 'done' })
+    await expect(rowState(h.storePath, hop2)).resolves.toMatchObject({ state: 'done' })
+    expect(JSON.parse((await rowState(h.storePath, hop3)).result ?? '{}').reason as string).toContain('hop-limit-exceeded')
+    expect(live.steer).toHaveBeenCalledTimes(2)
+  })
+
+  it('never hop-counts trace-less mail', async () => {
+    const { live } = liveTarget()
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    const spec = bridge.resolveBridgeSpec({
+      addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000,
+      admitFrom: ['sender'], maxHopsPerTrace: 1,
+    })
+    const ids: string[] = []
+    for (let index = 0; index < 4; index++) {
+      ids.push(await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: `untraced ${index}` }))
+    }
+    await bridge.internals.drainOnce(h.ctx, spec)
+    for (const id of ids) {
+      await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'done' })
+    }
+    expect(live.steer).toHaveBeenCalledTimes(4)
+  })
+
+  it('forgets an evicted chain instead of wedging on traced-chain memory', async () => {
+    const { live } = liveTarget()
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    const spec = specWithGuards(
+      { addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000, admitFrom: ['sender'], maxHopsPerTrace: 1 },
+      { maxTracedChains: 2 },
+      { at: 1_000_000 },
+    )
+    const a = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'a', traceId: 'trace-a' })
+    await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'b', traceId: 'trace-b' })
+    await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'c', traceId: 'trace-c' })
+    // 'trace-a' was evicted by the two later chains, so a resend on it starts
+    // a fresh count instead of being refused by a forgotten one.
+    const aAgain = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'a2', traceId: 'trace-a' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+    await expect(rowState(h.storePath, a)).resolves.toMatchObject({ state: 'done' })
+    await expect(rowState(h.storePath, aAgain)).resolves.toMatchObject({ state: 'done' })
+    expect(live.steer).toHaveBeenCalledTimes(4)
+  })
+
+  it('never records a deferred lease — a pending settlement is re-judged, not self-suppressed', async () => {
+    const h = await makeHarness({ persisted: true })
+    const clock: Clock = { at: 1_000_000 }
+    const spec = specWithGuards(
+      { addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000, admitFrom: ['sender'] },
+      { maxDepthPerAddress: 1, depthWindowMs: 1_000, repeatWindowMs: 60_000 },
+      clock,
+    )
+    const lock = acquireNamedSessionLock('target')
+    try {
+      const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'deferred once' })
+      await bridge.internals.drainOnce(h.ctx, spec)
+      // Residency held elsewhere: pending, and NOTHING recorded — the depth
+      // memory stays empty and the repeat memory never saw this content.
+      await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'pending' })
+    } finally {
+      lock.release()
+    }
+    // The re-claimed lease admits against empty guard memory.
+    await bridge.internals.drainOnce(h.ctx, spec)
+    const db = new DatabaseSync(h.storePath)
+    try {
+      const states = db.prepare('SELECT state FROM messages WHERE to_address = ?').all('target') as Array<{ state: string }>
+      expect(states.map(row => row.state)).toEqual(['done'])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('delivers exactly one of two identical resends that deferred together', async () => {
+    const h = await makeHarness({ persisted: true })
+    const spec = specWithGuards(
+      { addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000, admitFrom: ['sender'] },
+      { repeatWindowMs: 60_000 },
+      { at: 1_000_000 },
+    )
+    const original = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'same', payload: 'body' })
+    const resend = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'same', payload: 'body' })
+    const lock = acquireNamedSessionLock('target')
+    try {
+      await bridge.internals.drainOnce(h.ctx, spec)
+      await expect(rowState(h.storePath, original)).resolves.toMatchObject({ state: 'pending' })
+      await expect(rowState(h.storePath, resend)).resolves.toMatchObject({ state: 'pending' })
+    } finally {
+      lock.release()
+    }
+    await bridge.internals.drainOnce(h.ctx, spec)
+    const first = await rowState(h.storePath, original)
+    const second = await rowState(h.storePath, resend)
+    expect([first.state, second.state].sort()).toEqual(['done', 'failed'])
+    // Whichever lost the race was suppressed as a repeat of the winner.
+    const loser = first.state === 'failed' ? first : second
+    expect(JSON.parse(loser.result ?? '{}').reason as string).toContain('duplicate-suppressed')
+  })
+
+  it('keeps the recent-fingerprint memory bounded per pair', async () => {
+    const { live } = liveTarget()
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    const spec = specWithGuards(
+      { addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000, admitFrom: ['sender'] },
+      { repeatWindowMs: 60_000 },
+      { at: 1_000_000 },
+    )
+    const ids: string[] = []
+    for (let index = 0; index < 10; index++) {
+      ids.push(await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: `distinct-${index}` }))
+    }
+    // Ten distinct admissions within one window: the per-pair memory holds
+    // only the most recent eight, and nothing wedges or misfires.
+    await bridge.internals.drainOnce(h.ctx, spec)
+    for (const id of ids) {
+      await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'done' })
+    }
+    expect(live.steer).toHaveBeenCalledTimes(10)
   })
 })

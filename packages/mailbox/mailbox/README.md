@@ -14,11 +14,13 @@ The mailbox capability seam: durable, cross-process agent messaging with publish
 | `publish(message, signal?)` | Convenience through the configured `defaultProvider`; validates the destination grammar in the admitting operation. |
 | `claim(filter, signal?)` | Default-provider claim after validating every filter address. |
 | `settle(leaseRef, outcome, signal?)` | Default-provider settlement of one lease. |
+| `lookupByTraceId(traceId, signal?)` | Default-provider pure read of every stored message carrying a traceId (`{ id, from, to, sentAt }` per entry) — the direction evidence a consumer needs to recognize a reply; claims and settles nothing. |
 
 ## Contracts
 
 - **Address grammar** — the seat's bare name, reusing the named-session name pattern (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`); one name names one seat, so the bridge derives target session ids with no second encoding. `parseMailboxAddress`/`formatMailboxAddress` round-trip by construction.
 - **At-least-once delivery** — a crashed claimer's lease is reclaimed after `staleClaimMs`; consumers tolerate duplicate claims.
+- **Sent time is provider-minted** — every delivered message carries `sentAt` (epoch ms), stamped when the provider admitted it and never re-stamped by a claim, reclaim, or settlement, so queued mail keeps its original date; `lease.claimedAt` remains the delivery-claim moment.
 - **`done` = inbox admission** — settlement records that the message reached its target's queue, never an answer; replies travel as newly published messages. The `result` column of an outcome is the delivery envelope only, never business payload.
 - **Default resolution fails loud** — conveniences without a registered configured default throw at call time naming the gap; named-provider calls are unaffected.
 

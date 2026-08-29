@@ -7,7 +7,7 @@
  * @module @deepseek-ai/dsh-mailbox/provider
  */
 
-import type { MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxMessage, MailboxMessageId, MailboxOutcome, MailboxStalenessFilter } from './types.ts'
+import type { MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxMessageId, MailboxOutcome, MailboxPublishInput, MailboxStalenessFilter, MailboxTraceEntry } from './types.ts'
 
 /**
  * One swappable mailbox storage backend. Providers own durability and
@@ -24,12 +24,13 @@ export interface MailboxProvider {
   readonly name: string
 
   /**
-   * Store one message durably and assign it a fresh {@link MailboxMessageId}.
-   * @param message - the message content without an id; providers ignore or reject foreign ids loudly.
+   * Store one message durably and assign it a fresh {@link MailboxMessageId}
+   * and sent time (`MailboxMessage.sentAt`).
+   * @param message - the message content without an id or sent time; providers ignore or reject foreign ids loudly.
    * @param signal - caller cancellation owning admission until the store accepts.
    * @returns the assigned durable id.
    */
-  publish(message: Omit<MailboxMessage, 'id'>, signal?: AbortSignal): Promise<MailboxMessageId>
+  publish(message: MailboxPublishInput, signal?: AbortSignal): Promise<MailboxMessageId>
 
   /**
    * Atomically move up to `filter.limit` messages matching `filter.addresses`
@@ -62,6 +63,17 @@ export interface MailboxProvider {
    * @returns the addresses with claimable work, in provider-determined order.
    */
   claimableAddresses(filter: MailboxStalenessFilter, signal?: AbortSignal): Promise<readonly MailboxAddress[]>
+
+  /**
+   * Read every stored message carrying `traceId`, regardless of its current
+   * claim or settlement state — a lookup answers "has this correlation id
+   * traveled before, and in which direction", not "what is still queued". A
+   * pure read: it claims nothing, settles nothing, and mutates nothing.
+   * @param traceId - the correlation id to search for, matched exactly.
+   * @param signal - caller cancellation owning the scan.
+   * @returns one entry per stored message carrying the id, earliest send first.
+   */
+  lookupByTraceId(traceId: string, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]>
 }
 
 /**

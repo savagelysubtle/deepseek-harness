@@ -513,6 +513,8 @@ export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
   MailboxProvider: 'mailbox storage provider contract is owned by packages/mailbox/mailbox/README.md',
   MailboxMessage: 'mailbox durable message record is owned by packages/mailbox/mailbox/README.md',
   MailboxMessageId: 'provider-assigned mailbox message identity is owned by packages/mailbox/mailbox/README.md',
+  MailboxPublishInput: 'mailbox publish input (the record minus provider-minted id and sentAt) is owned by packages/mailbox/mailbox/README.md',
+  MailboxTraceEntry: 'mailbox traceId lookup result is owned by packages/mailbox/mailbox/README.md',
   MailboxClaimFilter: 'mailbox claim filter input is owned by packages/mailbox/mailbox/README.md',
   MailboxLease: 'mailbox claim lease view is owned by packages/mailbox/mailbox/README.md',
   MailboxLeaseRef: 'store-owned lease settlement handle is owned by packages/mailbox/mailbox/README.md',

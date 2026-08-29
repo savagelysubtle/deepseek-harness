@@ -10,6 +10,12 @@
  * instead, reading without consuming). Machine-readable output rides
  * `--json`; errors go to stderr with a non-zero exit.
  *
+ * The CLI is the outside-operator GUEST channel, so `send` stamps its sender
+ * `guest:<original>` unconditionally — the caller cannot suppress the prefix,
+ * and a stamped sender never matches a roster seat. In-process seats send
+ * through the mailbox tools instead, whose sender is the trusted session
+ * name; this path exists for the operator standing outside the harness.
+ *
  * Built as its own bundle and declared in `package.json` `bin`; runs under
  * plain Node with no host up (precedent: `dsh-mcp-client-auth`).
  *
@@ -26,6 +32,22 @@ import { SqliteMailboxStore } from './sqlite.ts'
 
 /** Batch bound of one `inbox` drain when `--limit` is absent. */
 export const INBOX_DEFAULT_LIMIT = 20
+
+/** Prefix stamped onto every `send` sender; see {@link guestSender}. */
+export const GUEST_SENDER_PREFIX = 'guest:'
+
+/**
+ * Stamp the outside-operator sender. The CLI is the guest bootstrap path, so
+ * whatever the caller passes under `--from` is stored as
+ * `guest:<original>` — the prefix cannot be suppressed and cannot be
+ * pre-satisfied by already-prefixed input. A stamped sender never matches a
+ * roster seat, so the receiving end renders it `unverified`.
+ * @param original - the `--from` value the caller supplied.
+ * @returns the stored sender text.
+ */
+export function guestSender(original: string): string {
+  return `${GUEST_SENDER_PREFIX}${original}`
+}
 
 /**
  * Staleness bound applied while claiming, aligned in value with the bridge's
@@ -47,6 +69,7 @@ export const internals: MailboxCliIo = { stdout: process.stdout, stderr: process
 interface SendArgs {
   readonly command: 'send'
   readonly to: string
+  /** The original `--from` value; stored stamped as `guest:<from>` ({@link guestSender}). */
   readonly from: string
   readonly type?: string
   readonly subject?: string
@@ -79,7 +102,10 @@ type CliArgs = SendArgs | InboxArgs
 function parseArgs(argv: readonly string[]): CliArgs {
   const [command, ...rest] = argv
   if (command !== 'send' && command !== 'inbox') {
-    throw new Error('usage: dsh-mailbox <send|inbox> [flags] — see the @deepseek-ai/dsh-mailbox-local README')
+    throw new Error(
+      'usage: dsh-mailbox <send|inbox> [flags] — send always stores its sender as "guest:<--from>";'
+      + ' see the @deepseek-ai/dsh-mailbox-local README',
+    )
   }
   const values = new Map<string, string>()
   const valueFlags = new Set(['--to', '--from', '--type', '--subject', '--payload-file', '--trace-id', '--address', '--limit', '--db'])
@@ -104,7 +130,9 @@ function parseArgs(argv: readonly string[]): CliArgs {
     const to = requireFlag(values, '--to')
     const from = requireFlag(values, '--from')
     // Loud before any write: an unroutable address would otherwise sit in the
-    // store forever invisible — the bridge only polices its own roster.
+    // store forever invisible — the bridge only polices its own roster. The
+    // `--from` value is the original provenance; the stored sender gains the
+    // guest prefix at publish ({@link guestSender}).
     parseMailboxAddress(to)
     parseMailboxAddress(from)
     return {
@@ -238,7 +266,9 @@ export async function runMailboxCli(argv: readonly string[]): Promise<number> {
     if (args.command === 'send') {
       await store.publish({
         to: args.to as never,
-        from: args.from,
+        // Unconditional guest stamp: the CLI caller is outside the harness and
+        // cannot claim a seat's identity, including by pre-prefixing.
+        from: guestSender(args.from),
         ...args.type !== undefined ? { type: args.type } : {},
         ...args.subject !== undefined ? { subject: args.subject } : {},
         ...args.payload !== undefined ? { payload: args.payload } : {},

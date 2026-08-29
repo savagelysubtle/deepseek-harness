@@ -209,12 +209,13 @@ list(): readonly MailboxProvider[]
 
 /**
  * Publish through the configured default provider after validating the
- * destination address grammar.
- * @param message - message content without an id.
+ * destination address grammar. The provider mints the durable id and the
+ * sent time; the caller supplies neither.
+ * @param message - message content without an id or sent time.
  * @param signal - caller cancellation owning admission.
  * @returns the provider-assigned durable id.
  */
-async publish(message: Omit<MailboxMessage, 'id'>, signal?: AbortSignal): Promise<MailboxMessageId>
+async publish(message: MailboxPublishInput, signal?: AbortSignal): Promise<MailboxMessageId>
 
 /**
  * Claim through the configured default provider after validating every
@@ -232,6 +233,16 @@ async claim(filter: MailboxClaimFilter, signal?: AbortSignal): Promise<readonly 
  * @param signal - caller cancellation owning the settlement write.
  */
 async settle(leaseRef: MailboxLeaseRef, outcome: MailboxOutcome, signal?: AbortSignal): Promise<void>
+
+/**
+ * Read stored messages by traceId through the configured default provider —
+ * the same pure lookup the provider contract declares, with no address
+ * grammar to validate and no claim, settlement, or other write behind it.
+ * @param traceId - the correlation id to search for, matched exactly.
+ * @param signal - caller cancellation owning the scan.
+ * @returns one entry per stored message carrying the id, earliest send first.
+ */
+async lookupByTraceId(traceId: string, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]>
 ```
 
 Source: [`packages/mailbox/mailbox/src/index.ts:60`](../../packages/mailbox/mailbox/src/index.ts)

@@ -28,6 +28,29 @@
     - id: headless-startup
       name: '@deepseek-ai/dsh-headless/startup'
 
+    # The mailbox seam and its local SQLite store back the mailbox tools: mail
+    # sits in the shared deployment queue until the recipient drains it. The
+    # bridge is deliberately NOT mounted here — a mail-enabled deployment adds
+    # it in a later patch layer (the bridge pushes mail into live turns), and
+    # without one the seat's own mailbox_check_inbox drain is the reader.
+    - id: mailbox
+      name: '@deepseek-ai/dsh-mailbox'
+      config:
+        defaultProvider: local
+
+    - id: mailbox-local
+      name: '@deepseek-ai/dsh-mailbox-local'
+
+    # The trusted sender identity is the launcher-validated --session-name:
+    # the row injects the startup service so its lazy config reads the name
+    # after the command line is parsed, and the tools fail loud at call time
+    # for an anonymous run that has none.
+    - id: tool-mailbox
+      name: '@deepseek-ai/dsh-tool-mailbox'
+      inject: [headlessStartup]
+      config:
+        sessionName: !!js ctx.headlessStartup.sessionName
+
     # Reads its task and output flags from the ordinary headlessStartup provider.
     - id: headless-runner
       name: '@deepseek-ai/dsh-headless'

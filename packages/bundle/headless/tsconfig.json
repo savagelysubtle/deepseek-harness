@@ -45,6 +45,9 @@
       "path": "../../mailbox/bridge"
     },
     {
+      "path": "../../mailbox/tool-mailbox"
+    },
+    {
       "path": "../../session/named-sessions"
     },
     {

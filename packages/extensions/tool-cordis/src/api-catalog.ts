@@ -917,9 +917,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the borrowed providers; mutating them is the owner\'s concern.',
       },
       {
-        signature: 'async publish(message: Omit<MailboxMessage, \'id\'>, signal?: AbortSignal): Promise<MailboxMessageId>',
-        description: 'Publish through the configured default provider after validating the destination address grammar.',
-        parameters: [{ name: 'message', description: 'message content without an id.' }, { name: 'signal', description: 'caller cancellation owning admission.' }],
+        signature: 'async publish(message: MailboxPublishInput, signal?: AbortSignal): Promise<MailboxMessageId>',
+        description: 'Publish through the configured default provider after validating the destination address grammar. The provider mints the durable id and the sent time; the caller supplies neither.',
+        parameters: [{ name: 'message', description: 'message content without an id or sent time.' }, { name: 'signal', description: 'caller cancellation owning admission.' }],
         returns: 'the provider-assigned durable id.',
       },
       {
@@ -932,6 +932,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         signature: 'async settle(leaseRef: MailboxLeaseRef, outcome: MailboxOutcome, signal?: AbortSignal): Promise<void>',
         description: 'Settle through the configured default provider.',
         parameters: [{ name: 'leaseRef', description: 'the ref received from the claiming call.' }, { name: 'outcome', description: 'delivery-envelope outcome.' }, { name: 'signal', description: 'caller cancellation owning the settlement write.' }],
+      },
+      {
+        signature: 'async lookupByTraceId(traceId: string, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]>',
+        description: 'Read stored messages by traceId through the configured default provider — the same pure lookup the provider contract declares, with no address grammar to validate and no claim, settlement, or other write behind it.',
+        parameters: [{ name: 'traceId', description: 'the correlation id to search for, matched exactly.' }, { name: 'signal', description: 'caller cancellation owning the scan.' }],
+        returns: 'one entry per stored message carrying the id, earliest send first.',
       },
     ],
   },
@@ -3472,7 +3478,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'MailboxMessage',
-    declaration: 'export interface MailboxMessage {\n    readonly id?: MailboxMessageId;\n    readonly to: MailboxAddress;\n    readonly from: string;\n    readonly type?: string;\n    readonly subject?: string;\n    readonly payload?: unknown;\n    readonly traceId?: string;\n    readonly blocking?: boolean;\n}',
+    declaration: 'export interface MailboxMessage {\n    readonly id?: MailboxMessageId;\n    readonly to: MailboxAddress;\n    readonly from: string;\n    readonly sentAt: number;\n    readonly type?: string;\n    readonly subject?: string;\n    readonly payload?: unknown;\n    readonly traceId?: string;\n    readonly blocking?: boolean;\n}',
   },
   {
     name: 'MailboxMessageId',
@@ -3484,7 +3490,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'MailboxProvider',
-    declaration: 'export interface MailboxProvider {\n    readonly name: string;\n    publish(message: Omit<MailboxMessage, \'id\'>, signal?: AbortSignal): Promise<MailboxMessageId>;\n    claim(filter: MailboxClaimFilter, signal?: AbortSignal): Promise<readonly MailboxLease[]>;\n    settle(leaseRef: MailboxLease[\'leaseRef\'], outcome: MailboxOutcome, signal?: AbortSignal): Promise<void>;\n    claimableAddresses(filter: MailboxStalenessFilter, signal?: AbortSignal): Promise<readonly MailboxAddress[]>;\n}',
+    declaration: 'export interface MailboxProvider {\n    readonly name: string;\n    publish(message: MailboxPublishInput, signal?: AbortSignal): Promise<MailboxMessageId>;\n    claim(filter: MailboxClaimFilter, signal?: AbortSignal): Promise<readonly MailboxLease[]>;\n    settle(leaseRef: MailboxLease[\'leaseRef\'], outcome: MailboxOutcome, signal?: AbortSignal): Promise<void>;\n    claimableAddresses(filter: MailboxStalenessFilter, signal?: AbortSignal): Promise<readonly MailboxAddress[]>;\n    lookupByTraceId(traceId: string, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]>;\n}',
+  },
+  {
+    name: 'MailboxPublishInput',
+    declaration: 'export type MailboxPublishInput = Omit<MailboxMessage, \'id\' | \'sentAt\'>;',
   },
   {
     name: 'MailboxPublishPayload',
@@ -3497,6 +3507,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'MailboxStalenessFilter',
     declaration: 'export interface MailboxStalenessFilter {\n    readonly staleClaimMs: number;\n}',
+  },
+  {
+    name: 'MailboxTraceEntry',
+    declaration: 'export interface MailboxTraceEntry {\n    readonly id: MailboxMessageId;\n    readonly from: string;\n    readonly to: MailboxAddress;\n    readonly sentAt: number;\n}',
   },
   {
     name: 'ManualCompactAgentContext',
