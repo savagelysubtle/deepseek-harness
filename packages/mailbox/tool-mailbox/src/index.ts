@@ -1,10 +1,12 @@
 /**
  * Model-facing mailbox tools over the mailbox seam: `mailbox_send` publishes
  * with a runtime-filled sender, `mailbox_check_inbox` drains the calling
- * session's own address. Both resolve their identity from the
- * deployment-supplied trusted session name ({@link Config.sessionName}) — the
- * schema exposes no sender field and no address argument, so a seat cannot
- * claim another identity or read another seat's mail through these tools.
+ * session's own address. The schema exposes no sender field and no address
+ * argument, so a seat cannot claim another identity or read another seat's
+ * mail through these tools. Where the identity itself comes from depends on
+ * how many seats share the process — the launcher's {@link Config.sessionName}
+ * for a one-seat headless run, the calling agent matched against
+ * {@link Config.addresses} for the many-seat host. See the identity module.
  *
  * The plugin stays PENDING until `ctx.tools` and `ctx.mailbox` exist, and the
  * tools fail loud at call time when the run has no session name: an anonymous
@@ -17,10 +19,12 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
+import type { IdentitySources } from './identity.ts'
 import { mailboxCheckInboxTool, mailboxSendTool } from './tools.ts'
 
 export { CHECK_INBOX_DRAIN_LIMIT, CHECK_INBOX_STALE_CLAIM_MS } from './tools.ts'
 export { resolveMailboxIdentity } from './identity.ts'
+export type { IdentitySources } from './identity.ts'
 export type { CheckInboxResult, InboxEntry, SendResult } from './tools.ts'
 
 /** Stable Cordis plugin name. */
@@ -33,17 +37,26 @@ export const inject = ['tools', 'mailbox']
 export interface Config {
   /**
    * The calling session's trusted name — the name the operator's launcher
-   * passed to this process. It is the only sender identity the tools fill and
-   * the only address `mailbox_check_inbox` drains. Absent for an anonymous
-   * run: both tools then fail loud at call time (see
-   * {@link resolveMailboxIdentity}), because there is no identity to trust.
+   * passed to this process. Correct only where the process serves ONE seat,
+   * which is the headless run. Absent for an anonymous run: both tools then
+   * fail loud at call time (see {@link resolveMailboxIdentity}), because
+   * there is no identity to trust.
    */
   readonly sessionName?: string
+  /**
+   * The addresses this deployment serves — the same roster the bridge is
+   * mounted with. Set it wherever one process serves MANY seats (the host
+   * behind the UI): the identity then comes from the calling agent's own
+   * session id matched against this roster, never from a mount-time name,
+   * which in a many-seat process would stamp every session as one seat.
+   */
+  readonly addresses?: string[]
 }
 
 /** Schema for {@link Config}. */
 export const Config: Schema<Config> = z.object({
   sessionName: z.string(),
+  addresses: z.array(z.string()),
 })
 
 /**
@@ -55,6 +68,10 @@ export const Config: Schema<Config> = z.object({
  * @param config - the deployment-supplied session name.
  */
 export function apply(ctx: Context, config: Config): void {
-  ctx.tools.register(mailboxSendTool(ctx.mailbox, config.sessionName))
-  ctx.tools.register(mailboxCheckInboxTool(ctx.mailbox, config.sessionName))
+  const identity: IdentitySources = {
+    ...config.sessionName !== undefined ? { sessionName: config.sessionName } : {},
+    ...config.addresses !== undefined ? { addresses: config.addresses } : {},
+  }
+  ctx.tools.register(mailboxSendTool(ctx.mailbox, identity))
+  ctx.tools.register(mailboxCheckInboxTool(ctx.mailbox, identity))
 }

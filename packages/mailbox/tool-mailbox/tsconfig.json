@@ -24,6 +24,9 @@
       "path": "../../mailbox/mailbox"
     },
     {
+      "path": "../../session/named-sessions"
+    },
+    {
       "path": "../../runtime-diagnostics/invariants"
     }
   ]

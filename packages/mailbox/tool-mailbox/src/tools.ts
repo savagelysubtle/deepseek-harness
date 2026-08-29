@@ -13,6 +13,7 @@ import { parseMailboxAddress } from '@deepseek-ai/dsh-mailbox'
 import type { MailboxLease, MailboxMessageId, MailboxRegistry } from '@deepseek-ai/dsh-mailbox'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { resolveMailboxIdentity } from './identity.ts'
+import type { IdentitySources } from './identity.ts'
 
 /**
  * Batch bound of one `mailbox_check_inbox` drain. Aligned in value with the
@@ -90,15 +91,29 @@ function toEntry(lease: MailboxLease): InboxEntry {
 }
 
 /**
+ * Fold the calling agent's session id into the mount-time identity inputs.
+ * Kept as a function rather than a spread at each call site so the two tools
+ * cannot drift on which sources they consider.
+ * @param mounted - the deployment-supplied identity inputs.
+ * @param agentSessionId - the calling agent's durable session id, when the
+ *   call runs inside an agent loop.
+ * @returns the complete input to {@link resolveMailboxIdentity}.
+ */
+function callerIdentity(mounted: IdentitySources, agentSessionId: string | undefined): IdentitySources {
+  return { ...mounted, ...agentSessionId !== undefined ? { agentSessionId } : {} }
+}
+
+/**
  * Build the `mailbox_send` tool: publish one message whose sender is the
  * trusted session name. The registry's `publish` validates the destination
  * address grammar; the stamped `from` needs no validation because it never
  * passes through the model.
  * @param mailbox - the mailbox registry whose default provider admits the message.
- * @param sessionName - the trusted session name, or undefined on an anonymous run.
+ * @param identity - the deployment's mount-time identity inputs; the calling
+ *   agent's own session id is added per call.
  * @returns the registry-ready tool definition.
  */
-export function mailboxSendTool(mailbox: MailboxRegistry, sessionName: string | undefined) {
+export function mailboxSendTool(mailbox: MailboxRegistry, identity: IdentitySources) {
   return defineTool({
     name: 'mailbox_send',
     description: 'Send a mailbox message to another seat by its bare name. '
@@ -149,7 +164,7 @@ export function mailboxSendTool(mailbox: MailboxRegistry, sessionName: string | 
       rawInput: { to: args.to, subject: args.subject },
     }),
     async execute(args, exec) {
-      const from = resolveMailboxIdentity(sessionName)
+      const from = resolveMailboxIdentity(callerIdentity(identity, exec.agent?.id))
       // The branded boundary: the destination crosses into the seam here, so
       // the grammar check that admits it runs at this exact edge. The
       // registry re-validates by contract; this call gives the model the
@@ -175,10 +190,11 @@ export function mailboxSendTool(mailbox: MailboxRegistry, sessionName: string | 
  * it. Each claimed message settles as delivered (inbox admission); a crash
  * between claim and settle is reclaimed by the staleness bound.
  * @param mailbox - the mailbox registry whose default provider holds the queue.
- * @param sessionName - the trusted session name, or undefined on an anonymous run.
+ * @param identity - the deployment's mount-time identity inputs; the calling
+ *   agent's own session id is added per call.
  * @returns the registry-ready tool definition.
  */
-export function mailboxCheckInboxTool(mailbox: MailboxRegistry, sessionName: string | undefined) {
+export function mailboxCheckInboxTool(mailbox: MailboxRegistry, identity: IdentitySources) {
   return defineTool({
     name: 'mailbox_check_inbox',
     description: 'Drain this seat\'s own mailbox: claim and deliver every pending message addressed to this seat. '
@@ -223,9 +239,9 @@ export function mailboxCheckInboxTool(mailbox: MailboxRegistry, sessionName: str
     },
     presentCall: () => ({ card: 'generic', title: 'Check inbox', kind: 'other' }),
     async execute(_args, exec) {
-      const identity = resolveMailboxIdentity(sessionName)
+      const own = resolveMailboxIdentity(callerIdentity(identity, exec.agent?.id))
       const leases = await mailbox.claim({
-        addresses: [identity],
+        addresses: [own],
         limit: CHECK_INBOX_DRAIN_LIMIT,
         staleClaimMs: CHECK_INBOX_STALE_CLAIM_MS,
       }, exec.signal)

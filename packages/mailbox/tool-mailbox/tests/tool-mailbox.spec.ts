@@ -20,6 +20,7 @@ import type { MailboxLease, MailboxRegistry as MailboxRegistryShape } from '@dee
 import MailboxLocal from '@deepseek-ai/dsh-mailbox-local'
 import * as tool from '../src/index.ts'
 import { mailboxCheckInboxTool, mailboxSendTool } from '../src/tools.ts'
+import { deriveNamedSessionId } from '@deepseek-ai/dsh-named-sessions'
 import { resolveMailboxIdentity } from '../src/identity.ts'
 import * as invariant from '../src/invariant.ts'
 
@@ -231,7 +232,7 @@ describe('mailbox_check_inbox', () => {
         throw new Error('settle must not run for an id-less claim')
       },
     } as unknown as MailboxRegistryShape
-    const checkInbox = mailboxCheckInboxTool(stub, 'alfred')
+    const checkInbox = mailboxCheckInboxTool(stub, { sessionName: 'alfred' })
     await expect(checkInbox.execute({}, {
       signal: testSignal,
       callId: CallId('call-stub'),
@@ -260,28 +261,43 @@ describe('identity resolution', () => {
   })
 
   it('resolves a valid name and rejects blank or grammar-violating ones', () => {
-    expect(resolveMailboxIdentity('batman')).toBe('batman')
-    expect(() => resolveMailboxIdentity(undefined)).toThrow(/no trusted sender identity/)
-    expect(() => resolveMailboxIdentity('   ')).toThrow(/no trusted sender identity/)
-    expect(() => resolveMailboxIdentity('bad name!')).toThrow(/invalid mailbox address/)
+    expect(resolveMailboxIdentity({ sessionName: 'batman' })).toBe('batman')
+    expect(() => resolveMailboxIdentity({})).toThrow(/no trusted sender identity/)
+    expect(() => resolveMailboxIdentity({ sessionName: '   ' })).toThrow(/no trusted sender identity/)
+    expect(() => resolveMailboxIdentity({ sessionName: 'bad name!' })).toThrow(/invalid mailbox address/)
+  })
+
+  it('takes the identity from the calling agent, not the mount, when a roster is served', () => {
+    const addresses = ['tt-ping', 'tt-pong']
+    // The id is derived, never passed: a caller matches only by actually
+    // running as the session that address derives to.
+    const pong = String(deriveNamedSessionId('tt-pong'))
+    expect(resolveMailboxIdentity({ addresses, agentSessionId: pong })).toBe('tt-pong')
+    // A mount-time name loses to the roster — otherwise every session in a
+    // many-seat host would send as whichever seat the mount happened to name.
+    expect(resolveMailboxIdentity({ sessionName: 'tt-ping', addresses, agentSessionId: pong })).toBe('tt-pong')
+    expect(() => resolveMailboxIdentity({ addresses }))
+      .toThrow(/require a calling agent in a multi-seat deployment/)
+    expect(() => resolveMailboxIdentity({ addresses, agentSessionId: String(deriveNamedSessionId('alfred')) }))
+      .toThrow(/is not one of the addresses this deployment serves/)
   })
 
   it('presents calls as pure cards derived from the args', () => {
-    const send = mailboxSendTool({ publish: async () => 'x' } as unknown as MailboxRegistryShape, 'batman')
+    const send = mailboxSendTool({ publish: async () => 'x' } as unknown as MailboxRegistryShape, { sessionName: 'batman' })
     expect(send.presentCall?.({ to: 'alfred', subject: 'hi', body: 'b', blocking: true })).toEqual({
       card: 'generic',
       title: 'Send mail to alfred',
       kind: 'other',
       rawInput: { to: 'alfred', subject: 'hi' },
     })
-    const drain = mailboxCheckInboxTool({ claim: async () => [] } as unknown as MailboxRegistryShape, 'alfred')
+    const drain = mailboxCheckInboxTool({ claim: async () => [] } as unknown as MailboxRegistryShape, { sessionName: 'alfred' })
     expect(drain.presentCall?.({})).toEqual({ card: 'generic', title: 'Check inbox', kind: 'other' })
   })
 })
 
 describe('plugin config', () => {
   it('accepts an absent sessionName and rejects a non-string one', () => {
-    expect(new tool.Config({})).toEqual({})
+    expect(new tool.Config({})).toEqual({ addresses: [] })
     expect(() => new tool.Config({ sessionName: 42 as never })).toThrow()
   })
 })

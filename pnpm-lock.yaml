@@ -5702,6 +5702,9 @@ importers:
       '@deepseek-ai/dsh-mailbox':
         specifier: workspace:^
         version: link:../mailbox
+      '@deepseek-ai/dsh-named-sessions':
+        specifier: workspace:^
+        version: link:../../session/named-sessions
       '@deepseek-ai/schemastery':
         specifier: link:../../../vendor/schemastery
         version: link:../../../vendor/schemastery
