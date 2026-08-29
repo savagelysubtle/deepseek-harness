@@ -261,6 +261,70 @@ describe('WorkspaceRegistry lifecycle and bootstrap', () => {
     expect(storedState(pool)).toEqual({ initialized: true, workspaceIds: [], archivedSessionIds: [] })
   })
 
+  it('attaches a session that appeared while this registry was closed', async () => {
+    const project = await makeDir('reopen-project')
+    const pool = new MemoryMediaPool()
+    const first = await harness({ pool, sessions: [header('original', project, 100)] })
+    const workspaceId = first.registry.list()[0]!.id
+    expect(first.registry.list()[0]!.sessionIds).toEqual(['original'])
+    await first.fiber.dispose()
+
+    // A headless run wrote a second session into the same cwd while this
+    // registry was closed. Nothing but reconciliation on open can attach it,
+    // and without that it stays ungrouped no matter how often the host boots.
+    const second = await harness({
+      pool,
+      sessions: [header('original', project, 100), header('headless', project, 200)],
+    })
+    expect(second.registry.list()[0]!.sessionIds).toEqual(['headless', 'original'])
+    expect(storedRecord(pool, workspaceId).sessionIds).toEqual(['headless', 'original'])
+  })
+
+  it('preserves an operator title while attaching a later session', async () => {
+    const project = await makeDir('titled-project')
+    const pool = new MemoryMediaPool()
+    const first = await harness({ pool, sessions: [header('one', project, 100)] })
+    await first.registry.list()[0]!.setTitle('DSH/GOTHAM')
+    await first.fiber.dispose()
+
+    const second = await harness({
+      pool,
+      sessions: [header('one', project, 100), header('two', project, 200)],
+    })
+    expect(second.registry.list()[0]!.title).toBe('DSH/GOTHAM')
+    expect(second.registry.list()[0]!.sessionIds).toEqual(['two', 'one'])
+  })
+
+  it('leaves a path with no registered workspace ungrouped on a later open', async () => {
+    const known = await makeDir('known-project')
+    const stranger = await makeDir('stranger-project')
+    const pool = new MemoryMediaPool()
+    const first = await harness({ pool, sessions: [header('known', known, 100)] })
+    await first.fiber.dispose()
+
+    // Minting a workspace for an unseen path stays a first-bootstrap concern,
+    // so an incidental cwd cannot create one on an ordinary restart.
+    const second = await harness({
+      pool,
+      sessions: [header('known', known, 100), header('stray', stranger, 200)],
+    })
+    expect(second.registry.list().map(workspace => workspace.path)).toEqual([known])
+    expect(second.registry.list()[0]!.sessionIds).toEqual(['known'])
+  })
+
+  it('writes nothing when a later open finds no new sessions', async () => {
+    const project = await makeDir('idempotent-project')
+    const pool = new MemoryMediaPool()
+    const first = await harness({ pool, sessions: [header('only', project, 100)] })
+    const workspaceId = first.registry.list()[0]!.id
+    const before = storedRecord(pool, workspaceId).updatedAt
+    await first.fiber.dispose()
+
+    const second = await harness({ pool, sessions: [header('only', project, 100)] })
+    expect(second.registry.list()[0]!.sessionIds).toEqual(['only'])
+    expect(storedRecord(pool, workspaceId).updatedAt).toBe(before)
+  })
+
   it('reuses partial records after a bootstrap record write fails', async () => {
     const firstDir = await makeDir('partial-first')
     const secondDir = await makeDir('partial-second')
@@ -741,7 +805,10 @@ describe('header-validated membership projection', () => {
       sessions: [
         header('good', owned),
         header('mismatch', elsewhere),
-        header('cwd-only', owned),
+        // A subagent child in the workspace's own directory: reconciliation
+        // adopts unclaimed top-level sessions by path, but never delegation
+        // children, so this one must stay out of the record and the projection.
+        { ...header('cwd-only', owned), origin: 'subagent' as const },
       ],
     })
     const workspace = result.registry.list()[0]!

@@ -130,7 +130,12 @@ export class WorkspaceRegistry extends Service {
       await this.replaceHeaderIndex(headers)
       await this.bootstrap(headers)
     } else if (this.table.size > 0) {
-      await this.replaceHeaderIndex(await this.ctx.sessionPersistence.list())
+      // Reconcile on every open, not just first bootstrap: sessions this host
+      // did not create — headless runs, mail-triggered seats — appear on disk
+      // with no workspace association, and nothing else ever attaches them.
+      const headers = await this.ctx.sessionPersistence.list()
+      await this.replaceHeaderIndex(headers)
+      await this.attachKnownSessions(this.groupHeadersByPath(headers))
     }
 
     await this.indexLiveSessions()
@@ -423,9 +428,14 @@ export class WorkspaceRegistry extends Service {
     })
   }
 
-  private async bootstrap(headers: readonly SessionHeader[]): Promise<void> {
-    const table = this.requireTable()
-    const state = this.requireState()
+  /**
+   * Group indexed session headers by the workspace path their cwd resolved to,
+   * newest group first. A header whose cwd never resolved names no directory
+   * this registry can own, so it is skipped rather than guessed at.
+   * @param headers - the indexed session headers to group.
+   * @returns one group per resolved path, ordered newest-session-first.
+   */
+  private groupHeadersByPath(headers: readonly SessionHeader[]): BootstrapGroup[] {
     const groupsByPath = new Map<string, SessionHeader[]>()
     for (const header of headers) {
       const path = this.sessionPaths.get(header.id)
@@ -434,44 +444,46 @@ export class WorkspaceRegistry extends Service {
       if (group === undefined) groupsByPath.set(path, [header])
       else group.push(header)
     }
-    const groups: BootstrapGroup[] = [...groupsByPath].map(([path, groupHeaders]) => {
+    return [...groupsByPath].map(([path, groupHeaders]) => {
       groupHeaders.sort(compareHeaders)
       const newest = groupHeaders[0] as SessionHeader
       return { path, headers: groupHeaders, newestAt: newest.createdAt }
     }).sort((left, right) =>
       right.newestAt - left.newestAt || left.path.localeCompare(right.path))
+  }
 
+  /**
+   * Merge sessions found on disk into the workspaces already registered at
+   * their paths.
+   *
+   * Runs on EVERY open, not only first bootstrap. A session this host did not
+   * create itself — every headless run, and every mail-triggered seat — is
+   * otherwise never attached to its workspace and stays ungrouped forever, no
+   * matter how many times the host restarts. Minting a workspace for an
+   * unknown path stays a first-bootstrap concern ({@link bootstrap}) so an
+   * incidental cwd cannot create one on an ordinary restart.
+   *
+   * Idempotent: a group whose sessions are already accounted for writes
+   * nothing, and `title` is never rewritten — an operator's rename survives.
+   * @param groups - path groups from {@link groupHeadersByPath}.
+   */
+  private async attachKnownSessions(groups: readonly BootstrapGroup[]): Promise<void> {
+    const table = this.requireTable()
     const byPath = new Map<string, WorkspaceId>()
     const accounted = new Map<SessionId, WorkspaceId>()
     for (const [id, record] of table.entries()) {
       byPath.set(record.path, id)
       for (const sessionId of record.sessionIds) accounted.set(sessionId, id)
     }
-
     for (const group of groups) {
-      let id = byPath.get(group.path)
-      if (id === undefined) {
-        const sessionIds = group.headers
-          .map(header => header.id)
-          .filter(sessionId => !accounted.has(sessionId))
-        if (sessionIds.length === 0) continue
-        id = WorkspaceId(randomUUID())
-        const createdAt = new Date(group.newestAt).toISOString()
-        const record: WorkspaceRecord = {
-          path: group.path,
-          title: basename(group.path),
-          sessionIds,
-          createdAt,
-          updatedAt: createdAt,
-        }
-        await table.put(id, record)
-        byPath.set(group.path, id)
-        for (const sessionId of sessionIds) accounted.set(sessionId, id)
-        continue
-      }
-
+      const id = byPath.get(group.path)
+      if (id === undefined) continue
       const current = table.get(id) as WorkspaceRecord
       const historical = group.headers
+        // Subagent children run in their parent's cwd, so adopting by path
+        // alone would fill a project's panel with delegation noise. Only
+        // top-level sessions are adopted; a child stays with its parent.
+        .filter(header => header.origin !== 'subagent')
         .map(header => header.id)
         .filter(sessionId => accounted.get(sessionId) === undefined || accounted.get(sessionId) === id)
       const historicalSet = new Set(historical)
@@ -487,6 +499,41 @@ export class WorkspaceRegistry extends Service {
       }))
       for (const sessionId of historical) accounted.set(sessionId, id)
     }
+  }
+
+  private async bootstrap(headers: readonly SessionHeader[]): Promise<void> {
+    const table = this.requireTable()
+    const state = this.requireState()
+    const groups = this.groupHeadersByPath(headers)
+
+    // First bootstrap only: a resolved path with no workspace yet becomes one,
+    // titled by its basename until an operator renames it.
+    const byPath = new Map<string, WorkspaceId>()
+    const accounted = new Map<SessionId, WorkspaceId>()
+    for (const [id, record] of table.entries()) {
+      byPath.set(record.path, id)
+      for (const sessionId of record.sessionIds) accounted.set(sessionId, id)
+    }
+    for (const group of groups) {
+      if (byPath.has(group.path)) continue
+      const sessionIds = group.headers
+        .map(header => header.id)
+        .filter(sessionId => !accounted.has(sessionId))
+      if (sessionIds.length === 0) continue
+      const id = WorkspaceId(randomUUID())
+      const createdAt = new Date(group.newestAt).toISOString()
+      await table.put(id, {
+        path: group.path,
+        title: basename(group.path),
+        sessionIds,
+        createdAt,
+        updatedAt: createdAt,
+      })
+      byPath.set(group.path, id)
+      for (const sessionId of sessionIds) accounted.set(sessionId, id)
+    }
+
+    await this.attachKnownSessions(groups)
 
     const groupRank = new Map(groups.map(group => [group.path, group.newestAt]))
     const priorRank = new Map(state.workspaceIds.map((id, index) => [id, index]))
