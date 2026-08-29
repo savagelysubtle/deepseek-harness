@@ -165,6 +165,58 @@ export function namedLockPath(name: string): string {
 }
 
 /**
+ * Extract the 32-hex token from a derived named-session id.
+ * @param sessionId - a session id, named-derived or otherwise.
+ * @returns the token, or undefined when the id is not name-derived.
+ */
+export function namedSessionToken(sessionId: string): string | undefined {
+  if (!sessionId.startsWith(NAMED_SESSION_ID_PREFIX)) return undefined
+  const token = sessionId.slice(NAMED_SESSION_ID_PREFIX.length)
+  return new RegExp(`^${NAMED_SESSION_TOKEN_PATTERN_SOURCE}$`).test(token) ? token : undefined
+}
+
+/**
+ * Resolve the per-session lock path for a session id.
+ *
+ * **Lock the identity that is actually written, not the name that labels it.**
+ * {@link namedLockPath} derives from the name, which is correct only while a
+ * seat's id is also derived from its name. Once identity is recorded in the org
+ * registry, the two come apart: a rename moves the name-derived lock while the
+ * log stays where it was, so two processes can hold two different locks over one
+ * file. That is the corruption class this function exists to close.
+ *
+ * A non-derived id (a UI-created session, or an adopted one) hashes its own
+ * string, so every session has exactly one lock regardless of how it was named.
+ * @param sessionId - the durable session id being written.
+ * @returns the absolute lock-file path for that session.
+ */
+export function lockPathForSession(sessionId: string): string {
+  return lockPathForToken(namedSessionToken(sessionId) ?? hashToken(sessionId))
+}
+
+/**
+ * Take the per-session lock for one session id.
+ *
+ * Prefer this over {@link acquireNamedSessionLock}: it locks the written
+ * identity rather than the label, so a renamed seat cannot end up with two live
+ * writers holding two different locks over one log.
+ * @param sessionId - the durable session id being written.
+ * @param options - optional bounds; see {@link AcquireNamedSessionLockOptions}.
+ * @param label - human-facing identity for the contention error; defaults to the
+ *   id. Pass the seat name — an operator reading `session "robin" is active`
+ *   learns something, whereas a 32-hex token tells them nothing.
+ * @returns the held lock.
+ * @throws when a live process holds it: `session "<label>" is active in another process`.
+ */
+export function acquireSessionLock(
+  sessionId: string,
+  options: AcquireNamedSessionLockOptions = {},
+  label: string = sessionId,
+): NamedSessionLock {
+  return acquireLockAtPath(lockPathForSession(sessionId), label, options)
+}
+
+/**
  * Resolve the lock path for an already-derived token. The invariant companion
  * goes through this entry so the id-to-lock algebra lives in exactly one place.
  * @param token - the 32-hex token of a derived named-session id.
@@ -214,7 +266,22 @@ export function acquireNamedSessionLock(
   name: string,
   options: AcquireNamedSessionLockOptions = {},
 ): NamedSessionLock {
-  const path = namedLockPath(name)
+  return acquireLockAtPath(namedLockPath(name), name, options)
+}
+
+/**
+ * Acquire one lock artifact, shared by the name-keyed and session-keyed entries.
+ * @param path - the lock file to take.
+ * @param label - identity named in the contention error (a name or a session id).
+ * @param options - optional bounds; see {@link AcquireNamedSessionLockOptions}.
+ * @returns the held lock.
+ * @throws when a live process holds it.
+ */
+function acquireLockAtPath(
+  path: string,
+  label: string,
+  options: AcquireNamedSessionLockOptions,
+): NamedSessionLock {
   mkdirSync(dirname(path), { recursive: true })
   // Written once per acquisition; release compares it verbatim so a
   // taken-over artifact is never removed by its previous holder.
@@ -232,7 +299,7 @@ export function acquireNamedSessionLock(
       handle = openSync(path, 'wx')
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-      throwIfLiveHolder(path, name, options.maxAgeMs)
+      throwIfLiveHolder(path, label, options.maxAgeMs)
       // No provable live owner: the file is abandoned (dead holder,
       // unreadable content, removed between the failed open and the read,
       // or — with `maxAgeMs` — a live holder past the age bound).
@@ -242,7 +309,7 @@ export function acquireNamedSessionLock(
   if (handle === undefined) {
     // Every attempt lost the create race to another acquirer, whose own
     // holder read reports the live owner on its side.
-    throw new Error(`session "${name}" is active in another process`)
+    throw new Error(`session "${label}" is active in another process`)
   }
   try {
     writeSync(handle, payload)

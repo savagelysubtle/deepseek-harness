@@ -9,11 +9,14 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import {
   acquireNamedSessionLock,
+  acquireSessionLock,
   assertValidSessionName,
   deriveNamedSessionId,
   internals,
   isLockHolderLive,
+  lockPathForSession,
   namedLockPath,
+  namedSessionToken,
 } from '../src/index.ts'
 
 const originalInternals = { ...internals }
@@ -188,5 +191,39 @@ describe('maxAgeMs takeover bound', () => {
     internals.isPidAlive = () => true
     expect(() => acquireNamedSessionLock('undated', { maxAgeMs: 1 }))
       .toThrow('session "undated" is active in another process')
+  })
+})
+
+describe('session-keyed locking — the lock guards what is written', () => {
+  it('locks a derived id at the same path its name would', () => {
+    // A seat whose identity is still name-derived must not change lock files
+    // just because the caller switched entry points.
+    expect(lockPathForSession(String(deriveNamedSessionId('robin')))).toBe(namedLockPath('robin'))
+  })
+
+  it('gives a non-derived id its own lock rather than colliding on a name', () => {
+    const uiSession = 'session-35081af5-7bb7-4910-899e-b80bbe8915b2'
+    expect(lockPathForSession(uiSession)).not.toBe(namedLockPath('robin'))
+    expect(lockPathForSession(uiSession)).toBe(lockPathForSession(uiSession))
+  })
+
+  it('keeps one lock across a rename — the id is what is locked, not the label', () => {
+    // Identity recorded once and carried through a rename: both names resolve to
+    // the same session id, so both must contend for exactly one lock. Locking by
+    // name would hand them two, which is two writers on one log.
+    const pinned = String(deriveNamedSessionId('robin'))
+    const held = acquireSessionLock(pinned)
+    try {
+      expect(() => acquireSessionLock(pinned)).toThrow(/active in another process/)
+    } finally {
+      held.release()
+    }
+  })
+
+  it('reads the token back out of a derived id, and refuses a foreign one', () => {
+    const id = String(deriveNamedSessionId('robin'))
+    expect(namedSessionToken(id)).toMatch(/^[0-9a-f]{32}$/)
+    expect(namedSessionToken('session-not-derived')).toBeUndefined()
+    expect(namedSessionToken('named-tooshort')).toBeUndefined()
   })
 })

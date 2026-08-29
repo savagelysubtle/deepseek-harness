@@ -21,7 +21,8 @@ export type { MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxLeaseRef,
 export type { AddressResolutionExtension, MailboxProvider } from './provider.ts'
 export type { MailboxMessageSource } from './source.ts'
 export {
-  findOrgRegistryRoute, loadOrgRegistry, orgRegistryAllows, parseOrgRegistry, resolveSeatCwd,
+  findOrgRegistryRoute, isSeatIdentityPinned, loadOrgRegistry, orgRegistryAllows, parseOrgRegistry,
+  resolveSeatCwd, resolveSeatSessionId,
 } from './org-registry.ts'
 export type { OrgRegistry, OrgRegistryEdge, OrgRegistryParseOptions, OrgRegistrySeat } from './org-registry.ts'
 

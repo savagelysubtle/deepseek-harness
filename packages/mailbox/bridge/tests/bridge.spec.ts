@@ -5,11 +5,11 @@
  * routing outcomes a claimed lease can take.
  */
 
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Context as ContextType } from '@deepseek-ai/cordis'
 import MailboxRegistry from '@deepseek-ai/dsh-mailbox'
@@ -31,8 +31,35 @@ afterEach(() => {
 const TARGET = formatMailboxAddress('target')
 
 /** The spec every routing test drains with: one address, permissive staleness, the fixture peer sender admitted. */
+/**
+ * A registry naming every seat the unit suite provisions. Provisioning resolves
+ * a seat's project directory from here — a served address the registry does not
+ * know cannot be created, because nothing knows where it would live.
+ */
+let registryPath: string
+
+beforeEach(() => {
+  registryPath = writeTestRegistry(['target', 'alice', 'ghost', 'other', 'batman', 'gotham-seat'])
+})
+
+function writeTestRegistry(seats: readonly string[]): string {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-bridge-registry-'))
+  const path = join(dir, 'registry.yml')
+  const rows = seats.map(seat => `  ${seat}: { cwd: ${seat} }`).join('\n')
+  writeFileSync(path, `baseDir: ${dir}\nseats:\n${rows}\nedges: []\n`, 'utf8')
+  for (const seat of seats) mkdirSync(join(dir, seat), { recursive: true })
+  return path
+}
+
 function targetSpec(addresses = ['target']): Parameters<typeof bridge.resolveBridgeSpec>[0] {
-  return { addresses, pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000, admitFrom: ['sender'] }
+  return {
+    addresses,
+    pollIntervalMs: 5,
+    maxClaimPerCycle: 10,
+    staleClaimMs: 600_000,
+    admitFrom: ['sender'],
+    orgRegistryPath: registryPath,
+  }
 }
 
 interface LiveAgentStub {
@@ -548,6 +575,21 @@ describe('terminal-failure bounces (every drop visible)', () => {
       bouncedMessageId: id,
       reason: 'sender-not-admitted',
     })
+  })
+
+  it('refuses to provision a served address the registry does not know', async () => {
+    const h = await makeHarness({ persisted: false })
+    const stranger = formatMailboxAddress('stranger')
+    await h.ctx.mailbox.publish({ to: stranger, from: 'sender', subject: 'who?' })
+    // Served, but absent from the registry: nothing knows which project it would
+    // run in. Provisioning it anyway is how ghost sessions were made — a live,
+    // correct conversation filed where the operator never looks. Fail loud and
+    // bounce instead, so the sender learns the address is wrong.
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(['sender', 'stranger'])))
+    expect(h.createdSessions()).not.toContain(String(deriveNamedSessionId('stranger')))
+    const bounces = rowsTo(h.storePath, 'sender').filter(row => row.type === 'bounce')
+    expect(bounces).toHaveLength(1)
+    expect(String(bounces[0]?.payload)).toContain('registry')
   })
 
   it('a typo send into a served roster provisions the seat instead of bouncing', async () => {

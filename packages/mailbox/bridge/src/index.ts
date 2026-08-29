@@ -32,11 +32,12 @@ import type { Agent, AgentHandle, AgentSetup, ModelSelectionRef } from '@deepsee
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import {
-  acquireNamedSessionLock,
+  acquireSessionLock,
   deriveNamedSessionId,
   type NamedSessionLock,
 } from '@deepseek-ai/dsh-named-sessions'
-import { parseMailboxAddress } from '@deepseek-ai/dsh-mailbox'
+import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import { loadOrgRegistry, parseMailboxAddress, resolveSeatCwd, resolveSeatSessionId } from '@deepseek-ai/dsh-mailbox'
 import type { MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxMessageId } from '@deepseek-ai/dsh-mailbox'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
@@ -101,6 +102,13 @@ export interface Config {
    */
   readonly admitFrom?: readonly string[]
   /**
+   * Path to the org registry that resolves a seat name to its project
+   * directory. A provisioned seat is created in ITS OWN cwd, never the host's:
+   * the panel groups sessions by directory, so a seat created under the host's
+   * cwd is filed where nobody looks. Absent: the harness-home default.
+   */
+  readonly orgRegistryPath?: string
+  /**
    * Explicit live-seat roster: full served addresses routed to an EXISTING
    * session id instead of the name-derivation default. This is how web-host
    * seat sessions (whose ids are not named-derived) become reachable. Absent
@@ -118,6 +126,7 @@ export const Config = z.object({
   lockStaleMs: z.number().step(1).min(1),
   residencyIdleMs: z.number().step(1).min(0),
   admitFrom: z.array(z.string()),
+  orgRegistryPath: z.string().min(1),
   seatAliases: z.array(
     z.object({ address: z.string().min(1), sessionId: z.string().min(1) }),
   ),
@@ -135,6 +144,8 @@ export interface BridgeSpec {
   readonly residencyIdleMs: number
   /** Sender addresses admitted beyond the served roster. */
   readonly admitFrom: readonly string[]
+  /** Registry file resolving a seat name to the project directory it runs in. */
+  readonly orgRegistryPath: string
   /** Grammar-checked alias rows for non-derived (web-host seat) targets. */
   readonly seatAliases: ReadonlyMap<MailboxAddress, SessionId>
   /** Live resident seats keyed by address; the host's one-writer pen. */
@@ -174,6 +185,7 @@ export function resolveBridgeSpec(config: Config): BridgeSpec {
     lockStaleMs: config.lockStaleMs,
     residencyIdleMs: config.residencyIdleMs ?? DEFAULT_RESIDENCY_IDLE_MS,
     admitFrom: config.admitFrom ?? [],
+    orgRegistryPath: config.orgRegistryPath ?? dshHomePath('org', 'registry.yml'),
     seatAliases,
     residents: new Map(),
   }
@@ -256,8 +268,12 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
   // session id (web-host seats are not name-derived); anything else falls
   // back to pure derivation — routing adds no second encoding.
   const name = String(lease.message.to)
+  // Recorded identity beats derived. A seat whose id is pinned in the org
+  // registry keeps that id through a rename; derivation is only the bootstrap
+  // for a seat that has never run. Resolving by name alone is what made the
+  // name the identity, so a rename orphaned the log.
   const sessionId = spec.seatAliases.get(lease.message.to as MailboxAddress)
-    ?? deriveNamedSessionId(name)
+    ?? await seatSessionId(spec, name)
 
   // Host-resident delivery: an agent this process already owns takes the
   // message directly. The operator's composer rides the same residency, so
@@ -277,7 +293,10 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
   try {
     // Losing the acquire means a live process holds residency elsewhere: defer
     // without waiting out any staleness window.
-    lock = acquireNamedSessionLock(name, spec.lockStaleMs === undefined ? {} : { maxAgeMs: spec.lockStaleMs })
+    // Locked by SESSION ID, not by name: the lock must guard the identity that
+    // is actually written, or a rename leaves two live writers holding two
+    // different locks over one log.
+    lock = acquireSessionLock(String(sessionId), spec.lockStaleMs === undefined ? {} : { maxAgeMs: spec.lockStaleMs }, name)
   } catch {
     await mailbox.settle(lease.leaseRef, { state: 'pending', result: undefined })
     return { kind: 'pending' }
@@ -290,7 +309,7 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
     const persisted = (await persistence.list()).some(header => header.id === sessionId)
     const handle = persisted
       ? await resumeTarget(ctx, sessionId)
-      : await createTarget(ctx, sessionId)
+      : await createTarget(ctx, sessionId, await seatCwd(spec, name))
     // A freshly resident agent takes the delivery as an ordinary FIFO turn;
     // steering a cold resume would skip reconstructing prior context.
     handle.agent.followup(relayUserMessage(lease))
@@ -365,12 +384,74 @@ function retainResident(
 }
 
 /**
+ * Resolve the durable session id a seat's conversation lives under.
+ *
+ * The registry answers when it has a recorded `sessionId`; otherwise the name is
+ * derived as a bootstrap for a seat that has never run. Recorded beats derived
+ * so that a rename carries the conversation — the id stays put while the label
+ * moves.
+ * @param spec - resolved serving parameters carrying the registry path.
+ * @param name - the seat name (which is also its address).
+ * @returns the seat's durable session id.
+ * @throws when the registry cannot be read or does not list the seat.
+ */
+async function seatSessionId(spec: BridgeSpec, name: string): Promise<SessionId> {
+  let registry
+  try {
+    registry = await loadOrgRegistry(spec.orgRegistryPath)
+  } catch {
+    // A registry that will not load cannot pin identity; derivation is the only
+    // answer left, and it is the same one every prior build used.
+    return deriveNamedSessionId(name)
+  }
+  try {
+    return resolveSeatSessionId(registry, name, n => String(deriveNamedSessionId(n))) as SessionId
+  } catch {
+    // Unknown to the roster: fall back to derivation so routing still resolves.
+    // Provisioning still refuses (see seatCwd) — this only keeps an existing
+    // conversation reachable when the roster and the served list disagree.
+    return deriveNamedSessionId(name)
+  }
+}
+
+/**
+ * Resolve the project directory a seat runs in, from the org registry.
+ *
+ * Fails loud on an unknown seat rather than falling back to the host's cwd.
+ * A silent fallback is what produced ghost sessions: the seat was provisioned
+ * correctly, ran correctly, and was filed under a workspace the operator never
+ * opens. An address the registry does not know is a configuration error and
+ * should bounce to its sender, not become an invisible conversation.
+ * @param spec - resolved serving parameters carrying the registry path.
+ * @param name - the seat name (which is also its address).
+ * @returns the seat's absolute project directory.
+ * @throws when the registry cannot be read or does not list the seat.
+ */
+async function seatCwd(spec: BridgeSpec, name: string): Promise<string> {
+  let registry
+  try {
+    registry = await loadOrgRegistry(spec.orgRegistryPath)
+  } catch (error) {
+    throw new Error(
+      `mailbox-bridge: cannot provision "${name}" — org registry at `
+      + `"${spec.orgRegistryPath}" did not load: ${(error as Error).message}`,
+    )
+  }
+  return resolveSeatCwd(registry, name)
+}
+
+/**
  * Create the first session for a seat that has never run — the basic
  * wake-up: mail alone provisions the seat, no hire script required.
  * @param ctx - plugin context carrying the agent registry and default model.
  * @param sessionId - the derived durable session id to create.
+ * @param cwd - the seat's own project directory, from the org registry.
  */
-async function createTarget(ctx: Context, sessionId: ReturnType<typeof deriveNamedSessionId>): Promise<AgentHandle> {
+async function createTarget(
+  ctx: Context,
+  sessionId: ReturnType<typeof deriveNamedSessionId>,
+  cwd: string,
+): Promise<AgentHandle> {
   const defaultModel = ctx.get('agentDefaultModel')
   if (defaultModel === undefined) {
     throw new Error('mailbox-bridge: wake requires the default model-selection service')
@@ -381,7 +462,12 @@ async function createTarget(ctx: Context, sessionId: ReturnType<typeof deriveNam
     const selected: ModelSelectionRef = { current: selection, assembled: undefined }
     installModelSelection(agentCtx, selected)
   }
-  return ctx.agents.create({ sessionId, meta: { cwd: process.cwd() }, agentOptions, setup })
+  // The SEAT's directory, never `process.cwd()`. The host's cwd is wherever it
+  // was launched from — systemd sets none, so it resolves to the home directory
+  // — and the UI groups sessions by cwd. A seat provisioned with the host's cwd
+  // is filed under a workspace nobody opens: the session is live and correct and
+  // simply cannot be found. That is the "ghost session" class.
+  return ctx.agents.create({ sessionId, meta: { cwd }, agentOptions, setup })
 }
 
 /**

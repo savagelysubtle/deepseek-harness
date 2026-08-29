@@ -31,6 +31,20 @@ export interface OrgRegistrySeat {
   readonly cwd: string
   /** Marks a department head; documentation metadata, not enforcement data. */
   readonly lead?: boolean
+  /**
+   * The seat's durable session id, recorded at first hire.
+   *
+   * Identity is DERIVED once and then RECORDED — after that this field is
+   * authoritative and the name is only a label. That is what lets a rename
+   * carry the conversation: the id never moves when the name does. Without it,
+   * identity is `sha256(name)` and renaming orphans the log.
+   *
+   * Absent for a seat that has never run; callers derive from the name to
+   * bootstrap and record the result.
+   */
+  readonly sessionId?: string
+  /** Marks a throwaway seat; an edge may never cross the test boundary. */
+  readonly test?: boolean
 }
 
 /** One undirected edge: both directions are implied unless a later rule excepts them. */
@@ -101,9 +115,16 @@ export function parseOrgRegistry(text: string, options: OrgRegistryParseOptions 
     if (seat.lead !== undefined && typeof seat.lead !== 'boolean') {
       throw new Error(`org registry field seats.${name}.lead must be a boolean when present`)
     }
-    seats[name] = seat.lead === undefined
-      ? { cwd: expandTilde(seat.cwd, home) }
-      : { cwd: expandTilde(seat.cwd, home), lead: seat.lead }
+    if (seat.sessionId !== undefined) assertNonEmptyString(seat.sessionId, `seats.${name}.sessionId`)
+    if (seat.test !== undefined && typeof seat.test !== 'boolean') {
+      throw new Error(`org registry field seats.${name}.test must be a boolean when present`)
+    }
+    seats[name] = {
+      cwd: expandTilde(seat.cwd, home),
+      ...seat.lead === undefined ? {} : { lead: seat.lead },
+      ...seat.sessionId === undefined ? {} : { sessionId: seat.sessionId },
+      ...seat.test === undefined ? {} : { test: seat.test },
+    }
   }
 
   const edges: OrgRegistryEdge[] = []
@@ -216,6 +237,47 @@ export function resolveSeatCwd(registry: OrgRegistry, seatName: string): string 
   const seat = knownSeat(registry, seatName)
   // resolve, not join: a seat cwd that is already absolute replaces baseDir.
   return resolve(registry.baseDir, seat.cwd)
+}
+
+/**
+ * Resolve the durable session id a seat's conversation lives under.
+ *
+ * **Recorded beats derived.** When the registry carries a `sessionId`, that is
+ * the answer, unconditionally — it is what makes a rename carry the seat's
+ * conversation instead of orphaning it. Derivation is only the bootstrap for a
+ * seat that has never run; the caller is expected to record the derived id back
+ * into the registry so the next resolution reads it rather than recomputing it.
+ *
+ * The distinction matters because deriving from the name makes the NAME the
+ * identity: rename it and the id moves, the log is orphaned, and the lock no
+ * longer guards the file being written.
+ * @param registry - the parsed registry.
+ * @param seatName - the seat under lookup.
+ * @param derive - bootstrap derivation for a seat with no recorded id.
+ * @returns the recorded id when present, otherwise the derived one.
+ * @throws when the name is unknown to the roster.
+ */
+export function resolveSeatSessionId(
+  registry: OrgRegistry,
+  seatName: string,
+  derive: (name: string) => string,
+): string {
+  const seat = knownSeat(registry, seatName)
+  return seat.sessionId ?? derive(seatName)
+}
+
+/**
+ * Whether a seat's identity is already pinned in the registry.
+ *
+ * A caller that provisions a seat uses this to decide whether it must record the
+ * id it just used — an unpinned seat is one rename away from losing its log.
+ * @param registry - the parsed registry.
+ * @param seatName - the seat under lookup.
+ * @returns whether a `sessionId` is recorded for that seat.
+ * @throws when the name is unknown to the roster.
+ */
+export function isSeatIdentityPinned(registry: OrgRegistry, seatName: string): boolean {
+  return knownSeat(registry, seatName).sessionId !== undefined
 }
 
 /**

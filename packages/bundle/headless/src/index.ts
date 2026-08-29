@@ -28,7 +28,7 @@ import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-cmdline'
 import {
-  acquireNamedSessionLock,
+  acquireSessionLock,
   assertValidSessionName,
   deriveNamedSessionId,
   type NamedSessionLock,
@@ -52,6 +52,17 @@ export interface Config {
    * creates it, later uses resume it. Absent for anonymous one-shot runs.
    */
   sessionName?: string
+  /**
+   * Durable session id to run against, overriding derivation from
+   * {@link Config.sessionName}.
+   *
+   * Identity belongs to whoever knows the org, not to the runner. A seat whose
+   * id is recorded in the org registry keeps that id through a rename, so the
+   * caller resolves it and passes it here; deriving from the name would move
+   * the id when the label moved and orphan the log. The name is still required
+   * — it labels the run and names the lock's error text.
+   */
+  sessionId?: string
   /** Output mode; the schema default is `text`. */
   format?: OutputFormat
 }
@@ -59,6 +70,7 @@ export interface Config {
 export const Config: z<Config> = z.object({
   task: z.string().required(),
   sessionName: z.string(),
+  sessionId: z.string(),
   format: z.union(['text', 'json'] as const).default('text'),
 })
 
@@ -118,7 +130,12 @@ export function resolveRunSpec(config: Config): RunSpec {
   return {
     kind: 'named',
     name: config.sessionName,
-    sessionId: deriveNamedSessionId(config.sessionName),
+    // An explicit id wins: it is the recorded identity of a seat that may have
+    // been renamed since it was created. Derivation is the bootstrap for a seat
+    // that has never run and has nothing recorded yet.
+    sessionId: config.sessionId === undefined
+      ? deriveNamedSessionId(config.sessionName)
+      : SessionId(config.sessionId),
     json,
   }
 }
@@ -242,7 +259,12 @@ async function run(ctx: Context, config: Config, io: HeadlessIo): Promise<void> 
       if (persistence === undefined) {
         throw new Error('headless-runner: named sessions require a configured session-persistence backend')
       }
-      lock = acquireNamedSessionLock(spec.name)
+      // Locked by SESSION ID, not by name. The lock must guard the identity
+      // being written: once a seat's id is recorded in the org registry the two
+      // come apart, and a name-keyed lock would leave this process holding one
+      // artifact while the host checks another — two writers on one log.
+      // Every writer must key the lock the same way or the guard is decorative.
+      lock = acquireSessionLock(String(spec.sessionId), {}, spec.name)
       // Metadata-only existence probe: only a genuinely absent log falls back
       // to first creation; corruption and backend failures stay loud via resume.
       persisted = (await persistence.list()).some(header => header.id === spec.sessionId)

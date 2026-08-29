@@ -7,7 +7,9 @@ import {
   orgRegistryAllows,
   parseMailboxAddress,
   parseOrgRegistry,
+  isSeatIdentityPinned,
   resolveSeatCwd,
+  resolveSeatSessionId,
 } from '../src/index.ts'
 
 const VALID = `
@@ -109,6 +111,53 @@ describe('findOrgRegistryRoute', () => {
   it('returns undefined for an unreachable seat', () => {
     const isolated = parseOrgRegistry('baseDir: /projects\nseats:\n  a: { cwd: one }\n  b: { cwd: two }\n')
     expect(findOrgRegistryRoute(isolated, 'a', 'b')).toBeUndefined()
+  })
+})
+
+describe('seat identity — recorded beats derived', () => {
+  const derive = (name: string): string => `derived-${name}`
+
+  it('returns the recorded sessionId when the registry pins one', () => {
+    const registry = parseOrgRegistry(
+      'baseDir: /projects\nseats:\n  robin: { cwd: a, sessionId: named-pinned }\nedges: []\n',
+      {},
+    )
+    expect(resolveSeatSessionId(registry, 'robin', derive)).toBe('named-pinned')
+    expect(isSeatIdentityPinned(registry, 'robin')).toBe(true)
+  })
+
+  it('derives as a bootstrap when no id is recorded yet', () => {
+    const registry = parseOrgRegistry('baseDir: /projects\nseats:\n  robin: { cwd: a }\nedges: []\n', {})
+    expect(resolveSeatSessionId(registry, 'robin', derive)).toBe('derived-robin')
+    expect(isSeatIdentityPinned(registry, 'robin')).toBe(false)
+  })
+
+  it('keeps the same identity after a rename — the seat carries its conversation', () => {
+    // The whole point: the label moves, the id does not. Deriving from the name
+    // would return a different id here and orphan the log.
+    const before = parseOrgRegistry(
+      'baseDir: /projects\nseats:\n  robin: { cwd: a, sessionId: named-stable }\nedges: []\n',
+      {},
+    )
+    const after = parseOrgRegistry(
+      'baseDir: /projects\nseats:\n  nightwing: { cwd: a, sessionId: named-stable }\nedges: []\n',
+      {},
+    )
+    expect(resolveSeatSessionId(after, 'nightwing', derive))
+      .toBe(resolveSeatSessionId(before, 'robin', derive))
+  })
+
+  it('rejects a blank recorded sessionId rather than treating it as absent', () => {
+    expect(() => parseOrgRegistry(
+      'baseDir: /projects\nseats:\n  robin: { cwd: a, sessionId: "" }\nedges: []\n', {},
+    )).toThrow(/seats\.robin\.sessionId/)
+  })
+
+  it('carries the test flag through parsing', () => {
+    const registry = parseOrgRegistry(
+      'baseDir: /projects\nseats:\n  tt-ping: { cwd: a, test: true }\nedges: []\n', {},
+    )
+    expect(registry.seats['tt-ping']?.test).toBe(true)
   })
 })
 

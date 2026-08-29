@@ -35,4 +35,5 @@
       config:
         task: !!js ctx.headlessStartup.task
         sessionName: !!js ctx.headlessStartup.sessionName
+        sessionId: !!js ctx.headlessStartup.sessionId
         format: !!js ctx.headlessStartup.format

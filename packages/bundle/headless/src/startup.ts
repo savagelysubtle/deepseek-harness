@@ -27,6 +27,12 @@ export interface HeadlessStartupValues {
   task: string
   /** The `--session-name` value; absent for anonymous one-shot runs. */
   sessionName?: string
+  /**
+   * The `--session-id` value: the durable session id to run against, overriding
+   * derivation from the name. A seat whose identity is recorded in the org
+   * registry keeps that id through a rename, so its caller passes it here.
+   */
+  sessionId?: string
   /** The `--format` value; absent lets the runner schema default to `text`. */
   format?: OutputFormat
 }
@@ -42,6 +48,7 @@ function headlessCommand(): Command {
     .helpOption('-h, --help', 'show this help')
     .argument('[task...]', 'the task text; multiple words are joined by spaces')
     .option('--session-name <name>', 'create once and then resume this durable named session')
+    .option('--session-id <id>', 'run against this exact session id instead of deriving one from the name')
     .option('--mailbox-namespace <namespace>', 'serve "<namespace>:<session-name>" mail ahead of the task')
     .option('--format <format>', 'output format: text (default) or json (NDJSON text parts)')
     .addHelpText('after', `
@@ -63,7 +70,7 @@ export function apply(ctx: Context): void {
     const task = program.args.join(' ')
     if (task.trim() === '') program.error('error: a task is required, for example: dsh --profile headless "run the tests"')
     const values: HeadlessStartupValues = { task }
-    const opts = program.opts<{ sessionName?: string; format?: string }>()
+    const opts = program.opts<{ sessionName?: string; sessionId?: string; format?: string }>()
     const sessionName = opts.sessionName
     if (sessionName !== undefined) {
       try {
@@ -74,6 +81,16 @@ export function apply(ctx: Context): void {
         program.error(`error: invalid --session-name "${sessionName}": use 1-64 characters of A-Za-z0-9._- starting with A-Za-z0-9`)
       }
       values.sessionName = sessionName
+    }
+    const sessionId = opts.sessionId
+    if (sessionId !== undefined) {
+      if (sessionName === undefined) {
+        program.error('error: --session-id requires --session-name (the name labels the run)')
+      }
+      if (typeof sessionId !== 'string' || sessionId.trim() === '') {
+        program.error('error: --session-id must be a non-empty session id')
+      }
+      values.sessionId = sessionId
     }
     const format = opts.format
     if (format !== undefined) {
