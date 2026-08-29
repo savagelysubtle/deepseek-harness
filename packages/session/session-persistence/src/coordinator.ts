@@ -280,6 +280,11 @@ interface SessionState {
    * cursor would still write them at the wrong positions.
    */
   stale?: boolean | undefined
+  /**
+   * Set when a 'session/persistence-failed' event has been emitted for a stale
+   * session, preventing notification storms on subsequent background retries.
+   */
+  staleReported?: boolean | undefined
 }
 
 /** One live session's initialization and bounded write-behind controller. */
@@ -1457,6 +1462,21 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       },
       reportBackgroundFailure: (error) => {
         this.ctx.logger.warn(`${this.backend.name}: background write for session "${session.id}" failed (buffered events retained): ${String(error)}`)
+        const state = this.states.get(session.id)
+        const isStale = state?.stale === true
+        if (isStale) {
+          if (state.staleReported) return
+          state.staleReported = true
+        }
+        // Caller-less drain failures converge here: announce the stall on the
+        // context bus so a UI can say the session stopped persisting. The
+        // signal is a ctx event, not a session-log event — the log write is
+        // what failed, and a stale cursor must not mint another seq.
+        this.ctx.emit('session/persistence-failed', {
+          sessionId: session.id,
+          error,
+          stale: isStale,
+        })
       },
     })
   }

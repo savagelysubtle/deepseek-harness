@@ -328,6 +328,25 @@ describe('routing outcomes', () => {
     expect(existsSync(namedLockPath('target'))).toBe(false)
   })
 
+  it('logs a failed idle-retire flush and still disposes and releases the lock', async () => {
+    const h = await makeHarness({ persisted: true })
+    // The idle timer's retire cannot await its drain, so a failing flush is
+    // logged instead of swallowed; disposal and lock release still run.
+    const sessions = (h.ctx as unknown as { sessions: { flush: ReturnType<typeof vi.fn> } }).sessions
+    sessions.flush.mockRejectedValueOnce(new Error('disk gone'))
+    const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
+
+    await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec({ ...targetSpec(), residencyIdleMs: 5 }))
+
+    await vi.waitFor(() => {
+      expect(h.disposeCalls()).toBe(1)
+      expect(existsSync(namedLockPath('target'))).toBe(false)
+    })
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('final flush for retiring resident "target"'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('disk gone'))
+  })
+
   it('creates a first session for an unpersisted name — the basic wake-up', async () => {
     const h = await makeHarness({ persisted: false })
     const id = await publishHello(h.ctx)

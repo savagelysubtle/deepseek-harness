@@ -5,7 +5,8 @@ import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import {
   DEFAULT_PREPARED_SESSION_CACHE_SIZE, DEFAULT_WRITE_BATCH_MAX_DELAY_MS, MAX_WRITE_BATCH_DELAY_MS,
   SessionPersistence, SessionPersistenceRevision, PersistenceCoordinator,
-  type PersistenceBackend, type SessionPersistenceSnapshot, type StoredPrefix, type StoredSuffix,
+  type PersistenceBackend, type SessionPersistenceFailed, type SessionPersistenceSnapshot,
+  type StoredPrefix, type StoredSuffix,
 } from '../src/index.ts'
 import { runPersistenceContract, meta, oneTurnLog } from './contract.ts'
 import { runCoordinatorContract, type CoordinatorFixture } from './coordinator-contract.ts'
@@ -248,6 +249,19 @@ runPersistenceContract('memory', async () => {
   }
 })
 
+/**
+ * {@link ControlledBackend} plus the optional append-position identity hook,
+ * so a test can move the durable log out from under the coordinator the way
+ * another process would.
+ */
+class IdentityBackend extends ControlledBackend {
+  /** Per-id append identity the coordinator reconciles its cursor against. */
+  readonly identities = new Map<SessionId, string>()
+
+  async readAppendIdentity(id: SessionId): Promise<string | undefined> {
+    return this.identities.get(id)
+  }}
+
 describe('the inherited readRaw default', () => {
   it('rejects unsupported reads distinctly from absence and honors an aborted signal', async () => {
     const ctx = new Context()
@@ -392,6 +406,106 @@ describe('PersistenceCoordinator bounded writes', () => {
       appendGate.resolve(true)
       await fiber.dispose()
       await ctx.fiber.dispose()
+    }
+  })
+})
+
+describe('PersistenceCoordinator background failure signal', () => {
+  it('emits session/persistence-failed and keeps the logger warning on EVERY transient background failure', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const backend = new ControlledBackend()
+    const failure = new Error('transient background failure')
+    backend.beforeAppend = async (attempt) => {
+      if (attempt === 2 || attempt === 3) throw failure
+    }
+    const fiber = await ctx.plugin(Object.assign((inner: Context) => {
+      new PersistenceCoordinator(inner, backend, {
+        preparedSessionCacheSize: DEFAULT_PREPARED_SESSION_CACHE_SIZE,
+        writeBatchMaxDelayMs: 1,
+      })
+    }, { inject: ['sessions'] }))
+
+    const failures: SessionPersistenceFailed[] = []
+    ctx.on('session/persistence-failed', (failed) => { failures.push(failed) })
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+
+    try {
+      const session = ctx.sessions.create(SessionId('background-signal'))
+      session.append('turn/start', { turn: 1 })
+      await vi.waitFor(() => { expect(backend.appendAttempts).toBe(1) })
+
+      // First failure
+      session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      await vi.waitFor(() => { expect(failures).toHaveLength(1) })
+      expect(warn).toHaveBeenCalledTimes(1)
+
+      // Second failure (same session)
+      session.append('turn/start', { turn: 2 })
+      await vi.waitFor(() => { expect(failures).toHaveLength(2) })
+      expect(warn).toHaveBeenCalledTimes(2)
+
+      expect(failures[0]).toEqual({ sessionId: session.id, error: failure, stale: false })
+      expect(failures[1]).toEqual({ sessionId: session.id, error: failure, stale: false })
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('background write for session "background-signal" failed'))
+    } finally {
+      // The backend is healthy again, so teardown's explicit drain persists the
+      // retained batch and disposes cleanly.
+      await fiber.dispose()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('deduplicates session/persistence-failed for a stale session but keeps the logger warning', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const backend = new IdentityBackend()
+    const id = SessionId('background-stale-dedupe')
+    backend.identities.set(id, 'gen-1')
+    const fiber = await ctx.plugin(Object.assign((inner: Context) => {
+      new PersistenceCoordinator(inner, backend, {
+        preparedSessionCacheSize: DEFAULT_PREPARED_SESSION_CACHE_SIZE,
+        writeBatchMaxDelayMs: 1,
+      })
+    }, { inject: ['sessions'] }))
+
+    const failures: SessionPersistenceFailed[] = []
+    ctx.on('session/persistence-failed', (failed) => { failures.push(failed) })
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+
+    try {
+      const session = ctx.sessions.create(id)
+      session.append('turn/start', { turn: 1 })
+      await vi.waitFor(() => { expect(backend.appendAttempts).toBe(1) })
+
+      // The "other process" moved the log
+      backend.identities.set(id, 'gen-2')
+
+      // First stale failure
+      session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      await vi.waitFor(() => { expect(failures).toHaveLength(1) })
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(failures[0]?.sessionId).toBe(id)
+      expect(failures[0]?.stale).toBe(true)
+
+      // Second stale failure - should log warning but NOT emit context event
+      session.append('turn/start', { turn: 2 })
+      await vi.waitFor(() => { expect(warn).toHaveBeenCalledTimes(2) })
+
+      expect(failures).toHaveLength(1)
+      expect(warn).toHaveBeenCalledTimes(2)
+    } finally {
+      try {
+        await fiber.dispose()
+      } catch {
+        // Every append after the stale mark refuses by design, so teardown's
+        // drain rejects with that same refusal, already asserted above.
+      }
+      try {
+        await ctx.fiber.dispose()
+      } catch {
+        // The child failure was asserted above; cleanup only releases effects.
+      }
     }
   })
 })

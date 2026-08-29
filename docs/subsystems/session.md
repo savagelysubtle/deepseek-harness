@@ -846,4 +846,29 @@ Awaited parallel durability checkpoint: every listener runs and the caller await
 Types: [Scoped](scope.md)
 
 Source: [`packages/core/session/src/index.ts:85`](../../packages/core/session/src/index.ts)
+
+<a id="sessionpersistence-failed--emit"></a>
+
+#### `session/persistence-failed` — emit
+
+A session's write-behind drain failed with no caller awaiting the result (agent turns, mail delivery, schedule dispatch), so the session silently stopped persisting. Emitted once per failed background batch, in addition to the coordinator's logger warning; buffered events are retained and retried. Listener failures are logged and contained by Cordis dispatch.
+
+```ts cordis-catalog
+/**
+ * A session's write-behind drain failed with no caller awaiting the result
+ * (agent turns, mail delivery, schedule dispatch), so the session silently
+ * stopped persisting. Emitted once per failed background batch, in
+ * addition to the coordinator's logger warning; buffered events are
+ * retained and retried. Listener failures are logged and contained by
+ * Cordis dispatch.
+ * @param failure - the session id, the failure verbatim, and whether the
+ *   session is stale and must be reloaded from disk.
+ * @mode emit
+ */
+'session/persistence-failed'(failure: SessionPersistenceFailed): void
+```
+
+Types: [SessionPersistenceFailed](persistence.md)
+
+Source: [`packages/session/session-persistence/src/index.ts:97`](../../packages/session/session-persistence/src/index.ts)
 <!-- END GENERATED cordis-surface -->

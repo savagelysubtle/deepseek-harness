@@ -449,6 +449,23 @@ export function assertJsonArgs(event: string, args: readonly unknown[]): JsonVal
   return args as JsonValue[]
 }
 
+/**
+ * The user-facing text for one background persistence failure: what broke, and
+ * the recovery path. A caller-less drain failure (agent turn, mail delivery,
+ * schedule dispatch) otherwise reaches no one, so the message names the remedy
+ * outright — reload the session from disk, never repair it in place.
+ * @param error - the drain failure, verbatim.
+ * @param stale - whether the coordinator marked the session stale (no longer
+ *   writable from this process).
+ * @returns the message the `host/agent-error` frame carries.
+ */
+function persistenceFailureMessage(error: unknown, stale: boolean): string {
+  const reason = errorChain(error)
+  return stale
+    ? `Session persistence failed: ${reason}. This session is stale — its log advanced on disk outside this process, so it can no longer be written to from here. Reload the session from disk to continue; it cannot be repaired in place.`
+    : `Session persistence failed: ${reason}. Events written after this failure are buffered and retry with the session's next write; if failures continue, reload the session from disk.`
+}
+
 /** Queue the subscription baseline frame. */
 function subscribeSession(queue: FrameQueue<RpcRequest<MuxFrame>>, session: Session): void {
   queue.push(frame({ type: 'session/subscribed', sessionId: session.id, lastSeq: session.seq - 1 }))
@@ -3674,6 +3691,17 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           }),
           ctx.on('agent/error', ({ agent, error }: { agent: Agent; error: unknown }) => {
             queue.push(frame({ type: 'host/agent-error', sessionId: agent.id, message: errorChain(error) }))
+          }),
+          ctx.on('session/persistence-failed', ({ sessionId, error, stale }) => {
+            // Reuses the agent-error frame: it is the documented outlet for
+            // live failures with no turn position, so the UI renders this
+            // with no client-side work. The session event-bus cannot carry
+            // the signal — the session log is the thing that failed.
+            queue.push(frame({
+              type: 'host/agent-error',
+              sessionId,
+              message: persistenceFailureMessage(error, stale),
+            }))
           }),
           ctx.on('domain/changed', (change) => {
             if (change.domain !== 'workspace') return

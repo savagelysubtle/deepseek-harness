@@ -362,9 +362,14 @@ function retainResident(
   const retire = (): void => {
     spec.residents.delete(name)
     const sessions = ctx.get('sessions')
+    // The timer/release caller cannot await this drain, so its failure is
+    // logged rather than swallowed; disposal still runs so the lock never
+    // waits on a dead resident.
     void (sessions === undefined
       ? handle.dispose()
-      : sessions.flush(handle.agent.session).catch(() => {}).then(() => handle.dispose()))
+      : sessions.flush(handle.agent.session).catch((error: unknown) => {
+        ctx.logger.warn(`mailbox-bridge: final flush for retiring resident "${name}" (${handle.agent.session.id}) failed: ${String(error)}`)
+      }).then(() => handle.dispose()))
     lock.release()
   }
   const resident: ResidentSeat = {

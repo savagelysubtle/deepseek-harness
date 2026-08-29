@@ -57,9 +57,44 @@ export type {
   StoredSuffix,
 } from './coordinator.ts'
 
+/**
+ * One background persistence drain failure, carried on the context bus. This
+ * is deliberately NOT a session-log event: the log write is the thing that
+ * failed, so appending the signal to the same log would fail identically or
+ * mint a sequence number against a cursor the durable log no longer agrees
+ * with. The session id, not a Session object, identifies the subject.
+ */
+export interface SessionPersistenceFailed {
+  /** The session whose fire-and-forget write stopped persisting. */
+  readonly sessionId: SessionId
+  /** The failure, verbatim. */
+  readonly error: unknown
+  /**
+   * Whether the coordinator marked the session stale: another process advanced
+   * the durable log, so this copy can no longer be written to. Recovery is to
+   * reload the session from disk — never to repair it in place.
+   */
+  readonly stale: boolean
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     sessionPersistence: SessionPersistence
+  }
+
+  interface Events {
+    /**
+     * A session's write-behind drain failed with no caller awaiting the result
+     * (agent turns, mail delivery, schedule dispatch), so the session silently
+     * stopped persisting. Emitted once per failed background batch, in
+     * addition to the coordinator's logger warning; buffered events are
+     * retained and retried. Listener failures are logged and contained by
+     * Cordis dispatch.
+     * @param failure - the session id, the failure verbatim, and whether the
+     *   session is stale and must be reloaded from disk.
+     * @mode emit
+     */
+    'session/persistence-failed'(failure: SessionPersistenceFailed): void
   }
 }
 

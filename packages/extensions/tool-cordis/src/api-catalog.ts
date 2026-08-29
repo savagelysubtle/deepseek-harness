@@ -2523,6 +2523,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'session', description: 'the session whose buffered events must reach durable storage.' }],
   },
   {
+    name: 'session/persistence-failed',
+    mode: 'emit',
+    signature: '\'session/persistence-failed\'(failure: SessionPersistenceFailed): void',
+    summary: 'A session\'s write-behind drain failed with no caller awaiting the result (agent turns, mail delivery, schedule dispatch), so the session silently stopped persisting.',
+    description: 'A session\'s write-behind drain failed with no caller awaiting the result (agent turns, mail delivery, schedule dispatch), so the session silently stopped persisting. Emitted once per failed background batch, in addition to the coordinator\'s logger warning; buffered events are retained and retried. Listener failures are logged and contained by Cordis dispatch.',
+    parameters: [{ name: 'failure', description: 'the session id, the failure verbatim, and whether the session is stale and must be reloaded from disk.' }],
+  },
+  {
     name: 'settings/document-updated',
     mode: 'emit',
     signature: '\'settings/document-updated\'(ns: SettingsNamespace, revision: number): void',
@@ -3977,6 +3985,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionLogSnapshot',
     declaration: 'export interface SessionLogSnapshot {\n    session: SessionHeader;\n    events: SessionEvent[];\n}',
+  },
+  {
+    name: 'SessionPersistenceFailed',
+    declaration: 'export interface SessionPersistenceFailed {\n    readonly sessionId: SessionId;\n    readonly error: unknown;\n    readonly stale: boolean;\n}',
   },
   {
     name: 'SessionPersistenceRevision',
