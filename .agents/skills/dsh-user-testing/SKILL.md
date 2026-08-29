@@ -139,3 +139,35 @@ opposite: that is an incident. Archive it, tell Steve, delete nothing without as
 
 > Append what you learn, dated. Do not rewrite the body mid-task; these get folded
 > in at the weekly skill review.
+
+### 2026-08-28 — Never discard playwright-cli's output, and never parse the .yml by hand
+
+Two tooling mistakes cost most of a testing session:
+
+1. **`playwright-cli click ... >/dev/null` hid every error.** Clicks were failing
+   with `Ref eNN not found in the current page snapshot` and I read the silence as
+   "the page didn't change", then built a whole false theory about sessions not
+   appearing in the sidebar. **Read the output of every command.**
+2. **Do not `ls -t .playwright-cli/*.yml` and grep the file for refs.** Those refs
+   go stale, and a reopened browser uses a different namespace (`f1e*` vs `e*`), so
+   they silently address nothing. **Use `playwright-cli find "<text>"`** — it
+   queries the live snapshot and returns refs that work.
+
+The false alarm: a session created by an external process *did* appear correctly;
+the "Show N more" count had even incremented from 7 to 8 to include it.
+
+### 2026-08-28 — Test the path the bug actually took
+
+Sending a message from the composer does **not** exercise the host's append path
+for a dormant session: `session.prompt` answers `{"mode":"queue","accepted":true}`
+and nothing runs until an agent attaches. The seq regression came in through
+**`session.rename`** (what `dsh-hire` calls to pin a title), so that is the call to
+drive. Ask what the original failure actually did, and reproduce *that*, not
+something adjacent that looks like user activity.
+
+### 2026-08-28 — A synchronous ok:true is not evidence the write landed
+
+`session.rename` returns a seq immediately because `Session.append` is synchronous;
+persistence runs afterwards and its failures do not propagate. So `ok:true` plus a
+plausible seq can coexist with nothing reaching disk. **Confirm on the artifact** —
+cold-read the log and check the value is actually in it.
