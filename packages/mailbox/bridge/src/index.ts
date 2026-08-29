@@ -21,6 +21,9 @@
  * Every terminal failure settles the recipient's row failed AND publishes a
  * best-effort `bounce` notice back to the sender (same store, original
  * traceId, the recorded reason), so a drop is never silent to whoever sent.
+ * Every delivered turn opens with the standing sender envelope (`delivery.ts`)
+ * — timestamp, sender with its registry-derived class, and the peer-input and
+ * urgency contracts: mail is peer input, never founder authority.
  *
  * @module @deepseek-ai/dsh-mailbox-bridge
  */
@@ -44,8 +47,10 @@ import type { MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxMessageId
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { admittedOutcome, relayUserMessage } from './delivery.ts'
+import type { SenderClass } from './delivery.ts'
 
-export { admittedOutcome, HEADLESS_BACKLOG_LIMIT, HEADLESS_BACKLOG_STALE_CLAIM_MS, relaySource, relayText, relayUserMessage } from './delivery.ts'
+export { admittedOutcome, HEADLESS_BACKLOG_LIMIT, HEADLESS_BACKLOG_STALE_CLAIM_MS, messageEnvelope, relaySource, relayText, relayUserMessage } from './delivery.ts'
+export type { SenderClass } from './delivery.ts'
 
 /** Default pause between drain cycles. */
 export const DEFAULT_POLL_INTERVAL_MS = 5_000
@@ -265,6 +270,9 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
     await failTerminal(ctx, lease, 'sender-not-admitted')
     return { kind: 'failed', reason: 'sender-not-admitted' }
   }
+  // Derived once per lease here, where the registry is already reachable, and
+  // passed into the rendered turn so delivery.ts stays pure and testable.
+  const senderClass = await senderClassFor(spec, lease.message.from)
   // Every served address was grammar-checked at mount, and the address IS
   // the session name. An explicit seat-alias row routes to that EXISTING
   // session id (web-host seats are not name-derived); anything else falls
@@ -282,7 +290,7 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
   // human input and mail converge on one agent with no fence in between.
   const live = ctx.agents.get(sessionId)
   if (live !== undefined) {
-    deliverToLive(live, relayUserMessage(lease))
+    deliverToLive(live, relayUserMessage(lease, senderClass))
     await mailbox.settle(lease.leaseRef, admittedOutcome(lease))
     // A delivery keeps the seat's residency warm — idle expiry measures time
     // since the seat was last used, not since it was woken.
@@ -314,7 +322,7 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
       : await createTarget(ctx, sessionId, await seatCwd(spec, name))
     // A freshly resident agent takes the delivery as an ordinary FIFO turn;
     // steering a cold resume would skip reconstructing prior context.
-    handle.agent.followup(relayUserMessage(lease))
+    handle.agent.followup(relayUserMessage(lease, senderClass))
     await mailbox.settle(lease.leaseRef, admittedOutcome(lease))
     // The agent STAYS resident — the operator's composer and later mail all
     // reach it without any cold start — until the idle bound releases the
@@ -471,6 +479,36 @@ async function seatCwd(spec: BridgeSpec, name: string): Promise<string> {
     )
   }
   return resolveSeatCwd(registry, name)
+}
+
+/**
+ * Derive the sender class of one incoming message from the org registry:
+ * `seat` only when the sender address exactly matches a roster seat,
+ * `unverified` for everything else.
+ *
+ * The relay MUST NEVER emit a `founder` class. Steve does not reach seats
+ * through the mailbox — he types into a session directly, and a direct user
+ * turn never runs this code — so a forged `send --from steve` names no seat,
+ * renders `unverified`, and receives the full peer-input contract: the
+ * forgery gains no authority. And because his real path never touches this
+ * code, nothing here can teach a seat to discount him either. Do not add a
+ * founder branch.
+ * @param spec - resolved serving parameters carrying the registry path.
+ * @param from - the message's sender address.
+ * @returns the derived class; a registry that will not load fails closed to
+ *   `unverified`, never `seat`.
+ */
+async function senderClassFor(spec: BridgeSpec, from: string): Promise<SenderClass> {
+  try {
+    const registry = await cachedRegistry(spec.orgRegistryPath)
+    // Object.hasOwn, not `in`: `in` walks the prototype chain, so a sender
+    // naming an inherited Object property would classify as a seat.
+    return Object.hasOwn(registry.seats, from) ? 'seat' : 'unverified'
+  } catch {
+    // The roster is the only seat authority; without it nothing may look
+    // like one, so the message ships as unverified peer input.
+    return 'unverified'
+  }
 }
 
 /**

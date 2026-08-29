@@ -53,7 +53,8 @@ export interface MailboxMessage {
    * under the founder model — and the receiver JUDGES it: a blocking message
    * means a coworker or boss is stuck until this seat replies (handle now,
    * resume current work after), while non-blocking mail queues mentally for
-   * the next natural gap. Delivered turns render the mark visibly (`[BLOCKING]`).
+   * the next natural gap. Delivered turns render the mark as its behavioural
+   * contract line: the blocking contract when true, the FYI contract otherwise.
    */
   readonly blocking?: boolean
 }

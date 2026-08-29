@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-29-mail-relay-envelope-sender-attribution.md
+2026-08-29-mail-relay-envelope-sender-attribution.md: d53cedc4d16f30466b1fe6e28985cf02a2d24ef5
+2026-08-29-mail-relay-envelope-sender-attribution.zh.md: b5d0f279080b9cbf35ba3fd56220842ff3d59892

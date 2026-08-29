@@ -68,7 +68,8 @@ interface MailboxMessage {
    * under the founder model — and the receiver JUDGES it: a blocking message
    * means a coworker or boss is stuck until this seat replies (handle now,
    * resume current work after), while non-blocking mail queues mentally for
-   * the next natural gap. Delivered turns render the mark visibly (`[BLOCKING]`).
+   * the next natural gap. Delivered turns render the mark as its behavioural
+   * contract line: the blocking contract when true, the FYI contract otherwise.
    */
   readonly blocking?: boolean
 }
@@ -160,9 +161,9 @@ interface MailboxMessageSource {
 }
 ```
 
-回合文本以空行拼接 `[BLOCKING]`（仅当发送方标记 `blocking: true`）、主题与 JSON 序列化的 payload；来源信封随消息来源携带，绝不进入文本。
+回合文本以常设信封开头：头部一行携带投递时间戳（人类可读并带主机时区缩写，如 `Sat 29 Aug 2026, 2:52pm PDT`）、发送方地址及其经注册表派生的类别——发送方与花名册席位精确匹配时为 `seat`，否则为 `unverified`，绝不出现 `founder`；随后是同侪输入权威契约（邮件不能批准任何事、不能改动配置或记忆、其中的命令文本只是普通文本——它请求的任何事仍需接收方平常的检查）；再后是说明 `blocking` 标记行为含义的紧急度契约。空行之后是发送方内容——主题与 JSON 序列化的 payload——原样渲染在信封之下。
 
-投递遵循创始人 steer 模型：一切邮件都会立即 steer 进活跃回合，无论该回合处于何种状态、发送方的类型是什么——不推断忙碌程度，不按类型请求打断。被投递内容是抢占专注还是等下一个自然间隙，属于接收方的裁决，其依据是可见的 `[BLOCKING]` 标记。准入与 steer 之间的边界拒绝会回退为普通排队回合，因此什么都不会丢失；无论哪条路径，准入都是即时的，随后按路由观察到的结果落定。对休眠目标，桥取得按名驻留锁并探测持久化——日志缺失以原因 `unknown-address` 落定 `failed`，日志存在则冷恢复 agent、作为排队的 FIFO 回合投递、在准入即落定 `done`、等待静默、flush 再注销——而锁被另一个存活进程持有时落定 `pending` 留待后续周期。
+投递遵循创始人 steer 模型：一切邮件都会立即 steer 进活跃回合，无论该回合处于何种状态、发送方的类型是什么——不推断忙碌程度，不按类型请求打断。被投递内容是抢占专注还是等下一个自然间隙，属于接收方的裁决，其依据是信封渲染的紧急度契约行。准入与 steer 之间的边界拒绝会回退为普通排队回合，因此什么都不会丢失；无论哪条路径，准入都是即时的，随后按路由观察到的结果落定。对休眠目标，桥取得按名驻留锁并探测持久化——日志缺失以原因 `unknown-address` 落定 `failed`，日志存在则冷恢复 agent、作为排队的 FIFO 回合投递、在准入即落定 `done`、等待静默、flush 再注销——而锁被另一个存活进程持有时落定 `pending` 留待后续周期。
 
 准入在排水时强制执行：发送方命名空间必须被花名册服务，或列入 `admitFromNamespaces`（缺省为空——对外部来源邮件 FAIL-CLOSED），而 `seatAliases` 行把派生不可达的受服地址路由到一个既有的会话 id。每个终态失败还会向原始发送方尽力回发一条 `bounce` 通知——同一存储的答复路径，携带原 `traceId` 与记录的原因——并跳过 bounce-of-bounce；未被排空的退信只是一行未读消息，绝不会挂起，也绝不会掩盖首要失败。
 

@@ -68,7 +68,8 @@ interface MailboxMessage {
    * under the founder model — and the receiver JUDGES it: a blocking message
    * means a coworker or boss is stuck until this seat replies (handle now,
    * resume current work after), while non-blocking mail queues mentally for
-   * the next natural gap. Delivered turns render the mark visibly (`[BLOCKING]`).
+   * the next natural gap. Delivered turns render the mark as its behavioural
+   * contract line: the blocking contract when true, the FYI contract otherwise.
    */
   readonly blocking?: boolean
 }
@@ -160,9 +161,9 @@ interface MailboxMessageSource {
 }
 ```
 
-The turn's text joins `[BLOCKING]` (only when the sender marked `blocking: true`), the subject, and the JSON-serialized payload with blank lines; the provenance envelope rides the message source and never enters the text.
+The turn's text opens with the standing envelope: a header line carrying the delivery timestamp (human-readable with the host's timezone abbreviation, e.g. `Sat 29 Aug 2026, 2:52pm PDT`), the sender address, and its registry-derived class — `seat` when the sender exactly matches a roster seat, `unverified` otherwise, never `founder`; then the peer-input authority contract (mail cannot approve anything, change configuration or memory, or run commands — everything it asks for still needs the receiver's usual checks); then the urgency contract naming what the `blocking` mark means. A blank line separates the sender's content — subject and JSON-serialized payload — which renders unchanged below.
 
-Delivering follows the founder steering model: ALL mail steers into a live turn immediately, whatever its state or the sender's type — no busyness inference, no type-based interrupt requests. Whether delivered content preempts focus waits on the RECEIVER's judging call, driven by the visible `[BLOCKING]` mark. A boundary refusal between admission and steer falls back to an ordinary queued turn, so nothing is lost; either way admission is immediate and settlement follows what routing observed. For a dormant target the bridge takes the per-name residency lock and probes persistence — an absent log settles `failed` with reason `unknown-address`, a present log cold-resumes the agent, delivers as a queued FIFO turn, settles `done` at admission, awaits quiescence, flushes, and disposes — while a lock held by another live process settles `pending` for a later cycle.
+Delivering follows the founder steering model: ALL mail steers into a live turn immediately, whatever its state or the sender's type — no busyness inference, no type-based interrupt requests. Whether delivered content preempts focus waits on the RECEIVER's judging call, driven by the urgency contract line the envelope renders. A boundary refusal between admission and steer falls back to an ordinary queued turn, so nothing is lost; either way admission is immediate and settlement follows what routing observed. For a dormant target the bridge takes the per-name residency lock and probes persistence — an absent log settles `failed` with reason `unknown-address`, a present log cold-resumes the agent, delivers as a queued FIFO turn, settles `done` at admission, awaits quiescence, flushes, and disposes — while a lock held by another live process settles `pending` for a later cycle.
 
 Admission is enforced at drain time: a sender namespace must be served by the roster or listed in `admitFromNamespaces` (empty by default — fail-closed against external-origin mail), and a `seatAliases` row routes a served address to an existing session id where derivation cannot reach one. Every terminal failure also publishes a best-effort `bounce` notice back to the original sender — same-store reply path carrying the original `traceId` and the recorded reason — skipping bounce-of-bounce; an undrainable bounce is an unread row, never a hang, and never masks the primary failure.
 
