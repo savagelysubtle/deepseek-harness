@@ -392,6 +392,13 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
       signal?.throwIfAborted()
       const complete = scanner.checkpoint()
       if (complete.committedBytes !== complete.inputBytes) {
+        // Prefer the scanner's own reason. It knows whether it stopped on a seq
+        // gap, a duplicate seq, or an unparsable line — and naming that sends the
+        // reader at the writer that produced it. The generic torn-record wording
+        // below points at the compression layer, which is almost never the fault:
+        // frames here are record-aligned by construction (one frame per batch,
+        // always terminated by a newline).
+        if (complete.issue !== undefined) throw complete.issue
         throw new Error('corrupt Zstandard session log: complete frame contains a torn JSONL record')
       }
       if (tornStart === undefined) {

@@ -324,13 +324,22 @@ export class SessionLogScanner {
 
   /**
    * Snapshot progress before appending a recoverable torn-frame prefix.
-   * @returns byte, committed-prefix, and expanded-event cursors.
+   *
+   * `issue` carries the reason the scanner stopped committing, when it has one.
+   * A caller that only compares byte cursors cannot tell a genuinely torn record
+   * from a well-formed record the scanner refused — a seq gap, a duplicate seq,
+   * an unparsable line — and reporting the former for the latter sends whoever
+   * reads the error looking at the compression layer instead of at whichever
+   * writer produced the bad sequence.
+   * @returns byte, committed-prefix, and expanded-event cursors, plus the
+   *   recorded reason for an incomplete commit.
    */
-  checkpoint(): { inputBytes: number; committedBytes: number; eventCount: number } {
+  checkpoint(): { inputBytes: number; committedBytes: number; eventCount: number; issue?: Error } {
     return {
       inputBytes: this.inputBytes,
       committedBytes: this.committedBytes,
       eventCount: this.events.length,
+      ...this.issue === undefined ? {} : { issue: this.issue },
     }
   }
 
