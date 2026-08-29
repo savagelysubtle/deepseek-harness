@@ -81,8 +81,11 @@ suspected cause of two corrupted logs on 2026-08-28. Until it is fixed, prefer
 
 ## Verifying like a user
 
-Code-level tests do not prove the operator's experience. For anything that changes
-what a person sees:
+**Full flow lives in the `dsh-user-testing` skill — follow it, do not improvise.**
+It covers the blast-radius rules, finding the host by process, establishing a
+baseline, and the cold-read check that is the only real proof a log is intact.
+
+The short version, for orientation:
 
 ```bash
 playwright-cli open http://127.0.0.1:3080
