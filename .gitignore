@@ -43,3 +43,9 @@ worktrees/
 interagentstuff/
 interagent/
 *.code-workspace
+
+# seat working notes — churn, not law (personas stay committed)
+org/*/scratchpad/
+
+# per-spawn-root permission grants
+.dsh/
