@@ -11,7 +11,7 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
-import type { MailboxClaimFilter, MailboxLeaseRef, MailboxLease, MailboxMessageId, MailboxOutcome, MailboxPublishInput, MailboxTraceEntry } from './types.ts'
+import type { MailboxAddress, MailboxClaimFilter, MailboxLeaseRef, MailboxLease, MailboxMessageId, MailboxOutcome, MailboxPublishInput, MailboxTraceEntry } from './types.ts'
 import type { MailboxProvider } from './provider.ts'
 import { parseMailboxAddress } from './address.ts'
 import './source.ts'
@@ -19,7 +19,7 @@ import './source.ts'
 export { parseMailboxAddress, formatMailboxAddress, MAILBOX_SEGMENT_PATTERN_SOURCE } from './address.ts'
 export type { MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxLeaseRef, MailboxMessage, MailboxMessageId, MailboxOutcome, MailboxPublishInput, MailboxState, MailboxStalenessFilter, MailboxTraceEntry } from './types.ts'
 export type { AddressResolutionExtension, MailboxProvider } from './provider.ts'
-export type { MailboxMessageSource } from './source.ts'
+export type { MailboxMessageSource, MailboxRelaySource, MailboxRefusalSource } from './source.ts'
 export {
   findOrgRegistryRoute, isSeatIdentityPinned, loadOrgRegistry, orgRegistryAllows, parseOrgRegistry,
   resolveSeatCwd, resolveSeatSessionId,
@@ -153,6 +153,22 @@ export class MailboxRegistry extends Service {
    */
   async lookupByTraceId(traceId: string, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]> {
     return this.resolveDefault('lookupByTraceId').lookupByTraceId(traceId, signal)
+  }
+
+  /**
+   * Read stored messages addressed to one address since a time through the
+   * configured default provider — the same pure inbound scan the provider
+   * contract declares, with no claim, settlement, or other write behind it.
+   * @param address - the recipient address to scan; grammar-checked here so
+   *   a malformed address fails at the seam edge.
+   * @param sinceMs - epoch-milliseconds floor (inclusive) on the row's
+   *   admission time.
+   * @param signal - caller cancellation owning the scan.
+   * @returns one entry per matching row, earliest admission first.
+   */
+  async lookupInboundSince(address: MailboxAddress, sinceMs: number, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]> {
+    parseMailboxAddress(address)
+    return this.resolveDefault('lookupInboundSince').lookupInboundSince(address, sinceMs, signal)
   }
 
   /**

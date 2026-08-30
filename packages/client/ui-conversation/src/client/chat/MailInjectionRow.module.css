@@ -1,0 +1,114 @@
+/* Delivered mailbox message: a dedicated card, deliberately distinct from the
+   generic ContextInjectionRow chrome (ContextInjectionRow.module.css) — a
+   peer seat's mail must never read as founder input or a routine system
+   injection. The blue accent (state-business, this design system's neutral
+   "ongoing" hue) marks the card as mail; the amber warn tokens are reserved
+   for the blocking indicator alone, so urgency stays the one thing that reads
+   as attention-red/amber on the row. */
+
+.card {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  margin: 2px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--dsw-alias-line-secondary);
+  border-left: 3px solid var(--dsw-alias-state-business-primary);
+  border-radius: 8px;
+  background: var(--dsw-alias-markdown-code-block);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.icon {
+  flex: none;
+  color: var(--dsw-alias-state-business-primary);
+}
+
+/* Sender (+ sender class, when the source carries one): the card's title. */
+.sender {
+  flex: none;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Delivery time, pushed to the row's trailing edge. */
+.time {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+  line-height: 20px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chevron {
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+  transition: transform 120ms ease;
+}
+
+.card[data-open] .chevron {
+  transform: rotate(180deg);
+}
+
+/* Subject, when the source carries one — beneath the header, above the body. */
+.subject {
+  margin: 6px 0 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+/* The interruption contract, worded and colored to read as urgent — not a
+   quiet field like the rest of the card. */
+.blocking {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  margin: 6px 0 0;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--dsw-alias-state-warn-tertiary);
+  color: var(--dsw-alias-state-warn-label);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.blockingIcon {
+  flex: none;
+}
+
+/* Message body: same code-block scrollport geometry as the generic row's
+   .body (ContextInjectionRow.module.css), reproduced here because the card
+   is not built on DisclosureRow. */
+.body {
+  box-sizing: border-box;
+  max-height: 141px;
+  margin-top: 8px;
+  padding-top: 8px;
+  overflow: auto;
+  border-top: 1px solid var(--dsw-alias-line-secondary);
+  color: var(--dsw-alias-label-tertiary);
+  font: 400 11px/16px var(--ds-font-family-code);
+}

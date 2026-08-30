@@ -30,6 +30,13 @@ failed row nobody ever reads).
   original `from` carrying the original `traceId` and reason. No bounce of
   bounces; unparseable senders get no fabricated destination. Applied to ALL
   terminal paths including the previously silent `unknown-address`.
+  (Scope since narrowed by the admission-pipeline work and the
+  [durable refusal notice](../bug-fix/2026-08-29-mail-refusal-durable-sender-notice.md):
+  an ADMISSION refusal — registry health, the `test: true` boundary, org
+  topology, sender admission, a loop guard — never stores a bounce, because
+  the bounce would be subject to the very rule that refused the original.
+  Those refusals report on the `mailbox/refused` context bus and log a durable
+  notice into the sender's session instead.)
 
 **Seat-alias roster (composition gap, same change):** the bridge previously
 assumed every target id derives from the address name — true only for

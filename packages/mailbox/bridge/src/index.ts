@@ -7,8 +7,10 @@
  * each admitted lease:
  *
  * Admission runs in order, and every refusal is terminal — the recipient's
- * row settles `failed` AND the sender gets a `bounce` naming the reason, so
- * a dropped message is never silent and never mysterious:
+ * row settles `failed` AND the refusal is reported to its SENDER on the
+ * context bus (`mailbox/refused`, below) plus as a durable notice node in the
+ * sender's own session, so a dropped message is never silent and never
+ * mysterious:
  *
  * 1. **Registry health** — a registry file that exists but will not load
  *    refuses the lease loud (`org-registry-unavailable`): a broken roster
@@ -49,12 +51,23 @@
  * 3. **Resident elsewhere** — lock acquisition loses to a live holder: settle
  *    `pending` so a later cycle retries.
  *
- * Every terminal failure settles the recipient's row failed AND publishes a
- * best-effort `bounce` notice back to the sender (same store, original
- * traceId, the recorded reason), so a drop is never silent to whoever sent.
- * Every delivered turn opens with the standing sender envelope (`delivery.ts`)
- * — timestamp, sender with its registry-derived class, and the peer-input and
- * urgency contracts: mail is peer input, never founder authority.
+ * Every admission refusal reports itself THREE ways, all from the one `refuse`
+ * call: the recipient's row settles `failed`, the `mailbox/refused` context
+ * event carries the sender and recipient addresses plus the reason to the
+ * host's consumers (which render it as a live `host/agent-error` frame at the
+ * SENDER's session), and a durable notice node is logged INTO the sender's
+ * session (`injectRefusalNotice`) so the refusal survives a reload and sits in
+ * the conversation the sender reads. The refusal deliberately travels none of
+ * those ways as mail — a bounce back to the sender is itself subject to the
+ * rule that refused the original, so it gets refused in turn and the sender
+ * sees silence. Every terminal failure AFTER admission (a wake or provisioning
+ * crash) settles the recipient's row failed AND publishes a best-effort
+ * `bounce` notice back to the sender (same store, original traceId, the
+ * recorded reason): those are failures of the recipient's side, and the bounce
+ * is neither circular nor admission-judged. Every delivered turn opens with
+ * the standing sender envelope (`delivery.ts`) — timestamp, sender with its
+ * registry-derived class, and the peer-input and urgency contracts: mail is
+ * peer input, never founder authority.
  *
  * @module @deepseek-ai/dsh-mailbox-bridge
  */
@@ -85,10 +98,10 @@ import type { OrgRegistry, OrgRegistrySeat } from '@deepseek-ai/dsh-mailbox'
 import type { MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxMessageId } from '@deepseek-ai/dsh-mailbox'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
-import { admittedOutcome, relayUserMessage } from './delivery.ts'
+import { admittedOutcome, refusalUserMessage, relayUserMessage } from './delivery.ts'
 import type { SenderClass } from './delivery.ts'
 
-export { admittedOutcome, HEADLESS_BACKLOG_LIMIT, HEADLESS_BACKLOG_STALE_CLAIM_MS, messageEnvelope, relaySource, relayText, relayUserMessage } from './delivery.ts'
+export { admittedOutcome, HEADLESS_BACKLOG_LIMIT, HEADLESS_BACKLOG_STALE_CLAIM_MS, messageEnvelope, refusalSource, refusalText, refusalUserMessage, relaySource, relayText, relayUserMessage } from './delivery.ts'
 export type { SenderClass } from './delivery.ts'
 
 /** Default pause between drain cycles. */
@@ -185,24 +198,36 @@ export interface Config {
    * CLI stamps every guest send with the prefix (a seat cannot claim it —
    * the transport sets the sender), so true (the default) keeps the
    * bootstrap path — mail written while no host is up — reaching its seat.
-   * False closes the channel: only the served roster and exact `admitFrom`
-   * matches (including a `guest:`-prefixed sender whose stripped name is
-   * listed) are admitted. Guests still pass the full pipeline — boundary,
-   * topology, and every loop guard.
+   *
+   * A guest sender bypasses the `test: true` boundary and the org topology
+   * BY DESIGN. Both rules key off roster seats and judge seat-to-seat pairs;
+   * a guest is never a roster seat, so neither rule applies to it — a
+   * `guest:`-prefixed CLI can mail a live seat, a test seat, or a seat with
+   * no edge to anything. That is the break-glass property the channel exists
+   * for: an outside operator must always be able to reach a working seat,
+   * including for repair, without provisioning an edge first. It costs the
+   * sender no authority: the delivered envelope renders the guest
+   * `unverified`, and the recipient is told so. The loop guards DO still
+   * apply to guest mail in full — size, depth, repeat, and hops.
+   *
+   * False closes the channel, and is the only switch that does: no edge, no
+   * roster mark, and no other rule closes it while it is admitted. Only the
+   * served roster and exact `admitFrom` matches (including a
+   * `guest:`-prefixed sender whose stripped name is listed) are admitted.
    */
   readonly admitGuests?: boolean
   /**
    * Maximum rendered sender content one message may bring — subject plus
    * payload, the text the delivered turn carries — in characters. A larger
-   * message bounces naming both sizes. This is a message-shape guard, not a
+   * message is refused naming both sizes. This is a message-shape guard, not a
    * volume cap: it stops an unbounded payload entering the shared store, and
    * has no opinion about how many messages flow.
    */
   readonly maxMessageChars?: number
   /**
    * Maximum messages admitted to ONE recipient address within
-   * `depthWindowMs`. Beyond it the bridge refuses and bounces instead of
-   * waking the seat again: a seat's queue must not grow without bound, and a
+   * `depthWindowMs`. Beyond it the bridge refuses instead of waking the seat
+   * again: a seat's queue must not grow without bound, and a
    * conversation loop shows up exactly as one address being fed faster than
    * anyone reads it. Windowed, so ordinary volume resumes when the window
    * slides; it bounds one address's intake rate, never the org's total work.
@@ -212,7 +237,7 @@ export interface Config {
   readonly depthWindowMs?: number
   /**
    * Window within which a substantially identical repeat — same sender, same
-   * recipient, same subject and payload — is suppressed with a bounce that
+   * recipient, same subject and payload — is suppressed with a refusal that
    * names the original message and says not to resend. A loop is two seats
    * re-sending the same thing to each other: a correctness bug, not
    * expensive work, and suppressing the repeat never stops legitimate
@@ -225,7 +250,7 @@ export interface Config {
   /**
    * Maximum admitted deliveries one `traceId` chain may carry before further
    * mail on that trace is refused. The trace id is the correlation field
-   * that rides the message producer → delivery → bounce (this bridge's own
+   * that rides the message producer → delivery → bounce (the routing-failure
    * bounce path preserves it), so a relayed chain terminates instead of
    * hopping forever. The counter is per mounted bridge and counts hops as
    * they are ADMITTED — a queued burst on one trace is judged per hop, not
@@ -247,7 +272,12 @@ export interface Config {
    * seat sessions (whose ids are not named-derived) become reachable. Absent
    * (the default): pure derivation — fail-closed, no discovery magic.
    */
-  readonly seatAliases?: readonly { readonly address: string; readonly sessionId: string }[]
+  readonly seatAliases?: readonly {
+    /** The full served mailbox address the alias routes; grammar-checked at mount with every served address. */
+    readonly address: string
+    /** The existing session id mail to that address is delivered into, bypassing name derivation. */
+    readonly sessionId: string
+  }[]
 }
 
 /** Schemastery validator for {@link Config}. */
@@ -285,7 +315,7 @@ export interface BridgeSpec {
   readonly admitFrom: readonly string[]
   /** Whether the `guest:`-prefixed outside-operator channel is admitted. */
   readonly admitGuests: boolean
-  /** Rendered sender-content character cap; a larger message bounces. */
+  /** Rendered sender-content character cap; a larger message is refused. */
   readonly maxMessageChars: number
   /** Messages admitted to one recipient address within `depthWindowMs`. */
   readonly maxDepthPerAddress: number
@@ -594,28 +624,35 @@ function deliverToLive(agent: Agent, message: UserMessage): void {
 }
 
 /**
- * Route one claimed lease to the agent its address names, settling the exact
- * outcome the routing observed. See the module contract for the three paths.
- * @param ctx - plugin context carrying the mailbox registry and core services.
- * @param spec - resolved serving parameters.
- * @param lease - the lease claimed this cycle.
- * @returns what the settlement recorded, observed by {@link internals.drainOnce}.
+ * Settle one lease's recipient row `failed` with the recorded reason — the
+ * terminal marker every drop shares. Best-effort: the settlement surface
+ * being down must not mask the primary failure this records.
+ * @param ctx - plugin context carrying the mailbox registry.
+ * @param lease - the lease being settled.
+ * @param reason - the terminal reason recorded on the row.
  */
+async function settleFailed(ctx: Context, lease: MailboxLease, reason: string): Promise<void> {
+  await ctx.mailbox.settle(lease.leaseRef, { state: 'failed', result: { reason } }).catch(() => {
+    // The settlement surface itself is down; re-raising would mask its cause.
+  })
+}
+
 /**
- * Record one terminal routing failure and make it visible: settle the
+ * Record one terminal ROUTING failure and make it visible: settle the
  * recipient's row `failed`, then publish a best-effort `bounce` notice back
  * to the original sender — same-store reply path, carrying the original
  * traceId and the recorded reason. Skips bounce-of-bounce (no ping-pong) and
  * senders whose address would not parse; an undrainable bounce is an unread
- * row, never a hang, and never masks the primary failure.
+ * row, never a hang, and never masks the primary failure. Admission refusals
+ * do NOT travel through here: a refusal is the harness reporting on the
+ * sender's own action, and a bounce would be mail subject to the very rule
+ * that refused the original — see {@link refuse}.
  * @param ctx - plugin context carrying the mailbox registry.
  * @param lease - the failed lease.
  * @param reason - the terminal reason recorded on both rows.
  */
 async function failTerminal(ctx: Context, lease: MailboxLease, reason: string): Promise<void> {
-  await ctx.mailbox.settle(lease.leaseRef, { state: 'failed', result: { reason } }).catch(() => {
-    // The settlement surface itself is down; re-raising would mask its cause.
-  })
+  await settleFailed(ctx, lease, reason)
   const { type, id, traceId } = lease.message
   if (type === 'bounce' || id === undefined) return
   try {
@@ -634,21 +671,140 @@ async function failTerminal(ctx: Context, lease: MailboxLease, reason: string): 
 }
 
 /**
- * Refuse one claimed lease terminally at admission: warn the host log, settle
- * the recipient's row `failed`, and bounce to the sender with the reason. A
- * refusal that only a store row would show is a silent fence — the operator
- * sees the reason in the moment it happens, the sender gets the bounce.
- * @param ctx - plugin context carrying the mailbox registry.
+ * Log one refusal notice into the SENDER's session as a durable context node:
+ * a `user/message` whose source is the mailbox `notice` form
+ * ({@link refusalSource} in `delivery.ts`), so the refusal survives reloads,
+ * sits in the conversation the sender reads, and reaches the sender's model —
+ * none of which a transient `host/agent-error` frame guarantees.
+ *
+ * The notice is NOT mail and never touches the mail store: it is appended to
+ * the session log directly, so no admission rule can ever judge it and a
+ * refusal notice can never itself be refused. It also wakes nothing — no
+ * `steer`, no `followup`, no inbox write of any kind — because the sender is
+ * usually mid-turn (it just called the send tool) and a waking delivery from
+ * a refusal would let a seat interrupt itself.
+ *
+ * Best-effort by construction: the refusal is already terminal on the
+ * recipient's row and on the context bus before this runs, so a failed notice
+ * is logged, never raised, and never turned into a second refusal — raising
+ * out of `refuse` would hand the lease to the drain's generic failure path,
+ * which bounces, and a bounce is the circular route the refusal forbids.
+ * @param ctx - plugin context carrying the agent registry and core services.
+ * @param spec - resolved serving parameters carrying the seat aliases.
  * @param lease - the refused lease.
- * @param reason - the terminal reason recorded on both rows and the bounce.
+ * @param reason - the terminal reason recorded on the recipient's failed row.
+ */
+async function injectRefusalNotice(ctx: Context, spec: BridgeSpec, lease: MailboxLease, reason: string): Promise<void> {
+  const from = lease.message.from
+  // A `guest:` sender has no session to log into — the outside-operator CLI
+  // channel reports its failures with its own non-zero exit.
+  if (from.startsWith(GUEST_SENDER_PREFIX)) return
+  // An address that fails mailbox grammar names no seat and no derivable
+  // session — the same guard the host's refusal frame applies.
+  try {
+    parseMailboxAddress(from)
+  } catch {
+    // Nowhere to log the notice; the failed row and the context event remain.
+    return
+  }
+  // The same identity resolution delivery uses, retargeted at the sender:
+  // recorded identity beats derivation, and an explicit web-seat alias wins
+  // over both.
+  const sessionId = spec.seatAliases.get(from as MailboxAddress) ?? await seatSessionId(spec, from)
+  const live = ctx.agents.get(sessionId)
+  if (live !== undefined) {
+    // The sender's agent is resident here — normally true, since it sent the
+    // mail from a live turn. A direct log append bypasses the inbox entirely:
+    // the running driver is not interrupted, and the notice joins the history
+    // the model already reads on its next request.
+    try {
+      live.session.append('user/message', refusalUserMessage(lease, reason), { surfaceOp: 'append' })
+    } catch (error) {
+      ctx.logger.warn(`mailbox-bridge: refusal notice for sender "${from}" could not be logged: ${String(error)}`)
+    }
+    return
+  }
+  let lock: NamedSessionLock
+  try {
+    lock = acquireSessionLock(String(sessionId), spec.lockStaleMs === undefined ? {} : { maxAgeMs: spec.lockStaleMs }, from)
+  } catch (error) {
+    // Residency is held by a live process elsewhere, so THAT writer owns the
+    // sender's log; appending here too would break the one-writer contract.
+    ctx.logger.warn(`mailbox-bridge: refusal notice for sender "${from}" skipped, its session is active elsewhere: ${String(error)}`)
+    return
+  }
+  let handle: AgentHandle | undefined
+  try {
+    const persistence = ctx.get('sessionPersistence')
+    if (persistence === undefined) {
+      throw new Error('mailbox-bridge: refusal notice requires a configured session-persistence backend')
+    }
+    const persisted = (await persistence.list()).some(header => header.id === sessionId)
+    if (!persisted) {
+      // The sender has never run: there is no session to notify, and
+      // provisioning one for a notice is the ghost-session class. The CLI or
+      // wire caller that sent the mail already learned the outcome from its
+      // own path.
+      return
+    }
+    handle = await resumeTarget(ctx, sessionId)
+    // Resume only — no followup, no steer: the dormant sender is rebuilt,
+    // receives the durable node, and is released without ever driving a turn.
+    handle.agent.session.append('user/message', refusalUserMessage(lease, reason), { surfaceOp: 'append' })
+    const sessions = ctx.get('sessions')
+    if (sessions === undefined) throw new Error('mailbox-bridge: refusal notice requires the session store service')
+    await sessions.flush(handle.agent.session)
+  } catch (error) {
+    ctx.logger.warn(`mailbox-bridge: refusal notice for sender "${from}" could not be logged: ${String(error)}`)
+  } finally {
+    // Dispose before releasing, mirroring delivery's zero-residency retire:
+    // the notice must not keep the sender's residency warm.
+    await handle?.dispose()
+    lock.release()
+  }
+}
+
+/**
+ * Refuse one claimed lease terminally at admission: warn the host log, settle
+ * the recipient's row `failed`, report the refusal on the context bus
+ * (`mailbox/refused`), and log a durable notice into the SENDER's session
+ * ({@link injectRefusalNotice}) — never as mail back to the sender. A bounce
+ * would be itself subject to the rule that refused the original, refused in
+ * turn, and the sender would have seen silence. The refusal is the harness
+ * reporting on the sender's OWN action, so it travels as a system notice on
+ * the context bus, which the host's api-proxy turns into a `host/agent-error`
+ * frame at the sender's session — the live toast for a user who happens to be
+ * watching — while the durable notice is the outlet that survives a reload.
+ * A `guest:` sender has no session and reaches nobody that way; the CLI's own
+ * send path reports its failures with a non-zero exit. A refusal that only a
+ * store row would show is a silent fence — the operator sees the reason in
+ * the moment it happens.
+ * @param ctx - plugin context carrying the mailbox registry.
+ * @param spec - resolved serving parameters, for the sender's session id.
+ * @param lease - the refused lease.
+ * @param reason - the terminal reason recorded on the row and the event.
  * @returns the failed route result the caller returns.
  */
-async function refuse(ctx: Context, lease: MailboxLease, reason: string): Promise<RouteResult> {
+async function refuse(ctx: Context, spec: BridgeSpec, lease: MailboxLease, reason: string): Promise<RouteResult> {
   ctx.logger.warn(`mailbox-bridge: refused mail to "${lease.message.to}" from "${lease.message.from}": ${reason}`)
-  await failTerminal(ctx, lease, reason)
+  await settleFailed(ctx, lease, reason)
+  ctx.emit('mailbox/refused', {
+    from: lease.message.from,
+    to: String(lease.message.to),
+    reason,
+  })
+  await injectRefusalNotice(ctx, spec, lease, reason)
   return { kind: 'failed', reason }
 }
 
+/**
+ * Route one claimed lease to the agent its address names, settling the exact
+ * outcome the routing observed. See the module contract for the three paths.
+ * @param ctx - plugin context carrying the mailbox registry and core services.
+ * @param spec - resolved serving parameters.
+ * @param lease - the lease claimed this cycle.
+ * @returns what the settlement recorded, observed by {@link internals.drainOnce}.
+ */
 async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease): Promise<RouteResult> {
   const mailbox = ctx.mailbox
   const from = lease.message.from
@@ -656,8 +812,10 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
   // Drain-time admission pipeline, in the module contract's order. The store
   // cannot police an external writer, so every rule is decided here at drain,
   // where the store can actually enforce it. Each refusal is terminal: warn,
-  // settle the recipient's row failed, and bounce to the sender with the
-  // reason — a drop is never silent, and never mysterious.
+  // settle the recipient's row failed, and report the refusal on the context
+  // bus for the sender's session — never a bounce, which the rule that caused
+  // the refusal would refuse in turn. A drop is never silent, and never
+  // mysterious.
   let registry: OrgRegistry | undefined
   try {
     registry = await judgmentRegistry(spec)
@@ -666,20 +824,20 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
     // check below could prove an exchange boundary-safe, and silently
     // permitting is exactly the failure the test boundary exists to prevent.
     // The next cycle re-reads the file, so fixing it self-heals the bridge.
-    return refuse(ctx, lease, `org-registry-unavailable: ${(error as Error).message}`)
+    return refuse(ctx, spec, lease, `org-registry-unavailable: ${(error as Error).message}`)
   }
   // The test boundary outranks everything below it — the admission list, the
   // edge list, and callUp (which would otherwise carry a call-up seat
   // straight across it).
   const boundary = testBoundaryRefusal(registry, from, name)
-  if (boundary !== undefined) return refuse(ctx, lease, boundary)
+  if (boundary !== undefined) return refuse(ctx, spec, lease, boundary)
   const topology = orgTopologyRefusal(registry, from, name)
-  if (topology !== undefined) return refuse(ctx, lease, topology)
+  if (topology !== undefined) return refuse(ctx, spec, lease, topology)
   if (!isAdmittedSender(spec, spec.addresses.map(String), from)) {
-    return refuse(ctx, lease, 'sender-not-admitted')
+    return refuse(ctx, spec, lease, 'sender-not-admitted')
   }
   const guardRefusal = spec.guards.refusalFor(lease)
-  if (guardRefusal !== undefined) return refuse(ctx, lease, guardRefusal)
+  if (guardRefusal !== undefined) return refuse(ctx, spec, lease, guardRefusal)
   // Derived once per lease here, where the registry is already reachable, and
   // passed into the rendered turn so delivery.ts stays pure and testable.
   const senderClass = await senderClassFor(spec, from)
@@ -949,11 +1107,12 @@ function seatEntry(registry: OrgRegistry, name: string): OrgRegistrySeat | undef
  *   may still mail a test seat: that is the bootstrap path a test bed exists
  *   for, and no seat is crossing anything.
  *
- * A refusal still bounces, and that bounce is itself boundary-judged mail
- * (live sender, test recipient here), so a boundary refusal between seats
- * leaves its bounce an unread row rather than re-deliver across the
- * boundary. The refusal is loud either way: the failed row and the bounce
- * row both carry the reason.
+ * A refusal generates no mail: it settles the recipient's row `failed` and
+ * reports on the context bus (`mailbox/refused`), and the sender's session
+ * receives the reason as a system notice. A bounce between seats would be
+ * itself boundary-judged mail — refused in turn, leaving the sender silence —
+ * so none is published. The refusal is loud either way: the failed row and
+ * the context event both carry the reason.
  * @param registry - the loaded registry; `undefined` (no registry file)
  *   judges nothing — no seat is knowable without it.
  * @param from - the message's sender address.
@@ -1110,10 +1269,45 @@ export const inject = ['mailbox', 'agents']
  */
 export type MailboxBridgeSpecs = readonly BridgeSpec[]
 
+/**
+ * One drain-time admission refusal, carried on the context bus. The refusal
+ * is the harness reporting on the SENDER's own action — not correspondence
+ * from the recipient — so it rides the bus instead of the mail store.
+ */
+export interface MailboxRefusal {
+  /** Sender address as published; a `guest:` sender rides the outside-operator channel. */
+  readonly from: string
+  /** Recipient address the refused lease was addressed to. */
+  readonly to: string
+  /** The terminal refusal reason recorded on the recipient's failed row. */
+  readonly reason: string
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     /** Union of every mounted bridge's serving roster in mount order. */
     mailboxBridgeSpecs?: MailboxBridgeSpecs
+  }
+
+  interface Events {
+    /**
+     * The bridge refused a claimed lease terminally at admission — registry
+     * health, the `test: true` boundary, org topology, sender admission, or a
+     * loop guard — and settled the recipient's row `failed` with the same
+     * reason. This event is the refusal's LIVE sender-facing outlet, in place
+     * of a bounce message: a bounce would itself be subject to the rule that
+     * refused the original and would be refused in turn. Listeners render it
+     * where its sender will see it now (the host's api-proxy addresses a
+     * `host/agent-error` frame to the sender's session); the DURABLE outlet is
+     * the notice node `injectRefusalNotice` logs into the sender's session
+     * from the same `refuse` call, which does not depend on anyone watching a
+     * live stream. A `guest:` sender has no session and reaches nobody through
+     * either outlet. Listener failures are logged and contained by Cordis
+     * dispatch.
+     * @param refusal - the sender and recipient addresses and the terminal reason.
+     * @mode emit
+     */
+    'mailbox/refused'(refusal: MailboxRefusal): void
   }
 }
 

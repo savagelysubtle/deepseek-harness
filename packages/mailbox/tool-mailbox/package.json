@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-ai/dsh-tool-mailbox",
-  "description": "Model-facing mailbox_send and mailbox_check_inbox tools whose sender identity comes from the trusted session name, never from a caller-set field",
+  "description": "Model-facing mailbox_send, mailbox_check_inbox, and mailbox_await tools whose sender identity comes from the trusted session name, never from a caller-set field",
   "version": "0.1.0-rc.7",
   "publishConfig": {
     "access": "public"

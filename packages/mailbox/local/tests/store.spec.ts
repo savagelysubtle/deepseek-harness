@@ -334,10 +334,69 @@ describe('lookupByTraceId', () => {
     const answer = await store.publish({ to: FIELD, from: 'gotham:operations', traceId: 'trace-1', subject: 'answer' })
     await store.publish({ to: OPS, from: 'gotham:cane', traceId: 'trace-2' })
     await expect(store.lookupByTraceId('trace-1')).resolves.toEqual([
-      { id: question, from: 'gotham:batman', to: OPS, sentAt: 1_000_000 },
-      { id: answer, from: 'gotham:operations', to: FIELD, sentAt: 1_000_010 },
+      { id: question, from: 'gotham:batman', to: OPS, sentAt: 1_000_000, state: 'pending', subject: 'question' },
+      { id: answer, from: 'gotham:operations', to: FIELD, sentAt: 1_000_010, state: 'pending', subject: 'answer' },
     ])
     await expect(store.lookupByTraceId('unknown-trace')).resolves.toEqual([])
+    store.close()
+  })
+
+  it('projects the content fields a reader acts on without a second claim', async () => {
+    const { clock } = fakeClock()
+    const store = storeWith(clock)
+    const id = await store.publish({
+      to: OPS, from: 'gotham:batman', traceId: 'trace-1', subject: 'status', payload: { ok: true }, blocking: true,
+    })
+    const [lease] = await store.claim(filter([OPS]))
+    // Mid-flight, the row reports its claim time — the moment another
+    // consumer took it — alongside the content a waiter returns as the reply.
+    await expect(store.lookupByTraceId('trace-1')).resolves.toEqual([
+      {
+        id, from: 'gotham:batman', to: OPS, sentAt: 1_000_000, state: 'claimed',
+        subject: 'status', payload: { ok: true }, blocking: true, claimedAt: 1_000_000,
+      },
+    ])
+    await store.settle(lease!.leaseRef, { state: 'done', result: { deliveredAt: 1_000_005, messageId: id } })
+    // Settled, the claim is released (its lease is spent) and the delivery
+    // admission is what dates the row for a reader.
+    await expect(store.lookupByTraceId('trace-1')).resolves.toEqual([
+      {
+        id, from: 'gotham:batman', to: OPS, sentAt: 1_000_000, state: 'done',
+        subject: 'status', payload: { ok: true }, blocking: true, deliveredAt: 1_000_005,
+      },
+    ])
+    store.close()
+  })
+
+  it('degrades an unreadable stored payload to no payload instead of failing the read', async () => {
+    const { clock } = fakeClock()
+    const path = tempDbPath()
+    const store = storeWith(clock, path)
+    const id = await store.publish({ to: OPS, from: 'gotham:batman', traceId: 'trace-1', subject: 'status', payload: 'fine' })
+    const db = new DatabaseSync(path)
+    try {
+      db.prepare('UPDATE messages SET payload = ? WHERE id = ?').run('not-json{', id)
+    } finally {
+      db.close()
+    }
+    await expect(store.lookupByTraceId('trace-1')).resolves.toEqual([
+      { id, from: 'gotham:batman', to: OPS, sentAt: 1_000_000, state: 'pending', subject: 'status' },
+    ])
+    store.close()
+  })
+
+  it('projects a refused row\'s reason, so a waiting sender need not wait out its deadline', async () => {
+    const { clock } = fakeClock()
+    const store = storeWith(clock)
+    const id = await store.publish({ to: OPS, from: 'gotham:alfred', traceId: 'trace-refused' })
+    const [lease] = await store.claim(filter([OPS]))
+    await store.settle(lease!.leaseRef, { state: 'failed', result: { reason: 'org-registry-denied: no edge' } })
+    // The reason is the whole point: a sender awaiting a reply to a message
+    // that was REFUSED must learn that immediately rather than blocking until
+    // its deadline expires on an answer that can never come.
+    await expect(store.lookupByTraceId('trace-refused')).resolves.toEqual([
+      { id, from: 'gotham:alfred', to: OPS, sentAt: 1_000_000, state: 'failed', failureReason: 'org-registry-denied: no edge' },
+    ])
     store.close()
   })
 
@@ -346,17 +405,20 @@ describe('lookupByTraceId', () => {
     const path = tempDbPath()
     const store = storeWith(clock, path)
     const id = await store.publish({ to: OPS, from: 'gotham:alfred', traceId: 'trace-1' })
-    // The lookup is a pure read: the pending row survives for the next claim.
+    // The lookup is a pure read: the pending row survives for the next claim,
+    // and reports the lifecycle state it is actually in.
     await expect(store.lookupByTraceId('trace-1')).resolves.toEqual([
-      { id, from: 'gotham:alfred', to: OPS, sentAt: 1_000_000 },
+      { id, from: 'gotham:alfred', to: OPS, sentAt: 1_000_000, state: 'pending' },
     ])
     const [lease] = await store.claim(filter([OPS]))
     expect(lease?.message.id).toBe(id)
     await store.settle(lease!.leaseRef, { state: 'done', result: { deliveredAt: 5, messageId: id } })
     // Settled messages stay readable — the reply-direction evidence outlives
-    // the delivery — and the settlement is undisturbed.
+    // the delivery — and the settlement is undisturbed. The terminal envelope
+    // is projected too: `deliveredAt` is what lets a waiting sender tell
+    // "never picked up" from "delivered, still no answer".
     await expect(store.lookupByTraceId('trace-1')).resolves.toEqual([
-      { id, from: 'gotham:alfred', to: OPS, sentAt: 1_000_000 },
+      { id, from: 'gotham:alfred', to: OPS, sentAt: 1_000_000, state: 'done', deliveredAt: 5 },
     ])
     const db = new DatabaseSync(path)
     try {
@@ -366,6 +428,49 @@ describe('lookupByTraceId', () => {
     } finally {
       db.close()
     }
+    store.close()
+  })
+})
+
+describe('lookupInboundSince', () => {
+  it('returns every state addressed to the scan target admitted at or after the floor, earliest first', async () => {
+    const { clock, advance } = fakeClock()
+    const store = storeWith(clock)
+    const before = await store.publish({ to: OPS, from: 'gotham:robin', subject: 'older' })
+    advance(10)
+    const atFloor = await store.publish({ to: OPS, from: 'gotham:batman', subject: 'at the floor' })
+    advance(10)
+    const after = await store.publish({ to: OPS, from: 'gotham:batman', subject: 'after' })
+    advance(10)
+    const elsewhere = await store.publish({ to: FIELD, from: 'gotham:batman', subject: 'not mine' })
+    expect(elsewhere).toBeDefined()
+    // The floor is inclusive: mail admitted exactly at `sinceMs` counts, so a
+    // waiter anchored on its awaited send's admission time cannot skip a reply
+    // admitted in the same millisecond. Clock times: `before` at 1_000_000,
+    // `atFloor` at 1_000_010, `after` at 1_000_020, `elsewhere` at 1_000_030.
+    const [leaseBefore] = await store.claim(filter([OPS], 1))
+    await store.settle(leaseBefore!.leaseRef, { state: 'done', result: { deliveredAt: clock(), messageId: leaseBefore!.message.id! } })
+    await expect(store.lookupInboundSince(OPS, 1_000_010)).resolves.toEqual([
+      { id: atFloor, from: 'gotham:batman', to: OPS, sentAt: 1_000_010, state: 'pending', subject: 'at the floor' },
+      { id: after, from: 'gotham:batman', to: OPS, sentAt: 1_000_020, state: 'pending', subject: 'after' },
+    ])
+    // A floor at the first row's admission still includes it, and the
+    // delivered row reads in whatever state it is in — the scan is the read
+    // half of reply detection, not a second queue.
+    await expect(store.lookupInboundSince(OPS, 1_000_000)).resolves.toEqual([
+      { id: before, from: 'gotham:robin', to: OPS, sentAt: 1_000_000, state: 'done', subject: 'older', deliveredAt: expect.any(Number) },
+      { id: atFloor, from: 'gotham:batman', to: OPS, sentAt: 1_000_010, state: 'pending', subject: 'at the floor' },
+      { id: after, from: 'gotham:batman', to: OPS, sentAt: 1_000_020, state: 'pending', subject: 'after' },
+    ])
+    store.close()
+  })
+
+  it('returns nothing when no row for the address reaches the floor', async () => {
+    const { clock, advance } = fakeClock()
+    const store = storeWith(clock)
+    await store.publish({ to: OPS, from: 'gotham:robin' })
+    advance(10)
+    await expect(store.lookupInboundSince(OPS, 1_000_050)).resolves.toEqual([])
     store.close()
   })
 })

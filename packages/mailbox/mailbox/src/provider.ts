@@ -74,6 +74,22 @@ export interface MailboxProvider {
    * @returns one entry per stored message carrying the id, earliest send first.
    */
   lookupByTraceId(traceId: string, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]>
+
+  /**
+   * Read every stored message addressed to `address` admitted at or after
+   * `sinceMs`, regardless of its current claim or settlement state — the
+   * read half of reply detection: a reply another consumer (the bridge) has
+   * already claimed or settled is invisible to `claim`, and this read is
+   * what lets a waiter recognize it anyway. A pure read: it claims nothing,
+   * settles nothing, and mutates nothing.
+   * @param address - the recipient address to scan; the caller's own address
+   *   in the reply-detection use.
+   * @param sinceMs - epoch-milliseconds floor (inclusive) on the row's
+   *   admission time.
+   * @param signal - caller cancellation owning the scan.
+   * @returns one entry per matching row, earliest admission first.
+   */
+  lookupInboundSince(address: MailboxAddress, sinceMs: number, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]>
 }
 
 /**

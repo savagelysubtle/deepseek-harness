@@ -373,7 +373,7 @@ describe('mailbox delivery over real compositions', () => {
       expect(mail.source).toMatchObject({
         form: 'relay', address: 'hook-target', from: 'sender', messageId: id,
       })
-      expect(mail.content?.[0]?.text).toMatch(/^\[.+ - from .+ \((?:seat|unverified)\)\]$/m)
+      expect(mail.content?.[0]?.text).toMatch(/^\[.+ - from .+ \((?:seat|unverified)\)(?: · trace [0-9a-f-]+)?\]$/m)
       expect(mail.content?.[0]?.text).toContain('\n\nwake up')
     },
   )
@@ -522,7 +522,7 @@ describe('mailbox delivery over real compositions', () => {
         .find(message => (message as { source?: { kind?: string } }).source?.kind === 'mailbox') as {
           content?: ReadonlyArray<{ type: string; text?: string }>
         } | undefined
-      expect(mail?.content?.[0]?.text).toMatch(/^\[.+ - from .+ \((?:seat|unverified)\)\]$/m)
+      expect(mail?.content?.[0]?.text).toMatch(/^\[.+ - from .+ \((?:seat|unverified)\)(?: · trace [0-9a-f-]+)?\]$/m)
       expect(mail?.content?.[0]?.text).toContain('\n\nwake up')
 
       const db = new DatabaseSync(env.storePath)
@@ -591,7 +591,7 @@ describe('mailbox delivery over real compositions', () => {
       expect(mail.source).toMatchObject({
         address: 'alfred', from: 'console', messageId: id,
       })
-      expect(mail.content?.[0]?.text).toMatch(/^\[.+ - from .+ \((?:seat|unverified)\)\]$/m)
+      expect(mail.content?.[0]?.text).toMatch(/^\[.+ - from .+ \((?:seat|unverified)\)(?: · trace [0-9a-f-]+)?\]$/m)
       expect(mail.content?.[0]?.text).toContain('\n\nwake up')
     },
   )

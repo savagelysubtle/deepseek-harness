@@ -73,9 +73,14 @@ export interface MailboxMessage {
 }
 
 /**
- * One stored message found by a traceId lookup: the direction — sender to
- * recipient — and send time a caller needs to establish that a prior message
- * with that id exists and whether it traveled toward or away from an address.
+ * One stored message found by a traceId lookup or an inbound-since scan: the
+ * direction — sender to recipient — the send time, and the store lifecycle
+ * state a caller needs to establish that a prior message with that id exists,
+ * whether it traveled toward or away from an address, and what became of it
+ * (queued, delivered, or terminally failed with the recorded reason). The
+ * content fields let a reader act on the row without a second claim: a reply
+ * detected on a row another consumer already delivered is returned from these
+ * fields, not re-claimed.
  */
 export interface MailboxTraceEntry {
   /** The stored message's durable id. */
@@ -86,6 +91,38 @@ export interface MailboxTraceEntry {
   readonly to: MailboxAddress
   /** Epoch milliseconds at which the provider admitted the message. */
   readonly sentAt: number
+  /** The row's current store lifecycle state, read at lookup time. */
+  readonly state: MailboxState
+  /**
+   * The sender's subject line, when the row carried one; absent otherwise.
+   */
+  readonly subject?: string
+  /**
+   * The sender's JSON-decoded body, when the row carried a readable one;
+   * absent when the row had no payload or its stored text is not valid JSON
+   * — absence reads as "no readable body", never as an empty one.
+   */
+  readonly payload?: unknown
+  /**
+   * Whether the sender marked the message blocking; present only when the
+   * row carried the mark.
+   */
+  readonly blocking?: boolean
+  /**
+   * Epoch milliseconds of the row's most recent claim, when it has been
+   * claimed at least once; absent while it has never left `pending`.
+   */
+  readonly claimedAt?: number
+  /**
+   * Epoch milliseconds at which the row was admitted to its target's queue,
+   * recorded by the `done` settlement; present only while `state` is `done`.
+   */
+  readonly deliveredAt?: number
+  /**
+   * The terminal refusal reason the `failed` settlement recorded; present
+   * only while `state` is `failed`.
+   */
+  readonly failureReason?: string
 }
 
 /**

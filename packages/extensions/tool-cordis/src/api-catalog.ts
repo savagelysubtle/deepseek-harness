@@ -939,6 +939,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [{ name: 'traceId', description: 'the correlation id to search for, matched exactly.' }, { name: 'signal', description: 'caller cancellation owning the scan.' }],
         returns: 'one entry per stored message carrying the id, earliest send first.',
       },
+      {
+        signature: 'async lookupInboundSince(address: MailboxAddress, sinceMs: number, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]>',
+        description: 'Read stored messages addressed to one address since a time through the configured default provider — the same pure inbound scan the provider contract declares, with no claim, settlement, or other write behind it.',
+        parameters: [{ name: 'address', description: 'the recipient address to scan; grammar-checked here so a malformed address fails at the seam edge.' }, { name: 'sinceMs', description: 'epoch-milliseconds floor (inclusive) on the row\'s admission time.' }, { name: 'signal', description: 'caller cancellation owning the scan.' }],
+        returns: 'one entry per matching row, earliest admission first.',
+      },
     ],
   },
   {
@@ -2489,6 +2495,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'options', description: 'the full request. A LOOP-built request carries the process-local {@link markAgentLoopRequest} identity and arrives deep-frozen (mutation throws): its content is a pure function of the session log (the reconstructability Agent Note), so listeners read it, never rewrite it. Hand-built calls do not carry that marker; their messages already obey the immutable creation contract.' }],
   },
   {
+    name: 'mailbox/refused',
+    mode: 'emit',
+    signature: '\'mailbox/refused\'(refusal: MailboxRefusal): void',
+    summary: 'The bridge refused a claimed lease terminally at admission — registry health, the `test: true` boundary, org topology, sender admission, or a loop guard — and settled the recipient\'s row `failed` with the same reason.',
+    description: 'The bridge refused a claimed lease terminally at admission — registry health, the `test: true` boundary, org topology, sender admission, or a loop guard — and settled the recipient\'s row `failed` with the same reason. This event is the refusal\'s LIVE sender-facing outlet, in place of a bounce message: a bounce would itself be subject to the rule that refused the original and would be refused in turn. Listeners render it where its sender will see it now (the host\'s api-proxy addresses a `host/agent-error` frame to the sender\'s session); the DURABLE outlet is the notice node `injectRefusalNotice` logs into the sender\'s session from the same `refuse` call, which does not depend on anyone watching a live stream. A `guest:` sender has no session and reaches nobody through either outlet. Listener failures are logged and contained by Cordis dispatch.',
+    parameters: [{ name: 'refusal', description: 'the sender and recipient addresses and the terminal reason.' }],
+  },
+  {
     name: 'session-telemetry/record',
     mode: 'waterfall',
     signature: '\'session-telemetry/record\'(record: SessionTelemetryRecord, next: () => SessionTelemetryRecord): SessionTelemetryRecord',
@@ -3490,7 +3504,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'MailboxProvider',
-    declaration: 'export interface MailboxProvider {\n    readonly name: string;\n    publish(message: MailboxPublishInput, signal?: AbortSignal): Promise<MailboxMessageId>;\n    claim(filter: MailboxClaimFilter, signal?: AbortSignal): Promise<readonly MailboxLease[]>;\n    settle(leaseRef: MailboxLease[\'leaseRef\'], outcome: MailboxOutcome, signal?: AbortSignal): Promise<void>;\n    claimableAddresses(filter: MailboxStalenessFilter, signal?: AbortSignal): Promise<readonly MailboxAddress[]>;\n    lookupByTraceId(traceId: string, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]>;\n}',
+    declaration: 'export interface MailboxProvider {\n    readonly name: string;\n    publish(message: MailboxPublishInput, signal?: AbortSignal): Promise<MailboxMessageId>;\n    claim(filter: MailboxClaimFilter, signal?: AbortSignal): Promise<readonly MailboxLease[]>;\n    settle(leaseRef: MailboxLease[\'leaseRef\'], outcome: MailboxOutcome, signal?: AbortSignal): Promise<void>;\n    claimableAddresses(filter: MailboxStalenessFilter, signal?: AbortSignal): Promise<readonly MailboxAddress[]>;\n    lookupByTraceId(traceId: string, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]>;\n    lookupInboundSince(address: MailboxAddress, sinceMs: number, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]>;\n}',
   },
   {
     name: 'MailboxPublishInput',
@@ -3505,12 +3519,20 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface MailboxPublishValue {\n    readonly messageId: string;\n    readonly disposition: \'delivered\' | \'queued\';\n}',
   },
   {
+    name: 'MailboxRefusal',
+    declaration: 'export interface MailboxRefusal {\n    readonly from: string;\n    readonly to: string;\n    readonly reason: string;\n}',
+  },
+  {
     name: 'MailboxStalenessFilter',
     declaration: 'export interface MailboxStalenessFilter {\n    readonly staleClaimMs: number;\n}',
   },
   {
+    name: 'MailboxState',
+    declaration: 'export type MailboxState = \'pending\' | \'claimed\' | \'done\' | \'failed\';',
+  },
+  {
     name: 'MailboxTraceEntry',
-    declaration: 'export interface MailboxTraceEntry {\n    readonly id: MailboxMessageId;\n    readonly from: string;\n    readonly to: MailboxAddress;\n    readonly sentAt: number;\n}',
+    declaration: 'export interface MailboxTraceEntry {\n    readonly id: MailboxMessageId;\n    readonly from: string;\n    readonly to: MailboxAddress;\n    readonly sentAt: number;\n    readonly state: MailboxState;\n    readonly subject?: string;\n    readonly payload?: unknown;\n    readonly blocking?: boolean;\n    readonly claimedAt?: number;\n    readonly deliveredAt?: number;\n    readonly failureReason?: string;\n}',
   },
   {
     name: 'ManualCompactAgentContext',

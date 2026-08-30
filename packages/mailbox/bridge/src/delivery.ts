@@ -8,12 +8,18 @@
  * harness metadata, so transcripts credit the relayed mail to its sender
  * address.
  *
+ * A REFUSED lease renders through the sibling {@link refusalUserMessage}
+ * instead: a `notice`-form source with no `from`, logged into the SENDER's
+ * session rather than delivered to the recipient — the harness reporting on
+ * the sender's own action, never correspondence and never store mail.
+ *
  * @module @deepseek-ai/dsh-mailbox-bridge/delivery
  */
 
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
-import type { MailboxLease, MailboxMessageSource, MailboxOutcome } from '@deepseek-ai/dsh-mailbox'
+import { boundContextSummary } from '@deepseek-ai/dsh-llm'
+import type { MailboxLease, MailboxMessageSource, MailboxRefusalSource, MailboxOutcome } from '@deepseek-ai/dsh-mailbox'
 
 /**
  * Sender class stated on every delivered envelope, derived by the caller from
@@ -97,7 +103,13 @@ function formatDeliveredAt(at: number): string {
  * @returns the three envelope lines: header, authority contract, urgency contract.
  */
 export function messageEnvelope(lease: MailboxLease, senderClass: SenderClass): string {
-  const header = `[${formatDeliveredAt(lease.claimedAt)} - from ${lease.message.from} (${senderClass})]`
+  // The correlation id rides the header when the message carries one: a
+  // replying model can only thread its reply onto an awaited send if it can
+  // SEE the id, and this line is the one place every delivery is guaranteed
+  // to reach the model. Threaded replies repeat the same id, so a thread's
+  // envelope stays constant across the chain.
+  const trace = lease.message.traceId !== undefined ? ` · trace ${lease.message.traceId}` : ''
+  const header = `[${formatDeliveredAt(lease.claimedAt)} - from ${lease.message.from} (${senderClass})${trace}]`
   const urgency = lease.message.blocking === true
     ? "[BLOCKING] Your correspondent is blocked waiting on you. Stop what you're doing, handle this, reply so they're unblocked, then resume."
     : "[FYI] Not urgent. Decide whether it needs a reply and when, or whether it's a note to absorb and carry on. If it's worth keeping beyond this session, write it to memory."
@@ -134,11 +146,20 @@ export function relayText(lease: MailboxLease, senderClass: SenderClass): string
  * assigns durable ids at publish, so a claimed lease always carries one; this
  * helper fails loud instead of forging a source if a provider ever violates
  * that expectation.
+ *
+ * The source carries the mail-card fields the delivery already computed —
+ * subject, blocking mark, sender class — so the client's dedicated mail card
+ * renders them from the durable provenance and never scrapes the rendered
+ * text. Each message-carried field is omitted (not stamped `undefined`) when
+ * the message does not have it: the source is merge-extensible and older
+ * logged rows predate these fields, so absence must stay a readable state.
+ * `senderClass` is always present — the caller derives it for every delivery.
  * @param lease - the claimed lease being delivered.
+ * @param senderClass - the caller-derived sender class for this message.
  * @returns the attribution object merged into the delivered user turn.
  */
-export function relaySource(lease: MailboxLease): MailboxMessageSource {
-  const { id, to, from, traceId } = lease.message
+export function relaySource(lease: MailboxLease, senderClass: SenderClass): MailboxMessageSource {
+  const { id, to, from, traceId, subject, blocking } = lease.message
   if (id === undefined) {
     throw new Error(`mailbox bridge: claimed message for "${to}" has no provider id and cannot be delivered`)
   }
@@ -148,6 +169,9 @@ export function relaySource(lease: MailboxLease): MailboxMessageSource {
     address: to,
     from,
     messageId: id,
+    senderClass,
+    ...subject !== undefined ? { subject } : {},
+    ...blocking !== undefined ? { blocking } : {},
     ...traceId !== undefined ? { traceId } : {},
   }
 }
@@ -161,6 +185,74 @@ export function relaySource(lease: MailboxLease): MailboxMessageSource {
 export function relayUserMessage(lease: MailboxLease, senderClass: SenderClass): UserMessage {
   return createUserMessage({
     content: [{ type: 'text', text: relayText(lease, senderClass) }],
-    source: relaySource(lease),
+    source: relaySource(lease, senderClass),
+  })
+}
+
+/**
+ * Build the refusal-notice source for one refused message. The source is the
+ * durable provenance the sender's transcript renders the refusal from, and it
+ * deliberately carries NO `from` field: a readable `from` is exactly what
+ * makes a mailbox source present as incoming mail, and the refusal is the
+ * harness reporting on the sender's OWN action, not mail from the refused
+ * recipient. It is also not a store message, so no admission rule can ever
+ * judge it — a refusal notice can never itself be refused.
+ *
+ * `summary` carries the one-line account the client's `notice` presentation
+ * shows on the collapsed row, bounded here at the producer the same way every
+ * other `notice` producer bounds it.
+ * @param lease - the refused lease.
+ * @param reason - the terminal reason recorded on the recipient's failed row.
+ * @returns the attribution object merged into the refusal's user turn.
+ * @throws when the claimed lease carries no provider id — the same loud
+ *   failure {@link relaySource} raises, since the notice must name the send
+ *   it reports on.
+ */
+export function refusalSource(lease: MailboxLease, reason: string): MailboxRefusalSource {
+  const { id, to } = lease.message
+  if (id === undefined) {
+    throw new Error(`mailbox bridge: refused message for "${to}" has no provider id and cannot carry a notice`)
+  }
+  return {
+    kind: 'mailbox',
+    form: 'notice',
+    refusedTo: to,
+    messageId: id,
+    reason,
+    summary: boundContextSummary(`Mail to "${to}" was refused: ${reason}`),
+  }
+}
+
+/**
+ * Render the model-visible text of one refusal notice. A system account, not
+ * an envelope: no delivery timestamp, no sender header, and none of the mail
+ * contracts — the notice tells the sender its own send was dropped, by whom,
+ * and why, and what not to do about it. The recipient, the store id, and the
+ * reason are all named, so a drop is traceable, never mysterious.
+ * @param lease - the refused lease.
+ * @param reason - the terminal reason recorded on the recipient's failed row.
+ * @returns the plain-text turn content of the refusal notice.
+ */
+export function refusalText(lease: MailboxLease, reason: string): string {
+  const { id, to } = lease.message
+  return [
+    `Mail refused. Your message${id === undefined ? '' : ` (id ${id})`} to "${to}" was NOT delivered: ${reason}`,
+    'This is the harness reporting on your own send — it is not mail from the recipient, and the recipient has seen nothing. Do not resend unchanged; the refusal stays until what the reason names changes.',
+  ].join('\n')
+}
+
+/**
+ * Render one refused lease as the durable user-role context turn logged into
+ * the SENDER's session. Unlike {@link relayUserMessage} this is never handed
+ * to `steer`/`followup` — it is appended to the session log directly, so it
+ * wakes nothing and starts no turn.
+ * @param lease - the refused lease.
+ * @param reason - the terminal reason recorded on the recipient's failed row.
+ * @returns the identified prompt content of the refusal notice.
+ */
+export function refusalUserMessage(lease: MailboxLease, reason: string): UserMessage {
+  return createUserMessage({
+    content: [{ type: 'text', text: refusalText(lease, reason) }],
+    source: refusalSource(lease, reason),
   })
 }

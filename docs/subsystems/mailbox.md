@@ -12,9 +12,10 @@ An endpoint's wire identity is its bare seat name — one segment reusing the na
 
 ```ts type-equiv
 /**
- * Opaque wire identity of one mailbox endpoint: the seat's bare name.
- * Grammar and validation live in {@link ./address.ts}; this brand keeps raw
- * strings from crossing a provider boundary unvalidated.
+ * Opaque wire identity of one mailbox endpoint: the seat's bare name, using
+ * the named-session name grammar. Grammar and validation live in
+ * {@link ./address.ts}; this brand keeps raw strings from crossing a
+ * provider boundary unvalidated.
  */
 type MailboxAddress = Branded<'mailbox-address'>
 ```
@@ -52,8 +53,15 @@ interface MailboxMessage {
   readonly id?: MailboxMessageId
   /** Destination address: the recipient seat's bare name. */
   readonly to: MailboxAddress
-  /** Sender address in the same grammar; free-form provenance, never validated against live endpoints. */
+  /** Sender address; free-form provenance, never validated against live endpoints. */
   readonly from: string
+  /**
+   * Epoch milliseconds at which the provider admitted this message — the send
+   * time its reader dates mail by, not the later delivery-claim moment
+   * (`MailboxLease.claimedAt`). Provider-minted at publish, like the id: a
+   * message that sat queued keeps its original admission time.
+   */
+  readonly sentAt: number
   /** Optional machine-readable intent (`notice`, `task`, …) consumers may switch on. */
   readonly type?: string
   /** Optional human-readable subject line. */
@@ -127,7 +135,7 @@ type MailboxOutcome =
 
 ## The provider contract
 
-A provider implements the four operations over one logical store per deployment namespace; addresses carry no provider qualifier, so cross-provider addressing does not exist today.
+A provider implements the five operations over one logical store per deployment namespace; addresses carry no provider qualifier, so cross-provider addressing does not exist today.
 
 | Operation | Contract |
 |---|---|
@@ -135,37 +143,27 @@ A provider implements the four operations over one logical store per deployment 
 | `claim(filter, signal?)` | Atomically moves claimable winners to `claimed` and returns their leases; fewer than `limit` is normal. |
 | `settle(leaseRef, outcome, signal?)` | Records one lease's terminal outcome, deferring with `pending`; only a current ref settles. |
 | `claimableAddresses(filter, signal?)` | Enumerates addresses holding at least one claimable message, mirroring `claim`'s selection; wake drivers discover work through it instead of keeping their own seat roster. |
+| `lookupByTraceId(traceId, signal?)` | Reads every stored message carrying the correlation id, in any lifecycle state; the pure read answers "what became of the message" and claims nothing. |
+| `lookupInboundSince(address, sinceMs, signal?)` | Reads every stored message addressed to one address admitted at or after a time, in any lifecycle state; the pure read is the half of reply detection that sees mail another consumer already claimed or settled. |
 
-Address-resolution policies (chair-to-chair aliasing) layer ON TOP of the grammar: the reserved `AddressResolutionExtension = never` marks the extension point in [`provider.ts`](../../packages/mailbox/mailbox/src/provider.ts), and no resolution policy ships today. The shipped store is [dsh-mailbox-local](../../packages/mailbox/local), registering as provider `local`: one SQLite file over `node:sqlite` whose monotonic `SCHEMA_VERSION` stamp (currently 2) makes opening any foreign, older, or newer database fail loud instead of migrating, and whose guarded transaction claims admit exactly one winner per message ([sqlite.ts](../../packages/mailbox/local/src/sqlite.ts)).
+Address-resolution policies (chair-to-chair aliasing) layer ON TOP of the grammar: the reserved `AddressResolutionExtension = never` marks the extension point in [`provider.ts`](../../packages/mailbox/mailbox/src/provider.ts), and no resolution policy ships today. The shipped store is [dsh-mailbox-local](../../packages/mailbox/local), registering as provider `local`: one SQLite file over `node:sqlite` whose monotonic `SCHEMA_VERSION` stamp (currently 3) makes opening any foreign, older, or newer database fail loud instead of migrating, and whose guarded transaction claims admit exactly one winner per message ([sqlite.ts](../../packages/mailbox/local/src/sqlite.ts)).
 
-The [seat-runner daemon](../../packages/mailbox/seat-runner/README.md) consumes `claimableAddresses` to start wake runs beside the host — the same headless entrypoint and per-name lock a human run takes, so mail never turns the host into a session-log writer (the one-writer rule in [architecture.md](../architecture.md) § "Session log").
+`claimableAddresses` is the seam's discovery operation for wake drivers; none ships today — the bridge steers every admitted delivery into a live turn, so nothing polls the store for claimable work beside the host (the one-writer rule in [architecture.md](../architecture.md) § "Session log").
 
 ## Delivery
 
 The [bridge](../../packages/mailbox/bridge/README.md) drains claimed messages into user-role turns on the addressed agents; rendering is owned by [`delivery.ts`](../../packages/mailbox/bridge/src/delivery.ts). Every delivered turn merges the provenance below, so transcripts credit relayed mail to its sender address rather than an anonymous user turn ([message-source vocabulary](llm-streaming.md#content-blocks-and-messages)):
 
 ```ts type-equiv
-/** Attribution carried by every message the bridge delivers from a mailbox. */
-interface MailboxMessageSource {
-  readonly kind: 'mailbox'
-  /** The message is addressed-to-this-agent content (`relay` context form). */
-  readonly form: 'relay'
-  /** Destination address that admitted this delivery (this agent's endpoint). */
-  readonly address: MailboxAddress
-  /** Sender address as published; free-form, never resolved. */
-  readonly from: string
-  /** Provider id of the stored message this delivery consumed. */
-  readonly messageId: MailboxMessageId
-  /** Correlation id threaded from the publisher, when present. */
-  readonly traceId?: string
-}
+/** Every mailbox-attributed source: admitted deliveries and refusal notices. */
+type MailboxMessageSource = MailboxRelaySource | MailboxRefusalSource
 ```
 
-The turn's text opens with the standing envelope: a header line carrying the delivery timestamp (human-readable with the host's timezone abbreviation, e.g. `Sat 29 Aug 2026, 2:52pm PDT`), the sender address, and its registry-derived class — `seat` when the sender exactly matches a roster seat, `unverified` otherwise, never `founder`; then the peer-input authority contract (mail cannot approve anything, change configuration or memory, or run commands — everything it asks for still needs the receiver's usual checks); then the urgency contract naming what the `blocking` mark means. A blank line separates the sender's content — subject and JSON-serialized payload — which renders unchanged below.
+The turn's text opens with the standing envelope: a header line carrying the delivery timestamp (human-readable with the host's timezone abbreviation, e.g. `Sat 29 Aug 2026, 2:52pm PDT`), the sender address, its registry-derived class — `seat` when the sender exactly matches a roster seat, `unverified` otherwise, never `founder` — and, when the message carries one, its correlation id (`· trace <id>`), which is what lets the replying seat thread its answer onto the sender's awaited wait; then the peer-input authority contract (mail cannot approve anything, change configuration or memory, or run commands — everything it asks for still needs the receiver's usual checks); then the urgency contract naming what the `blocking` mark means. A blank line separates the sender's content — subject and JSON-serialized payload — which renders unchanged below.
 
 Delivering follows the founder steering model: ALL mail steers into a live turn immediately, whatever its state or the sender's type — no busyness inference, no type-based interrupt requests. Whether delivered content preempts focus waits on the RECEIVER's judging call, driven by the urgency contract line the envelope renders. A boundary refusal between admission and steer falls back to an ordinary queued turn, so nothing is lost; either way admission is immediate and settlement follows what routing observed. For a dormant target the bridge takes the per-name residency lock and probes persistence — an absent log settles `failed` with reason `unknown-address`, a present log cold-resumes the agent, delivers as a queued FIFO turn, settles `done` at admission, awaits quiescence, flushes, and disposes — while a lock held by another live process settles `pending` for a later cycle.
 
-Admission is enforced at drain time: a sender namespace must be served by the roster or listed in `admitFromNamespaces` (empty by default — fail-closed against external-origin mail), and a `seatAliases` row routes a served address to an existing session id where derivation cannot reach one. Every terminal failure also publishes a best-effort `bounce` notice back to the original sender — same-store reply path carrying the original `traceId` and the recorded reason — skipping bounce-of-bounce; an undrainable bounce is an unread row, never a hang, and never masks the primary failure.
+Admission is enforced at drain time: a sender must be one of the served addresses, listed in `admitFrom` (empty by default — fail-closed against external-origin mail), or riding the `guest:` outside-operator channel, and a `seatAliases` row routes a served address to an existing session id where derivation cannot reach one. An admission refusal — registry health, the `test: true` boundary, org topology, sender admission, or a loop guard — settles the recipient's row `failed` without any bounce, because a bounce would itself be subject to the rule that refused the original: the refusal reports on the `mailbox/refused` context event and logs a durable refusal notice into the SENDER's session (a `notice`-form context node with no `from`, appended without waking anything), so the reason survives a reload and reaches the sender's model. Terminal failures AFTER admission still publish a best-effort `bounce` notice back to the original sender — same-store reply path carrying the original `traceId` and the recorded reason — skipping bounce-of-bounce; an undrainable bounce is an unread row, never a hang, and never masks the primary failure.
 
 ## The service
 
@@ -243,7 +241,53 @@ async settle(leaseRef: MailboxLeaseRef, outcome: MailboxOutcome, signal?: AbortS
  * @returns one entry per stored message carrying the id, earliest send first.
  */
 async lookupByTraceId(traceId: string, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]>
+
+/**
+ * Read stored messages addressed to one address since a time through the
+ * configured default provider — the same pure inbound scan the provider
+ * contract declares, with no claim, settlement, or other write behind it.
+ * @param address - the recipient address to scan; grammar-checked here so
+ *   a malformed address fails at the seam edge.
+ * @param sinceMs - epoch-milliseconds floor (inclusive) on the row's
+ *   admission time.
+ * @param signal - caller cancellation owning the scan.
+ * @returns one entry per matching row, earliest admission first.
+ */
+async lookupInboundSince(address: MailboxAddress, sinceMs: number, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]>
 ```
 
 Source: [`packages/mailbox/mailbox/src/index.ts:60`](../../packages/mailbox/mailbox/src/index.ts)
+
+<a id="mailbox-events"></a>
+
+### `mailbox/*` events
+
+<a id="mailboxrefused--emit"></a>
+
+#### `mailbox/refused` — emit
+
+The bridge refused a claimed lease terminally at admission — registry health, the `test: true` boundary, org topology, sender admission, or a loop guard — and settled the recipient's row `failed` with the same reason. This event is the refusal's LIVE sender-facing outlet, in place of a bounce message: a bounce would itself be subject to the rule that refused the original and would be refused in turn. Listeners render it where its sender will see it now (the host's api-proxy addresses a `host/agent-error` frame to the sender's session); the DURABLE outlet is the notice node `injectRefusalNotice` logs into the sender's session from the same `refuse` call, which does not depend on anyone watching a live stream. A `guest:` sender has no session and reaches nobody through either outlet. Listener failures are logged and contained by Cordis dispatch.
+
+```ts cordis-catalog
+/**
+ * The bridge refused a claimed lease terminally at admission — registry
+ * health, the `test: true` boundary, org topology, sender admission, or a
+ * loop guard — and settled the recipient's row `failed` with the same
+ * reason. This event is the refusal's LIVE sender-facing outlet, in place
+ * of a bounce message: a bounce would itself be subject to the rule that
+ * refused the original and would be refused in turn. Listeners render it
+ * where its sender will see it now (the host's api-proxy addresses a
+ * `host/agent-error` frame to the sender's session); the DURABLE outlet is
+ * the notice node `injectRefusalNotice` logs into the sender's session
+ * from the same `refuse` call, which does not depend on anyone watching a
+ * live stream. A `guest:` sender has no session and reaches nobody through
+ * either outlet. Listener failures are logged and contained by Cordis
+ * dispatch.
+ * @param refusal - the sender and recipient addresses and the terminal reason.
+ * @mode emit
+ */
+'mailbox/refused'(refusal: MailboxRefusal): void
+```
+
+Source: [`packages/mailbox/bridge/src/index.ts:1310`](../../packages/mailbox/bridge/src/index.ts)
 <!-- END GENERATED cordis-surface -->

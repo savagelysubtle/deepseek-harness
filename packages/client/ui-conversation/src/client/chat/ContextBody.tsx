@@ -6,6 +6,7 @@
 
 import type { ReactNode } from 'react'
 import type { ContextMessageNode, KnownContextForm } from '@deepseek-ai/dsh-client-runtime/client'
+import { mailboxRelay } from '@deepseek-ai/dsh-client-runtime/client'
 import { JsonBlock } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ChatViewSlotProps } from '../contract/slots.ts'
 import css from './ContextBody.module.css'
@@ -426,10 +427,13 @@ export function NoticeBody({ content, t }: {
 }
 
 /**
- * `relay` form: which agent sent this, then what it said.
+ * `relay` form, subagent kind: which agent sent this, then what it said.
  *
  * The sender is an opaque session id; it is shown as a field rather than a
- * label, because this client cannot resolve it to a title.
+ * label, because this client cannot resolve it to a title. Delivered mail
+ * also declares `form: 'relay'` but renders as {@link MailBody} instead —
+ * {@link contextBody} tells the two apart with {@link mailboxRelay} before
+ * choosing between them, so this body only ever sees a subagent source.
  * @param props - Durable content, its source, and the locale seat.
  * @returns The relay context body.
  */
@@ -455,6 +459,36 @@ export function RelayBody({ content, source, t }: {
 function relaySender(source: unknown): string | null {
   const sender = asRecord(source)?.['senderSessionId']
   return typeof sender === 'string' && sender !== '' ? sender : null
+}
+
+/**
+ * `relay` form, mailbox kind: the subject the sender gave it, when there is
+ * one, then what they said.
+ *
+ * The sender itself is NOT repeated here: unlike the subagent {@link RelayBody}
+ * (which has no header of its own and so states its sender inline), a
+ * mailbox relay renders inside {@link ContextInjectionRow}'s dedicated mail
+ * header, which already names the sender. This body is only the part of the
+ * card that sits below that header's separator.
+ * @param props - Durable content, its source, and the locale seat.
+ * @returns The mail context body, or the opaque body when unreadable.
+ */
+export function MailBody({ content, source, t }: {
+  content: ContextMessageNode['content']
+  source: unknown
+  t: Translate
+}): ReactNode {
+  const mail = mailboxRelay(source)
+  /* v8 ignore next -- contextBody resolves the mail fields before choosing this body. */
+  if (mail === null) return <OpaqueBody content={content} source={source} t={t} />
+  return (
+    <>
+      {mail.subject !== null && (
+        <p className={css.mailSubject} data-context-mail-subject>{mail.subject}</p>
+      )}
+      <ModelFacingContent content={content} t={t} />
+    </>
+  )
 }
 
 /** One recalled session, as the durable source records it. */
@@ -571,10 +605,18 @@ export function contextBody(
         ? opaque
         : { rendered: 'notice', summary, body: <NoticeBody {...props} /> }
     }
-    case 'relay':
+    case 'relay': {
+      // Mail and subagent relay both declare `form: 'relay'`; mailboxRelay
+      // narrows on `kind` first, so a readable mail source always gets the
+      // mail body even where a stray `senderSessionId` field could otherwise
+      // satisfy relaySender too.
+      if (mailboxRelay(props.source) !== null) {
+        return { rendered: 'relay', summary: null, body: <MailBody {...props} /> }
+      }
       return relaySender(props.source) === null
         ? opaque
         : { rendered: 'relay', summary: null, body: <RelayBody {...props} /> }
+    }
     case 'recall':
       return recalledSessions(props.source) === null
         ? opaque

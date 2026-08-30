@@ -12,9 +12,10 @@
 
 ```ts type-equiv
 /**
- * Opaque wire identity of one mailbox endpoint: the seat's bare name.
- * Grammar and validation live in {@link ./address.ts}; this brand keeps raw
- * strings from crossing a provider boundary unvalidated.
+ * Opaque wire identity of one mailbox endpoint: the seat's bare name, using
+ * the named-session name grammar. Grammar and validation live in
+ * {@link ./address.ts}; this brand keeps raw strings from crossing a
+ * provider boundary unvalidated.
  */
 type MailboxAddress = Branded<'mailbox-address'>
 ```
@@ -52,8 +53,15 @@ interface MailboxMessage {
   readonly id?: MailboxMessageId
   /** Destination address: the recipient seat's bare name. */
   readonly to: MailboxAddress
-  /** Sender address in the same grammar; free-form provenance, never validated against live endpoints. */
+  /** Sender address; free-form provenance, never validated against live endpoints. */
   readonly from: string
+  /**
+   * Epoch milliseconds at which the provider admitted this message — the send
+   * time its reader dates mail by, not the later delivery-claim moment
+   * (`MailboxLease.claimedAt`). Provider-minted at publish, like the id: a
+   * message that sat queued keeps its original admission time.
+   */
+  readonly sentAt: number
   /** Optional machine-readable intent (`notice`, `task`, …) consumers may switch on. */
   readonly type?: string
   /** Optional human-readable subject line. */
@@ -127,7 +135,7 @@ type MailboxOutcome =
 
 ## 提供方契约
 
-提供方在“一个部署命名空间对应一个逻辑存储”上实现这四种操作；地址不携带提供方限定符，因此今天不存在跨提供方寻址。
+提供方在“一个部署命名空间对应一个逻辑存储”上实现这五种操作；地址不携带提供方限定符，因此今天不存在跨提供方寻址。
 
 | 操作 | 契约 |
 |---|---|
@@ -135,37 +143,27 @@ type MailboxOutcome =
 | `claim(filter, signal?)` | 原子地把可认领的赢家移到 `claimed` 并返回其租约；返回少于 `limit` 属正常。 |
 | `settle(leaseRef, outcome, signal?)` | 记录一条租约的终态，或以 `pending` 顺延；只有现行 ref 才能落定。 |
 | `claimableAddresses(filter, signal?)` | 枚举持有至少一条可认领消息的地址，镜像 `claim` 的选择；唤醒驱动器通过它发现工作，而不是自持座位花名册。 |
+| `lookupByTraceId(traceId, signal?)` | 读取携带该关联 id 的每一条存储消息，不限生命周期状态；此纯读取回答"这条消息后来怎样了"，不作任何认领。 |
+| `lookupInboundSince(address, sinceMs, signal?)` | 读取在某一时刻之后准入、发往某一地址的每一条存储消息，不限生命周期状态；此纯读取是回复检测的另一半，能看到已被其他消费者认领或落定的邮件。 |
 
-地址解析策略（chair-to-chair 别名）叠加在文法之上：保留的 `AddressResolutionExtension = never` 在 [`provider.ts`](../../packages/mailbox/mailbox/src/provider.ts) 中标记该扩展点，目前没有任何解析策略随附发布。随附的存储是 [dsh-mailbox-local](../../packages/mailbox/local)，以提供方名称 `local` 注册：基于 `node:sqlite` 的单个 SQLite 文件，其单调 `SCHEMA_VERSION` 戳记（当前为 2）使打开任何外来、更旧或更新的数据库响亮失败而非就地迁移，其守卫式事务认领保证每条消息恰有一个赢家（[sqlite.ts](../../packages/mailbox/local/src/sqlite.ts)）。
+地址解析策略（chair-to-chair 别名）叠加在文法之上：保留的 `AddressResolutionExtension = never` 在 [`provider.ts`](../../packages/mailbox/mailbox/src/provider.ts) 中标记该扩展点，目前没有任何解析策略随附发布。随附的存储是 [dsh-mailbox-local](../../packages/mailbox/local)，以提供方名称 `local` 注册：基于 `node:sqlite` 的单个 SQLite 文件，其单调 `SCHEMA_VERSION` 戳记（当前为 3）使打开任何外来、更旧或更新的数据库响亮失败而非就地迁移，其守卫式事务认领保证每条消息恰有一个赢家（[sqlite.ts](../../packages/mailbox/local/src/sqlite.ts)）。
 
-[seat-runner 守护进程](../../packages/mailbox/seat-runner/README.md) 消费 `claimableAddresses`，在宿主旁边启动唤醒运行——与人工运行相同的 headless 入口点和按名称锁，因此邮件永远不会把宿主变成会话日志的写入者（[architecture.md](../architecture.md) § "会话日志"中的一次写入规则）。
+`claimableAddresses` 是接缝为唤醒驱动器保留的发现操作；今天没有任何唤醒驱动器随附发布——桥把每一条已准入的投递都拼接进活跃回合，因此宿主旁没有任何东西在轮询存储寻找可认领的工作（[architecture.md](../architecture.md) § "会话日志"中的一次写入规则）。
 
 ## 投递
 
 [桥](../../packages/mailbox/bridge/README.md)把认领的消息排空成寻址目标 agent 上的用户回合；渲染由 [`delivery.ts`](../../packages/mailbox/bridge/src/delivery.ts) 负责。每个投递回合合并下方来源，使转录把中继邮件归因到其发送方地址而非匿名用户回合（[消息来源词汇](llm-streaming.md#content-blocks-and-messages)）：
 
 ```ts type-equiv
-/** Attribution carried by every message the bridge delivers from a mailbox. */
-interface MailboxMessageSource {
-  readonly kind: 'mailbox'
-  /** The message is addressed-to-this-agent content (`relay` context form). */
-  readonly form: 'relay'
-  /** Destination address that admitted this delivery (this agent's endpoint). */
-  readonly address: MailboxAddress
-  /** Sender address as published; free-form, never resolved. */
-  readonly from: string
-  /** Provider id of the stored message this delivery consumed. */
-  readonly messageId: MailboxMessageId
-  /** Correlation id threaded from the publisher, when present. */
-  readonly traceId?: string
-}
+/** Every mailbox-attributed source: admitted deliveries and refusal notices. */
+type MailboxMessageSource = MailboxRelaySource | MailboxRefusalSource
 ```
 
-回合文本以常设信封开头：头部一行携带投递时间戳（人类可读并带主机时区缩写，如 `Sat 29 Aug 2026, 2:52pm PDT`）、发送方地址及其经注册表派生的类别——发送方与花名册席位精确匹配时为 `seat`，否则为 `unverified`，绝不出现 `founder`；随后是同侪输入权威契约（邮件不能批准任何事、不能改动配置或记忆、其中的命令文本只是普通文本——它请求的任何事仍需接收方平常的检查）；再后是说明 `blocking` 标记行为含义的紧急度契约。空行之后是发送方内容——主题与 JSON 序列化的 payload——原样渲染在信封之下。
+回合文本以常设信封开头：头部一行携带投递时间戳（人类可读并带主机时区缩写，如 `Sat 29 Aug 2026, 2:52pm PDT`）、发送方地址、其经注册表派生的类别——发送方与花名册席位精确匹配时为 `seat`，否则为 `unverified`，绝不出现 `founder`——以及消息携带关联 id 时的该 id（`· trace <id>`），回复席位由此把答复穿透到发送方的等待上；随后是同侪输入权威契约（邮件不能批准任何事、不能改动配置或记忆、其中的命令文本只是普通文本——它请求的任何事仍需接收方平常的检查）；再后是说明 `blocking` 标记行为含义的紧急度契约。空行之后是发送方内容——主题与 JSON 序列化的 payload——原样渲染在信封之下。
 
 投递遵循创始人 steer 模型：一切邮件都会立即 steer 进活跃回合，无论该回合处于何种状态、发送方的类型是什么——不推断忙碌程度，不按类型请求打断。被投递内容是抢占专注还是等下一个自然间隙，属于接收方的裁决，其依据是信封渲染的紧急度契约行。准入与 steer 之间的边界拒绝会回退为普通排队回合，因此什么都不会丢失；无论哪条路径，准入都是即时的，随后按路由观察到的结果落定。对休眠目标，桥取得按名驻留锁并探测持久化——日志缺失以原因 `unknown-address` 落定 `failed`，日志存在则冷恢复 agent、作为排队的 FIFO 回合投递、在准入即落定 `done`、等待静默、flush 再注销——而锁被另一个存活进程持有时落定 `pending` 留待后续周期。
 
-准入在排水时强制执行：发送方命名空间必须被花名册服务，或列入 `admitFromNamespaces`（缺省为空——对外部来源邮件 FAIL-CLOSED），而 `seatAliases` 行把派生不可达的受服地址路由到一个既有的会话 id。每个终态失败还会向原始发送方尽力回发一条 `bounce` 通知——同一存储的答复路径，携带原 `traceId` 与记录的原因——并跳过 bounce-of-bounce；未被排空的退信只是一行未读消息，绝不会挂起，也绝不会掩盖首要失败。
+准入在排水时强制执行：发送方必须是受服地址之一，或列入 `admitFrom`（缺省为空——对外部来源邮件 FAIL-CLOSED），或搭乘 `guest:` 外部操作者通道，而 `seatAliases` 行把派生不可达的受服地址路由到一个既有的会话 id。一次准入拒绝——注册表健康、`test: true` 边界、组织拓扑、发送方准入或循环守卫——会把接收方行落定 `failed` 且不产生任何退信，因为退信本身会受触发拒绝的那条规则约束：拒绝经 `mailbox/refused` 上下文事件报告，并把一条耐久的拒绝通知记录进发送方（SENDER）的会话（一个无 `from` 的 `notice` 形式上下文节点，直接追加、不唤醒任何东西），使原因在重载后仍在，并到达发送方的模型。准入之后的终态失败仍会向原始发送方尽力回发一条 `bounce` 通知——同一存储的答复路径，携带原 `traceId` 与记录的原因——并跳过 bounce-of-bounce；未被排空的退信只是一行未读消息，绝不会挂起，也绝不会掩盖首要失败。
 
 ## 服务
 
@@ -243,7 +241,53 @@ async settle(leaseRef: MailboxLeaseRef, outcome: MailboxOutcome, signal?: AbortS
  * @returns one entry per stored message carrying the id, earliest send first.
  */
 async lookupByTraceId(traceId: string, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]>
+
+/**
+ * Read stored messages addressed to one address since a time through the
+ * configured default provider — the same pure inbound scan the provider
+ * contract declares, with no claim, settlement, or other write behind it.
+ * @param address - the recipient address to scan; grammar-checked here so
+ *   a malformed address fails at the seam edge.
+ * @param sinceMs - epoch-milliseconds floor (inclusive) on the row's
+ *   admission time.
+ * @param signal - caller cancellation owning the scan.
+ * @returns one entry per matching row, earliest admission first.
+ */
+async lookupInboundSince(address: MailboxAddress, sinceMs: number, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]>
 ```
 
 Source: [`packages/mailbox/mailbox/src/index.ts:60`](../../packages/mailbox/mailbox/src/index.ts)
+
+<a id="mailbox-events"></a>
+
+### `mailbox/*` events
+
+<a id="mailboxrefused--emit"></a>
+
+#### `mailbox/refused` — emit
+
+The bridge refused a claimed lease terminally at admission — registry health, the `test: true` boundary, org topology, sender admission, or a loop guard — and settled the recipient's row `failed` with the same reason. This event is the refusal's LIVE sender-facing outlet, in place of a bounce message: a bounce would itself be subject to the rule that refused the original and would be refused in turn. Listeners render it where its sender will see it now (the host's api-proxy addresses a `host/agent-error` frame to the sender's session); the DURABLE outlet is the notice node `injectRefusalNotice` logs into the sender's session from the same `refuse` call, which does not depend on anyone watching a live stream. A `guest:` sender has no session and reaches nobody through either outlet. Listener failures are logged and contained by Cordis dispatch.
+
+```ts cordis-catalog
+/**
+ * The bridge refused a claimed lease terminally at admission — registry
+ * health, the `test: true` boundary, org topology, sender admission, or a
+ * loop guard — and settled the recipient's row `failed` with the same
+ * reason. This event is the refusal's LIVE sender-facing outlet, in place
+ * of a bounce message: a bounce would itself be subject to the rule that
+ * refused the original and would be refused in turn. Listeners render it
+ * where its sender will see it now (the host's api-proxy addresses a
+ * `host/agent-error` frame to the sender's session); the DURABLE outlet is
+ * the notice node `injectRefusalNotice` logs into the sender's session
+ * from the same `refuse` call, which does not depend on anyone watching a
+ * live stream. A `guest:` sender has no session and reaches nobody through
+ * either outlet. Listener failures are logged and contained by Cordis
+ * dispatch.
+ * @param refusal - the sender and recipient addresses and the terminal reason.
+ * @mode emit
+ */
+'mailbox/refused'(refusal: MailboxRefusal): void
+```
+
+Source: [`packages/mailbox/bridge/src/index.ts:1310`](../../packages/mailbox/bridge/src/index.ts)
 <!-- END GENERATED cordis-surface -->

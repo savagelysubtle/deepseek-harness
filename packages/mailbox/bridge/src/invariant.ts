@@ -15,13 +15,19 @@ export const name = 'mailbox-bridge-invariant'
 export const inject = ['invariants']
 
 /**
- * No runtime invariant: the bridge owns no durable artifact and no event
- * stream of its own. Every relation it relies on is asserted by the operation
- * that makes the decision — claim exclusivity and settlement legitimacy live
- * in the provider's SQL, residency is the named-session lock file itself,
- * and address-grammar membership is validated once at mount with direct
- * tests. Delivery outcomes are recorded through the store's own settled
- * state, which the provider package already covers.
+ * No runtime invariant: every relation this package owns is enforced by the
+ * operation that makes the decision, each with direct tests. The one event
+ * stream the bridge emits (`mailbox/refused`) is emitted by the same `refuse`
+ * call that settles the recipient's row `failed` with the same reason and
+ * logs the sender's durable notice node — the event, the settlement, and the
+ * notice are that single operation, not a cross-operation state relation a
+ * companion could watch — and the store's settled state itself remains the
+ * provider package's coverage. The notice's loop and interrupt safety are
+ * structural, not observational: it is appended to the sender's session log
+ * directly, so it never enters the mail store (nothing can claim, judge, or
+ * refuse it) and never touches the inbox (nothing can wake on it). Residency
+ * is the named-session lock file, and address-grammar membership is validated
+ * once at mount.
  */
 const install: InvariantInstaller = () => {}
 

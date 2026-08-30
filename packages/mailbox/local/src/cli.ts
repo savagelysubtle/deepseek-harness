@@ -22,8 +22,8 @@
  * @module @deepseek-ai/dsh-mailbox-local/cli
  */
 
-import { readFileSync } from 'node:fs'
-import { pathToFileURL } from 'node:url'
+import { readFileSync, realpathSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { parseMailboxAddress } from '@deepseek-ai/dsh-mailbox'
 import type { MailboxMessageId } from '@deepseek-ai/dsh-mailbox'
 import { openLocalMailbox, resolveMailboxPath } from './index.ts'
@@ -296,10 +296,33 @@ export async function runMailboxCli(argv: readonly string[]): Promise<number> {
   }
 }
 
+/**
+ * Whether one argv script path names THIS module, compared after resolving
+ * both sides through the filesystem. `import.meta.url` is always fully
+ * resolved, while `process.argv[1]` can carry a symlinked path — a bin shim,
+ * a PATH entry into a linked install, or any indirection an operator's shell
+ * puts in the way — and an unresolved comparison never matches, so the guard
+ * would be false and the CLI would exit 0 having run nothing. A resolution
+ * failure (the invoked path does not exist, or cannot be read) answers
+ * `false`: a missing file cannot be this module's entry.
+ * @param invokedPath - the `process.argv[1]` script path, unresolved.
+ * @param entryUrl - this module's `import.meta.url`.
+ * @returns whether the invoked path and this module are the same file.
+ */
+export function isEntryInvocation(invokedPath: string, entryUrl: string): boolean {
+  try {
+    return realpathSync(invokedPath) === realpathSync(fileURLToPath(entryUrl))
+  } catch {
+    // ENOENT or an unreadable path: the invocation cannot be this module's
+    // entry, and there is no fallback comparison that could still match.
+    return false
+  }
+}
+
 // Bin execution guard: run only when this file is the entry module, so an
 // in-process import (tests) never starts a store session.
 const invoked = process.argv[1] !== undefined
-  && import.meta.url === pathToFileURL(process.argv[1]).href
+  && isEntryInvocation(process.argv[1], import.meta.url)
 if (invoked) {
   runMailboxCli(process.argv.slice(2)).then((code) => {
     process.exitCode = code

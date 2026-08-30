@@ -171,3 +171,13 @@ something adjacent that looks like user activity.
 persistence runs afterwards and its failures do not propagate. So `ok:true` plus a
 plausible seq can coexist with nothing reaching disk. **Confirm on the artifact** —
 cold-read the log and check the value is actually in it.
+
+### 2026-08-30 — A fresh test host needs its home assembled: profile, credentials, route
+
+Booting a host into a brand-new `DSH_HOME` failed three times before it ran. Three separate pieces live in a home, and a fresh one has none of them:
+
+1. **Profiles resolve under `$DSH_HOME/profiles/`** — "profile mailtest does not exist" means copy the profile directory into the fresh home, not that the profile is gone.
+2. **Model credentials and route are home-local too**: `.credentials.yaml` (the key) and `settings.yaml` (`agent-default-model`) — a home without them fails every turn with `MISSING_CREDENTIAL` against the default `deepseek-official` route. A known-good test home's pair can be copied.
+3. **Launcher flags precede app-consumed flags**: `dsh --patch o.yml --profile p --port 3099` boots; `--port 3099 --patch …` dies with "unknown option '--patch'" because the inner web app's commander sees the flag first.
+
+And one process-hygiene rule I violated twice: track each background host by the **node pid from `ss -tlnp`**, never by "the job I started last" — my kill/restart dance hit the wrong pids and nearly double-bound the port, and the stale survivor's bridge went quiet for ~10 minutes in a way I still cannot fully explain. One host per port, one pid per host, checked on every restart.

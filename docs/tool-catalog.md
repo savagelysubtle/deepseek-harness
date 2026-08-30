@@ -15,7 +15,7 @@ This table connects model-visible tool names to the plugin package and service s
 
 | Tool package | Model-visible names | Requires | Writes / affects | Shipped aliases | Deployment note |
 | --- | --- | --- | --- | --- | --- |
-| `@deepseek-ai/dsh-tool-mailbox` | `mailbox_check_inbox`, `mailbox_send` | `ctx.tools`, `ctx.mailbox` | `tool/call`, `tool/result` | - | mailbox_send carries NO sender field: the runtime fills `from` from the trusted session name, so a seat cannot claim to be another seat or the founder. mailbox_check_inbox takes no address and drains only the calling session's own endpoint. An anonymous run (no session name) fails both tools loud at call time rather than falling back to an untrusted identity. |
+| `@deepseek-ai/dsh-tool-mailbox` | `mailbox_await`, `mailbox_check_inbox`, `mailbox_send` | `ctx.tools`, `ctx.mailbox` | `tool/call`, `tool/result` | - | mailbox_send carries NO sender field: the runtime fills `from` from the trusted session name, so a seat cannot claim to be another seat or the founder. Its replyToTraceId threads a reply onto the awaited send's correlation chain. mailbox_check_inbox takes no address and drains only the calling session's own endpoint. mailbox_await holds the turn until a reply (read-detected even when the bridge already delivered it), a refusal of the correlated send, or the deadline. An anonymous run (no session name) fails all tools loud at call time rather than falling back to an untrusted identity. |
 | `@deepseek-ai/dsh-tool-ask-user` | `ask_user_question` | `ctx.tools`, `ctx.userQuestions` | `tool/call`, `tool/result after a UI/provider answers the question` | - | ask_user_question pauses the tool call until the active UI provider returns a human answer. |
 | `@deepseek-ai/dsh-tools` | `run_code` | `ctx.tools`, `ctx.codeRuntime (execution time)`, `ctx.systemPrompt` | `tool/call`, `one tool/code-dispatch-start + tool/code-dispatch pair per bridged sub-call`, `tool/result` | - | Owned by the tool registry as a reserved transport outside filterable capability layers under `mode: code` / `mode: both` (see the Code Mode Agent Note). Under `code` it is the registry's only wire contribution; the other visible capabilities are declared in a generated SDK section in the loaded runtime's language, and a program calls them through bindings scheduled under the native concurrency contract (submission-ordered starts and policy; concurrency-safe bodies overlap up to `maxParallelSubCalls`) that re-enter the complete guarded tool pipeline and link each nested execution to this outer result. |
 | `@deepseek-ai/dsh-plan-mode` | `exit_plan_mode` | `ctx.tools`, `ctx.systemPrompt`, `ctx.userQuestions (execution time, opportunistic)` | `tool/call`, `plan/mode inactive on an approved review`, `tool/result` | - | exit_plan_mode stays in the model-facing schema while planning is inactive so transitions add no tool-catalog churn on top of the plan-policy change. Its execute path rejects calls outside plan mode; in plan mode it presents the plan over the user-questions seam (approve / keep planning with feedback), and approval logs plan mode inactive at the step boundary. |
@@ -46,6 +46,28 @@ This table connects model-visible tool names to the plugin package and service s
 
 ## `@deepseek-ai/dsh-tool-mailbox`
 
+### `mailbox_await`
+
+Hold this turn until a reply arrives or the deadline expires — the wait primitive to call right after mailbox_send when you are blocked on an answer, instead of improvising a Bash sleep-poll loop that burns one turn per poll. Pass the traceId from that send's result to correlate the wait with that exact message: a refusal in transit ends the wait immediately with its reason (never wait out the deadline for a refused message), and a timeout states whether the message was delivered or never picked up. The wait recognizes a reply whether it was still queued or already delivered to this seat — but the reply only carries your traceId if the sender passed it as replyToTraceId on their mailbox_send, so say so when you ask for a reply. A timeout is a normal outcome — on one, report the stall, re-await, or move on rather than retrying blindly. Without a traceId the wait ends on any inbound mail for this seat. The deadline is clamped to 1000–600000 ms; default 300000 (5 minutes).
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "deadlineMs": {
+      "type": "integer",
+      "description": "How long to hold this turn, in milliseconds; clamped to 1000–600000. Default 300000 (5 minutes)."
+    },
+    "traceId": {
+      "type": "string",
+      "description": "The traceId mailbox_send returned for the message you are waiting on. Correlates the wait to that send: a refusal ends the wait immediately, a timeout reports the message's delivery state, and a reply threaded onto the id ends the wait with its content. Omit to end the wait on any inbound mail."
+    }
+  }
+}
+```
+
+Source: [`packages/mailbox/tool-mailbox/src/index.ts`](../packages/mailbox/tool-mailbox/src/index.ts)
+
 ### `mailbox_check_inbox`
 
 Drain this seat's own mailbox: claim and deliver every pending message addressed to this seat. Takes no address argument — the runtime drains this session's own address, and only that one. Each returned message is removed from the pending queue (delivered); call it whenever you expect mail, for example after learning a coworker sent you something.
@@ -61,7 +83,7 @@ Source: [`packages/mailbox/tool-mailbox/src/index.ts`](../packages/mailbox/tool-
 
 ### `mailbox_send`
 
-Send a mailbox message to another seat by its bare name. The sender is filled in by the runtime from this session's trusted name and cannot be chosen or changed — the recipient sees the message as coming from this seat. Replies travel as their own mailbox_send calls, not inside this one.
+Send a mailbox message to another seat by its bare name. The sender is filled in by the runtime from this session's trusted name and cannot be chosen or changed — the recipient sees the message as coming from this seat. Replies travel as their own mailbox_send calls, not inside this one. When this message IS the reply the other seat is waiting for, pass the traceId its sender quoted as replyToTraceId: the reply then carries that correlation id, and the waiting seat's mailbox_await matches it instead of timing out. The result names a traceId: pass it to mailbox_await to hold this turn until the reply arrives or the deadline expires.
 
 ```json
 {
@@ -82,6 +104,10 @@ Send a mailbox message to another seat by its bare name. The sender is filled in
     "blocking": {
       "type": "boolean",
       "description": "True when you are blocked waiting on an answer to this message and the recipient should handle it now; omit for ordinary mail the recipient can absorb at a natural gap."
+    },
+    "replyToTraceId": {
+      "type": "string",
+      "description": "The traceId of the message this reply answers — only when the sender asked you to reply while it waits (its mail said so, or you know it is awaiting). Threads the reply onto that message's correlation chain so the waiting seat's mailbox_await recognizes your reply. Omit for ordinary replies and new threads."
     }
   },
   "required": [
@@ -94,7 +120,7 @@ Send a mailbox message to another seat by its bare name. The sender is filled in
 
 Source: [`packages/mailbox/tool-mailbox/src/index.ts`](../packages/mailbox/tool-mailbox/src/index.ts)
 
-mailbox_send carries NO sender field: the runtime fills `from` from the trusted session name, so a seat cannot claim to be another seat or the founder. mailbox_check_inbox takes no address and drains only the calling session's own endpoint. An anonymous run (no session name) fails both tools loud at call time rather than falling back to an untrusted identity.
+mailbox_send carries NO sender field: the runtime fills `from` from the trusted session name, so a seat cannot claim to be another seat or the founder. Its replyToTraceId threads a reply onto the awaited send's correlation chain. mailbox_check_inbox takes no address and drains only the calling session's own endpoint. mailbox_await holds the turn until a reply (read-detected even when the bridge already delivered it), a refusal of the correlated send, or the deadline. An anonymous run (no session name) fails all tools loud at call time rather than falling back to an untrusted identity.
 
 <a id="deepseek-aidsh-tool-ask-user"></a>
 

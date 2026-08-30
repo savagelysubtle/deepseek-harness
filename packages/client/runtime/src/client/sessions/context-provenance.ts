@@ -86,6 +86,12 @@ export function contextProvenance(source: unknown): ContextProvenanceView {
     // A user-explicit skill invocation names the skill it injected.
     case 'skill-invocation':
       return { role: 'inject', label: readString(record, 'name') ?? kind }
+    // Delivered mail names its sender address. The dedicated mail card
+    // (`ContextInjectionRow`, gated on {@link mailboxRelay}) replaces this
+    // label entirely once the source is readable; it survives here only as
+    // the collapsed-row fallback for a mailbox source that names no sender.
+    case 'mailbox':
+      return { role: 'inject', label: readString(record, 'from') ?? kind }
     // Documented default arm of the merge-extensible source map: an unknown
     // producer still identifies itself by its own durable kind.
     default:
@@ -116,4 +122,102 @@ export function contextForm(source: unknown): KnownContextForm | null {
   return form !== null && (KNOWN_FORMS as readonly string[]).includes(form)
     ? form as KnownContextForm
     : null
+}
+
+/**
+ * Sender class a delivered mailbox relay's source may state: `seat` when the
+ * sender address matched a roster seat at delivery, `unverified` otherwise.
+ * Mirrors `SenderClass` in `@deepseek-ai/dsh-mailbox-bridge`, duplicated here
+ * rather than imported so this UI package stays independent of the bridge.
+ */
+export type MailboxSenderClass = 'seat' | 'unverified'
+
+/**
+  * Everything this UI version can read off a delivered mailbox relay's durable
+ * source. The bridge stamps `senderClass` on every delivery, and `subject` and
+ * `blocking` whenever the message carried them (`relaySource` in
+ * `@deepseek-ai/dsh-mailbox-bridge`, onto `MailboxMessageSource` in
+ * `@deepseek-ai/dsh-mailbox`), so all three normally read. They still read null
+ * for a message logged before that stamping landed, and for one that simply
+ * carried no subject or was not blocking — the mail card degrades by omitting
+ * whatever reads null. Nothing here is scraped from the model-facing envelope
+ * text; the source is the only input, and it is merge-extensible by design.
+ */
+export interface MailboxRelayView {
+  /** Sender address, exactly as the source records it. */
+  from: string
+  /** Sender class stated at delivery, when the source records it. */
+  senderClass: MailboxSenderClass | null
+  /** Subject line, when the source records one. */
+  subject: string | null
+  /** Whether the sender is blocked waiting on a reply, when the source records it. */
+  blocking: boolean | null
+}
+
+/**
+ * Read one delivered mailbox relay off its durable source.
+ *
+ * Narrower than {@link contextForm}: `form: 'relay'` alone does not say
+ * whether a context is delivered mail or a subagent relay (both declare it),
+ * so the mail presentation and {@link contextForm}'s `relay` dispatch both
+ * call this first and fall back to the subagent presentation when it reads
+ * null.
+ * @param source - the logged `user/message` source, exactly as recorded.
+ * @returns the readable mail fields, or null when this is not a readable
+ *   mailbox relay (a different `kind`, or one that names no sender).
+ */
+export function mailboxRelay(source: unknown): MailboxRelayView | null {
+  const record = asRecord(source)
+  if (record === null || readString(record, 'kind') !== 'mailbox') return null
+  const from = readString(record, 'from')
+  if (from === null) return null
+  const senderClass = record['senderClass']
+  const blocking = record['blocking']
+  return {
+    from,
+    senderClass: senderClass === 'seat' || senderClass === 'unverified' ? senderClass : null,
+    subject: readString(record, 'subject'),
+    blocking: typeof blocking === 'boolean' ? blocking : null,
+  }
+}
+
+/**
+ * What this UI version can read off a mailbox refusal notice's durable source.
+ * The bridge stamps a refusal notice as `kind: 'mailbox'`, `form: 'notice'` —
+ * the harness reporting a refused send into the SENDER's session — with the
+ * attempted recipient, the terminal reason, and the refused message's id. It
+ * carries NO `from` by design, which is exactly why {@link mailboxRelay} never
+ * matches it: a refusal must never present as mail from a peer.
+ */
+export interface MailboxRefusalView {
+  /** Recipient address the refused mail was addressed to. */
+  refusedTo: string
+  /** The terminal refusal reason recorded on the recipient's failed row. */
+  reason: string
+  /** One-line account for the collapsed row, when the source records one. */
+  summary: string | null
+}
+
+/**
+ * Read one mailbox refusal notice off its durable source.
+ *
+ * Narrower than {@link contextForm}: a readable refusal names its attempted
+ * recipient AND its reason, both required because a notice missing either is
+ * not a readable refusal — presenting one without the reason would show a
+ * confident card over a mystery. Such a source reads null here and falls
+ * through to the generic notice presentation, which renders whatever the
+ * record still carries.
+ * @param source - the logged `user/message` source, exactly as recorded.
+ * @returns the readable refusal fields, or null when this is not a readable
+ *   mailbox refusal (a different `kind`, the `relay` form, or missing
+ *   recipient or reason).
+ */
+export function mailboxRefusal(source: unknown): MailboxRefusalView | null {
+  const record = asRecord(source)
+  if (record === null || readString(record, 'kind') !== 'mailbox') return null
+  if (readString(record, 'form') !== 'notice') return null
+  const refusedTo = readString(record, 'refusedTo')
+  const reason = readString(record, 'reason')
+  if (refusedTo === null || reason === null) return null
+  return { refusedTo, reason, summary: readString(record, 'summary') }
 }

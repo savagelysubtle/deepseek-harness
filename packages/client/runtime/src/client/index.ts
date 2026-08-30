@@ -85,13 +85,14 @@ export {
 } from './sessions/conversation.ts'
 export { emptyAssistantBlock } from './sessions/partial.ts'
 export { isTokenDelta } from './sessions/assistant-timing.ts'
-export { contextForm, contextProvenance } from './sessions/context-provenance.ts'
+export { contextForm, contextProvenance, mailboxRefusal, mailboxRelay } from './sessions/context-provenance.ts'
 export { displayFailureMessage } from './sessions/failure-display.ts'
 export type {
   ConversationContext, ConversationContextOriginKind,
 } from './sessions/conversation-context.ts'
 export type {
-  ContextProvenanceView, ContextRole, KnownContextForm,
+  ContextProvenanceView, ContextRole, KnownContextForm, MailboxRefusalView, MailboxRelayView,
+  MailboxSenderClass,
 } from './sessions/context-provenance.ts'
 export type {
   ConversationPromptSnapshot, RequestInspectionSnapshot, RequestPromptChange, RequestView,

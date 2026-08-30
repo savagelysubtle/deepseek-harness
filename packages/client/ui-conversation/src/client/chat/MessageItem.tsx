@@ -266,6 +266,7 @@ export const ContextMessageNodeView = memo(function ContextMessageNodeView({ nod
       source={data.source}
       provenance={data.provenance}
       form={data.form}
+      time={data.time}
       t={t}
     />
   )

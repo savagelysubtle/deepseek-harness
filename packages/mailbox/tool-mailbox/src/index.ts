@@ -1,12 +1,14 @@
 /**
  * Model-facing mailbox tools over the mailbox seam: `mailbox_send` publishes
  * with a runtime-filled sender, `mailbox_check_inbox` drains the calling
- * session's own address. The schema exposes no sender field and no address
- * argument, so a seat cannot claim another identity or read another seat's
- * mail through these tools. Where the identity itself comes from depends on
- * how many seats share the process — the launcher's {@link Config.sessionName}
- * for a one-seat headless run, the calling agent matched against
- * {@link Config.addresses} for the many-seat host. See the identity module.
+ * session's own address, and `mailbox_await` holds the calling turn until a
+ * reply arrives, the awaited send is refused, or a deadline expires. The
+ * schemas expose no sender field and no address argument, so a seat cannot
+ * claim another identity or read another seat's mail through these tools.
+ * Where the identity itself comes from depends on how many seats share the
+ * process — the launcher's {@link Config.sessionName} for a one-seat headless
+ * run, the calling agent matched against {@link Config.addresses} for the
+ * many-seat host. See the identity module.
  *
  * The plugin stays PENDING until `ctx.tools` and `ctx.mailbox` exist, and the
  * tools fail loud at call time when the run has no session name: an anonymous
@@ -20,12 +22,20 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
 import type { IdentitySources } from './identity.ts'
-import { mailboxCheckInboxTool, mailboxSendTool } from './tools.ts'
+import { mailboxAwaitTool, mailboxCheckInboxTool, mailboxSendTool } from './tools.ts'
 
-export { CHECK_INBOX_DRAIN_LIMIT, CHECK_INBOX_STALE_CLAIM_MS } from './tools.ts'
+export {
+  AWAIT_DEFAULT_DEADLINE_MS,
+  AWAIT_MAX_DEADLINE_MS,
+  AWAIT_MIN_DEADLINE_MS,
+  AWAIT_POLL_INTERVAL_MS,
+  CHECK_INBOX_DRAIN_LIMIT,
+  CHECK_INBOX_STALE_CLAIM_MS,
+  clampAwaitDeadlineMs,
+} from './tools.ts'
 export { resolveMailboxIdentity } from './identity.ts'
 export type { IdentitySources } from './identity.ts'
-export type { CheckInboxResult, InboxEntry, SendResult } from './tools.ts'
+export type { CheckInboxResult, InboxEntry, MailboxAwaitOutcome, MailboxAwaitResult, MailboxAwaitSentState, SendResult } from './tools.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'tool-mailbox'
@@ -33,12 +43,12 @@ export const name = 'tool-mailbox'
 /** Services required before the tools can register. */
 export const inject = ['tools', 'mailbox']
 
-/** Plugin configuration: the trusted identity source of the two tools. */
+/** Plugin configuration: the trusted identity source of the mailbox tools. */
 export interface Config {
   /**
    * The calling session's trusted name — the name the operator's launcher
    * passed to this process. Correct only where the process serves ONE seat,
-   * which is the headless run. Absent for an anonymous run: both tools then
+   * which is the headless run. Absent for an anonymous run: the tools then
    * fail loud at call time (see {@link resolveMailboxIdentity}), because
    * there is no identity to trust.
    */
@@ -74,4 +84,5 @@ export function apply(ctx: Context, config: Config): void {
   }
   ctx.tools.register(mailboxSendTool(ctx.mailbox, identity))
   ctx.tools.register(mailboxCheckInboxTool(ctx.mailbox, identity))
+  ctx.tools.register(mailboxAwaitTool(ctx.mailbox, identity))
 }

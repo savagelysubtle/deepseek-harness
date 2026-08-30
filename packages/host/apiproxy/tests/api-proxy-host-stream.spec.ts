@@ -1,17 +1,18 @@
 /**
- * The host stream's relay of the persistence coordinator's caller-less drain
- * failure. `session/persistence-failed` rides the context bus — never the
- * session log, which is the thing that failed — and lands on the existing
- * `host/agent-error` frame, the documented outlet for live failures with no
- * turn position, so the UI renders it with no client-side work. This spec owns
- * the frame mapping and the reason-plus-remedy message; the emission side is
- * session-persistence's.
+ * The host stream's relays onto the `host/agent-error` frame — the documented
+ * outlet for live failures with no turn position. `session/persistence-failed`
+ * rides the context bus — never the session log, which is the thing that
+ * failed — and `mailbox/refused` carries an admission refusal to the refused
+ * sender's session, since the bridge's logger warning has no sink in this
+ * deployment. This spec owns both frame mappings and their human-readable
+ * messages; the emission sides are session-persistence's and the bridge's.
  */
 
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
+import { deriveNamedSessionId } from '@deepseek-ai/dsh-named-sessions'
 import type { HostFrame } from '../src/api/index.ts'
 import type { RpcRequest } from '../src/api/rpc.ts'
 import { RpcId } from '../src/api/rpc.ts'
@@ -92,6 +93,59 @@ describe('host stream: session/persistence-failed relay', () => {
       sessionId: 'persist-transient',
       message: 'Session persistence failed: disk full. Events written after this failure are buffered and retry '
         + 'with the session\'s next write; if failures continue, reload the session from disk.',
+    }])
+  })
+})
+
+describe('host stream: mailbox/refused relay', () => {
+  it('relays a refusal to the sender session as host/agent-error, naming who mailed whom and why', async () => {
+    const { ctx, api } = await harness()
+    const frames = await collectHost(api, ['host/agent-error'], 1, () => {
+      ctx.emit('mailbox/refused', {
+        from: 'alice',
+        to: 'batman',
+        reason: 'test-boundary-violation: test seat "alice" may not mail "batman" (not marked test: true)',
+      })
+    })
+
+    // The sender's session id is derived the way the bridge routes a seat:
+    // the address IS the session name. The bridge's logger warning has no
+    // sink in this deployment, so this frame is where the operator reads it.
+    expect(frames).toEqual([{
+      type: 'host/agent-error',
+      sessionId: deriveNamedSessionId('alice'),
+      message: 'Mail from "alice" to "batman" was refused by the mailbox bridge: '
+        + 'test-boundary-violation: test seat "alice" may not mail "batman" (not marked test: true)',
+    }])
+  })
+
+  it('reports nothing for a sender with no session — guest or unparseable — while still relaying real seats', async () => {
+    const { ctx, api } = await harness()
+    // Each dead-end refusal is emitted BEFORE the seat refusal that serves as
+    // the control: the stream is demonstrably open and relaying, so a frame
+    // for a sessionless sender would have arrived ahead of it.
+    const frames = await collectHost(api, ['host/agent-error'], 1, () => {
+      ctx.emit('mailbox/refused', {
+        from: 'guest:claude-code',
+        to: 'batman',
+        reason: 'sender-not-admitted',
+      })
+      ctx.emit('mailbox/refused', {
+        from: 'robin',
+        to: 'batman',
+        reason: 'sender-not-admitted',
+      })
+      ctx.emit('mailbox/refused', {
+        from: 'no separator',
+        to: 'batman',
+        reason: 'sender-not-admitted',
+      })
+    })
+
+    expect(frames).toEqual([{
+      type: 'host/agent-error',
+      sessionId: deriveNamedSessionId('robin'),
+      message: 'Mail from "robin" to "batman" was refused by the mailbox bridge: sender-not-admitted',
     }])
   })
 })

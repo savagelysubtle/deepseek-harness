@@ -116,6 +116,8 @@ async function makeHarness(options: {
   resumedFollowup: ReturnType<typeof vi.fn>
   disposeCalls: () => number
   flushes: () => number
+  /** The stub agent a resume/create registered under one session id. */
+  agentFor: (id: string) => { session: { append: ReturnType<typeof vi.fn> } } | undefined
 }> {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-mailbox-bridge-unit-'))
   homes.push(dir)
@@ -132,12 +134,15 @@ async function makeHarness(options: {
     // The real registry registers the AGENT under the session id and returns
     // the handle from resume/create; the stub mirrors both facts with one
     // shared agent object so path-1 and resident deliveries hit the same fns.
+    // `session.append` is the refusal-notice seam: a real Session appends a
+    // durable user/message event, and the stub records the call for assertion.
+    const sessionAppend = vi.fn()
     const agent = {
       status: 'idle',
       followup: resumedFollowup,
       steer: vi.fn(),
       whenIdle: async () => {},
-      session: { events: [] },
+      session: { events: [], append: sessionAppend },
     }
     return { agent, handle: { agent, dispose: async () => { state.disposes += 1 } } }
   }
@@ -175,6 +180,8 @@ async function makeHarness(options: {
     resumedFollowup,
     disposeCalls: () => state.disposes,
     flushes: () => state.flushes,
+    /** The stub agent a resume/create registered under one session id. */
+    agentFor: (id: string) => registered.get(id) as { session: { append: ReturnType<typeof vi.fn> } } | undefined,
   }
 }
 
@@ -299,6 +306,17 @@ describe('delivery rendering', () => {
     expect(text).toContain('\n\nhandoff')
   })
 
+  it('renders a traced message with its correlation id in the header, so the replying model can thread a reply', () => {
+    // The traceId is otherwise invisible to the recipient: the send result
+    // names it only to the SENDER, and the await's replyToTraceId thread only
+    // works if the replying seat can quote the id it received.
+    const text = relayText({ message: { ...base, traceId: '3f2a1b7c' }, leaseRef: 'r' as never, claimedAt: 1 }, 'seat')
+    expect(text.split('\n')[0]).toMatch(/ - from sender \(seat\) · trace 3f2a1b7c\]$/)
+    // An untraced message (a CLI publish without one) carries no trace segment.
+    const untraced = relayText({ message: base, leaseRef: 'r' as never, claimedAt: 1 }, 'seat')
+    expect(untraced.split('\n')[0]).not.toContain('trace')
+  })
+
   it('renders an unknown sender as (unverified) — including a sender claiming steve', () => {
     for (const from of ['claude-code', 'steve']) {
       const text = relayText({ message: { ...base, from }, leaseRef: 'r' as never, claimedAt: 1 }, 'unverified')
@@ -330,13 +348,29 @@ describe('delivery rendering', () => {
   })
 
   it('keeps provenance in the merged source, not the text', () => {
-    const sourced = relaySource({ message: { ...base, traceId: 't-9' }, leaseRef: 'r' as never, claimedAt: 1 })
+    const sourced = relaySource({ message: { ...base, traceId: 't-9' }, leaseRef: 'r' as never, claimedAt: 1 }, 'seat')
     expect(sourced).toMatchObject({
-      kind: 'mailbox', form: 'relay', address: TARGET, from: 'sender', messageId: 'm-1', traceId: 't-9',
+      kind: 'mailbox', form: 'relay', address: TARGET, from: 'sender', messageId: 'm-1', senderClass: 'seat', traceId: 't-9',
     })
-    expect(relaySource({ message: base, leaseRef: 'r' as never, claimedAt: 1 })).not.toHaveProperty('traceId')
-    expect(() => relaySource({ message: { to: TARGET, from: 'sender', sentAt: 0 }, leaseRef: 'r' as never, claimedAt: 1 })).toThrow(/no provider id/)
+    expect(relaySource({ message: base, leaseRef: 'r' as never, claimedAt: 1 }, 'unverified')).not.toHaveProperty('traceId')
+    expect(() => relaySource({ message: { to: TARGET, from: 'sender', sentAt: 0 }, leaseRef: 'r' as never, claimedAt: 1 }, 'unverified')).toThrow(/no provider id/)
     expect(admittedOutcome({ message: base, leaseRef: 'r' as never, claimedAt: 1 }).state).toBe('done')
+  })
+
+  it('stamps the mail-card fields — sender class always, subject and blocking only when carried', () => {
+    const full = relaySource({ message: { ...base, subject: 'status check', blocking: true }, leaseRef: 'r' as never, claimedAt: 1 }, 'seat')
+    expect(full).toMatchObject({ senderClass: 'seat', subject: 'status check', blocking: true })
+    // A non-blocking message that still carries the mark stamps `false`, so
+    // the card can render the FYI state instead of degrading to unknown.
+    const fyi = relaySource({ message: { ...base, blocking: false }, leaseRef: 'r' as never, claimedAt: 1 }, 'unverified')
+    expect(fyi.form === 'relay' && fyi.blocking).toBe(false)
+    // Absent message fields are omitted entirely — never stamped `undefined`
+    // — because the source is merge-extensible and older logged rows predate
+    // these keys, so absence must stay a readable state.
+    const bare = relaySource({ message: base, leaseRef: 'r' as never, claimedAt: 1 }, 'unverified')
+    expect(bare).not.toHaveProperty('subject')
+    expect(bare).not.toHaveProperty('blocking')
+    expect(bare.form === 'relay' && bare.senderClass).toBe('unverified')
   })
 })
 
@@ -352,7 +386,7 @@ describe('routing outcomes', () => {
       source: { kind: string; form: string; messageId: string }
       content: readonly [{ text: string }]
     }
-    expect(message.source).toMatchObject({ kind: 'mailbox', form: 'relay', messageId: id })
+    expect(message.source).toMatchObject({ kind: 'mailbox', form: 'relay', messageId: id, senderClass: 'unverified' })
     // The envelope frames the content; 'sender' is no roster seat.
     expect(message.content[0]?.text).toContain('- from sender (unverified)')
     expect(message.content[0]?.text).toContain('\n\nhello')
@@ -705,41 +739,43 @@ describe('sender class framing at drain', () => {
   })
 })
 
-describe('terminal-failure bounces (every drop visible)', () => {
-  /** Read every store row addressed to one recipient address. */
-  type StoredRow = {
-    type: string | null
-    trace_id: string | null
-    result: string | null
-    payload: string | null
-    from_address: string
+/** Read every store row addressed to one recipient address. */
+type StoredRow = {
+  type: string | null
+  trace_id: string | null
+  result: string | null
+  payload: string | null
+  from_address: string
+}
+function rowsTo(storePath: string, address: string): Array<StoredRow> {
+  const db = new DatabaseSync(storePath)
+  try {
+    return db.prepare('SELECT type, trace_id, result, payload, from_address FROM messages WHERE to_address = ?').all(address) as unknown as Array<StoredRow>
+  } finally {
+    db.close()
   }
-  function rowsTo(storePath: string, address: string): Array<StoredRow> {
-    const db = new DatabaseSync(storePath)
-    try {
-      return db.prepare('SELECT type, trace_id, result, payload, from_address FROM messages WHERE to_address = ?').all(address) as unknown as Array<StoredRow>
-    } finally {
-      db.close()
-    }
-  }
+}
 
-  it("bounce round-trip: rejected guest mail produces a 'bounce' row carrying the original traceId and reason", async () => {
+describe('terminal failures (refusals report on the bus, routing failures bounce)', () => {
+  it('an admission refusal settles failed, reports on the context bus, and never bounces mail back', async () => {
     const h = await makeHarness({})
+    const refusals: bridge.MailboxRefusal[] = []
+    h.ctx.on('mailbox/refused', (refusal) => { refusals.push(refusal) })
     const id = await h.ctx.mailbox.publish({
       to: TARGET, from: 'council', subject: 'request', traceId: 'tr-42',
     })
     await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec()))
-    const bounces = rowsTo(h.storePath, 'council').filter(row => row.type === 'bounce')
-    expect(bounces).toHaveLength(1)
-    const bounceRow = bounces[0]
-    expect(bounceRow?.trace_id).toBe('tr-42')
-    expect(bounceRow?.from_address).toBe(String(TARGET))
-    // An UNDRAINED bounce stays pending with an empty settlement slot — the
-    // drop notice lives in its payload, readable by the guest's next inbox.
-    expect(JSON.parse(bounceRow?.payload ?? '{}')).toEqual({
-      bouncedMessageId: id,
-      reason: 'sender-not-admitted',
-    })
+    // Terminal on the recipient's row…
+    const row = await rowState(h.storePath, id)
+    expect(row.state).toBe('failed')
+    expect(JSON.parse(row.result ?? '{}')).toEqual({ reason: 'sender-not-admitted' })
+    // …reported on the bus with sender, recipient, and reason — the notice
+    // that reaches the sender's session as a system notice…
+    expect(refusals).toEqual([{ from: 'council', to: String(TARGET), reason: 'sender-not-admitted' }])
+    // …and NEVER as mail. A bounce would itself be subject to the rule that
+    // refused the original, refused in turn, and the sender would have seen
+    // silence instead of the reason.
+    expect(rowsTo(h.storePath, 'council')).toEqual([])
   })
 
   it('refuses to provision a served address the registry does not know', async () => {
@@ -789,6 +825,131 @@ describe('terminal-failure bounces (every drop visible)', () => {
     await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(['bouncer'])))
     expect(rowsTo(h.storePath, 'bouncer')).toEqual([])
     expect(rowsTo(h.storePath, 'opaque-sender-token')).toEqual([])
+  })
+})
+
+describe('durable refusal notices (the sender-side outlet)', () => {
+  /**
+   * One live sender agent with a recordable session log. `session.append` is
+   * the durable-notice seam: a real Session appends a `user/message` event,
+   * and the stub records the call so tests assert the exact source and text.
+   */
+  function liveSender() {
+    const append = vi.fn()
+    return {
+      append,
+      live: { status: 'idle' as const, followup: vi.fn(), steer: vi.fn(), session: { events: [], append } },
+    }
+  }
+
+  /** The served-target spec with NO admission list, so every seat sender is refused. */
+  function refusingSpec(): Parameters<typeof bridge.resolveBridgeSpec>[0] {
+    return { addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000, admitFrom: [] }
+  }
+
+  it('a live seat sender gets a durable notice node in its own session, waking nothing', async () => {
+    const sender = liveSender()
+    const h = await makeHarness({ liveBySession: {
+      [String(deriveNamedSessionId('target'))]: { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() },
+      [String(deriveNamedSessionId('alice'))]: sender.live,
+    } })
+    const refusals: bridge.MailboxRefusal[] = []
+    h.ctx.on('mailbox/refused', (refusal) => { refusals.push(refusal) })
+    const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'alice', subject: 'unsolicited' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(refusingSpec()))
+    const row = await rowState(h.storePath, id)
+    expect(row.state).toBe('failed')
+    expect(sender.live.steer).not.toHaveBeenCalled()
+    expect(sender.live.followup).not.toHaveBeenCalled()
+    // Exactly one durable node, logged as an appended user/message surface event.
+    expect(sender.append).toHaveBeenCalledTimes(1)
+    const [type, data, opts] = sender.append.mock.calls[0] as [string, {
+      content: ReadonlyArray<{ type: string; text?: string }>
+      source: Record<string, unknown>
+    }, unknown]
+    expect(type).toBe('user/message')
+    expect(opts).toEqual({ surfaceOp: 'append' })
+    expect(data.source).toEqual({
+      kind: 'mailbox',
+      form: 'notice',
+      refusedTo: String(TARGET),
+      messageId: id,
+      reason: 'sender-not-admitted',
+      summary: `Mail to "${String(TARGET)}" was refused: sender-not-admitted`,
+    })
+    // NEVER a `from`: a readable from is what makes a mailbox source present
+    // as incoming mail, and the refusal is the harness reporting on the
+    // sender's own action, not correspondence from the refused recipient.
+    expect(data.source).not.toHaveProperty('from')
+    expect(data.content[0]?.text).toContain(`"${String(TARGET)}"`)
+    expect(data.content[0]?.text).toContain('sender-not-admitted')
+    // One refusal, one notice, zero mail rows: the notice never re-enters the
+    // store, so no admission rule — including the one that fired — can ever
+    // judge it, and no refusal-of-the-refusal loop can exist.
+    expect(refusals).toHaveLength(1)
+    expect(rowsTo(h.storePath, 'alice')).toEqual([])
+  })
+
+  it('a dormant seat sender is resumed, noticed, flushed, and disposed — never provisioned', async () => {
+    const h = await makeHarness({ persisted: ['alice'] })
+    const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'alice', subject: 'ping' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(refusingSpec()))
+    await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'failed' })
+    // The dormant sender's log was rebuilt to receive the notice…
+    expect(h.resumeCalls()).toBe(1)
+    const appended = h.agentFor(String(deriveNamedSessionId('alice')))?.session.append
+    expect(appended).toHaveBeenCalledTimes(1)
+    expect((appended?.mock.calls[0] as unknown[])[0]).toBe('user/message')
+    // …the append was flushed durable, the handle released, and nothing was
+    // created: a sender with no session has nothing to notify.
+    expect(h.flushes()).toBeGreaterThanOrEqual(1)
+    expect(h.disposeCalls()).toBe(1)
+    expect(h.createdSessions()).toEqual([])
+  })
+
+  it('a guest sender gets no notice at all — the CLI channel is its own outcome path', async () => {
+    const h = await makeHarness({ persisted: true })
+    const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'guest:operator', subject: 'outside' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec({
+      addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000,
+      admitFrom: [], admitGuests: false,
+    }))
+    const row = await rowState(h.storePath, id)
+    expect(row.state).toBe('failed')
+    // No resume, no flush, no creation: there is no session to log into.
+    expect(h.resumeCalls()).toBe(0)
+    expect(h.flushes()).toBe(0)
+    expect(h.createdSessions()).toEqual([])
+  })
+
+  it('an unparseable sender names no session and gets no notice injection', async () => {
+    const h = await makeHarness({ persisted: ['alice'] })
+    const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'opaque-sender-token', subject: '?' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(refusingSpec()))
+    const row = await rowState(h.storePath, id)
+    expect(row.state).toBe('failed')
+    expect(h.resumeCalls()).toBe(0)
+    expect(h.flushes()).toBe(0)
+  })
+
+  it('a notice still logs when the guard rules refuse, not only at admission rules', async () => {
+    const sender = liveSender()
+    const h = await makeHarness({ liveBySession: {
+      [String(deriveNamedSessionId('target'))]: { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() },
+      [String(deriveNamedSessionId('sender'))]: sender.live,
+    } })
+    // One spec instance across both drains: the loop guards live on it, so a
+    // fresh resolve per cycle would forget the first admission entirely.
+    const spec = bridge.resolveBridgeSpec(targetSpec())
+    const first = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'same note' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+    await expect(rowState(h.storePath, first)).resolves.toMatchObject({ state: 'done' })
+    const repeat = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'same note' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+    await expect(rowState(h.storePath, repeat)).resolves.toMatchObject({ state: 'failed' })
+    const [type, data] = sender.append.mock.calls[0] as [string, { source: Record<string, unknown> }]
+    expect(type).toBe('user/message')
+    expect(data.source).toMatchObject({ kind: 'mailbox', form: 'notice', reason: expect.stringContaining('duplicate-suppressed') })
   })
 })
 
@@ -890,6 +1051,29 @@ describe('guest admission (the outside-operator channel)', () => {
     expect(row.state).toBe('failed')
     expect(JSON.parse(row.result ?? '{}')).toEqual({ reason: 'sender-not-admitted' })
     expect(live.steer).toHaveBeenCalledTimes(1)
+  })
+
+  it('a guest sender bypasses the boundary and topology by design, and still faces the loop guards', async () => {
+    // A guest (never a roster seat) mails INTO the test bed — the boundary
+    // rule judges seat-to-seat pairs, so it does not apply to a guest — the
+    // break-glass property the guest channel exists for.
+    const path = writeTestRegistry(['tt-ping', 'island'], { edges: [], testSeats: ['tt-ping'] })
+    const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('tt-ping'))]: live } })
+    const glass = await h.ctx.mailbox.publish({
+      to: formatMailboxAddress('tt-ping'), from: 'guest:operator', subject: 'break glass',
+    })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specWith({ addresses: ['tt-ping'], orgRegistryPath: path })))
+    expect(live.steer).toHaveBeenCalledTimes(1)
+    await expect(rowState(h.storePath, glass)).resolves.toMatchObject({ state: 'done' })
+    // The bypass is only about WHO is judging, not about the mail: a guest
+    // message over the size cap still refuses like any other sender.
+    const oversized = await h.ctx.mailbox.publish({
+      to: formatMailboxAddress('tt-ping'), from: 'guest:operator', payload: 'x'.repeat(50),
+    })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specWith({ addresses: ['tt-ping'], orgRegistryPath: path, maxMessageChars: 10 })))
+    const row = await rowState(h.storePath, oversized)
+    expect(JSON.parse(row.result ?? '{}').reason as string).toContain('message-too-large')
   })
 })
 

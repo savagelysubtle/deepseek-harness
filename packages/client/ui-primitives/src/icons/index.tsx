@@ -870,3 +870,21 @@ export const IconArchiveOutline20 = ({ size = 20, className }: IconProps) => (
     <path d="M12.7962 12.5661V11.0832H7.20548V12.5661L12.7962 12.5661Z" fill="currentColor" />
   </svg>
 )
+
+/**
+ * ic_ds_mail_outline_16 (hand-drawn, NOT a figma extract): envelope body as a
+ * rectangular outline ring, plus a filled V for the folded flap. Added for the
+ * mailbox relay card header — no envelope glyph existed in this set. Swap for
+ * a figma extract if/when design produces one; geometry here is a placeholder.
+ */
+export const IconMailOutline16 = ({ size = 16, className }: IconProps) => (
+  <svg width={size} height={size} className={className} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M1.5 3H14.5V13H1.5V3ZM2.7 4.2V11.8H13.3V4.2H2.7Z"
+      fill="currentColor"
+    />
+    <path d="M2.7 4.2L8 9L13.3 4.2V5.6L8 10.4L2.7 5.6V4.2Z" fill="currentColor" />
+  </svg>
+)

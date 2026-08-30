@@ -1,0 +1,98 @@
+/* Mail refusal notice: the harness reporting the sender's OWN refused send —
+   deliberately the mail card's twin geometry (MailInjectionRow.module.css) so
+   the two read as one family, and deliberately NOT mail in colour or icon:
+   the red error accent and warning icon mark a failure, not correspondence. */
+
+.card {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  margin: 2px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--dsw-alias-line-secondary);
+  border-left: 3px solid var(--dsw-alias-state-error-primary);
+  border-radius: 8px;
+  background: var(--dsw-alias-markdown-code-block);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.icon {
+  flex: none;
+  color: var(--dsw-alias-state-error-primary);
+}
+
+/* Card title: the localized system-notice heading, not a sender name. */
+.title {
+  flex: none;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Refusal time, pushed to the row's trailing edge. */
+.time {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+  line-height: 20px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chevron {
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+  transition: transform 120ms ease;
+}
+
+.card[data-open] .chevron {
+  transform: rotate(180deg);
+}
+
+/* Attempted recipient, when the source carries one — beneath the header,
+   above the reason, mirroring the mail card's subject slot. */
+.recipient {
+  margin: 6px 0 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+/* The terminal reason: log-shaped text in the code face, because it names
+   rules and numbers the operator may need to act on. */
+.reason {
+  margin: 4px 0 0;
+  color: var(--dsw-alias-label-tertiary);
+  font: 400 11px/16px var(--ds-font-family-code);
+  overflow-wrap: anywhere;
+}
+
+/* Notice body: same code-block scrollport geometry as the mail card's .body. */
+.body {
+  box-sizing: border-box;
+  max-height: 141px;
+  margin-top: 8px;
+  padding-top: 8px;
+  overflow: auto;
+  border-top: 1px solid var(--dsw-alias-line-secondary);
+  color: var(--dsw-alias-label-tertiary);
+  font: 400 11px/16px var(--ds-font-family-code);
+}

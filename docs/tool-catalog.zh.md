@@ -17,6 +17,7 @@
 
 | 工具包 | 模型可见名称 | 依赖 | 写入／影响 | 随产品发布的别名 | 部署说明 |
 | --- | --- | --- | --- | --- | --- |
+| `@deepseek-ai/dsh-tool-mailbox` | `mailbox_await`、`mailbox_check_inbox`、`mailbox_send` | `ctx.tools`、`ctx.mailbox` | `tool/call`、`tool/result` | - | mailbox_send 不携带 sender 字段：运行时用受信会话名填充 `from`，席位无法冒充其他席位或创始人。其 replyToTraceId 把一条回复穿透到被等待发送的关联链上。mailbox_check_inbox 不取地址参数，只排水调用会话自身的端点。mailbox_await 占住回合直到回复到达（即使桥已投递也能读到）、被关联发送被拒、或截止时间到期。匿名运行（无会话名）在调用时让所有工具响亮失败，绝不回退到不受信身份。 |
 | `@deepseek-ai/dsh-tool-ask-user` | `ask_user_question` | `ctx.tools`、`ctx.userQuestions` | `tool/call`、`tool/result after a UI/provider answers the question` | - | ask_user_question 会暂停工具调用，直到当前 UI 提供方返回人类答案。 |
 | `@deepseek-ai/dsh-tools` | `run_code` | `ctx.tools`、`ctx.codeRuntime (execution time)`、`ctx.systemPrompt` | `tool/call`、`one tool/code-dispatch-start + tool/code-dispatch pair per bridged sub-call`、`tool/result` | - | 在 `mode: code`／`mode: both` 下，它由工具注册表所有，作为可过滤能力层之外的保留传输机制（参见 Code Mode Agent Note）。在 `code` 下，它是注册表对协议格式（wire format）的唯一贡献；其他可见能力在使用已加载运行时语言生成的 SDK 章节中声明。程序通过 binding 调用这些能力，调用按照原生并发约定调度：启动顺序和策略遵循提交顺序，并发安全的函数体最多重叠执行 `maxParallelSubCalls` 个。调用会重新进入完整且受守卫保护的工具流水线，并将每个嵌套执行关联到此外层结果。 |
 | `@deepseek-ai/dsh-plan-mode` | `exit_plan_mode` | `ctx.tools`、`ctx.systemPrompt`、`ctx.userQuestions (execution time, opportunistic)` | `tool/call`、`plan/mode inactive on an approved review`、`tool/result` | - | 规划未激活时，exit_plan_mode 仍保留在面向模型的 schema 中，这样状态转换不会在规划策略变更之外额外造成工具目录变动。其执行路径会拒绝规划模式之外的调用；在规划模式下，它通过用户交互 seam 提交计划（批准／根据反馈继续规划），批准后会在步骤边界记录规划模式已停用。 |
@@ -38,9 +39,90 @@
 | `@deepseek-ai/dsh-tool-subagent-control` | `interrupt_agent`、`list_agents`、`send_message` | `ctx.tools`、`ctx.subagents`、`ctx.agents and ctx.sessionProjections (list_agents only)` | `tool/call`、`tool/result`、`child session events through ctx.subagents` | - | 这些是控制可继续后台 subagent 的全局命名工具：绑定提供方的 `tool-subagent` 实例注册不同的委派工具；本包注册一次 `send_message` 和 `interrupt_agent`，另由 `list_agents` 通过单独加载的 `/list-agents` 插件提供，其目录行使用 sessionProjections 和实时 Agent 注册表。 |
 | `@deepseek-ai/dsh-tool-subagent-report` | `report` | `ctx.subagents`、`ctx.systemPrompt`、`a live continuable in-process child Agent` | `tool/call`、`tool/result`、`a user-role message in the direct parent session` | - | 按可继续的进程内子级注册，而非全局注册，因此该 schema 仅在这种子级内部可见，并且不受其全局 `toolFilter` 影响。同一份贡献还会安装子级作用域的 `tool:report` 系统提示词 section，本目录不渲染该 section。面向父级的 `send_message` 工具单独安装。 |
 | `@deepseek-ai/dsh-tool-jobs` | `job_kill`、`job_list`、`job_output` | `ctx.tools`、`ctx.jobs`、`ctx.systemPrompt` | `tool/call`、`tool/result`、`user/message via agent.inject() for background completion notices` | - | 与任务种类无关的后台任务控制器：后台 bash 命令、PTY 发送和 subagent 都通过相同的 3 个工具读取、列出和终止。加载该插件会挂接控制器，从而启用生产方的 `ctx.jobs.start()`。 |
+| `@deepseek-ai/dsh-tool-compact` | `compact` | `ctx.tools`、`ctx.compaction (engine takes llm, tokenMeter, sessions)` | `tool/call`、`tool/result`、`compaction/start once the current turn ends` | - | 调度为立即接受：请求先登记进程本地的状态，真正的压缩在当前回合结束后的空闲边界上经引擎的 compaction/start 锁执行。 |
 | `@deepseek-ai/dsh-tool-todo` | `todo_write` | `ctx.tools`、`owning Agent session` | `tool/call`、`todo/write`、`tool/result` | - | todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为检查清单。`allowParallelInProgress` 是没有默认值的必填项，因此本目录明确选择 `true`，对应描述允许同时存在多个 `in_progress` 项。选择 `false` 的部署会获得同一工具，但描述会要求只能有 1 个活动任务。 |
 | `@deepseek-ai/dsh-tool-workflow` | `workflow` | `ctx.tools`、`ctx.workflowEngine`、`ctx.systemPrompt`、`a calling Agent (exec.agent parents the script children)` | `tool/call`、`tool/result` | - | - |
 | `@deepseek-ai/dsh-tool-web` | `web_fetch`、`web_search` | `ctx.tools`、`ctx.web`、`ctx.systemPrompt` | `tool/call`、`tool/result` | - | web_search 和 web_fetch 将提供方选择置于 ctx.web 之后，使模型可见 schema 在更换后端时保持稳定。 |
+
+<a id="deepseek-aidsh-tool-mailbox"></a>
+
+## `@deepseek-ai/dsh-tool-mailbox`
+
+### `mailbox_await`
+
+占住当前回合，直到回复到达或截止时间到期——当你被一个答复阻塞时，在 mailbox_send 之后立即调用的等待原语，用来替代临时拼凑、每轮询一次就烧掉一个回合的 Bash sleep 轮询循环。传入那次发送结果中的 traceId，把等待与那条确切的消息关联起来：传输途中的拒绝会立即带原因结束等待（被拒的消息绝不等满截止时间），超时则陈述消息已投递还是从未被拾取。无论回复仍在队列中、还是已经投递到本席位，等待都能识别它——但只有当发送者在它的 mailbox_send 上以 replyToTraceId 传入了你的 traceId 时，回复才会携带该 id，所以请求回复时要说一声。超时是普通结果——遇到时报告停滞、重新等待、或继续前进，而不是盲目重试。不带 traceId 时，等待在本席位的任何入站邮件到达时结束。截止时间被钳制到 1000–600000 ms；默认 300000（5 分钟）。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "deadlineMs": {
+      "type": "integer",
+      "description": "How long to hold this turn, in milliseconds; clamped to 1000–600000. Default 300000 (5 minutes)."
+    },
+    "traceId": {
+      "type": "string",
+      "description": "The traceId mailbox_send returned for the message you are waiting on. Correlates the wait to that send: a refusal ends the wait immediately, a timeout reports the message's delivery state, and a reply threaded onto the id ends the wait with its content. Omit to end the wait on any inbound mail."
+    }
+  }
+}
+```
+
+来源：[`packages/mailbox/tool-mailbox/src/index.ts`](../packages/mailbox/tool-mailbox/src/index.ts)
+
+### `mailbox_check_inbox`
+
+排水本席位自己的邮箱：认领并投递每一条发往本席位的 pending 消息。不取地址参数——运行时排水本会话自身的地址，且仅此一个。返回的每条消息都会从 pending 队列移除（已投递）；预期有邮件时调用它，例如得知同事给你发了东西之后。
+
+```json
+{
+  "type": "object",
+  "properties": {}
+}
+```
+
+来源：[`packages/mailbox/tool-mailbox/src/index.ts`](../packages/mailbox/tool-mailbox/src/index.ts)
+
+### `mailbox_send`
+
+按裸名向另一个席位发送邮箱消息。发送者由运行时根据本会话的受信名填充，无法选择或更改——收件人看到的消息来自本席位。回复作为各自的 mailbox_send 调用传输，不在本调用之内。当本消息就是对方正在等待的回复时，把它发送者引用的 traceId 作为 replyToTraceId 传入：回复随即携带该关联 id，等待席位的 mailbox_await 就能匹配到它而不是超时。结果会给出一个 traceId：把它传给 mailbox_await，即可占住本回合直到回复到达或截止时间到期。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "to": {
+      "type": "string",
+      "description": "The recipient seat's bare name (for example \"batman\"). One name names one seat across the whole deployment."
+    },
+    "subject": {
+      "type": "string",
+      "description": "Short human-readable subject line."
+    },
+    "body": {
+      "type": "string",
+      "description": "The message text. Keep it self-contained: the recipient may read it without this conversation's context."
+    },
+    "blocking": {
+      "type": "boolean",
+      "description": "True when you are blocked waiting on an answer to this message and the recipient should handle it now; omit for ordinary mail the recipient can absorb at a natural gap."
+    },
+    "replyToTraceId": {
+      "type": "string",
+      "description": "The traceId of the message this reply answers — only when the sender asked you to reply while it waits (its mail said so, or you know it is awaiting). Threads the reply onto that message's correlation chain so the waiting seat's mailbox_await recognizes your reply. Omit for ordinary replies and new threads."
+    }
+  },
+  "required": [
+    "to",
+    "subject",
+    "body"
+  ]
+}
+```
+
+来源：[`packages/mailbox/tool-mailbox/src/index.ts`](../packages/mailbox/tool-mailbox/src/index.ts)
+
+mailbox_send 不携带 sender 字段：运行时用受信会话名填充 `from`，席位无法冒充其他席位或创始人。其 replyToTraceId 把一条回复穿透到被等待发送的关联链上。mailbox_check_inbox 不取地址参数，只排水调用会话自身的端点。mailbox_await 占住回合直到回复到达（即使桥已投递也能读到）、被关联发送被拒、或截止时间到期。匿名运行（无会话名）在调用时让所有工具响亮失败，绝不回退到不受信身份。
 
 <a id="deepseek-aidsh-tool-ask-user"></a>
 
@@ -1733,7 +1815,27 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
 
 todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为检查清单。`allowParallelInProgress` 是没有默认值的必填项，因此本目录明确选择 `true`，对应描述允许同时存在多个 `in_progress` 项。选择 `false` 的部署会获得同一工具，但描述会要求只能有 1 个活动任务。
 
+<a id="deepseek-aidsh-tool-compact"></a>
+
+## `@deepseek-ai/dsh-tool-compact`
+
+### `compact`
+
+调度压缩较旧的对话历史。不取任何参数。请求会被立即接受；真正的压缩在当前回合结束后运行，把较旧的历史替换为一个摘要检查点，而最近的上下文保持逐字不变。当累积的历史不再需要完整保留时调用一次；在已有调度待处理期间再次调用不会产生任何变化。
+
+```json
+{
+  "type": "object",
+  "properties": {}
+}
+```
+
+来源：[`packages/compaction/tool-compact/src/index.ts`](../packages/compaction/tool-compact/src/index.ts)
+
+调度为立即接受：请求先登记进程本地的状态，真正的压缩在当前回合结束后的空闲边界上经引擎的 compaction/start 锁执行。
+
 <a id="deepseek-aidsh-tool-workflow"></a>
+
 
 ## `@deepseek-ai/dsh-tool-workflow`
 

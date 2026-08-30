@@ -19,6 +19,7 @@ function fakeProvider(name: string): MailboxProvider {
     claimableAddresses: async () => [],
     settle: async () => {},
     lookupByTraceId: async () => [],
+    lookupInboundSince: async () => [],
   }
 }
 
@@ -72,6 +73,7 @@ describe('default-provider resolution', () => {
       claimableAddresses: async () => [],
       settle: async () => { calls.push('other.settle') },
       lookupByTraceId: async () => [],
+      lookupInboundSince: async () => [],
     })
     registry.registerProvider({
       name: 'chosen',
@@ -80,18 +82,20 @@ describe('default-provider resolution', () => {
       claimableAddresses: async () => [],
       settle: async () => { settled = true },
       lookupByTraceId: async () => { calls.push('chosen.lookupByTraceId'); return [] },
+      lookupInboundSince: async () => { calls.push('chosen.lookupInboundSince'); return [] },
     })
     await registry.publish({ to: ADDRESS, from: 'ns:sender' })
     await registry.claim({ addresses: [ADDRESS], limit: 1, staleClaimMs: 1_000 })
     await registry.settle('ref' as MailboxLeaseRef, { state: 'done', result: { deliveredAt: 0, messageId: 'y' as MailboxMessageId } })
     await registry.lookupByTraceId('t-1')
-    expect(calls).toEqual(['chosen.publish', 'chosen.claim', 'chosen.lookupByTraceId'])
+    await registry.lookupInboundSince(ADDRESS, 0)
+    expect(calls).toEqual(['chosen.publish', 'chosen.claim', 'chosen.lookupByTraceId', 'chosen.lookupInboundSince'])
     expect(settled).toBe(true)
   })
 
   it('surfaces the default provider\'s trace entries through the convenience', async () => {
     const { registry } = await setup({ defaultProvider: 'chosen' })
-    const entry = { id: 'm-1' as MailboxMessageId, from: 'ns:sender', to: ADDRESS, sentAt: 5 }
+    const entry = { id: 'm-1' as MailboxMessageId, from: 'ns:sender', to: ADDRESS, sentAt: 5, state: 'pending' as const }
     registry.registerProvider({
       name: 'chosen',
       publish: async () => 'y' as MailboxMessageId,
@@ -99,9 +103,26 @@ describe('default-provider resolution', () => {
       claimableAddresses: async () => [],
       settle: async () => {},
       lookupByTraceId: async traceId => traceId === 'known' ? [entry] : [],
+      lookupInboundSince: async () => [],
     })
     await expect(registry.lookupByTraceId('known')).resolves.toEqual([entry])
     await expect(registry.lookupByTraceId('unknown')).resolves.toEqual([])
+  })
+
+  it('surfaces the default provider\'s inbound scan through the convenience and validates the address', async () => {
+    const { registry } = await setup({ defaultProvider: 'chosen' })
+    const entry = { id: 'm-2' as MailboxMessageId, from: 'ns:sender', to: ADDRESS, sentAt: 9, state: 'done' as const }
+    registry.registerProvider({
+      name: 'chosen',
+      publish: async () => 'y' as MailboxMessageId,
+      claim: async () => [],
+      claimableAddresses: async () => [],
+      settle: async () => {},
+      lookupByTraceId: async () => [],
+      lookupInboundSince: async (address, since) => address === ADDRESS && since === 7 ? [entry] : [],
+    })
+    await expect(registry.lookupInboundSince(ADDRESS, 7)).resolves.toEqual([entry])
+    await expect(registry.lookupInboundSince('bad address' as never, 7)).rejects.toThrow('invalid mailbox address')
   })
 
   it('rejects publishing through an unregistered configured default', async () => {

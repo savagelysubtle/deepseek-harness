@@ -83,7 +83,11 @@ import type {} from '@deepseek-ai/dsh-skill'
 import { SettingsConflictError, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { SettingsDescriptor, SettingsNamespace, SettingsPathOp } from '@deepseek-ai/dsh-settings'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { publishAndWake } from '@deepseek-ai/dsh-mailbox-bridge'
+import { publishAndWake, GUEST_SENDER_PREFIX } from '@deepseek-ai/dsh-mailbox-bridge'
+import { parseMailboxAddress } from '@deepseek-ai/dsh-mailbox'
+// The refusal-notice addresser derives the sender's session id the same way
+// the bridge routes a seat: the address IS the session name.
+import { deriveNamedSessionId } from '@deepseek-ai/dsh-named-sessions'
 // Value edge: the rename impl narrows the title service's validation failure; the import also resolves `ctx.get('sessionTitle')`.
 import { SessionTitleInvalidError } from '@deepseek-ai/dsh-session-title'
 import type { CallId } from '@deepseek-ai/dsh-llm/brand'
@@ -464,6 +468,42 @@ function persistenceFailureMessage(error: unknown, stale: boolean): string {
   return stale
     ? `Session persistence failed: ${reason}. This session is stale — its log advanced on disk outside this process, so it can no longer be written to from here. Reload the session from disk to continue; it cannot be repaired in place.`
     : `Session persistence failed: ${reason}. Events written after this failure are buffered and retry with the session's next write; if failures continue, reload the session from disk.`
+}
+
+/**
+ * The session a mailbox refusal notice addresses: the refused mail's sender,
+ * whose address IS its session name, derived the same way the bridge routes a
+ * seat. A sender with no session reaches nobody through this channel and
+ * reports nothing: a `guest:` outside-CLI sender has no session by
+ * construction, and an address that fails mailbox grammar names no derivable
+ * session either.
+ * @param from - the refused mail's sender address.
+ * @returns the sender's session id, or undefined when no session exists.
+ */
+function mailboxRefusalSessionId(from: string): SessionId | undefined {
+  if (from.startsWith(GUEST_SENDER_PREFIX)) return undefined
+  try {
+    parseMailboxAddress(from)
+  } catch {
+    // Unparseable grammar: no seat, hence no session to address.
+    return undefined
+  }
+  return deriveNamedSessionId(from)
+}
+
+/**
+ * The operator-facing text for one mailbox admission refusal: who tried to
+ * mail whom, and the terminal reason the bridge recorded. The bridge's logger
+ * warning has no sink in the web-app deployment, so this message — rendered
+ * from the `host/agent-error` frame — is where a live refusal actually reads;
+ * it is written to be understood cold.
+ * @param from - the refused mail's sender address.
+ * @param to - the recipient address the mail was addressed to.
+ * @param reason - the terminal refusal reason.
+ * @returns the message the `host/agent-error` frame carries.
+ */
+function mailboxRefusalMessage(from: string, to: string, reason: string): string {
+  return `Mail from "${from}" to "${to}" was refused by the mailbox bridge: ${reason}`
 }
 
 /** Queue the subscription baseline frame. */
@@ -3701,6 +3741,22 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
               type: 'host/agent-error',
               sessionId,
               message: persistenceFailureMessage(error, stale),
+            }))
+          }),
+          ctx.on('mailbox/refused', ({ from, to, reason }) => {
+            // The same agent-error outlet, for the same reason: an admission
+            // refusal is a live failure with no turn position, and the
+            // bridge's logger warning has no sink in this deployment. The
+            // frame addresses the SENDER's session — the refusal is the
+            // harness reporting on the sender's own action, not mail from
+            // the recipient — and a sender with no session (a `guest:` CLI
+            // sender, an unparseable address) reports nothing.
+            const sessionId = mailboxRefusalSessionId(from)
+            if (sessionId === undefined) return
+            queue.push(frame({
+              type: 'host/agent-error',
+              sessionId,
+              message: mailboxRefusalMessage(from, to, reason),
             }))
           }),
           ctx.on('domain/changed', (change) => {

@@ -134,6 +134,16 @@
   overflow-wrap: anywhere;
 }
 
+/* relay, mail: the subject line, above the message body. The sender itself
+   rides the mail card's own header (ContextInjectionRow.module.css), not
+   this scrollport, so unlike .relaySender there is nothing to say alongside it. */
+.mailSubject {
+  margin: 0 0 6px;
+  color: var(--dsw-alias-label-secondary);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
 /* recall: one row per source session, with how much of it survived. */
 .recalls {
   display: flex;

@@ -24,9 +24,10 @@ import type { MailboxClock, MessageRow } from './types.ts'
 /**
  * On-disk schema version of the mailbox database. Monotonic: an open against
  * a file stamped with any other version — newer or older — rejects loud
- * instead of migrating in place.
+ * instead of migrating in place. Version 3 added the inbound-scan index the
+ * reply-detection reads poll on.
  */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 /** Meta-table key stamping {@link SCHEMA_VERSION}. */
 const SCHEMA_VERSION_KEY = 'schema_version'
@@ -57,7 +58,9 @@ const CREATE_SCHEMA = `
     result       TEXT
   ) STRICT;
 
-  CREATE INDEX IF NOT EXISTS messages_claim_scan ON messages (state, to_address, created_at)
+  CREATE INDEX IF NOT EXISTS messages_claim_scan ON messages (state, to_address, created_at);
+
+  CREATE INDEX IF NOT EXISTS messages_inbound_scan ON messages (to_address, created_at)
 `
 
 /**
@@ -196,6 +199,76 @@ function parseLeaseRef(leaseRef: MailboxLeaseRef): { id: string; token: string }
  * `DatabaseSync`; instances are cheap enough that each plugin mount opens its
  * own.
  */
+/**
+ * The settlement half of one {@link MailboxTraceEntry}, read off a row's
+ * terminal envelope. Split out because the envelope is JSON written by the
+ * settle path and read back here on a path that must never throw: a trace
+ * lookup is a diagnostic read (it answers "what became of the message I
+ * sent"), so a row whose envelope is missing or malformed degrades to "no
+ * settlement fields" rather than failing the whole lookup.
+ * @param state - the row's current lifecycle state.
+ * @param result - the row's JSON-encoded delivery envelope, or null.
+ * @returns the `deliveredAt` or `failureReason` field, or neither.
+ */
+function traceSettlement(
+  state: MessageRow['state'],
+  result: MessageRow['result'],
+): { deliveredAt?: number } | { failureReason?: string } {
+  if (result === null) return {}
+  let envelope: unknown
+  try {
+    envelope = JSON.parse(result)
+  } catch {
+    return {}
+  }
+  if (typeof envelope !== 'object' || envelope === null) return {}
+  const record = envelope as Record<string, unknown>
+  if (state === 'done') {
+    const deliveredAt = record['deliveredAt']
+    return typeof deliveredAt === 'number' ? { deliveredAt } : {}
+  }
+  if (state === 'failed') {
+    const reason = record['reason']
+    return typeof reason === 'string' ? { failureReason: reason } : {}
+  }
+  return {}
+}
+
+/** Columns a trace read needs: identity and lifecycle plus the content fields a reader acts on without a second claim. */
+type TraceRow = Pick<MessageRow, 'id' | 'to_address' | 'from_address' | 'subject' | 'payload' | 'blocking' | 'created_at' | 'claimed_at' | 'state' | 'result'>
+
+/**
+ * Reconstruct one {@link MailboxTraceEntry} from a trace-read row. Shared by
+ * both read paths so they cannot drift on what a row contributes: an absent
+ * or unreadable payload contributes no `payload` field — absence reads as
+ * "no readable body", never as an empty one — mirroring the settlement
+ * envelope's degrade-don't-throw rule.
+ * @param row - the row selected by a trace read.
+ * @returns the enriched trace entry.
+ */
+function rowToTraceEntry(row: TraceRow): MailboxTraceEntry {
+  let payload: unknown
+  if (row.payload !== null) {
+    try {
+      payload = JSON.parse(row.payload) as unknown
+    } catch {
+      payload = undefined
+    }
+  }
+  return {
+    id: row.id as MailboxMessageId,
+    from: row.from_address,
+    to: row.to_address as MailboxAddress,
+    sentAt: row.created_at,
+    state: row.state,
+    ...row.subject !== null ? { subject: row.subject } : {},
+    ...payload !== undefined ? { payload } : {},
+    ...row.blocking === 1 ? { blocking: true as const } : {},
+    ...row.claimed_at !== null ? { claimedAt: row.claimed_at } : {},
+    ...traceSettlement(row.state, row.result),
+  }
+}
+
 export class SqliteMailboxStore implements MailboxProvider {
   readonly name = PROVIDER_NAME
 
@@ -355,17 +428,29 @@ export class SqliteMailboxStore implements MailboxProvider {
   async lookupByTraceId(traceId: string, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]> {
     signal?.throwIfAborted()
     const rows = this.db.prepare(`
-      SELECT id, to_address, from_address, created_at
+      SELECT id, to_address, from_address, subject, payload, blocking, created_at, claimed_at, state, result
       FROM messages
       WHERE trace_id = ?
       ORDER BY created_at, id
-    `).all(traceId) as unknown as Array<Pick<MessageRow, 'id' | 'to_address' | 'from_address' | 'created_at'>>
-    return rows.map(row => ({
-      id: row.id as MailboxMessageId,
-      from: row.from_address,
-      to: row.to_address as MailboxAddress,
-      sentAt: row.created_at,
-    }))
+    `).all(traceId) as unknown as TraceRow[]
+    return rows.map(rowToTraceEntry)
+  }
+
+  /**
+   * Read every stored message addressed to `address` admitted at or after
+   * `sinceMs`, earliest admitted first, regardless of claim or settlement
+   * state. A single `SELECT` on the claim-scan index's address half — the
+   * store claims nothing, settles nothing, and writes nothing on this path.
+   */
+  async lookupInboundSince(address: MailboxAddress, sinceMs: number, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]> {
+    signal?.throwIfAborted()
+    const rows = this.db.prepare(`
+      SELECT id, to_address, from_address, subject, payload, blocking, created_at, claimed_at, state, result
+      FROM messages
+      WHERE to_address = ? AND created_at >= ?
+      ORDER BY created_at, id
+    `).all(address, sinceMs) as unknown as TraceRow[]
+    return rows.map(rowToTraceEntry)
   }
 
   /** Release the database handle; the store is unusable afterwards. */

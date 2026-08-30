@@ -115,6 +115,10 @@ export type MuxFrame =
  * `host/session-status(running:true)` (a blank session never runs), and a
  * reconnecting client takes `session.list`'s summary.blank as authoritative.
  * agent-error is the only outlet for live failures with no turn position;
+ * mailbox admission refusals (`mailbox/refused`) ride it the same way,
+ * addressed to the refused sender's session — the live toast alongside the
+ * durable notice node the bridge logs into that session, which is the outlet
+ * that survives a reload;
  * workspace-changed pushes the full new snapshot after every durable
  * workspace mutation (create/attach/order change — the client upserts, while
  * `workspace.list` provides the reconnect baseline); workspace-removed is the

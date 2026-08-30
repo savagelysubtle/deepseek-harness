@@ -2,14 +2,16 @@
  * The mailbox tools' identity guarantees: the send schema exposes no `from`
  * and the runtime fills the trusted session name; checkInbox takes no address
  * argument and drains only the calling seat's own queue, settling each
- * receipt; an anonymous run fails loud instead of guessing an identity.
+ * receipt; await holds the turn until a reply, a refusal, or the deadline,
+ * and reports which; an anonymous run fails loud instead of guessing an
+ * identity.
  */
 
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { CallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -19,7 +21,7 @@ import MailboxRegistry from '@deepseek-ai/dsh-mailbox'
 import type { MailboxLease, MailboxRegistry as MailboxRegistryShape } from '@deepseek-ai/dsh-mailbox'
 import MailboxLocal from '@deepseek-ai/dsh-mailbox-local'
 import * as tool from '../src/index.ts'
-import { mailboxCheckInboxTool, mailboxSendTool } from '../src/tools.ts'
+import { AWAIT_MAX_DEADLINE_MS, AWAIT_MIN_DEADLINE_MS, AWAIT_POLL_INTERVAL_MS, clampAwaitDeadlineMs, mailboxAwaitTool, mailboxCheckInboxTool, mailboxSendTool } from '../src/tools.ts'
 import { deriveNamedSessionId } from '@deepseek-ai/dsh-named-sessions'
 import { resolveMailboxIdentity } from '../src/identity.ts'
 import * as invariant from '../src/invariant.ts'
@@ -72,12 +74,13 @@ interface StoredRow {
   subject: string | null
   payload: string | null
   blocking: number | null
+  trace_id: string | null
 }
 
 function storedRows(dbPath: string, address: string): StoredRow[] {
   const db = new DatabaseSync(dbPath)
   try {
-    return db.prepare('SELECT from_address, state, subject, payload, blocking FROM messages WHERE to_address = ? ORDER BY created_at').all(address) as never
+    return db.prepare('SELECT from_address, state, subject, payload, blocking, trace_id FROM messages WHERE to_address = ? ORDER BY created_at').all(address) as never
   } finally {
     db.close()
   }
@@ -92,10 +95,11 @@ describe('mailbox tool schemas', () => {
       properties: Record<string, unknown>
       required?: string[]
     }
-    expect(Object.keys(parameters.properties).sort()).toEqual(['blocking', 'body', 'subject', 'to'])
+    expect(Object.keys(parameters.properties).sort()).toEqual(['blocking', 'body', 'replyToTraceId', 'subject', 'to'])
     expect(Object.keys(parameters.properties)).not.toContain('from')
     expect(parameters.required).toEqual(['to', 'subject', 'body'])
     expect(schema!.description).toContain('filled in by the runtime')
+    expect(schema!.description).toContain('replyToTraceId')
     await ctx.fiber.dispose()
   })
 
@@ -112,21 +116,45 @@ describe('mailbox tool schemas', () => {
 })
 
 describe('mailbox_send', () => {
-  it('publishes with the trusted session name as the sender', async () => {
+  it('publishes with the trusted session name as the sender and a correlation id on the row', async () => {
     const { ctx, dbPath } = await setup('batman')
     const result = await call(ctx, 'mailbox_send', { to: 'alfred', subject: 'patrol', body: 'meet at the cave' })
     expect(result.isError).toBe(false)
     if (result.isError) throw new Error('expected mailbox_send success')
-    expect(result.value).toEqual({
+    const value = result.value as { messageId: string; to: string; from: string; traceId: string }
+    expect(value).toEqual({
       messageId: expect.any(String),
       to: 'alfred',
       from: 'batman',
+      traceId: expect.any(String),
     })
     expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('Stored for alfred') }])
+    expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining(`mailbox_await traceId ${value.traceId}`) }])
     const rows = storedRows(dbPath, 'alfred')
     expect(rows).toHaveLength(1)
-    expect(rows[0]).toMatchObject({ from_address: 'batman', state: 'pending', subject: 'patrol', blocking: null })
+    expect(rows[0]).toMatchObject({ from_address: 'batman', state: 'pending', subject: 'patrol', blocking: null, trace_id: value.traceId })
     expect(JSON.parse(rows[0]!.payload ?? '')).toBe('meet at the cave')
+    await ctx.fiber.dispose()
+  })
+
+  it('threads a reply onto the awaited trace when the caller supplies replyToTraceId', async () => {
+    const { ctx, dbPath } = await setup('alfred')
+    const result = await call(ctx, 'mailbox_send', {
+      to: 'batman', subject: 'answer', body: 'gate code is 4-1', replyToTraceId: 'awaited-trace',
+    })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected mailbox_send success')
+    // The result hands back the thread's id, not a fresh one: the replying
+    // seat's own later await correlates on the same chain.
+    expect(result.value).toEqual({
+      messageId: expect.any(String),
+      to: 'batman',
+      from: 'alfred',
+      traceId: 'awaited-trace',
+    })
+    const rows = storedRows(dbPath, 'batman')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ from_address: 'alfred', state: 'pending', subject: 'answer', trace_id: 'awaited-trace' })
     await ctx.fiber.dispose()
   })
 
@@ -245,6 +273,365 @@ describe('mailbox_check_inbox', () => {
   })
 })
 
+describe('mailbox_await', () => {
+  /**
+   * Drain one address the way the bridge does — claim, then settle the
+   * outcome the bridge records — so tests can stage delivered and refused
+   * rows without running the bridge itself.
+   */
+  async function drainOnce(ctx: Context, address: string, outcome: 'done' | { readonly failed: string }): Promise<boolean> {
+    const leases = await ctx.mailbox.claim({ addresses: [address as never], limit: 10, staleClaimMs: 60_000 })
+    if (leases.length === 0) return false
+    for (const lease of leases) {
+      if (lease.message.id === undefined) throw new Error('claim returned an id-less message')
+      await ctx.mailbox.settle(lease.leaseRef, outcome === 'done'
+        ? { state: 'done', result: { deliveredAt: Date.now(), messageId: lease.message.id } }
+        : { state: 'failed', result: { reason: outcome.failed } })
+    }
+    return true
+  }
+
+  /** The traceId of a successful send, for correlating an await. */
+  function sentTraceId(send: { isError: boolean; value?: unknown; error?: { message: string } }): string {
+    if (send.isError) throw new Error(`expected mailbox_send success: ${send.error?.message ?? ''}`)
+    return (send.value as { traceId: string }).traceId
+  }
+
+  it('exposes optional deadlineMs and traceId and teaches the timeout contract', async () => {
+    const { ctx } = await setup('batman')
+    const schema = ctx.tools.schemas().find(entry => entry.name === 'mailbox_await')
+    expect(schema).toBeDefined()
+    const parameters = schema!.parameters as { properties: Record<string, unknown>; required?: string[] }
+    expect(Object.keys(parameters.properties).sort()).toEqual(['deadlineMs', 'traceId'])
+    expect(parameters.required).toBeUndefined()
+    expect(schema!.description).toContain('sleep-poll')
+    expect(schema!.description).toContain('A timeout is a normal outcome')
+    expect(schema!.description).toContain('traceId')
+    await ctx.fiber.dispose()
+  })
+
+  it('returns an already-queued reply immediately, settled done like a drain', async () => {
+    const { ctx, dbPath } = await setup('alfred')
+    await ctx.mailbox.publish({ to: 'alfred' as never, from: 'batman', subject: 'answer', payload: 'gate code is 4-1' })
+    const result = await call(ctx, 'mailbox_await', { deadlineMs: AWAIT_MAX_DEADLINE_MS })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected mailbox_await success')
+    expect(result.value).toEqual({
+      outcome: 'reply',
+      messages: [{ messageId: expect.any(String), from: 'batman', subject: 'answer', body: 'gate code is 4-1', claimedAt: expect.any(Number) }],
+      count: 1,
+      waitedMs: expect.any(Number),
+    })
+    expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('Reply arrived after') }])
+    expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('1. from batman: answer') }])
+    expect(storedRows(dbPath, 'alfred')[0]?.state).toBe('done')
+    await ctx.fiber.dispose()
+  })
+
+  it('catches a threaded reply the bridge already delivered as a turn, instead of timing out', async () => {
+    const { ctx, dbPath } = await setup('batman')
+    const send = await call(ctx, 'mailbox_send', { to: 'alfred', subject: 'request', body: 'status?' })
+    const traceId = sentTraceId(send)
+    // The exact field failure: the peer replies threaded, the bridge wins the
+    // row — claims it, steers the reply into this seat's live turn, settles it
+    // done — and the await starts only after its own send's result round trip.
+    // A detection that only claimed could never see this row again.
+    await ctx.mailbox.publish({ to: 'batman' as never, from: 'alfred', subject: 'answer', payload: 'all clear', traceId })
+    expect(await drainOnce(ctx, 'batman', 'done')).toBe(true)
+    const started = Date.now()
+    const result = await call(ctx, 'mailbox_await', { traceId, deadlineMs: AWAIT_MAX_DEADLINE_MS })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected mailbox_await success')
+    expect(result.value).toEqual({
+      outcome: 'reply',
+      messages: [{ messageId: expect.any(String), from: 'alfred', subject: 'answer', body: 'all clear', claimedAt: expect.any(Number) }],
+      count: 1,
+      waitedMs: expect.any(Number),
+    })
+    expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('1. from alfred: answer') }])
+    // Back well inside one poll interval — the reply was read, never waited out.
+    expect(Date.now() - started).toBeLessThan(AWAIT_POLL_INTERVAL_MS)
+    // Detection is a read: the delivered row stays exactly as the bridge left it.
+    expect(storedRows(dbPath, 'batman')[0]?.state).toBe('done')
+    await ctx.fiber.dispose()
+  })
+
+  it('catches an unthreaded reply the bridge delivered, reading inbound mail since the awaited send', async () => {
+    const { ctx } = await setup('batman')
+    const send = await call(ctx, 'mailbox_send', { to: 'alfred', subject: 'request', body: 'status?' })
+    const traceId = sentTraceId(send)
+    // The peer replied without carrying the thread — the documented cost is
+    // that any inbound mail since the send ends the wait, and the benefit is
+    // that a bridge-pre-empted reply still does.
+    await ctx.mailbox.publish({ to: 'batman' as never, from: 'alfred', subject: 'answer', payload: 'all clear' })
+    expect(await drainOnce(ctx, 'batman', 'done')).toBe(true)
+    const result = await call(ctx, 'mailbox_await', { traceId, deadlineMs: AWAIT_MAX_DEADLINE_MS })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected mailbox_await success')
+    expect(result.value).toMatchObject({ outcome: 'reply', count: 1 })
+    expect((result.value as { messages: Array<{ from: string; subject?: string }> }).messages[0])
+      .toMatchObject({ from: 'alfred', subject: 'answer' })
+    await ctx.fiber.dispose()
+  })
+
+  it('returns a reply the bridge currently holds claimed, without disturbing its lease', async () => {
+    const { ctx, dbPath } = await setup('batman')
+    const send = await call(ctx, 'mailbox_send', { to: 'alfred', subject: 'request', body: 'status?' })
+    const traceId = sentTraceId(send)
+    await ctx.mailbox.publish({ to: 'batman' as never, from: 'alfred', subject: 'answer', payload: 'soon', traceId })
+    // Mid-flight: a fresh claim the bridge holds, inside the staleness bound,
+    // not yet steered or settled. The wait reads its content and returns it
+    // without claiming or settling — the lease is the bridge's to finish.
+    const leases = await ctx.mailbox.claim({ addresses: ['batman' as never], limit: 1, staleClaimMs: 60_000 })
+    expect(leases).toHaveLength(1)
+    const result = await call(ctx, 'mailbox_await', { traceId, deadlineMs: AWAIT_MAX_DEADLINE_MS })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected mailbox_await success')
+    expect(result.value).toMatchObject({ outcome: 'reply', count: 1, messages: [{ from: 'alfred', subject: 'answer' }] })
+    expect(storedRows(dbPath, 'batman')[0]?.state).toBe('claimed')
+    await ctx.fiber.dispose()
+  })
+
+  it('does not end a traced wait on inbound mail delivered before the awaited send', async () => {
+    const { ctx } = await setup('batman')
+    // Older delivered mail is the model's to reason about — it was in the
+    // conversation before the send — so the read anchor is the send's own
+    // admission time, not the store's beginning.
+    await ctx.mailbox.publish({ to: 'batman' as never, from: 'robin', subject: 'older', payload: 'earlier' })
+    expect(await drainOnce(ctx, 'batman', 'done')).toBe(true)
+    await new Promise(resolve => setTimeout(resolve, 2))
+    const send = await call(ctx, 'mailbox_send', { to: 'alfred', subject: 'request', body: 'status?' })
+    const traceId = sentTraceId(send)
+    // The awaited send itself was delivered — the timeout diagnosis is about
+    // the send, not the old mail.
+    expect(await drainOnce(ctx, 'alfred', 'done')).toBe(true)
+    vi.useFakeTimers()
+    try {
+      const pending = call(ctx, 'mailbox_await', { traceId, deadlineMs: AWAIT_MIN_DEADLINE_MS })
+      await vi.advanceTimersByTimeAsync(AWAIT_MIN_DEADLINE_MS + 1)
+      const result = await pending
+      expect(result.isError).toBe(false)
+      if (result.isError) throw new Error('expected mailbox_await success')
+      expect(result.value).toMatchObject({ outcome: 'timeout', sentState: 'delivered' })
+    } finally {
+      vi.useRealTimers()
+    }
+    await ctx.fiber.dispose()
+  })
+
+  it('ends an untraced wait on mail the bridge delivered mid-wait', async () => {
+    const { ctx } = await setup('batman')
+    vi.useFakeTimers()
+    try {
+      const pending = call(ctx, 'mailbox_await', { deadlineMs: AWAIT_MAX_DEADLINE_MS })
+      await vi.advanceTimersByTimeAsync(AWAIT_POLL_INTERVAL_MS)
+      // Delivered — claimed, steered, settled done — by the bridge during the
+      // wait: the read half catches what the claim half can no longer see.
+      await ctx.mailbox.publish({ to: 'batman' as never, from: 'alfred', subject: 'fyi', payload: 'mid-wait' })
+      expect(await drainOnce(ctx, 'batman', 'done')).toBe(true)
+      await vi.advanceTimersByTimeAsync(AWAIT_POLL_INTERVAL_MS)
+      const result = await pending
+      expect(result.isError).toBe(false)
+      if (result.isError) throw new Error('expected mailbox_await success')
+      expect(result.value).toMatchObject({ outcome: 'reply', count: 1, messages: [{ from: 'alfred', subject: 'fyi' }] })
+    } finally {
+      vi.useRealTimers()
+    }
+    await ctx.fiber.dispose()
+  })
+
+  it('ends immediately with the refusal reason instead of waiting out the deadline', async () => {
+    const { ctx, dbPath } = await setup('batman')
+    const send = await call(ctx, 'mailbox_send', { to: 'alfred', subject: 'request', body: 'approve the leave' })
+    const traceId = sentTraceId(send)
+    // The bridge's drain-time refusal: the recipient's row settles terminally failed.
+    expect(await drainOnce(ctx, 'alfred', { failed: 'sender-not-admitted' })).toBe(true)
+    const started = Date.now()
+    const result = await call(ctx, 'mailbox_await', { traceId, deadlineMs: AWAIT_MAX_DEADLINE_MS })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected mailbox_await success')
+    expect(result.value).toEqual({
+      outcome: 'refused',
+      messages: [],
+      count: 0,
+      refusalReason: 'sender-not-admitted',
+      waitedMs: expect.any(Number),
+    })
+    // Back well inside one poll interval — the refusal was read, never waited out.
+    expect(Date.now() - started).toBeLessThan(AWAIT_POLL_INTERVAL_MS)
+    expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('Reason: sender-not-admitted') }])
+    expect(storedRows(dbPath, 'alfred')[0]?.state).toBe('failed')
+    await ctx.fiber.dispose()
+  })
+
+  it('returns the refusal ahead of unrelated queued mail and leaves that mail pending', async () => {
+    const { ctx, dbPath } = await setup('batman')
+    const send = await call(ctx, 'mailbox_send', { to: 'alfred', subject: 'request', body: 'approve the leave' })
+    const traceId = sentTraceId(send)
+    await ctx.mailbox.publish({ to: 'batman' as never, from: 'alfred', subject: 'unrelated', payload: 'fyi' })
+    expect(await drainOnce(ctx, 'alfred', { failed: 'sender-not-admitted' })).toBe(true)
+    const result = await call(ctx, 'mailbox_await', { traceId, deadlineMs: AWAIT_MAX_DEADLINE_MS })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected mailbox_await success')
+    expect(result.value).toMatchObject({ outcome: 'refused', count: 0 })
+    expect(storedRows(dbPath, 'batman')).toHaveLength(1)
+    expect(storedRows(dbPath, 'batman')[0]).toMatchObject({ subject: 'unrelated', state: 'pending' })
+    await ctx.fiber.dispose()
+  })
+
+  it('times out reporting a send that was delivered but never answered', async () => {
+    const { ctx, dbPath } = await setup('batman')
+    const send = await call(ctx, 'mailbox_send', { to: 'alfred', subject: 'request', body: 'status?' })
+    const traceId = sentTraceId(send)
+    expect(await drainOnce(ctx, 'alfred', 'done')).toBe(true)
+    vi.useFakeTimers()
+    try {
+      const pending = call(ctx, 'mailbox_await', { traceId, deadlineMs: AWAIT_MIN_DEADLINE_MS })
+      // Run out the clamped-minimum wait: the poll sleep fires, the next tick
+      // sees no reply and an expired deadline, and the wait reports.
+      await vi.advanceTimersByTimeAsync(AWAIT_MIN_DEADLINE_MS + 1)
+      const result = await pending
+      expect(result.isError).toBe(false)
+      if (result.isError) throw new Error('expected mailbox_await success')
+      expect(result.value).toEqual({
+        outcome: 'timeout',
+        messages: [],
+        count: 0,
+        sentState: 'delivered',
+        deliveredAt: expect.any(Number),
+        waitedMs: expect.any(Number),
+      })
+      expect((result.value as { waitedMs: number }).waitedMs).toBeGreaterThanOrEqual(AWAIT_MIN_DEADLINE_MS)
+      expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('WAS delivered') }])
+      expect(storedRows(dbPath, 'alfred')[0]?.state).toBe('done')
+      vi.useRealTimers()
+      await ctx.fiber.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('times out reporting a send the transport never picked up', async () => {
+    const { ctx, dbPath } = await setup('batman')
+    const send = await call(ctx, 'mailbox_send', { to: 'alfred', subject: 'request', body: 'status?' })
+    const traceId = sentTraceId(send)
+    vi.useFakeTimers()
+    try {
+      const pending = call(ctx, 'mailbox_await', { traceId, deadlineMs: AWAIT_MIN_DEADLINE_MS })
+      await vi.advanceTimersByTimeAsync(AWAIT_MIN_DEADLINE_MS + 1)
+      const result = await pending
+      expect(result.isError).toBe(false)
+      if (result.isError) throw new Error('expected mailbox_await success')
+      expect(result.value).toEqual({
+        outcome: 'timeout',
+        messages: [],
+        count: 0,
+        sentState: 'pending',
+        waitedMs: expect.any(Number),
+      })
+      expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('NEVER picked up') }])
+      expect(storedRows(dbPath, 'alfred')[0]?.state).toBe('pending')
+      vi.useRealTimers()
+      await ctx.fiber.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('times out with no diagnosis when no traceId correlates the send', async () => {
+    const { ctx } = await setup('batman')
+    vi.useFakeTimers()
+    try {
+      const pending = call(ctx, 'mailbox_await', { deadlineMs: AWAIT_MIN_DEADLINE_MS })
+      await vi.advanceTimersByTimeAsync(AWAIT_MIN_DEADLINE_MS + 1)
+      const result = await pending
+      expect(result.isError).toBe(false)
+      if (result.isError) throw new Error('expected mailbox_await success')
+      expect(result.value).toEqual({
+        outcome: 'timeout',
+        messages: [],
+        count: 0,
+        sentState: 'unknown',
+        waitedMs: expect.any(Number),
+      })
+      expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('no traceId was supplied') }])
+      vi.useRealTimers()
+      await ctx.fiber.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('wakes on a reply that lands mid-wait and settles it done', async () => {
+    const { ctx, dbPath } = await setup('alfred')
+    const send = await call(ctx, 'mailbox_send', { to: 'batman', subject: 'question', body: 'gate code?' })
+    const traceId = sentTraceId(send)
+    vi.useFakeTimers()
+    try {
+      const pending = call(ctx, 'mailbox_await', { traceId, deadlineMs: AWAIT_MAX_DEADLINE_MS })
+      // Tick one finds nothing and arms the poll sleep; the reply lands; the
+      // next tick claims, settles, and ends the wait.
+      await vi.advanceTimersByTimeAsync(AWAIT_POLL_INTERVAL_MS + 1)
+      await ctx.mailbox.publish({ to: 'alfred' as never, from: 'batman', subject: 'answer', payload: 'it is 4-1' })
+      await vi.advanceTimersByTimeAsync(AWAIT_POLL_INTERVAL_MS + 1)
+      const result = await pending
+      expect(result.isError).toBe(false)
+      if (result.isError) throw new Error('expected mailbox_await success')
+      expect(result.value).toEqual({
+        outcome: 'reply',
+        messages: [{ messageId: expect.any(String), from: 'batman', subject: 'answer', body: 'it is 4-1', claimedAt: expect.any(Number) }],
+        count: 1,
+        waitedMs: expect.any(Number),
+      })
+      expect(storedRows(dbPath, 'alfred')[0]?.state).toBe('done')
+      vi.useRealTimers()
+      await ctx.fiber.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('settles as an aborted error promptly when the caller signal fires mid-wait', async () => {
+    const { ctx } = await setup('alfred')
+    const controller = new AbortController()
+    const started = Date.now()
+    const pending = ctx.tools.execute({
+      signal: controller.signal,
+      callId: CallId('call-abort'),
+      name: 'mailbox_await',
+      arguments: { deadlineMs: AWAIT_MAX_DEADLINE_MS },
+    })
+    // Past every microtask of the dispatch pipeline and inside the poll sleep.
+    await new Promise(resolve => setTimeout(resolve, 20))
+    controller.abort()
+    const result = await pending
+    expect(result.isError).toBe(true)
+    if (!result.isError) throw new Error('expected aborted result')
+    expect(result.error.message).toMatch(/abort/i)
+    expect(result.error.message).not.toContain('before dispatch')
+    // Reclaimed in milliseconds, not at the deadline.
+    expect(Date.now() - started).toBeLessThan(5000)
+    await ctx.fiber.dispose()
+  })
+
+  it('fails loud on an anonymous run like the other tools', async () => {
+    const { ctx } = await setup(undefined)
+    const result = await call(ctx, 'mailbox_await')
+    expect(result.isError).toBe(true)
+    if (!result.isError) throw new Error('expected anonymous mailbox_await failure')
+    expect(result.error.message).toContain('no trusted sender identity')
+    await ctx.fiber.dispose()
+  })
+
+  it('clamps the deadline to the documented floor and ceiling', () => {
+    expect(clampAwaitDeadlineMs(undefined)).toBe(tool.AWAIT_DEFAULT_DEADLINE_MS)
+    expect(clampAwaitDeadlineMs(0)).toBe(AWAIT_MIN_DEADLINE_MS)
+    expect(clampAwaitDeadlineMs(-5000)).toBe(AWAIT_MIN_DEADLINE_MS)
+    expect(clampAwaitDeadlineMs(Number.MAX_SAFE_INTEGER)).toBe(AWAIT_MAX_DEADLINE_MS)
+    expect(clampAwaitDeadlineMs(45_000)).toBe(45_000)
+  })
+})
+
 describe('identity resolution', () => {
   it('rejects a call on an anonymous run with the identity error, not a guessed sender', async () => {
     const { ctx } = await setup(undefined)
@@ -292,6 +679,8 @@ describe('identity resolution', () => {
     })
     const drain = mailboxCheckInboxTool({ claim: async () => [] } as unknown as MailboxRegistryShape, { sessionName: 'alfred' })
     expect(drain.presentCall?.({})).toEqual({ card: 'generic', title: 'Check inbox', kind: 'other' })
+    const awaiting = mailboxAwaitTool({ claim: async () => [], lookupByTraceId: async () => [] } as unknown as MailboxRegistryShape, { sessionName: 'alfred' })
+    expect(awaiting.presentCall?.({})).toEqual({ card: 'generic', title: 'Await mailbox reply', kind: 'other' })
   })
 })
 

@@ -5,9 +5,10 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { formatMailboxAddress } from '@deepseek-ai/dsh-mailbox'
 import { openMailboxDatabase, SCHEMA_VERSION, SqliteMailboxStore } from '../src/sqlite.ts'
@@ -145,11 +146,53 @@ describe('dsh-mailbox failure paths', () => {
     expect(drained[0]?.payload).toEqual({ piped: true })
   })
 
+  it('runs the real bin through a SYMLINKED path — resolution must not depend on the invoked spelling (POSIX)', { skip: process.platform === 'win32' }, async () => {
+    // The regression: `import.meta.url` is fully resolved while
+    // `process.argv[1]` carries the symlink, so an unresolved comparison
+    // never matched, the guard stayed false, and the process exited 0 having
+    // run nothing. The store row below proves the send actually happened.
+    const dir = tempDir()
+    const dbPath = join(dir, 'q.db')
+    const linkPath = join(dir, 'dsh-mailbox.ts')
+    symlinkSync(join(import.meta.dirname, '../src/cli.ts'), linkPath)
+    const stdout = execFileSync(
+      process.execPath,
+      ['--import', 'tsx/esm', linkPath, 'send', '--to', String(TARGET), '--from', 'gemini', '--db', dbPath],
+      { env: { ...process.env, DSH_HOME: dir }, encoding: 'utf8' },
+    )
+    expect(stdout).toContain('stored for')
+    const drained = JSON.parse(await run(['inbox', '--address', String(TARGET), '--db', dbPath, '--json'])) as Array<{ from?: string }>
+    expect(drained[0]?.from).toBe('guest:gemini')
+  })
+
   it('leaves no db litter behind for pure validation failures', async () => {
     const dir = tempDir()
     const dbPath = join(dir, 'never.db')
     await expect(cli.runMailboxCli(['send', '--to', String(TARGET), '--from', 'claude-code', '--payload-file', join(dir, 'missing.json'), '--db', dbPath]))
       .rejects.toThrow()
     expect(existsSync(dbPath)).toBe(false)
+  })
+})
+
+describe('bin entry resolution', () => {
+  /** The CLI module's URL, the second argument the bin guard passes. */
+  const entryUrl = pathToFileURL(join(import.meta.dirname, '../src/cli.ts')).href
+
+  it('matches the entry by direct path and through a symlink (POSIX)', { skip: process.platform === 'win32' }, () => {
+    const dir = tempDir()
+    const direct = join(import.meta.dirname, '../src/cli.ts')
+    expect(cli.isEntryInvocation(direct, entryUrl)).toBe(true)
+    // The invoked spelling resolves to the same file, so it matches — the
+    // case the unresolved URL comparison silently failed on.
+    const linkPath = join(dir, 'alias.ts')
+    symlinkSync(direct, linkPath)
+    expect(cli.isEntryInvocation(linkPath, entryUrl)).toBe(true)
+  })
+
+  it('answers false for another module and for a missing file without throwing', () => {
+    const dir = tempDir()
+    // This spec is a real, existing file that is not the entry module.
+    expect(cli.isEntryInvocation(join(import.meta.dirname, 'cli.spec.ts'), entryUrl)).toBe(false)
+    expect(cli.isEntryInvocation(join(dir, 'missing.ts'), entryUrl)).toBe(false)
   })
 })
