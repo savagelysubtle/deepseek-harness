@@ -99,7 +99,15 @@ export class WorkspaceEntity implements Workspace {
   }
 
   get sessionIds(): readonly SessionId[] {
-    return this.record.sessionIds.filter(id => this.host.sessionPath(id) === this.record.path)
+    // The durable account is served verbatim: membership is operator-owned
+    // (workspace.json + attach-time validation), and a seat whose cwd is a
+    // SUBDIRECTORY of the workspace path (e.g. a composer-minted session under
+    // the project root) is a legitimate member — filtering by exact path
+    // equality silently hid such seats from every grouping surface while the
+    // accounting slot remained, which read as "the seat vanished". Foreign-cwd
+    // sessions can only enter the account by direct storage writes, and the
+    // canonical-cwd diagnostic is still logged by the host for those.
+    return this.record.sessionIds
   }
 
   async setTitle(title: string): Promise<void> {
@@ -204,13 +212,13 @@ export class WorkspaceEntity implements Workspace {
     try {
       next = await this.host.table().update(this.id, (current) => {
         const changed = fn(current)
-        const sessionIds = changed.sessionIds.filter(
-          id => this.host.sessionPath(id) === changed.path,
-        )
-        if (changed === current && sessionIds.length === current.sessionIds.length) {
-          throw unchangedSentinel
-        }
-        return { ...changed, sessionIds, updatedAt: new Date().toISOString() }
+        // The account is served and written verbatim: membership is
+        // operator-owned, and pruning by canonical cwd here silently hid
+        // subdirectory-cwd seats from every grouping surface while their
+        // accounting slot remained. Foreign-cwd entry is gated at
+        // attach-time validation; direct storage writes are operator intent.
+        if (changed === current) throw unchangedSentinel
+        return { ...changed, updatedAt: new Date().toISOString() }
       })
     } catch (error) {
       if (error === unchangedSentinel) return

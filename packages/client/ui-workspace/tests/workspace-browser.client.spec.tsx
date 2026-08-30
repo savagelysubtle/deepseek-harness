@@ -227,28 +227,18 @@ describe('WorkspaceBrowser', () => {
     expect(screen.queryByText('alpha-s')).toBeNull()
   })
 
-  it('shows five sessions by default and clears transient show-all when the Workspace collapses', () => {
+  it('renders every accounted session of an expanded workspace on first mount — no second collapse', () => {
+    // The 2026-08-30 regression: a second, never-persisted collapse stage
+    // sliced expanded groups to 5 rows on fresh load, silently hiding
+    // accounted seats. All accounted rows render immediately now.
     const items = Array.from({ length: 7 }, (_, index) => summary(`session-${index + 1}`, 7 - index))
-    const b = mount({
+    mount({
       useSessions: hook(sessionState(items)),
       useWorkspaces: hook(workspaceState([workspace('alpha', items.map(item => item.id))])),
     })
     fireEvent.click(screen.getByText('alpha'))
-    for (const item of items.slice(0, 5)) expect(screen.getByText(item.displayTitle)).toBeTruthy()
-    expect(screen.queryByText('session-6')).toBeNull()
-    expect(screen.queryByText('session-7')).toBeNull()
-
-    fireEvent.click(screen.getByRole('button', { name: '展开其余 2 个会话' }))
-    expect(screen.getByText('session-6')).toBeTruthy()
-    expect(screen.getByText('session-7')).toBeTruthy()
-    expect(screen.getByRole('button', { name: '收起' })).toBeTruthy()
-
-    fireEvent.click(screen.getByText('alpha'))
-    expect(b.store.getSnapshot().groupExpansion).toEqual({ alpha: false })
-    fireEvent.click(screen.getByText('alpha'))
-    expect(b.store.getSnapshot().groupExpansion).toEqual({ alpha: true })
-    expect(screen.queryByText('session-6')).toBeNull()
-    expect(screen.getByRole('button', { name: '展开其余 2 个会话' })).toBeTruthy()
+    for (const item of items) expect(screen.getByText(item.displayTitle)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '展开其余 2 个会话' })).toBeNull()
   })
 
   it('shares one editable order across modes and promotes only while Last updated is active', async () => {

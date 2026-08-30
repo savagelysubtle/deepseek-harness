@@ -792,18 +792,27 @@ describe('Workspace session ordering', () => {
 })
 
 describe('header-validated membership projection', () => {
-  it('requires both candidate id and matching canonical cwd without re-reading on list()', async () => {
+  it('serves the durable account verbatim on list() — subdirectory-cwd seats are legitimate members', async () => {
+    // The 2026-08-30 semantics: membership is operator-owned. A session whose
+    // canonical cwd is a SUBDIRECTORY of the workspace path (a composer-minted
+    // seat under the project root) is a legitimate member — the old
+    // exact-path filter silently hid it from every grouping surface (the
+    // deep-thought vanish). Foreign-cwd sessions can only enter the account
+    // by direct storage writes; the canonical-cwd mismatch is still surfaced
+    // as a diagnostic, and attach-time validation still gates who enters.
     const owned = await makeDir('owned')
+    const sub = await makeDir('owned/sub-seat')
     const elsewhere = await makeDir('projection-elsewhere')
     const id = WorkspaceId('00000000-0000-4000-8000-000000000001')
     const pool = storedPool(
-      [[id, record(owned, ['good', 'mismatch', 'missing'])]],
+      [[id, record(owned, ['good', 'sub-seat', 'missing'])]],
       { initialized: true, workspaceIds: [id] },
     )
     const result = await harness({
       pool,
       sessions: [
         header('good', owned),
+        header('sub-seat', sub),
         header('mismatch', elsewhere),
         // A subagent child in the workspace's own directory: reconciliation
         // adopts unclaimed top-level sessions by path, but never delegation
@@ -812,13 +821,17 @@ describe('header-validated membership projection', () => {
       ],
     })
     const workspace = result.registry.list()[0]!
-    expect(workspace.sessionIds).toEqual(['good'])
-    expect(result.registry.list()[0]!.sessionIds).toEqual(['good'])
+    // Verbatim: the account is served as the operator owns it — including a
+    // headerless stale entry, which the client's byId join hides from render
+    // ("the row appears when the summary lands"). The stored record is
+    // untouched by list().
+    expect(workspace.sessionIds).toEqual(['good', 'sub-seat', 'missing'])
+    expect(result.registry.list()[0]!.sessionIds).toEqual(['good', 'sub-seat', 'missing'])
     expect(result.list).toHaveBeenCalledTimes(1)
-    expect(storedRecord(pool, id).sessionIds).toEqual(['good', 'mismatch', 'missing'])
+    expect(storedRecord(pool, id).sessionIds).toEqual(['good', 'sub-seat', 'missing'])
 
     await workspace.setTitle('pruned')
-    expect(storedRecord(pool, id).sessionIds).toEqual(['good'])
+    expect(storedRecord(pool, id).sessionIds).toEqual(['good', 'sub-seat', 'missing'])
     expect(workspace.sessionIds).not.toContain('cwd-only')
   })
 

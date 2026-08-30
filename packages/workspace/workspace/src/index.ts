@@ -643,17 +643,17 @@ export class WorkspaceRegistry extends Service {
   }
 
   private reportFilteredCandidates(): void {
+    // Membership is served verbatim (see WorkspaceEntity.sessionIds), so
+    // nothing is filtered anymore. The method stays as the single place that
+    // surfaces canonical-path mismatches for diagnostics, without claiming a
+    // filter is applied.
     for (const entity of this.entities.values()) {
       const record = this.requireTable().get(entity.id) as WorkspaceRecord
       for (const sessionId of record.sessionIds) {
         const path = this.sessionPaths.get(sessionId)
-        if (path === record.path) continue
-        const reason = this.invalidSessionPaths.get(sessionId)
-          ?? (this.headers.has(sessionId)
-            ? `canonical cwd '${path}' differs from workspace path '${record.path}'`
-            : 'session header is missing')
+        if (path === undefined || path === record.path) continue
         this.ctx.logger.warn(
-          `workspace '${entity.id}' filtered session '${sessionId}' from membership: ${reason}`,
+          `workspace '${entity.id}' accounts session '${sessionId}' whose canonical cwd '${path}' differs from the workspace path`,
         )
       }
     }

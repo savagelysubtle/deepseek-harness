@@ -32,6 +32,38 @@ const noArchive: readonly SessionId[] = []
 const archived = (...ids: string[]): readonly SessionId[] => ids.map(sid)
 
 describe('deriveGroups', () => {
+  it('renders every accounted session of an expanded group on first mount — the 2026-08-30 drop regression', () => {
+    // 18 accounted sessions, one blank leading (mirrors the live GOTHAM row).
+    // The old renderer sliced expanded groups to 5 behind a never-persisted
+    // second expansion state, hiding seats 6-18 (incl. restaffed seats) on
+    // every fresh load. All accounted, visible sessions must render at once.
+    const ids = ['blank-lead', ...Array.from({ length: 17 }, (_, i) => `seat-${String(i + 1).padStart(2, '0')}`)]
+    const blankLead: SessionSummary = { id: sid('blank-lead'), displayTitle: 'blank-lead', running: false, blank: true, updatedAt: 1, cwd: '/projects/project' }
+    const sessions = [
+      blankLead,
+      ...ids.slice(1).map((id, i) => summary(id, 2 + i, '/projects/project')),
+    ]
+    const groups = deriveGroups(list(...sessions), [workspace('project', ids)], noArchive, view(['project']))
+    const gotham = groups.find(group => group.key === 'project')
+    expect(gotham).toBeDefined()
+    // 17 visible: the blank provisional lead is hidden (not the selected
+    // session) — exactly how the live GOTHAM row behaved under the old slice,
+    // minus the slice. 17 seats, all rendered, no second interaction.
+    expect(gotham!.sessions).toHaveLength(17)
+    expect(gotham!.sessions.map(session => session.id)).toEqual(ids.slice(1).map(sid))
+  })
+
+  it('classes a subdirectory-cwd session as a workspace member, not stray (deep-thought case)', () => {
+    // Membership is operator-owned: a session whose cwd is a SUBDIRECTORY of
+    // the workspace path stays in its group rather than trailing under
+    // Ungrouped. The derive layer never filtered by cwd — this pins that.
+    const member = summary('sub-seat', 5, '/projects/project/sub-seat')
+    const groups = deriveGroups(list(member), [workspace('project', ['sub-seat'])], noArchive, view(['project']))
+    const group = groups.find(group => group.key === 'project')
+    expect(group!.sessions.map(session => session.id)).toEqual([sid('sub-seat')])
+    expect(groups.find(group => group.key === UNGROUPED_KEY)).toBeUndefined()
+  })
+
   it('keeps Host Workspace and sessionIds order without Client recency sorting', () => {
     const sessions = list(summary('newer', 20), summary('older', 10))
     const workspaces = [workspace('first', ['older', 'newer']), workspace('empty', [])]

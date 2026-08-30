@@ -351,7 +351,13 @@ export abstract class AbstractApiClient implements IApiClient {
     if (!full.result.ok) return { rpcId: full.rpcId, result: full.result }
     // Second-level S→C parse: the ok value must match the method's Value schema (mirror of the
     // handler's request-payload parse). The cast collapses the Wire<> widening, same as the handler side.
-    const value = UNARY_VALUE_SCHEMAS[method].parse(full.result.value) as ResponseValue<K>
+    // safeParse + loud failure: a schema skew between host and client must never masquerade as
+    // "the list silently froze at stale state" (the 2026-08-30 workspace-render incident class).
+    const parsed = UNARY_VALUE_SCHEMAS[method].safeParse(full.result.value)
+    if (!parsed.success) {
+      throw new Error(`rpc "${method}": response value failed the client-side schema (${parsed.error.issues.length} issue(s); first: ${parsed.error.issues[0]?.path.join('.') || '(root)'}: ${parsed.error.issues[0]?.message ?? 'unknown'})`)
+    }
+    const value = parsed.data as ResponseValue<K>
     return { rpcId: full.rpcId, result: { ok: true, value } }
   }
 
