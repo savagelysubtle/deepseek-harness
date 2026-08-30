@@ -23,7 +23,7 @@ import MailboxLocal from '@deepseek-ai/dsh-mailbox-local'
 import * as tool from '../src/index.ts'
 import { AWAIT_MAX_DEADLINE_MS, AWAIT_MIN_DEADLINE_MS, AWAIT_POLL_INTERVAL_MS, clampAwaitDeadlineMs, mailboxAwaitTool, mailboxCheckInboxTool, mailboxSendTool } from '../src/tools.ts'
 import { deriveNamedSessionId } from '@deepseek-ai/dsh-named-sessions'
-import { resolveMailboxIdentity } from '../src/identity.ts'
+import { resolveMailboxIdentity, resolveMailboxIdentityWithRegistry } from '../src/identity.ts'
 import * as invariant from '../src/invariant.ts'
 
 let dirs: string[] = []
@@ -750,6 +750,34 @@ describe('identity resolution', () => {
       .toThrow(/require a calling agent in a multi-seat deployment/)
     expect(() => resolveMailboxIdentity({ addresses, agentSessionId: String(deriveNamedSessionId('alfred')) }))
       .toThrow(/is not one of the addresses this deployment serves/)
+  })
+
+  it('resolves a recorded registry binding when derivation misses', async () => {
+    // An operator-composer session the UI minted carries a non-derived id:
+    // the recorded binding is what makes it a seat without renaming the world
+    // around it. Derivation is tried first; the recording is the fallback.
+    const dir = tempDir()
+    const registryPath = join(dir, 'registry.yml')
+    writeFileSync(
+      registryPath,
+      `baseDir: ${dir}\nseats:\n  Ms-pepper-potts: { cwd: ., sessionId: session-operator-minted }\nedges: []\n`,
+      'utf8',
+    )
+    const sources = { addresses: ['Ms-pepper-potts'], agentSessionId: 'session-operator-minted', orgRegistryPath: registryPath }
+    await expect(resolveMailboxIdentityWithRegistry(sources)).resolves.toBe('Ms-pepper-potts')
+    // The derived match still wins when it exists — unchanged semantics.
+    const derived = String(deriveNamedSessionId('tt-pong'))
+    await expect(resolveMailboxIdentityWithRegistry({
+      addresses: ['tt-pong', 'Ms-pepper-potts'], agentSessionId: derived, orgRegistryPath: registryPath,
+    })).resolves.toBe('tt-pong')
+    // No derivation match and no recorded binding: the same not-served error.
+    await expect(resolveMailboxIdentityWithRegistry({
+      addresses: ['Ms-pepper-potts'], agentSessionId: 'session-nobody', orgRegistryPath: registryPath,
+    })).rejects.toThrow(/is not one of the addresses this deployment serves/)
+    // An absent registry cannot resolve a binding either.
+    await expect(resolveMailboxIdentityWithRegistry({
+      addresses: ['Ms-pepper-potts'], agentSessionId: 'session-operator-minted', orgRegistryPath: join(tempDir(), 'absent.yml'),
+    })).rejects.toThrow(/could not be loaded/)
   })
 
   it('presents calls as pure cards derived from the args', () => {

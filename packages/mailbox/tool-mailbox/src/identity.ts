@@ -19,10 +19,19 @@
  * finite set. A caller cannot pass the check by naming an address; it passes
  * only by actually running as the session that address derives to.
  *
+ * **Sessions outside the named flow** — an operator-composer seat is created
+ * by the UI with a non-derived id, so derivation alone would lock it out of
+ * its own identity. The org registry's recorded `sessionId` bindings are the
+ * authoritative answer for those: a registry that records a session id under
+ * a seat names that session AS the seat, and {@link
+ * resolveMailboxIdentityWithRegistry} consults the recording when derivation
+ * misses. The recorded binding is runtime config the operator owns, never a
+ * model argument, so the forgery surface stays closed.
+ *
  * @module @deepseek-ai/dsh-tool-mailbox/identity
  */
 
-import { formatMailboxAddress } from '@deepseek-ai/dsh-mailbox'
+import { formatMailboxAddress, loadOrgRegistry } from '@deepseek-ai/dsh-mailbox'
 import type { MailboxAddress } from '@deepseek-ai/dsh-mailbox'
 import { deriveNamedSessionId } from '@deepseek-ai/dsh-named-sessions'
 
@@ -47,6 +56,12 @@ export interface IdentitySources {
    * an agent. Absent for a direct registry call outside any agent loop.
    */
   readonly agentSessionId?: string
+  /**
+   * The org registry carrying the seats' recorded `sessionId` bindings — the
+   * same file and default the bridge reads. Consulted when derivation misses;
+   * absent skips the binding lookup entirely.
+   */
+  readonly orgRegistryPath?: string
 }
 
 /**
@@ -75,12 +90,7 @@ export function resolveMailboxIdentity(sources: IdentitySources): MailboxAddress
       )
     }
     const match = addresses.find(address => String(deriveNamedSessionId(address)) === agentSessionId)
-    if (match === undefined) {
-      throw new Error(
-        `mailbox tools: session "${agentSessionId}" is not one of the addresses this deployment serves`
-        + ` (${addresses.join(', ')}), so it has no seat identity to send or drain as`,
-      )
-    }
+    if (match === undefined) throw notServedError(agentSessionId, addresses)
     return formatMailboxAddress(match)
   }
   if (sessionName === undefined || sessionName.trim() === '') {
@@ -90,4 +100,64 @@ export function resolveMailboxIdentity(sources: IdentitySources): MailboxAddress
     )
   }
   return formatMailboxAddress(sessionName)
+}
+
+
+/**
+ * The not-served error both identity paths share, naming the session and the
+ * roster it was matched against.
+ * @param agentSessionId - the calling session id that matched nothing.
+ * @param addresses - the roster the match ran against.
+ * @returns the error to throw for a session the deployment does not serve.
+ */
+function notServedError(agentSessionId: string, addresses: readonly string[]): Error {
+  return new Error(
+    `mailbox tools: session "${agentSessionId}" is not one of the addresses this deployment serves`
+    + ` (${addresses.join(', ')}), so it has no seat identity to send or drain as`,
+  )
+}
+
+/**
+ * Resolve the calling session's mailbox address, honoring the org registry's
+ * recorded `sessionId` bindings after the derivation match. Derivation stays
+ * first and its semantics are unchanged; the recorded binding is what lets a
+ * seat created outside the named flow — an operator-composer session whose id
+ * the UI minted — hold its seat identity. Both sources are runtime-supplied
+ * and neither is reachable from the model's arguments, so the recorded
+ * binding adds no forgery surface: a caller passes only by actually running
+ * as the session the operator recorded.
+ * @param sources - the runtime-supplied identity inputs, including the org
+ *   registry path when the deployment serves a directory.
+ * @returns the branded own address.
+ * @throws the same errors {@link resolveMailboxIdentity} throws when the
+ *   caller matches nothing — including a session with neither a derived
+ *   roster match nor a recorded binding.
+ */
+export async function resolveMailboxIdentityWithRegistry(sources: IdentitySources): Promise<MailboxAddress> {
+  const { addresses, agentSessionId, orgRegistryPath } = sources
+  if (addresses === undefined || addresses.length === 0 || agentSessionId === undefined) {
+    return resolveMailboxIdentity(sources)
+  }
+  try {
+    return resolveMailboxIdentity(sources)
+  } catch {
+    // Derivation missed — the recorded-binding path below is the fallback.
+  }
+  if (orgRegistryPath === undefined) throw notServedError(agentSessionId, addresses)
+  let registry: Awaited<ReturnType<typeof loadOrgRegistry>>
+  try {
+    registry = await loadOrgRegistry(orgRegistryPath)
+  } catch (cause) {
+    // A loadable registry is the binding's only source: without it the
+    // session has no resolvable identity, and the error names both facts so
+    // the operator sees the misconfiguration instead of a raw file error.
+    throw new Error(
+      `mailbox tools: the org registry at "${orgRegistryPath}" could not be loaded`
+      + ` (${(cause as Error).message}), and session "${agentSessionId}" has no derived identity either`,
+      { cause },
+    )
+  }
+  const entry = Object.entries(registry.seats).find(([, seat]) => seat.sessionId === agentSessionId)
+  if (entry === undefined) throw notServedError(agentSessionId, addresses)
+  return formatMailboxAddress(entry[0])
 }

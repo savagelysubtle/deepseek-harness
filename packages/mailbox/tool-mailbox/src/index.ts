@@ -89,6 +89,7 @@ export function apply(ctx: Context, config: Config): void {
   const identity: IdentitySources = {
     ...config.sessionName !== undefined ? { sessionName: config.sessionName } : {},
     ...config.addresses !== undefined ? { addresses: config.addresses } : {},
+    ...config.orgRegistryPath !== undefined ? { orgRegistryPath: config.orgRegistryPath } : {},
   }
   ctx.tools.register(mailboxSendTool(ctx.mailbox, identity))
   ctx.tools.register(mailboxCheckInboxTool(ctx.mailbox, identity))

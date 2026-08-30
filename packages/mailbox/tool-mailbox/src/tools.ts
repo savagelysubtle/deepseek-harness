@@ -17,7 +17,7 @@ import type { MailboxAddress, MailboxLease, MailboxMessageId, MailboxRegistry, M
 import { loadOrgRegistry } from '@deepseek-ai/dsh-mailbox'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { resolveMailboxIdentity } from './identity.ts'
+import { resolveMailboxIdentityWithRegistry } from './identity.ts'
 import type { IdentitySources } from './identity.ts'
 
 /**
@@ -322,7 +322,7 @@ export function mailboxSendTool(mailbox: MailboxRegistry, identity: IdentitySour
       rawInput: { to: args.to, subject: args.subject },
     }),
     async execute(args, exec) {
-      const from = resolveMailboxIdentity(callerIdentity(identity, exec.agent?.id))
+      const from = await resolveMailboxIdentityWithRegistry(callerIdentity(identity, exec.agent?.id))
       // The branded boundary: the destination crosses into the seam here, so
       // the grammar check that admits it runs at this exact edge. The
       // registry re-validates by contract; this call gives the model the
@@ -390,7 +390,7 @@ export function mailboxCheckInboxTool(mailbox: MailboxRegistry, identity: Identi
     },
     presentCall: () => ({ card: 'generic', title: 'Check inbox', kind: 'other' }),
     async execute(_args, exec) {
-      const own = resolveMailboxIdentity(callerIdentity(identity, exec.agent?.id))
+      const own = await resolveMailboxIdentityWithRegistry(callerIdentity(identity, exec.agent?.id))
       const leases = await mailbox.claim({
         addresses: [own],
         limit: CHECK_INBOX_DRAIN_LIMIT,
@@ -703,7 +703,7 @@ export function mailboxAwaitTool(mailbox: MailboxRegistry, identity: IdentitySou
     },
     presentCall: () => ({ card: 'generic', title: 'Await mailbox reply', kind: 'other' }),
     async execute(args, exec) {
-      const own = resolveMailboxIdentity(callerIdentity(identity, exec.agent?.id))
+      const own = await resolveMailboxIdentityWithRegistry(callerIdentity(identity, exec.agent?.id))
       const startedAt = Date.now()
       const deadline = startedAt + clampAwaitDeadlineMs(args.deadlineMs)
       for (;;) {
