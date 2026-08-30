@@ -5699,6 +5699,9 @@ importers:
 
   packages/mailbox/tool-mailbox:
     dependencies:
+      '@deepseek-ai/dsh-home-paths':
+        specifier: workspace:^
+        version: link:../../util/home-paths
       '@deepseek-ai/dsh-mailbox':
         specifier: workspace:^
         version: link:../mailbox

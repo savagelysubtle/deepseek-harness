@@ -22,7 +22,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
 import type { IdentitySources } from './identity.ts'
-import { mailboxAwaitTool, mailboxCheckInboxTool, mailboxSendTool } from './tools.ts'
+import { mailboxAwaitTool, mailboxCheckInboxTool, mailboxDirectoryTool, mailboxSendTool } from './tools.ts'
 
 export {
   AWAIT_DEFAULT_DEADLINE_MS,
@@ -35,7 +35,7 @@ export {
 } from './tools.ts'
 export { resolveMailboxIdentity } from './identity.ts'
 export type { IdentitySources } from './identity.ts'
-export type { CheckInboxResult, InboxEntry, MailboxAwaitOutcome, MailboxAwaitResult, MailboxAwaitSentState, SendResult } from './tools.ts'
+export type { CheckInboxResult, DirectoryEntry, InboxEntry, MailboxAwaitOutcome, MailboxAwaitResult, MailboxAwaitSentState, MailboxDirectoryResult, SendResult } from './tools.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'tool-mailbox'
@@ -61,12 +61,20 @@ export interface Config {
    * which in a many-seat process would stamp every session as one seat.
    */
   readonly addresses?: string[]
+  /**
+   * The org registry the `mailbox_directory` tool lists — the same file the
+   * bridge reads for topology. Defaults to the harness home's
+   * `org/registry.yml`; override wherever the bridge is pointed elsewhere so
+   * the two describe the same org.
+   */
+  readonly orgRegistryPath?: string
 }
 
 /** Schema for {@link Config}. */
 export const Config: Schema<Config> = z.object({
   sessionName: z.string(),
   addresses: z.array(z.string()),
+  orgRegistryPath: z.string().min(1),
 })
 
 /**
@@ -85,4 +93,8 @@ export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(mailboxSendTool(ctx.mailbox, identity))
   ctx.tools.register(mailboxCheckInboxTool(ctx.mailbox, identity))
   ctx.tools.register(mailboxAwaitTool(ctx.mailbox, identity))
+  ctx.tools.register(mailboxDirectoryTool({
+    ...config.addresses !== undefined ? { addresses: config.addresses } : {},
+    ...config.orgRegistryPath !== undefined ? { orgRegistryPath: config.orgRegistryPath } : {},
+  }))
 }

@@ -1,11 +1,12 @@
 /**
- * The three model-facing mailbox tools. All carry the deployment-supplied
- * trusted session name and resolve their identity through
- * {@link resolveMailboxIdentity} inside `execute`: `mailbox_send` fills the
- * envelope's sender from it — the schema has no `from` to fill — and
- * `mailbox_check_inbox` and `mailbox_await` act on the calling seat's own
- * address, taking no address argument at all. A seat can address mail
- * anywhere but can only ever be itself.
+ * The model-facing mailbox tools. All identity-carrying ones resolve their
+ * identity through {@link resolveMailboxIdentity} inside `execute`:
+ * `mailbox_send` fills the envelope's sender from it — the schema has no
+ * `from` to fill — and `mailbox_check_inbox` and `mailbox_await` act on the
+ * calling seat's own address, taking no address argument at all. A seat can
+ * address mail anywhere but can only ever be itself. `mailbox_directory`
+ * carries no identity at all: it lists the org's seats so a caller can find
+ * the bare name to address.
  *
  * @module @deepseek-ai/dsh-tool-mailbox/tools
  */
@@ -13,6 +14,8 @@
 import { randomUUID } from 'node:crypto'
 import { parseMailboxAddress } from '@deepseek-ai/dsh-mailbox'
 import type { MailboxAddress, MailboxLease, MailboxMessageId, MailboxRegistry, MailboxTraceEntry } from '@deepseek-ai/dsh-mailbox'
+import { loadOrgRegistry } from '@deepseek-ai/dsh-mailbox'
+import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { resolveMailboxIdentity } from './identity.ts'
 import type { IdentitySources } from './identity.ts'
@@ -757,6 +760,138 @@ export function mailboxAwaitTool(mailbox: MailboxRegistry, identity: IdentitySou
         if (remaining <= 0) return timeoutResult(sent, Date.now() - startedAt)
         await waitPollInterval(Math.min(remaining, AWAIT_POLL_INTERVAL_MS), exec.signal)
       }
+    },
+  })
+}
+
+/** One seat in the org directory, as the model sees it. */
+export interface DirectoryEntry {
+  /** The seat's bare name — the value `mailbox_send`'s `to` takes. */
+  readonly name: string
+  /** This host serves the seat: mail to it delivers and picks up here. */
+  readonly served?: true
+  /** Department head per the org registry; documentation metadata, not enforcement. */
+  readonly lead?: true
+  /**
+   * Throwaway test seat per the org registry. An edge may never cross the
+   * test boundary, so mail to or from a test seat is refused.
+   */
+  readonly test?: true
+}
+
+/** Canonical outcome of one `mailbox_directory` call. */
+export interface MailboxDirectoryResult {
+  /** Every known seat, alphabetical by name. */
+  readonly seats: DirectoryEntry[]
+  /** Convenience count of {@link MailboxDirectoryResult.seats}. */
+  readonly count: number
+  /**
+   * Whether the org registry loaded. `unavailable` degrades the list to this
+   * host's served roster only, with the role flags absent — the send path
+   * still enforces topology and admission regardless of what the directory
+   * could show.
+   */
+  readonly orgRegistry: 'loaded' | 'unavailable'
+}
+
+/** Output schema of one directory entry, shared shape with the result type. */
+const DIRECTORY_ENTRY_ITEM_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    name: { type: 'string', required: true },
+    served: { type: 'boolean', enum: [true] },
+    lead: { type: 'boolean', enum: [true] },
+    test: { type: 'boolean', enum: [true] },
+  },
+} as const
+
+/**
+ * Render the directory the way the model picks a recipient: grouped served /
+ * elsewhere / test, leads marked, and the registry caveat stated when the
+ * list degraded to the roster.
+ * @param value - the validated canonical result.
+ * @returns the single text block's content.
+ */
+function renderDirectory(value: MailboxDirectoryResult): string {
+  const label = (entry: DirectoryEntry): string => `${entry.name}${entry.lead === true ? ' [lead]' : ''}`
+  const served = value.seats.filter(entry => entry.served === true && entry.test !== true)
+  const elsewhere = value.seats.filter(entry => entry.served !== true && entry.test !== true)
+  const test = value.seats.filter(entry => entry.test === true)
+  const lines = [`Org directory — ${value.count} seat${value.count === 1 ? '' : 's'}`
+    + `${value.orgRegistry === 'unavailable' ? ' (org registry unavailable — this host\'s roster only)' : ''}.`
+    + ' Address by bare seat name; topology and admission are enforced when you send.']
+  if (served.length > 0) lines.push(`Served on this host: ${served.map(label).join(', ')}.`)
+  if (elsewhere.length > 0) lines.push(`Elsewhere in the org: ${elsewhere.map(label).join(', ')}.`)
+  if (test.length > 0) lines.push(`Test seats — never mail: ${test.map(entry => entry.name).join(', ')}.`)
+  return lines.join('\n')
+}
+
+/**
+ * Build the `mailbox_directory` tool: list every seat the deployment knows —
+ * this host's served roster merged with the org registry's seats and their
+ * role flags. Discovery is the piece that makes the other three tools
+ * usable: a seat cannot address a coworker it cannot name. The tool carries
+ * NO identity — the directory is org knowledge, not per-seat data, so it
+ * works on anonymous runs whose identity only exists at send time. The org
+ * registry loads per call (mtime-cached in the loader); a registry that
+ * fails to load degrades the result to the roster rather than failing the
+ * call, because the list is informational while the send path enforces.
+ * @param config - the mount's served roster and the org registry path;
+ *   the path defaults to the harness home's `org/registry.yml`.
+ * @returns the registry-ready tool definition.
+ */
+export function mailboxDirectoryTool(config: {
+  readonly addresses?: readonly string[]
+  readonly orgRegistryPath?: string
+}) {
+  // Grammar-checked once at mount: a malformed roster address is a
+  // self-contained misconfiguration and fails loud here, not at call time.
+  const roster = new Set((config.addresses ?? []).map(name => parseMailboxAddress(name)))
+  const registryPath = config.orgRegistryPath ?? dshHomePath('org', 'registry.yml')
+  return defineTool({
+    name: 'mailbox_directory',
+    description: 'List every seat in the org directory with its role, so you address coworkers by their bare name in '
+      + 'mailbox_send\'s `to`. Takes no argument. Marks which seats this host serves, which are department leads, and '
+      + 'which are throwaway test seats that must never be mailed. Topology and admission are enforced when you send — '
+      + 'the directory tells you who exists, not who may hear you.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          seats: { type: 'array', required: true, items: DIRECTORY_ENTRY_ITEM_SCHEMA },
+          count: { type: 'integer', required: true },
+          orgRegistry: { type: 'string', enum: ['loaded', 'unavailable'], required: true },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderDirectory(value) }],
+    },
+    presentCall: () => ({ card: 'generic', title: 'Org directory', kind: 'other' }),
+    async execute() {
+      let registry: Awaited<ReturnType<typeof loadOrgRegistry>> | undefined
+      try {
+        registry = await loadOrgRegistry(registryPath)
+      } catch {
+        registry = undefined
+      }
+      const names = new Set<string>([...roster, ...(registry === undefined ? [] : Object.keys(registry.seats))])
+      const seats: DirectoryEntry[] = [...names].sort().map((name) => {
+        const seat = registry?.seats[name]
+        return {
+          name,
+          ...roster.has(name as MailboxAddress) ? { served: true as const } : {},
+          ...seat?.lead === true ? { lead: true as const } : {},
+          ...seat?.test === true ? { test: true as const } : {},
+        }
+      })
+      const result: MailboxDirectoryResult = {
+        seats,
+        count: seats.length,
+        orgRegistry: registry === undefined ? 'unavailable' : 'loaded',
+      }
+      return result
     },
   })
 }

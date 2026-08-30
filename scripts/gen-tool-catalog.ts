@@ -203,7 +203,7 @@ const TOOL_PACKAGES: ToolPackage[] = [
       await ctx.plugin(ToolMailbox, { sessionName: 'tool-catalog' })
     },
     note:
-      'mailbox_send carries NO sender field: the runtime fills `from` from the trusted session name, so a seat cannot claim to be another seat or the founder. Its replyToTraceId threads a reply onto the awaited send\'s correlation chain. mailbox_check_inbox takes no address and drains only the calling session\'s own endpoint. mailbox_await holds the turn until a reply (read-detected even when the bridge already delivered it), a refusal of the correlated send, or the deadline. An anonymous run (no session name) fails all tools loud at call time rather than falling back to an untrusted identity.',
+      'mailbox_send carries NO sender field: the runtime fills `from` from the trusted session name, so a seat cannot claim to be another seat or the founder. Its replyToTraceId threads a reply onto the awaited send\'s correlation chain. mailbox_check_inbox takes no address and drains only the calling session\'s own endpoint. mailbox_await holds the turn until a reply (read-detected even when the bridge already delivered it), a refusal of the correlated send, or the deadline. mailbox_directory lists the org seats so a caller can find the bare name to address. An anonymous run (no session name) fails all tools loud at call time rather than falling back to an untrusted identity.',
   },
   {
     pkg: '@deepseek-ai/dsh-tool-ask-user',

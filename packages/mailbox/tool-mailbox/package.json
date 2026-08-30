@@ -33,6 +33,7 @@
   "license": "MIT",
   "dependencies": {
     "@deepseek-ai/dsh-mailbox": "workspace:^",
+    "@deepseek-ai/dsh-home-paths": "workspace:^",
     "@deepseek-ai/dsh-named-sessions": "workspace:^",
     "@deepseek-ai/schemastery": "workspace:^"
   },

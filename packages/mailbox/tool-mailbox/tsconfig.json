@@ -24,6 +24,9 @@
       "path": "../../mailbox/mailbox"
     },
     {
+      "path": "../../util/home-paths"
+    },
+    {
       "path": "../../session/named-sessions"
     },
     {

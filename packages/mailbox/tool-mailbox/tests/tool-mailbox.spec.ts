@@ -7,7 +7,7 @@
  * identity.
  */
 
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -43,7 +43,10 @@ const testSignal = new AbortController().signal
 let callCounter = 0
 
 /** Mount the real registries plus the plugin under test over one fresh queue file. */
-async function setup(sessionName: string | undefined): Promise<{ ctx: Context; dbPath: string }> {
+async function setup(
+  sessionName: string | undefined,
+  extraConfig: Record<string, unknown> = {},
+): Promise<{ ctx: Context; dbPath: string }> {
   const dbPath = join(tempDir(), 'mailbox.db')
   const ctx = new Context()
   await ctx.plugin(InvariantRegistry)
@@ -51,7 +54,7 @@ async function setup(sessionName: string | undefined): Promise<{ ctx: Context; d
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(MailboxRegistry, { defaultProvider: 'local' })
   await ctx.plugin(MailboxLocal, { path: dbPath })
-  await ctx.plugin(tool, sessionName === undefined ? {} : { sessionName })
+  await ctx.plugin(tool, { ...sessionName === undefined ? {} : { sessionName }, ...extraConfig })
   await ctx.plugin(invariant)
   return { ctx, dbPath }
 }
@@ -629,6 +632,86 @@ describe('mailbox_await', () => {
     expect(clampAwaitDeadlineMs(-5000)).toBe(AWAIT_MIN_DEADLINE_MS)
     expect(clampAwaitDeadlineMs(Number.MAX_SAFE_INTEGER)).toBe(AWAIT_MAX_DEADLINE_MS)
     expect(clampAwaitDeadlineMs(45_000)).toBe(45_000)
+  })
+})
+
+describe('mailbox_directory', () => {
+  /** Write a minimal valid org registry listing the given seats. */
+  function writeRegistry(seats: Record<string, { lead?: boolean; test?: boolean }>): string {
+    const dir = tempDir()
+    const path = join(dir, 'registry.yml')
+    const lines = Object.entries(seats).map(([name, flags]) => {
+      const parts = ['cwd: .', ...flags.lead === true ? ['lead: true'] : [], ...flags.test === true ? ['test: true'] : []]
+      return `  ${name}: { ${parts.join(', ')} }`
+    })
+    writeFileSync(path, `baseDir: ${dir}\nseats:\n${lines.join('\n')}\nedges: []\n`, 'utf8')
+    return path
+  }
+
+  it('exposes zero parameters and teaches the discovery contract', async () => {
+    const { ctx } = await setup('batman')
+    const schema = ctx.tools.schemas().find(entry => entry.name === 'mailbox_directory')
+    expect(schema).toBeDefined()
+    expect(schema!.parameters).toEqual({ type: 'object', properties: {} })
+    expect(schema!.description).toContain('bare name')
+    expect(schema!.description).toContain('test seats')
+    await ctx.fiber.dispose()
+  })
+
+  it('merges the served roster with the org registry and marks roles, sorted by name', async () => {
+    const registryPath = writeRegistry({
+      alfred: { lead: true },
+      pepper: { lead: true },
+      'tt-pong': { test: true },
+      'web-ceo': {},
+    })
+    const { ctx } = await setup('batman', { addresses: ['batman', 'tt-pong'], orgRegistryPath: registryPath })
+    const result = await call(ctx, 'mailbox_directory')
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected mailbox_directory success')
+    expect(result.value).toEqual({
+      seats: [
+        { name: 'alfred', lead: true },
+        { name: 'batman', served: true },
+        { name: 'pepper', lead: true },
+        { name: 'tt-pong', served: true, test: true },
+        { name: 'web-ceo' },
+      ],
+      count: 5,
+      orgRegistry: 'loaded',
+    })
+    const text = (result.content as Array<{ text: string }>)[0]!.text
+    // A served TEST seat renders only in the never-mail group: inviting mail
+    // to it under "served" would steer the model into a guaranteed refusal.
+    expect(text).toContain('Served on this host: batman.')
+    expect(text).toContain('Elsewhere in the org: alfred [lead], pepper [lead], web-ceo.')
+    expect(text).toContain('Test seats — never mail: tt-pong.')
+    await ctx.fiber.dispose()
+  })
+
+  it('degrades to the served roster when the org registry cannot load, and says so', async () => {
+    const { ctx } = await setup('batman', { addresses: ['batman'], orgRegistryPath: join(tempDir(), 'absent.yml') })
+    const result = await call(ctx, 'mailbox_directory')
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected mailbox_directory success')
+    expect(result.value).toEqual({
+      seats: [{ name: 'batman', served: true }],
+      count: 1,
+      orgRegistry: 'unavailable',
+    })
+    const text = (result.content as Array<{ text: string }>)[0]!.text
+    expect(text).toContain('org registry unavailable')
+    await ctx.fiber.dispose()
+  })
+
+  it('works on an anonymous run — the directory is org knowledge, not identity-scoped', async () => {
+    const registryPath = writeRegistry({ alfred: {} })
+    const { ctx } = await setup(undefined, { addresses: ['batman'], orgRegistryPath: registryPath })
+    const result = await call(ctx, 'mailbox_directory')
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected mailbox_directory success')
+    expect(result.value).toMatchObject({ count: 2, orgRegistry: 'loaded' })
+    await ctx.fiber.dispose()
   })
 })
 

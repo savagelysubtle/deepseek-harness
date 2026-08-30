@@ -15,7 +15,7 @@ This table connects model-visible tool names to the plugin package and service s
 
 | Tool package | Model-visible names | Requires | Writes / affects | Shipped aliases | Deployment note |
 | --- | --- | --- | --- | --- | --- |
-| `@deepseek-ai/dsh-tool-mailbox` | `mailbox_await`, `mailbox_check_inbox`, `mailbox_send` | `ctx.tools`, `ctx.mailbox` | `tool/call`, `tool/result` | - | mailbox_send carries NO sender field: the runtime fills `from` from the trusted session name, so a seat cannot claim to be another seat or the founder. Its replyToTraceId threads a reply onto the awaited send's correlation chain. mailbox_check_inbox takes no address and drains only the calling session's own endpoint. mailbox_await holds the turn until a reply (read-detected even when the bridge already delivered it), a refusal of the correlated send, or the deadline. An anonymous run (no session name) fails all tools loud at call time rather than falling back to an untrusted identity. |
+| `@deepseek-ai/dsh-tool-mailbox` | `mailbox_await`, `mailbox_check_inbox`, `mailbox_directory`, `mailbox_send` | `ctx.tools`, `ctx.mailbox` | `tool/call`, `tool/result` | - | mailbox_send carries NO sender field: the runtime fills `from` from the trusted session name, so a seat cannot claim to be another seat or the founder. Its replyToTraceId threads a reply onto the awaited send's correlation chain. mailbox_check_inbox takes no address and drains only the calling session's own endpoint. mailbox_await holds the turn until a reply (read-detected even when the bridge already delivered it), a refusal of the correlated send, or the deadline. mailbox_directory lists the org seats so a caller can find the bare name to address. An anonymous run (no session name) fails all tools loud at call time rather than falling back to an untrusted identity. |
 | `@deepseek-ai/dsh-tool-ask-user` | `ask_user_question` | `ctx.tools`, `ctx.userQuestions` | `tool/call`, `tool/result after a UI/provider answers the question` | - | ask_user_question pauses the tool call until the active UI provider returns a human answer. |
 | `@deepseek-ai/dsh-tools` | `run_code` | `ctx.tools`, `ctx.codeRuntime (execution time)`, `ctx.systemPrompt` | `tool/call`, `one tool/code-dispatch-start + tool/code-dispatch pair per bridged sub-call`, `tool/result` | - | Owned by the tool registry as a reserved transport outside filterable capability layers under `mode: code` / `mode: both` (see the Code Mode Agent Note). Under `code` it is the registry's only wire contribution; the other visible capabilities are declared in a generated SDK section in the loaded runtime's language, and a program calls them through bindings scheduled under the native concurrency contract (submission-ordered starts and policy; concurrency-safe bodies overlap up to `maxParallelSubCalls`) that re-enter the complete guarded tool pipeline and link each nested execution to this outer result. |
 | `@deepseek-ai/dsh-plan-mode` | `exit_plan_mode` | `ctx.tools`, `ctx.systemPrompt`, `ctx.userQuestions (execution time, opportunistic)` | `tool/call`, `plan/mode inactive on an approved review`, `tool/result` | - | exit_plan_mode stays in the model-facing schema while planning is inactive so transitions add no tool-catalog churn on top of the plan-policy change. Its execute path rejects calls outside plan mode; in plan mode it presents the plan over the user-questions seam (approve / keep planning with feedback), and approval logs plan mode inactive at the step boundary. |
@@ -81,6 +81,19 @@ Drain this seat's own mailbox: claim and deliver every pending message addressed
 
 Source: [`packages/mailbox/tool-mailbox/src/index.ts`](../packages/mailbox/tool-mailbox/src/index.ts)
 
+### `mailbox_directory`
+
+List every seat in the org directory with its role, so you address coworkers by their bare name in mailbox_send's `to`. Takes no argument. Marks which seats this host serves, which are department leads, and which are throwaway test seats that must never be mailed. Topology and admission are enforced when you send — the directory tells you who exists, not who may hear you.
+
+```json
+{
+  "type": "object",
+  "properties": {}
+}
+```
+
+Source: [`packages/mailbox/tool-mailbox/src/index.ts`](../packages/mailbox/tool-mailbox/src/index.ts)
+
 ### `mailbox_send`
 
 Send a mailbox message to another seat by its bare name. The sender is filled in by the runtime from this session's trusted name and cannot be chosen or changed — the recipient sees the message as coming from this seat. Replies travel as their own mailbox_send calls, not inside this one. When this message IS the reply the other seat is waiting for, pass the traceId its sender quoted as replyToTraceId: the reply then carries that correlation id, and the waiting seat's mailbox_await matches it instead of timing out. The result names a traceId: pass it to mailbox_await to hold this turn until the reply arrives or the deadline expires.
@@ -120,7 +133,7 @@ Send a mailbox message to another seat by its bare name. The sender is filled in
 
 Source: [`packages/mailbox/tool-mailbox/src/index.ts`](../packages/mailbox/tool-mailbox/src/index.ts)
 
-mailbox_send carries NO sender field: the runtime fills `from` from the trusted session name, so a seat cannot claim to be another seat or the founder. Its replyToTraceId threads a reply onto the awaited send's correlation chain. mailbox_check_inbox takes no address and drains only the calling session's own endpoint. mailbox_await holds the turn until a reply (read-detected even when the bridge already delivered it), a refusal of the correlated send, or the deadline. An anonymous run (no session name) fails all tools loud at call time rather than falling back to an untrusted identity.
+mailbox_send carries NO sender field: the runtime fills `from` from the trusted session name, so a seat cannot claim to be another seat or the founder. Its replyToTraceId threads a reply onto the awaited send's correlation chain. mailbox_check_inbox takes no address and drains only the calling session's own endpoint. mailbox_await holds the turn until a reply (read-detected even when the bridge already delivered it), a refusal of the correlated send, or the deadline. mailbox_directory lists the org seats so a caller can find the bare name to address. An anonymous run (no session name) fails all tools loud at call time rather than falling back to an untrusted identity.
 
 <a id="deepseek-aidsh-tool-ask-user"></a>
 

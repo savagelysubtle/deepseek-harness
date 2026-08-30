@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-The three model-facing mailbox tools — `mailbox_send`, `mailbox_check_inbox`, and `mailbox_await` — registered over the `ctx.mailbox` seam. Every tool resolves the calling seat's address through one identity path: the deployment-supplied trusted session name, folded with the calling agent's session id, resolved by `resolveMailboxIdentity`. A seat can address mail anywhere but can only ever be itself; there is no `from` argument to forge and no address argument to read another seat's queue. An anonymous run (no trusted name available) fails every tool loud at call time rather than falling back to a guessed sender.
+The four model-facing mailbox tools — `mailbox_send`, `mailbox_check_inbox`, `mailbox_await`, and `mailbox_directory` — registered over the `ctx.mailbox` seam. Every tool resolves the calling seat's address through one identity path: the deployment-supplied trusted session name, folded with the calling agent's session id, resolved by `resolveMailboxIdentity`. A seat can address mail anywhere but can only ever be itself; there is no `from` argument to forge and no address argument to read another seat's queue. An anonymous run (no trusted name available) fails every tool loud at call time rather than falling back to a guessed sender.
 
 Requires a loaded mailbox Service Provider (e.g. `@deepseek-ai/dsh-mailbox-local`) registered as the registry's `defaultProvider`; the plugin stays pending until its injected services exist.
 
@@ -32,6 +32,10 @@ No parameters. Claims and settles (inbox admission) up to 20 pending messages ad
 | `traceId` | string | The correlation id from the awaited send's result. Omit to end the wait on any inbound mail. |
 
 Holds the turn until a reply arrives, the awaited send is refused, or the deadline expires — the alternative to an improvised Bash sleep-poll loop. A refusal ends the wait immediately with the recorded reason verbatim. A reply is detected by store reads, not only by claiming: a reply the bridge already claimed, steered as a turn, and settled `done` still ends the wait with its content, and a threaded reply (`replyToTraceId`) is matched to the wait precisely. A timeout is an ordinary result carrying the awaited send's store state — `delivered` (with the time), `claimed`, `pending`, or `unknown` — plus `waitedMs`. Cancellation forwards the caller's abort into every read and sleep, so a stopped seat reclaims control immediately.
+
+### `mailbox_directory`
+
+No parameters. Lists every seat in the org directory — this host's served roster merged with the org registry — marking which seats are served here, which are department leads, and which are throwaway test seats that must never be mailed. Discovery is what makes the other three tools usable: a seat cannot address a coworker it cannot name. The org registry loads per call; one that fails to load degrades the list to the served roster with the caveat stated in the result. Topology and admission are enforced at send time — the directory is who exists, not who may hear you.
 
 ## Model Experience
 
