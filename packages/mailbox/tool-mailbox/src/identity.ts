@@ -33,6 +33,7 @@
 
 import { formatMailboxAddress, loadOrgRegistry } from '@deepseek-ai/dsh-mailbox'
 import type { MailboxAddress } from '@deepseek-ai/dsh-mailbox'
+import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { deriveNamedSessionId } from '@deepseek-ai/dsh-named-sessions'
 
 /**
@@ -143,16 +144,18 @@ export async function resolveMailboxIdentityWithRegistry(sources: IdentitySource
   } catch {
     // Derivation missed — the recorded-binding path below is the fallback.
   }
-  if (orgRegistryPath === undefined) throw notServedError(agentSessionId, addresses)
+  // The bridge resolves the same default at its own resolution step, so the
+  // tools and the bridge describe one org without the profile repeating it.
+  const registryPath = orgRegistryPath ?? dshHomePath('org', 'registry.yml')
   let registry: Awaited<ReturnType<typeof loadOrgRegistry>>
   try {
-    registry = await loadOrgRegistry(orgRegistryPath)
+    registry = await loadOrgRegistry(registryPath)
   } catch (cause) {
     // A loadable registry is the binding's only source: without it the
     // session has no resolvable identity, and the error names both facts so
     // the operator sees the misconfiguration instead of a raw file error.
     throw new Error(
-      `mailbox tools: the org registry at "${orgRegistryPath}" could not be loaded`
+      `mailbox tools: the org registry at "${registryPath}" could not be loaded`
       + ` (${(cause as Error).message}), and session "${agentSessionId}" has no derived identity either`,
       { cause },
     )

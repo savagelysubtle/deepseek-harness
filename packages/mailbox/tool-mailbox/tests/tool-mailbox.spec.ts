@@ -7,7 +7,7 @@
  * identity.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -778,6 +778,28 @@ describe('identity resolution', () => {
     await expect(resolveMailboxIdentityWithRegistry({
       addresses: ['Ms-pepper-potts'], agentSessionId: 'session-operator-minted', orgRegistryPath: join(tempDir(), 'absent.yml'),
     })).rejects.toThrow(/could not be loaded/)
+
+    // No orgRegistryPath in the sources: the resolver applies the bridge's own
+    // default ($DSH_HOME/org/registry.yml), so a host that never configures the
+    // path still binds composer-minted seats. The web-stable deployment relies
+    // on exactly this — its profile sets addresses but not the registry path.
+    const smokeHome = tempDir()
+    mkdirSync(join(smokeHome, 'org'), { recursive: true })
+    writeFileSync(
+      join(smokeHome, 'org', 'registry.yml'),
+      `baseDir: ${smokeHome}\nseats:\n  Ms-pepper-potts: { cwd: ., sessionId: session-via-default }\nedges: []\n`,
+      'utf8',
+    )
+    const savedHome = process.env.DSH_HOME
+    process.env.DSH_HOME = smokeHome
+    try {
+      await expect(resolveMailboxIdentityWithRegistry({
+        addresses: ['Ms-pepper-potts'], agentSessionId: 'session-via-default',
+      })).resolves.toBe('Ms-pepper-potts')
+    } finally {
+      if (savedHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = savedHome
+    }
   })
 
   it('presents calls as pure cards derived from the args', () => {
