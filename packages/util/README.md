@@ -12,3 +12,4 @@ These zero-dependency packages provide small primitives shared by multiple capab
 | [`retention/`](output-retention/README.md) | Bounds retained text and item collections |
 | [`atomic-write/`](atomic-write/README.md) | Replaces files atomically |
 | [`native-command/`](native-command/README.md) | Runs host-native commands without a shell |
+| [`port-allocator/`](port-allocator/README.md) | Allocates per-session ports and isolated session environments |
