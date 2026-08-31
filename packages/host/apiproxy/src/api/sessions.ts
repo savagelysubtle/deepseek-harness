@@ -14,6 +14,7 @@ import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/t
 import type { RpcId, RpcRequest, RpcResponse } from './rpc.ts'
 import type { ToolEventView } from './events.ts'
 import type { WorkspaceId } from './workspace.ts'
+import type { WorktreeSpawnInput } from './worktree.ts'
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionMap {
@@ -249,11 +250,21 @@ export interface SessionsApi {
 
   /**
    * Creates a real session and its idle agent. At most one of `workspaceId` /
-   * `cwd` is accepted; an omitted project uses the Host cwd. A caller may
-   * preallocate `sessionId`: retries with the same id and cwd return the same
-   * session, while a different cwd fails with `session-conflict`. Workspace
-   * creation attaches the session after publication; an attach failure
-   * returns `workspace-attach-failed` with the published session id.
+   * `cwd` / `worktree` is accepted; an omitted project uses the Host cwd. A
+   * caller may preallocate `sessionId`: retries with the same id and cwd
+   * return the same session, while a different cwd fails with
+   * `session-conflict`. Workspace creation attaches the session after
+   * publication; an attach failure returns `workspace-attach-failed` with the
+   * published session id.
+   *
+   * A `worktree` intent spawns the session inside the seam-minted worktree:
+   * the intent is forwarded verbatim to the seam's spawn and the session's cwd
+   * becomes the returned handle's path. A deployment without the seam refuses
+   * with `worktree-unavailable` — the spawn never silently falls back to the
+   * main repository — and a refused spawn surfaces as `worktree-refused` with
+   * the seam's own reason. A worktree minted for a create that then fails
+   * stays live and visible in `worktree.list`; reclaiming it is an explicit
+   * `worktree.remove`.
    *
    * `agentPreset` names the composition the new session's agent is built
    * from; omitted, the effective default applies — the user's stored choice
@@ -262,7 +273,13 @@ export interface SessionsApi {
    * id fails with `agent-preset-not-found`, and a preset whose composition
    * cannot be mounted fails with `agent-preset-invalid`.
    */
-  create(request: RpcRequest<{ workspaceId?: WorkspaceId; cwd?: string; sessionId?: SessionId; agentPreset?: string }>):
+  create(request: RpcRequest<{
+    workspaceId?: WorkspaceId
+    cwd?: string
+    worktree?: WorktreeSpawnInput
+    sessionId?: SessionId
+    agentPreset?: string
+  }>):
   Promise<RpcResponse<{ sessionId: SessionId; agentPreset?: string }>>
 
   /**

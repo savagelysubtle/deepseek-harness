@@ -15,6 +15,7 @@ import type { CredentialsApi } from './credentials.ts'
 import type { LlmApi } from './llm.ts'
 import type { MailboxApi } from './mailbox.ts'
 import type { SubagentsApi } from './subagents.ts'
+import type { WorktreeApi } from './worktree.ts'
 import type { RpcResponse } from './rpc.ts'
 
 /**
@@ -76,6 +77,10 @@ export interface RpcMethodMap {
   'llm.models': LlmApi['models']
   'llm.discoverModels': LlmApi['discoverModels']
   'mailbox.publish': MailboxApi['publish']
+  'worktree.list': WorktreeApi['list']
+  'worktree.create': WorktreeApi['create']
+  'worktree.lock': WorktreeApi['lock']
+  'worktree.remove': WorktreeApi['remove']
 }
 
 /** Business request payload of method K (reaches through the RpcRequest narrow form to payload). */

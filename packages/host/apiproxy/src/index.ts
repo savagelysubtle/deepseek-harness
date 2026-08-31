@@ -29,6 +29,11 @@ export { AbstractApiClient, InProcessApiClient } from './fetch/client.ts'
 export type { IApiClient } from './fetch/client.ts'
 export { createApiProxy } from './api-proxy.ts'
 export type { ApiProxyDefaults } from './api-proxy.ts'
+// The worktree seam's consumer-declared contract, re-exported so composition
+// authors (and the seam provider's integration commit) resolve the declared
+// surface from the package root.
+export { WorktreeSeamError } from './worktree-seam.ts'
+export type { WorktreeSeam, WorktreeSeamRefusalCode } from './worktree-seam.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -89,6 +94,7 @@ export class ApiProxyService extends Service implements ApiProxy {
   readonly settings: ApiProxy['settings']
   readonly credentials: ApiProxy['credentials']
   readonly mailbox: ApiProxy['mailbox']
+  readonly worktree: ApiProxy['worktree']
   readonly llm: ApiProxy['llm']
   readonly events: ApiProxy['events']
   readonly downloads: ApiProxy['downloads']
@@ -118,6 +124,7 @@ export class ApiProxyService extends Service implements ApiProxy {
     this.settings = api.settings
     this.credentials = api.credentials
     this.mailbox = api.mailbox
+    this.worktree = api.worktree
     this.llm = api.llm
     this.events = api.events
     this.downloads = api.downloads

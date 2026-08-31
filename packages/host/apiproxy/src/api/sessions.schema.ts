@@ -17,6 +17,7 @@ import type {
 import type { ToolEventView } from './events.ts'
 import type { AttachmentIdType, ImageAttachmentLimits, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { WorkspaceId } from './workspace.ts'
+import { worktreeSpawnInputSchema } from './worktree.schema.ts'
 import {
   SESSION_SEARCH_RESULT_LIMIT,
   SESSION_SEARCH_SNIPPET_MAX_CODE_POINTS,
@@ -98,15 +99,25 @@ export const sessionSearchValueSchema = z.object({
   hasMore: z.boolean(),
 }) satisfies z.ZodType<Wire<ResponseValue<'session.search'>>>
 
-/** session.create request payload (at most one of workspaceId / cwd). */
+/**
+ * session.create request payload (at most one of workspaceId / cwd /
+ * worktree). The worktree intent reuses the worktree domain's spawn-input
+ * schema — the consumer forwards it verbatim to the seam — imported from
+ * worktree.schema, which imports nothing from this module, so the schema DAG
+ * stays acyclic.
+ */
 export const sessionCreateRequestSchema = z.object({
   workspaceId: workspaceIdSchema.optional(),
   cwd: z.string().optional(),
+  worktree: worktreeSpawnInputSchema.optional(),
   sessionId: sessionIdSchema.optional(),
   agentPreset: z.string().optional(),
 }).refine(
-  payload => payload.workspaceId === undefined || payload.cwd === undefined,
-  { message: 'session.create accepts workspaceId or cwd, not both' },
+  payload =>
+    (payload.workspaceId === undefined ? 0 : 1)
+    + (payload.cwd === undefined ? 0 : 1)
+    + (payload.worktree === undefined ? 0 : 1) <= 1,
+  { message: 'session.create accepts at most one of workspaceId, cwd, worktree' },
 ) satisfies z.ZodType<Wire<RequestPayload<'session.create'>>>
 
 /** session.create response value. */

@@ -64,6 +64,10 @@ import {
   credentialsDescribeRequestSchema, credentialsSetRequestSchema, credentialsUnsetRequestSchema,
 } from '../api/credentials.schema.ts'
 import { mailboxPublishRequestSchema } from '../api/mailbox.schema.ts'
+import {
+  worktreeCreateRequestSchema, worktreeListRequestSchema, worktreeLockRequestSchema,
+  worktreeRemoveRequestSchema,
+} from '../api/worktree.schema.ts'
 import { llmDiscoverModelsRequestSchema, llmModelsRequestSchema, llmProvidersRequestSchema } from '../api/llm.schema.ts'
 import {
   subagentHistoryRequestSchema,
@@ -142,6 +146,10 @@ const UNARY_ROUTES: UnaryRoutes = {
   'llm.models': { schema: llmModelsRequestSchema, invoke: (api, r) => api.llm.models(r) },
   'llm.discoverModels': { schema: llmDiscoverModelsRequestSchema, invoke: (api, r, signal) => api.llm.discoverModels(r, signal) },
   'mailbox.publish': { schema: mailboxPublishRequestSchema, invoke: (api, r) => api.mailbox.publish(r) },
+  'worktree.list': { schema: worktreeListRequestSchema, invoke: (api, r) => api.worktree.list(r) },
+  'worktree.create': { schema: worktreeCreateRequestSchema, invoke: (api, r) => api.worktree.create(r) },
+  'worktree.lock': { schema: worktreeLockRequestSchema, invoke: (api, r) => api.worktree.lock(r) },
+  'worktree.remove': { schema: worktreeRemoveRequestSchema, invoke: (api, r) => api.worktree.remove(r) },
 }
 
 /** Route lookup that narrows an arbitrary path segment to a map key (single cast point for the string→key refinement). */

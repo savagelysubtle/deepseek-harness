@@ -64,6 +64,10 @@ import {
 import { llmDiscoverModelsValueSchema, llmModelsValueSchema, llmProvidersValueSchema } from '../api/llm.schema.ts'
 import { mailboxPublishValueSchema } from '../api/mailbox.schema.ts'
 import {
+  worktreeCreateValueSchema, worktreeListValueSchema, worktreeLockValueSchema,
+  worktreeRemoveValueSchema,
+} from '../api/worktree.schema.ts'
+import {
   subagentHistoryValueSchema,
   subagentInterruptValueSchema,
   subagentListValueSchema,
@@ -167,6 +171,13 @@ export interface IApiClient {
   mailbox: {
     publish(payload: RequestPayload<'mailbox.publish'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'mailbox.publish'>>>
   }
+  /** Worktree registry visibility and management over the worktree seam. */
+  worktree: {
+    list(payload: RequestPayload<'worktree.list'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'worktree.list'>>>
+    create(payload: RequestPayload<'worktree.create'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'worktree.create'>>>
+    lock(payload: RequestPayload<'worktree.lock'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'worktree.lock'>>>
+    remove(payload: RequestPayload<'worktree.remove'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'worktree.remove'>>>
+  }
   /** client-response passthrough (rpcId is a backfill of the server-request's id — never minted here). */
   respond(message: ClientResponse, signal?: AbortSignal): Promise<RpcReceipt>
 }
@@ -229,6 +240,10 @@ const UNARY_VALUE_SCHEMAS: { [K in keyof RpcMethodMap]: z.ZodType<Wire<ResponseV
   'llm.models': llmModelsValueSchema,
   'llm.discoverModels': llmDiscoverModelsValueSchema,
   'mailbox.publish': mailboxPublishValueSchema,
+  'worktree.list': worktreeListValueSchema,
+  'worktree.create': worktreeCreateValueSchema,
+  'worktree.lock': worktreeLockValueSchema,
+  'worktree.remove': worktreeRemoveValueSchema,
 }
 
 /** Default timeout for bounded unary calls (rpc-compare 2026-07-19: a hung host must not leave callers pending forever). */
@@ -517,6 +532,13 @@ export abstract class AbstractApiClient implements IApiClient {
 
   readonly mailbox: IApiClient['mailbox'] = {
     publish: (payload, signal) => this.callUnary('mailbox.publish', payload, signal),
+  }
+
+  readonly worktree: IApiClient['worktree'] = {
+    list: (payload, signal) => this.callUnary('worktree.list', payload, signal),
+    create: (payload, signal) => this.callUnary('worktree.create', payload, signal),
+    lock: (payload, signal) => this.callUnary('worktree.lock', payload, signal),
+    remove: (payload, signal) => this.callUnary('worktree.remove', payload, signal),
   }
 
   readonly events: IApiClient['events'] = {

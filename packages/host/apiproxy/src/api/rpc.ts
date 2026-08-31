@@ -99,6 +99,25 @@ export interface RpcErrorDetailsMap {
    * The message is the bridge's own text; details carry the same reason.
    */
   'mailbox-rejected': { reason: string }
+  /**
+   * A worktree operation was refused because this deployment mounts no
+   * worktree seam provider. Emitted instead of an empty list or a
+   * main-repository fallback: the caller must learn there is no registry.
+   */
+  'worktree-unavailable': {}
+  /**
+   * The worktree seam refused the operation (a lock is held, the seat is
+   * frozen, the reference is unknown, or the seam failed outright). The
+   * message is the seam's own text — the reason, never swallowed — and the
+   * details name the refused RPC, the addressed seat/reference, and the
+   * seam's typed refusal code when it reported one.
+   */
+  'worktree-refused': {
+    op: 'session.create' | 'worktree.list' | 'worktree.create' | 'worktree.lock' | 'worktree.remove'
+    seat?: string
+    ref?: string
+    seamCode?: string
+  }
   'internal': {}
 }
 

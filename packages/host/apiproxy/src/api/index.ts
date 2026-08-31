@@ -18,6 +18,7 @@ import type { CredentialsApi } from './credentials.ts'
 import type { LlmApi } from './llm.ts'
 import type { DownloadsApi } from './downloads.ts'
 import type { MailboxApi } from './mailbox.ts'
+import type { WorktreeApi } from './worktree.ts'
 import type { ClientResponse, RpcReceipt } from './rpc.ts'
 
 /** Root interface of the unified API. New client-request domain = one new file pair + one field here + one map row. */
@@ -35,6 +36,8 @@ export interface ApiProxy {
   llm: LlmApi
   /** Host-wire face for non-dsh callers admitting mail into served namespaces. */
   mailbox: MailboxApi
+  /** Seat→worktree→branch registry visibility and management over the worktree seam. */
+  worktree: WorktreeApi
   /** Host-only download surfaces (GET, no wire envelope); absent from IApiClient. */
   downloads: DownloadsApi
   /**
@@ -58,6 +61,9 @@ export type {
 } from './subagents.ts'
 export type { JobView } from './jobs.ts'
 export type { WorkspaceApi, WorkspaceId, WorkspaceView } from './workspace.ts'
+export type {
+  WorktreeApi, WorktreeHandle, WorktreeRef, WorktreeRow, WorktreeSpawnInput,
+} from './worktree.ts'
 export type { SkillsApi, SkillEntry } from './skills.ts'
 export type { AgentPresetsApi, AgentPresetEntry } from './agent-presets.ts'
 export type { EventsApi, MuxFrame, HostFrame, QueuedInboxItem, ToolCallView, ToolEventView, ToolResultView } from './events.ts'

@@ -192,9 +192,12 @@ describe('sessions domain schemas', () => {
       hasMore: true,
     })).toThrow()
     expect(sessionCreateRequestSchema.parse({ cwd: '/w' }).cwd).toBe('/w')
-    // The refine's both-sides branch: workspaceId alone passes, workspaceId+cwd rejects.
+    // The refine's exclusivity branches: each project source alone passes, any pair rejects.
     expect(sessionCreateRequestSchema.parse({ workspaceId: 'w1', sessionId: 's1' }).sessionId).toBe('s1')
-    expect(() => sessionCreateRequestSchema.parse({ workspaceId: 'w1', cwd: '/w' })).toThrow(/not both/)
+    expect(sessionCreateRequestSchema.parse({ worktree: { seat: 'eve', sessionName: 'task' } }).worktree?.seat).toBe('eve')
+    expect(() => sessionCreateRequestSchema.parse({ workspaceId: 'w1', cwd: '/w' })).toThrow(/at most one/)
+    expect(() => sessionCreateRequestSchema.parse({ workspaceId: 'w1', worktree: { seat: 'eve', sessionName: 'task' } })).toThrow(/at most one/)
+    expect(() => sessionCreateRequestSchema.parse({ cwd: '/w', worktree: { seat: 'eve', sessionName: 'task' } })).toThrow(/at most one/)
     expect(sessionCreateValueSchema.parse({ sessionId: 's1' }).sessionId).toBe('s1')
     expect(sessionHistoryRequestSchema.parse({ sessionId: 's1', beforeSeq: 3, maxMessages: 5 }).beforeSeq).toBe(3)
     expect(() => sessionHistoryRequestSchema.parse({ sessionId: 's1', maxMessages: 0 })).toThrow()

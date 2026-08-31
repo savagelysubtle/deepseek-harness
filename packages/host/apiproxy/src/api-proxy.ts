@@ -116,6 +116,10 @@ import {
   inspectApiRemoteSession,
 } from '@deepseek-ai/dsh-api-remotes'
 import { canOpenNativePath, openNativePath, openNativeTextFile } from './native-path-opener.ts'
+// The worktree seam's consumer-declared contract (see the module's header):
+// the error class narrows seam rejections at this wire boundary, and the
+// type-only service merge resolves `ctx.get('worktree')` — an optional read.
+import { WorktreeSeamError } from './worktree-seam.ts'
 
 /** Page size when history is called without maxMessages. */
 const DEFAULT_MAX_MESSAGES = 50
@@ -356,6 +360,40 @@ async function buildModelCatalog(ctx: Context): Promise<{
 /** Wrap an error result echoing the request's rpcId. */
 function err<T>(request: RpcRequest<unknown>, error: RpcError): RpcResponse<T> {
   return { rpcId: request.rpcId, result: { ok: false, error } }
+}
+
+/** The refusal every worktree operation answers when the deployment mounts no seam. */
+function worktreeUnavailable(): RpcError {
+  return {
+    code: 'worktree-unavailable',
+    message: 'worktree operations are unavailable: this deployment does not mount a worktree seam provider',
+    details: {},
+  }
+}
+
+/**
+ * Fold a seam throw into the `worktree-refused` wire error. Every seam
+ * rejection — typed refusal or unexpected failure — reaches the caller with
+ * the seam's own text as the message: the message is the reason, and
+ * swallowing it into a generic error or an empty success would fence the
+ * registry silently. A typed {@link WorktreeSeamError} additionally echoes
+ * its code into the details.
+ * @param error - the value the seam threw.
+ * @param details - the refused RPC and the seat/reference it addressed.
+ * @returns the wire error carrying the seam's reason.
+ */
+function worktreeRefusal(
+  error: unknown,
+  details: Pick<Extract<RpcError, { code: 'worktree-refused' }>['details'], 'op' | 'seat' | 'ref'>,
+): RpcError {
+  return {
+    code: 'worktree-refused',
+    message: error instanceof Error ? error.message : String(error),
+    details: {
+      ...details,
+      ...error instanceof WorktreeSeamError ? { seamCode: error.code } : {},
+    },
+  }
 }
 
 /**
@@ -2308,7 +2346,29 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             })
           }
         }
-        const cwd = workspace?.path ?? request.payload.cwd ?? defaults.cwd
+        // A worktree intent resolves the seam BEFORE any session exists: the
+        // session's cwd is the minted worktree's path, and a deployment
+        // without the seam refuses here rather than spawning the session in
+        // the main repository as if nothing had been asked. A worktree minted
+        // for a create that then fails stays live and listed — visible state
+        // an explicit worktree.remove reclaims — because the consumer cannot
+        // know whether the seat's worktree hosts other sessions.
+        let worktreeCwd: string | undefined
+        if (request.payload.worktree !== undefined) {
+          const seam = ctx.get('worktree')
+          if (seam === undefined) {
+            return err(request, worktreeUnavailable())
+          }
+          try {
+            worktreeCwd = (await seam.spawn(request.payload.worktree)).path
+          } catch (error: unknown) {
+            return err(request, worktreeRefusal(error, {
+              op: 'session.create',
+              seat: request.payload.worktree.seat,
+            }))
+          }
+        }
+        const cwd = worktreeCwd ?? workspace?.path ?? request.payload.cwd ?? defaults.cwd
         const requestedPreset = request.payload.agentPreset
         try {
           await ensureSession(sessionId, cwd, request.payload.sessionId !== undefined, requestedPreset)
@@ -3063,6 +3123,57 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           })
         }
         return ok(request, { archivedSessionIds: [...ctx.workspaceRegistry.archivedSessionIds] })
+      },
+    },
+
+    // The worktree surface is a thin projection of the seam: payloads pass
+    // through verbatim, and the consumer's own decisions are exactly the two
+    // the seam cannot make for it — refusing an absent seam loudly (never an
+    // empty list, never a fallback) and surfacing every seam rejection with
+    // its reason.
+    worktree: {
+      async list(request) {
+        const seam = ctx.get('worktree')
+        if (seam === undefined) return err(request, worktreeUnavailable())
+        try {
+          return ok(request, { items: await seam.list() })
+        } catch (error: unknown) {
+          return err(request, worktreeRefusal(error, { op: 'worktree.list' }))
+        }
+      },
+
+      async create(request) {
+        const seam = ctx.get('worktree')
+        if (seam === undefined) return err(request, worktreeUnavailable())
+        try {
+          return ok(request, { worktree: await seam.spawn(request.payload) })
+        } catch (error: unknown) {
+          return err(request, worktreeRefusal(error, { op: 'worktree.create', seat: request.payload.seat }))
+        }
+      },
+
+      async lock(request) {
+        const seam = ctx.get('worktree')
+        if (seam === undefined) return err(request, worktreeUnavailable())
+        const { ref, reason } = request.payload
+        try {
+          await seam.lock(ref, reason)
+          return ok(request, { locked: true as const })
+        } catch (error: unknown) {
+          return err(request, worktreeRefusal(error, { op: 'worktree.lock', ref }))
+        }
+      },
+
+      async remove(request) {
+        const seam = ctx.get('worktree')
+        if (seam === undefined) return err(request, worktreeUnavailable())
+        const { ref, reason } = request.payload
+        try {
+          await seam.remove(ref, reason)
+          return ok(request, { removed: true as const })
+        } catch (error: unknown) {
+          return err(request, worktreeRefusal(error, { op: 'worktree.remove', ref }))
+        }
       },
     },
 
