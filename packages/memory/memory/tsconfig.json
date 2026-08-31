@@ -22,6 +22,9 @@
       "path": "../../runtime-diagnostics/invariants"
     },
     {
+      "path": "../../session/named-sessions"
+    },
+    {
       "path": "../../util/home-paths"
     }
   ]

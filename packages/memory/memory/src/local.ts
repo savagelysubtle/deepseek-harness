@@ -27,7 +27,9 @@ import type { MemoryEntry, MemoryMatch, MemoryWriteResult } from './types.ts'
 export interface Config {
   /**
    * Storage root; defaults to `memory/` under the harness home
-   * (`$DSH_HOME` or `~/.dsh`). One project-slug directory per workspace cwd.
+   * (`$DSH_HOME` or `~/.dsh`). One project-slug directory per project anchor
+   * (the git common directory when the cwd belongs to a repository, the cwd
+   * itself otherwise).
    */
   root?: string
 }

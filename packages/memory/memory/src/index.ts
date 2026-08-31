@@ -1,9 +1,10 @@
 /**
  * Service Definition for the project-scoped memory seam (`ctx.memory`):
- * durable plain-markdown notes per workspace, co-editable by humans and
+ * durable plain-markdown notes per project, co-editable by humans and
  * agents. Storage is a capability of the harness home (`memory/` by default),
- * one directory per project cwd; content reaches a model only when that seat
- * explicitly reads or searches it — memory is a tool call, not an injection.
+ * one directory per project anchor; content reaches a model only when that
+ * seat explicitly reads or searches it — memory is a tool call, not an
+ * injection.
  * @module @deepseek-ai/dsh-memory
  */
 
@@ -31,8 +32,9 @@ declare module '@deepseek-ai/cordis' {
 /**
  * Abstract memory service. Providers implement the four operations over one
  * storage root; every operation resolves the project scope from the caller's
- * absolute `cwd`, so two checkouts never share notes and one checkout shares
- * them across every session, restart, and seat.
+ * absolute `cwd` through the project anchor, so two repositories never share
+ * notes, every worktree of one repository shares one scope, and the scope
+ * persists across every session, restart, and seat.
  */
 export abstract class MemoryService extends Service {
   constructor(ctx: Context) {

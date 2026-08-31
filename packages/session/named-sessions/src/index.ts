@@ -2,11 +2,15 @@
  * Named-session derivation and per-name locking, shared by every consumer
  * that addresses a durable session by a stable human-chosen name.
  *
- * A named session has no map store: the durable session id is derived from the
- * user-chosen name, so every process recomputes the same identity from the
- * name alone. The same derivation names the per-name lock file under the
- * canonical lock directory ({@link LOCK_DIR_SEGMENTS}), which is what makes
- * "one live holder per name" enforceable across processes.
+ * A named session has no map store: the durable session id is derived from
+ * the project anchor plus the user-chosen name, so every process running in
+ * the same project recomputes the same identity from those two values alone.
+ * The anchor ({@link projectAnchor}) is the git common directory when the
+ * working directory belongs to a repository — so every worktree of one
+ * repository shares its sessions' identities — and the resolved working
+ * directory itself otherwise. The same derivation names the per-name lock
+ * file under the canonical lock directory ({@link LOCK_DIR_SEGMENTS}), which
+ * is what makes "one live holder per name" enforceable across processes.
  *
  * @module @deepseek-ai/dsh-named-sessions
  */
@@ -16,6 +20,9 @@ import { dirname } from 'node:path'
 import { createHash } from 'node:crypto'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { projectAnchor } from './anchor.ts'
+
+export { PROJECT_ANCHOR_GIT_TIMEOUT_MS, projectAnchor } from './anchor.ts'
 
 /** Prefix of every derived named-session id. */
 export const NAMED_SESSION_ID_PREFIX = 'named-'
@@ -132,25 +139,48 @@ export function assertValidSessionName(name: string): void {
 }
 
 /**
- * Hash a session name to the fixed-width token shared by the derived session
- * id and the lock filename. One-way by construction: the name is never stored
- * in the token, so the caller owns any name-to-id directory.
- * @param name - a validated session name.
+ * Separator between the project anchor and the session name inside one hash
+ * input. NUL cannot appear in a filesystem path or a session name, so the
+ * joined value is injective — an anchor ending in `ab` with name `c` can
+ * never collide with an anchor ending in `a` and name `bc`.
+ */
+const ANCHOR_NAME_SEPARATOR = '\0'
+
+/**
+ * Hash one identity source to the fixed-width token shared by derived session
+ * ids and lock filenames. One-way by construction: the source is never stored
+ * in the token, so the caller owns any source-to-id directory.
+ * @param source - the exact identity source (anchor-joined name, or a raw
+ *   session id for non-derived sessions).
  * @returns the 32-character lowercase hex token.
  */
-function hashToken(name: string): string {
-  return createHash('sha256').update(name, 'utf8').digest('hex').slice(0, 32)
+function hashToken(source: string): string {
+  return createHash('sha256').update(source, 'utf8').digest('hex').slice(0, 32)
+}
+
+/**
+ * Token for one named run: the project anchor scopes the name so two
+ * repositories never derive the same name into one session id, while every
+ * worktree of one repository derives the same id.
+ * @param name - a validated session name.
+ * @param cwd - working directory naming the project; see {@link projectAnchor}.
+ * @returns the 32-character lowercase hex token.
+ */
+function namedToken(name: string, cwd: string): string {
+  return hashToken(`${projectAnchor(cwd)}${ANCHOR_NAME_SEPARATOR}${name}`)
 }
 
 /**
  * Derive the stable session id for a named run. Deterministic across
- * processes and machines: the same name always yields the same durable id,
- * which is how later invocations find the earlier run's log.
+ * processes: the same name in the same project always yields the same
+ * durable id, which is how later invocations find the earlier run's log.
  * @param name - a validated session name.
+ * @param cwd - working directory naming the project; defaults to the process
+ *   working directory, which is how every production consumer derives.
  * @returns the derived branded session id (`named-<32 hex>`).
  */
-export function deriveNamedSessionId(name: string): SessionId {
-  return SessionId(`${NAMED_SESSION_ID_PREFIX}${hashToken(name)}`)
+export function deriveNamedSessionId(name: string, cwd: string = process.cwd()): SessionId {
+  return SessionId(`${NAMED_SESSION_ID_PREFIX}${namedToken(name, cwd)}`)
 }
 
 /**
@@ -158,10 +188,12 @@ export function deriveNamedSessionId(name: string): SessionId {
  * filename carries the same token as {@link deriveNamedSessionId}, so an id
  * and its lock share one derivation.
  * @param name - a validated session name.
+ * @param cwd - working directory naming the project; must match the
+ *   derivation cwd so the lock guards the id that is actually written.
  * @returns the absolute lock-file path.
  */
-export function namedLockPath(name: string): string {
-  return lockPathForToken(hashToken(name))
+export function namedLockPath(name: string, cwd: string = process.cwd()): string {
+  return lockPathForToken(namedToken(name, cwd))
 }
 
 /**
@@ -259,14 +291,17 @@ export interface AcquireNamedSessionLockOptions {
  * the run settles.
  * @param name - a validated session name.
  * @param options - optional bounds; see {@link AcquireNamedSessionLockOptions}.
+ * @param cwd - working directory naming the project; must match the
+ *   derivation cwd so the lock guards the id that is actually written.
  * @returns the held lock.
  * @throws when a live process holds the lock: `session "<name>" is active in another process`.
  */
 export function acquireNamedSessionLock(
   name: string,
   options: AcquireNamedSessionLockOptions = {},
+  cwd: string = process.cwd(),
 ): NamedSessionLock {
-  return acquireLockAtPath(namedLockPath(name), name, options)
+  return acquireLockAtPath(namedLockPath(name, cwd), name, options)
 }
 
 /**

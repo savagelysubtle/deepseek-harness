@@ -10,12 +10,12 @@ The local provider stores notes under one storage root (default `<harness home>/
 
 ```
 memory/
-  deepseek-harness-1v55erz/     ← scope slug: <workspace-basename>-<6 hash chars of the absolute cwd>
+  deepseek-harness-1v55erz/     ← scope slug: <project-name>-<6 hash chars of the project anchor>
     federation-org-model.md     ← topics at the top level
     todo/auth-notes.md          ← nested subdirs emerge organically (todo/, done/, spec/, …)
 ```
 
-Two same-named checkouts get distinct slugs because the suffix hashes the resolved cwd. Entries are ordinary markdown files, frontmatter optional and preserved byte-for-byte.
+The suffix hashes the project anchor — the git common directory when the cwd belongs to a repository, the resolved cwd otherwise — so every worktree of one repository shares one scope (notes follow the repository, not the checkout), while two same-named repositories stay distinct. Entries are ordinary markdown files, frontmatter optional and preserved byte-for-byte.
 
 ## Plugins
 

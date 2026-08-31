@@ -17,6 +17,7 @@ import {
   lockPathForSession,
   namedLockPath,
   namedSessionToken,
+  projectAnchor,
 } from '../src/index.ts'
 
 const originalInternals = { ...internals }
@@ -36,8 +37,11 @@ function useTempHome(): string {
 }
 
 describe('named session identity', () => {
-  it('derives the documented id deterministically from the name', () => {
-    const expected = createHash('sha256').update('alpha', 'utf8').digest('hex').slice(0, 32)
+  it('derives the documented id deterministically from the anchor and the name', () => {
+    const expected = createHash('sha256')
+      .update(`${projectAnchor(process.cwd())}\0alpha`, 'utf8')
+      .digest('hex')
+      .slice(0, 32)
     expect(deriveNamedSessionId('alpha')).toBe(SessionId(`named-${expected}`))
     expect(deriveNamedSessionId('alpha')).toBe(deriveNamedSessionId('alpha'))
     expect(deriveNamedSessionId('alpha')).not.toBe(deriveNamedSessionId('beta'))

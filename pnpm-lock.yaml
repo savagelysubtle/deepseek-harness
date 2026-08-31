@@ -5785,6 +5785,9 @@ importers:
 
   packages/memory/memory:
     dependencies:
+      '@deepseek-ai/dsh-named-sessions':
+        specifier: workspace:^
+        version: link:../../session/named-sessions
       '@deepseek-ai/schemastery':
         specifier: link:../../../vendor/schemastery
         version: link:../../../vendor/schemastery

@@ -10,12 +10,12 @@ DeepSeek Harness 的项目级持久记忆：以纯 Markdown 文件存储的笔�
 
 ```
 memory/
-  deepseek-harness-1v55erz/     ← scope slug：<工作区目录名>-<绝对 cwd 的 6 位 hash>
+  deepseek-harness-1v55erz/     ← scope slug：<项目名>-<项目锚点的 6 位 hash>
     federation-org-model.md     ← 主题文件放在顶层
     todo/auth-notes.md          ← 子目录按需自然生长（todo/、done/、spec/……）
 ```
 
-两个同名的 checkout 会得到不同 slug，因为后缀对解析后的 cwd 做了哈希。条目是普通 Markdown 文件；frontmatter 可选且逐字节保留。
+后缀对项目锚点做哈希——cwd 属于某个 git 仓库时取 git 公共目录，否则取解析后的 cwd——因此同一仓库的每个 worktree 共享同一个 scope（笔记跟随仓库而非 checkout），而两个同名的仓库仍然彼此区分。条目是普通 Markdown 文件；frontmatter 可选且逐字节保留。
 
 ## 插件
 
