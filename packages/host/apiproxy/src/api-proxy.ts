@@ -1324,14 +1324,23 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
    * already carried the same no-lock-check gap before this change.)
    */
   const agentFor = async (sessionId: SessionId): ReturnType<typeof resolveAgentFor> => {
-    const owner = await liveHeadlessOwner(sessionId)
-    if (owner !== undefined) {
-      return {
-        error: {
-          code: 'agent-busy',
-          message: `session "${sessionId}" is owned by an active headless process (pid ${owner.pid}); it can be viewed but not driven from here`,
-          details: { reason: 'headless-owned' },
-        },
+    // Residency first: an agent this process already owns is drivable regardless
+    // of any held lock — the bridge puts the host's own pid in the lock file when
+    // it holds a cold-wake residency, and the UI must reach that resident (the
+    // founder's composer send must not be fenced by the bridge's own pen).
+    const resident = ctx.agents.get(sessionId)
+    if (resident === undefined) {
+      // No agent lives in THIS process: the lock file is the only writer
+      // signal, so a live-pid holder is a genuine foreign writer.
+      const owner = await liveHeadlessOwner(sessionId)
+      if (owner !== undefined) {
+        return {
+          error: {
+            code: 'agent-busy',
+            message: `session "${sessionId}" is locked by process ${owner.pid}; it can be viewed but not driven from here`,
+            details: { reason: 'headless-owned' },
+          },
+        }
       }
     }
     return resolveAgentFor(sessionId)
@@ -1376,6 +1385,10 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   async function sweepFollowedSessions(): Promise<void> {
     for (const sessionId of await listLiveOwnedSessionIds()) {
       if (followTailer.isFollowing(sessionId)) continue
+      // Host-resident seats are written by this process — a tail would
+      // duplicate every event on the mux channel (live + tail with the
+      // same seqs). Skip; the live path already surfaces them.
+      if (ctx.agents.get(sessionId) !== undefined) continue
       try {
         const inspected = await inspectServable(sessionId)
         followTailer.start(sessionId, inspected.meta, inspected.events)
