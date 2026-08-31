@@ -773,38 +773,58 @@ describe('envelope observation', () => {
   })
 })
 
+/** Shared probe: records the request URL and the minted rpcId of each unary call. */
+class MintProbe extends AbstractApiClient {
+  urls: string[] = []
+  protected async doFetch(input: URL): Promise<Response> {
+    this.urls.push(input.href)
+    return Response.json({ type: 'server-response', rpcId: this.lastMinted, result: { ok: true, value: { items: [] } } })
+  }
+
+  lastMinted = ''
+  protected override mintRpcId(): ReturnType<AbstractApiClient['mintRpcId']> {
+    const id = super.mintRpcId()
+    this.lastMinted = id
+    return id
+  }
+}
+
 describe('resolveBase', () => {
   it('prefers a real location.origin and falls back to the internal authority', async () => {
-    class Probe extends AbstractApiClient {
-      urls: string[] = []
-      protected async doFetch(input: URL): Promise<Response> {
-        this.urls.push(input.href)
-        return Response.json({ type: 'server-response', rpcId: this.lastMinted, result: { ok: true, value: { items: [] } } })
-      }
-
-      lastMinted = ''
-      protected override mintRpcId(): ReturnType<AbstractApiClient['mintRpcId']> {
-        const id = super.mintRpcId()
-        this.lastMinted = id
-        return id
-      }
-    }
-    const probe = new Probe()
+    const probe = new MintProbe()
     await probe.sessions.list({})
     expect(probe.urls[0]).toMatch(/^http:\/\/dsh\.internal\//)
 
     const globalWithLocation = globalThis as { location?: { origin?: string } }
     globalWithLocation.location = { origin: 'http://host.example' }
     try {
-      const probe2 = new Probe()
+      const probe2 = new MintProbe()
       await probe2.sessions.list({})
       expect(probe2.urls[0]).toMatch(/^http:\/\/host\.example\//)
       globalWithLocation.location = { origin: 'null' } // sandboxed iframe shape
-      const probe3 = new Probe()
+      const probe3 = new MintProbe()
       await probe3.sessions.list({})
       expect(probe3.urls[0]).toMatch(/^http:\/\/dsh\.internal\//)
     } finally {
       delete globalWithLocation.location
+    }
+  })
+})
+
+describe('mintRpcId without a secure context', () => {
+  it('mints RFC 4122 v4 rpcIds when crypto.randomUUID is absent (plain-HTTP LAN origin)', async () => {
+    vi.stubGlobal('crypto', {
+      getRandomValues(bytes: Uint8Array): Uint8Array {
+        return bytes.fill(0)
+      },
+    })
+    try {
+      const probe = new MintProbe()
+      await probe.sessions.list({})
+      expect(probe.lastMinted).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+      expect(probe.urls[0]).toMatch(/^http:\/\/dsh\.internal\//)
+    } finally {
+      vi.unstubAllGlobals()
     }
   })
 })
