@@ -221,8 +221,8 @@ describe('mailbox_send delivery state', () => {
       traceId: expect.any(String),
       deliveryState: 'accepted',
     })
-    const [block] = send.output!.render(args, value)
-    expect(block.text).toContain('Delivered to alfred')
+    const blocks = send.output!.render(args, value as never)
+    expect((blocks[0] as { text: string }).text).toContain('Delivered to alfred')
   })
 
   it('reports refused with the recorded terminal reason', async () => {
@@ -236,28 +236,28 @@ describe('mailbox_send delivery state', () => {
       deliveryState: 'refused',
       refusalReason: 'org-registry-denied',
     })
-    const [block] = send.output!.render(args, value)
-    expect(block.text).toContain('REFUSED')
-    expect(block.text).toContain('org-registry-denied')
+    const blocks = send.output!.render(args, value as never)
+    expect((blocks[0] as { text: string }).text).toContain('REFUSED')
+    expect((blocks[0] as { text: string }).text).toContain('org-registry-denied')
   })
 
   it('reports refused with a fallback reason when the failed row recorded none', async () => {
-    const value = await runOnce(sendWithRead([row('msg-1', 'failed')]))
+    const value = (await runOnce(sendWithRead([row('msg-1', 'failed')]))) as { deliveryState: string; refusalReason?: string }
     expect(value.deliveryState).toBe('refused')
     expect(value.refusalReason).toEqual(expect.stringContaining('recorded no reason'))
   })
 
   it('reports pending for a fresh row and folds claimed into pending', async () => {
-    expect((await runOnce(sendWithRead([row('msg-1', 'pending')]))).deliveryState).toBe('pending')
-    expect((await runOnce(sendWithRead([row('msg-1', 'claimed')]))).deliveryState).toBe('pending')
+    expect(((await runOnce(sendWithRead([row('msg-1', 'pending')]))) as { deliveryState: string }).deliveryState).toBe('pending')
+    expect(((await runOnce(sendWithRead([row('msg-1', 'claimed')]))) as { deliveryState: string }).deliveryState).toBe('pending')
   })
 
   it('reports pending when the post-admission read finds no row', async () => {
     const send = sendWithRead([])
-    const value = await runOnce(send)
+    const value = (await runOnce(send)) as { deliveryState: string; refusalReason?: string }
     expect(value.deliveryState).toBe('pending')
     expect(value.refusalReason).toBeUndefined()
-    const blocks = send.output!.render(args, value)
+    const blocks = send.output!.render(args, value as never)
     expect((blocks[0] as { text: string }).text).toContain('delivery pending — not yet confirmed')
   })
 })
