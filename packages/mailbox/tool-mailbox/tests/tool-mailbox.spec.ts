@@ -124,14 +124,16 @@ describe('mailbox_send', () => {
     const result = await call(ctx, 'mailbox_send', { to: 'alfred', subject: 'patrol', body: 'meet at the cave' })
     expect(result.isError).toBe(false)
     if (result.isError) throw new Error('expected mailbox_send success')
-    const value = result.value as { messageId: string; to: string; from: string; traceId: string }
+    const value = result.value as { messageId: string; to: string; from: string; traceId: string; deliveryState: string }
     expect(value).toEqual({
       messageId: expect.any(String),
       to: 'alfred',
       from: 'batman',
       traceId: expect.any(String),
+      deliveryState: 'pending',
     })
     expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('Stored for alfred') }])
+    expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('delivery pending — not yet confirmed') }])
     expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining(`mailbox_await traceId ${value.traceId}`) }])
     const rows = storedRows(dbPath, 'alfred')
     expect(rows).toHaveLength(1)
@@ -154,6 +156,7 @@ describe('mailbox_send', () => {
       to: 'batman',
       from: 'alfred',
       traceId: 'awaited-trace',
+      deliveryState: 'pending',
     })
     const rows = storedRows(dbPath, 'batman')
     expect(rows).toHaveLength(1)
@@ -176,6 +179,86 @@ describe('mailbox_send', () => {
     if (!result.isError) throw new Error('expected mailbox_send failure')
     expect(result.error.message).toContain('invalid mailbox address')
     await ctx.fiber.dispose()
+  })
+})
+
+describe('mailbox_send delivery state', () => {
+  /** One store row as the post-admission read sees it. */
+  function row(id: string, state: 'pending' | 'claimed' | 'done' | 'failed', failureReason?: string) {
+    return { id, state, from: 'batman', to: 'alfred', sentAt: 1, subject: 's', ...(failureReason === undefined ? {} : { failureReason }) }
+  }
+
+  /** Build the send tool over a fake registry whose post-admission read returns `rows`. */
+  function sendWithRead(rows: readonly ReturnType<typeof row>[]) {
+    return mailboxSendTool({
+      publish: async () => 'msg-1',
+      lookupByTraceId: async () => rows,
+    } as unknown as MailboxRegistryShape, { sessionName: 'batman' })
+  }
+
+  const args = { to: 'alfred', subject: 's', body: 'b' }
+
+  /** Run one execute through the direct-constructed tool. */
+  async function runOnce(send: ReturnType<typeof sendWithRead>) {
+    return send.execute(args, {
+      signal: testSignal,
+      callId: CallId('call-send-state'),
+      name: 'mailbox_send',
+      arguments: args,
+      token: Symbol('token') as never,
+      rootCallId: CallId('call-send-state'),
+      deferContext: () => {},
+    } as never)
+  }
+
+  it('reports accepted when the row already settled done', async () => {
+    const send = sendWithRead([row('msg-1', 'done')])
+    const value = await runOnce(send)
+    expect(value).toEqual({
+      messageId: 'msg-1',
+      to: 'alfred',
+      from: 'batman',
+      traceId: expect.any(String),
+      deliveryState: 'accepted',
+    })
+    const [block] = send.output!.render(args, value)
+    expect(block.text).toContain('Delivered to alfred')
+  })
+
+  it('reports refused with the recorded terminal reason', async () => {
+    const send = sendWithRead([row('msg-1', 'failed', 'org-registry-denied')])
+    const value = await runOnce(send)
+    expect(value).toEqual({
+      messageId: 'msg-1',
+      to: 'alfred',
+      from: 'batman',
+      traceId: expect.any(String),
+      deliveryState: 'refused',
+      refusalReason: 'org-registry-denied',
+    })
+    const [block] = send.output!.render(args, value)
+    expect(block.text).toContain('REFUSED')
+    expect(block.text).toContain('org-registry-denied')
+  })
+
+  it('reports refused with a fallback reason when the failed row recorded none', async () => {
+    const value = await runOnce(sendWithRead([row('msg-1', 'failed')]))
+    expect(value.deliveryState).toBe('refused')
+    expect(value.refusalReason).toEqual(expect.stringContaining('recorded no reason'))
+  })
+
+  it('reports pending for a fresh row and folds claimed into pending', async () => {
+    expect((await runOnce(sendWithRead([row('msg-1', 'pending')]))).deliveryState).toBe('pending')
+    expect((await runOnce(sendWithRead([row('msg-1', 'claimed')]))).deliveryState).toBe('pending')
+  })
+
+  it('reports pending when the post-admission read finds no row', async () => {
+    const send = sendWithRead([])
+    const value = await runOnce(send)
+    expect(value.deliveryState).toBe('pending')
+    expect(value.refusalReason).toBeUndefined()
+    const blocks = send.output!.render(args, value)
+    expect((blocks[0] as { text: string }).text).toContain('delivery pending — not yet confirmed')
   })
 })
 

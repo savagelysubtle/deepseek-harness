@@ -85,6 +85,19 @@ export interface SendResult {
    * wait that started it.
    */
   readonly traceId: string
+  /**
+   * The send's delivery state, read from the store immediately after
+   * admission: `pending` — stored, delivery not yet confirmed (store row
+   * `pending` or `claimed`); `accepted` — the bridge claimed the row and
+   * settled it done; `refused` — the bridge settled it failed, with
+   * {@link refusalReason} carrying the recorded terminal reason. A read
+   * taken once, post-admission: `pending` here is a fact about this instant,
+   * never a delivery promise — `mailbox_await` on the traceId reports the
+   * row's later fate.
+   */
+  readonly deliveryState: 'pending' | 'accepted' | 'refused'
+  /** Present only on `refused`: the terminal reason recorded on the row. */
+  readonly refusalReason?: string
 }
 
 /** One drained message in the tool's canonical output. */
@@ -251,6 +264,29 @@ function formatInboxEntries(messages: readonly InboxEntry[]): string {
 }
 
 /**
+ * Model-facing text of one send result, per delivery state. `pending` keeps
+ * the historical "Stored" opener (a store-admission fact) and says what is
+ * NOT yet known; `refused` mirrors `mailbox_await`'s refusal phrasing so the
+ * model meets one refusal shape across both tools.
+ * @param value - the validated canonical send result.
+ * @returns the single text block's content.
+ */
+function renderSendOutcome(value: SendResult): string {
+  const awaited = `Reply may be awaited with mailbox_await traceId ${value.traceId}.`
+  switch (value.deliveryState) {
+    case 'accepted':
+      return `Delivered to ${value.to} as message ${value.messageId} (sender ${value.from}). ${awaited}`
+    case 'refused':
+      return `Message for ${value.to} was REFUSED (message ${value.messageId}). `
+        + `Reason: ${value.refusalReason ?? 'the recipient\'s row is terminally failed but recorded no reason'}. `
+        + 'No reply is coming — handle the refused send instead of waiting.'
+    case 'pending':
+      return `Stored for ${value.to} as message ${value.messageId} (sender ${value.from}); `
+        + `delivery pending — not yet confirmed. ${awaited}`
+  }
+}
+
+/**
  * Build the `mailbox_send` tool: publish one message whose sender is the
  * trusted session name. The registry's `publish` validates the destination
  * address grammar; the stamped `from` needs no validation because it never
@@ -307,12 +343,13 @@ export function mailboxSendTool(mailbox: MailboxRegistry, identity: IdentitySour
           to: { type: 'string', required: true },
           from: { type: 'string', required: true },
           traceId: { type: 'string', required: true },
+          deliveryState: { type: 'string', enum: ['pending', 'accepted', 'refused'], required: true },
+          refusalReason: { type: 'string' },
         },
       },
       render: (_args, value) => [{
         type: 'text',
-        text: `Stored for ${value.to} as message ${value.messageId} (sender ${value.from}). `
-          + `Reply may be awaited with mailbox_await traceId ${value.traceId}.`,
+        text: renderSendOutcome(value),
       }],
     },
     presentCall: args => ({
@@ -343,7 +380,27 @@ export function mailboxSendTool(mailbox: MailboxRegistry, identity: IdentitySour
         traceId,
         ...args.blocking !== undefined ? { blocking: args.blocking } : {},
       }, exec.signal)
-      const result: SendResult = { messageId, to, from, traceId }
+      // The honest receipt: read THIS send's row back once, post-admission,
+      // and report what the store actually holds instead of an unconditional
+      // "Stored". The row is selected by id — exact even when a threaded
+      // reply reuses an awaited send's trace id, where narrowing by recorded
+      // sender would pick the earliest row of the chain instead of this one.
+      const rows = await mailbox.lookupByTraceId(traceId, exec.signal)
+      const sent = rows.find(entry => entry.id === messageId)
+      const refusalReason = sent?.state === 'failed'
+        ? sent.failureReason ?? 'refused: the recipient\'s row is terminally failed but recorded no reason'
+        : undefined
+      const deliveryState: SendResult['deliveryState'] = refusalReason !== undefined
+        ? 'refused'
+        : sent?.state === 'done' ? 'accepted' : 'pending'
+      const result: SendResult = {
+        messageId,
+        to,
+        from,
+        traceId,
+        deliveryState,
+        ...refusalReason === undefined ? {} : { refusalReason },
+      }
       return result
     },
   })
