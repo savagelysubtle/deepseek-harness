@@ -1437,8 +1437,8 @@ describe('loop guards', () => {
       ids.push(await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: `flood ${index}`, traceId: 'flood' }))
     }
     await bridge.internals.drainOnce(h.ctx, spec)
-    await expect(rowState(h.storePath, ids[49])).resolves.toMatchObject({ state: 'done' })
-    const refused = await rowState(h.storePath, ids[50])
+    await expect(rowState(h.storePath, ids[49]!)).resolves.toMatchObject({ state: 'done' })
+    const refused = await rowState(h.storePath, ids[50]!)
     expect(refused.state).toBe('failed')
     const reason = JSON.parse(refused.result ?? '{}').reason as string
     expect(reason).toContain('hop-limit-exceeded')
@@ -1461,9 +1461,9 @@ describe('loop guards', () => {
       day1.push(await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: `day-one ${index}`, traceId: 'chronic' }))
     }
     await bridge.internals.drainOnce(h.ctx, spec)
-    await expect(rowState(h.storePath, day1[0])).resolves.toMatchObject({ state: 'done' })
-    await expect(rowState(h.storePath, day1[1])).resolves.toMatchObject({ state: 'done' })
-    expect(JSON.parse((await rowState(h.storePath, day1[2])).result ?? '{}').reason as string).toContain('hop-limit-exceeded')
+    await expect(rowState(h.storePath, day1[0]!)).resolves.toMatchObject({ state: 'done' })
+    await expect(rowState(h.storePath, day1[1]!)).resolves.toMatchObject({ state: 'done' })
+    expect(JSON.parse((await rowState(h.storePath, day1[2]!)).result ?? '{}').reason as string).toContain('hop-limit-exceeded')
 
     clock.at += 86_400_000 // next UTC day: the counter must read as zero again
     const day2: string[] = []
@@ -1471,9 +1471,9 @@ describe('loop guards', () => {
       day2.push(await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: `day-two ${index}`, traceId: 'chronic' }))
     }
     await bridge.internals.drainOnce(h.ctx, spec)
-    await expect(rowState(h.storePath, day2[0])).resolves.toMatchObject({ state: 'done' })
-    await expect(rowState(h.storePath, day2[1])).resolves.toMatchObject({ state: 'done' })
-    expect(JSON.parse((await rowState(h.storePath, day2[2])).result ?? '{}').reason as string).toContain('resets daily')
+    await expect(rowState(h.storePath, day2[0]!)).resolves.toMatchObject({ state: 'done' })
+    await expect(rowState(h.storePath, day2[1]!)).resolves.toMatchObject({ state: 'done' })
+    expect(JSON.parse((await rowState(h.storePath, day2[2]!)).result ?? '{}').reason as string).toContain('resets daily')
     expect(live.steer).toHaveBeenCalledTimes(4)
   })
 
