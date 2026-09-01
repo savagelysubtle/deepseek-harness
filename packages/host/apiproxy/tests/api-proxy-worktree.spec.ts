@@ -11,11 +11,18 @@ import Storage from '@deepseek-ai/dsh-storage'
 import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
-import type { WorktreeRef, WorktreeRow } from '@deepseek-ai/dsh-host-apiproxy/api'
+import { WorktreeError } from '@deepseek-ai/dsh-worktree'
+import type {
+  WorktreeRow as ServiceWorktreeRow,
+  WorktreeService,
+  WorktreeSlug,
+  WorktreeSpawnRequest,
+  WorktreeSpawnResult,
+} from '@deepseek-ai/dsh-worktree'
+import type { WorktreeRef } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { RpcRequest, RpcResponse } from '@deepseek-ai/dsh-host-apiproxy/api/rpc'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api/rpc'
-import { createApiProxy, WorktreeSeamError } from '@deepseek-ai/dsh-host-apiproxy'
-import type { WorktreeSeam, WorktreeSpawnInput } from '@deepseek-ai/dsh-host-apiproxy'
+import { createApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 import { sessionCreateRequestSchema } from '../src/api/sessions.schema.ts'
 import { MemoryStorageBackend } from '../../../storage/storage-domain/tests/helpers/memory-backend.ts'
 
@@ -49,8 +56,11 @@ function stubAgent(session: Session): Agent {
   }
 }
 
+/** The WorktreeService members the consumer adapts; the double implements exactly this shape. */
+type MockWorktreeService = Pick<WorktreeService, 'spawn' | 'list' | 'lock' | 'unlock' | 'remove'>
+
 /** Refusals the double raises before its normal logic; the value is thrown as-is. */
-interface MockSeamRefusals {
+interface MockServiceRefusals {
   spawn?: unknown
   list?: unknown
   lock?: unknown
@@ -58,67 +68,96 @@ interface MockSeamRefusals {
 }
 
 /**
- * Deterministic in-memory WorktreeSeam double. Refs are the minted slugs, per
- * the consumer's declared convention; every refusal is a typed
- * WorktreeSeamError whose message is the reason the caller must see. Minted
- * paths live under `base` so a spawn-fed session create can really ensure the
- * directory.
+ * Deterministic in-memory double over the real `WorktreeService` interface
+ * shape, mirroring its observable row lifecycle: rows are born locked with the
+ * `<seat> <session>` creation reason, `lock`/`remove` refuse while a lock is
+ * held, unknown slugs refuse `NO_ROW`, and every refusal is a typed
+ * WorktreeError whose message is the reason. Minted paths live under `base` so
+ * a spawn-fed session create can really ensure the directory. The seat-side
+ * `unlock` lets tests move a born-locked row through the lifecycle step the
+ * wire surface does not expose.
  */
-function mockSeam(refusals: MockSeamRefusals = {}, base = '/wt') {
-  const rows = new Map<string, WorktreeRow>()
+function mockService(refusals: MockServiceRefusals = {}, base = '/wt') {
+  let nextSlug = 1
+  const rows = new Map<string, ServiceWorktreeRow>()
   const calls = {
-    spawn: [] as WorktreeSpawnInput[],
-    lock: [] as { ref: WorktreeRef; reason: string }[],
-    remove: [] as { ref: WorktreeRef; reason: string }[],
+    spawn: [] as WorktreeSpawnRequest[],
+    lock: [] as { slug: WorktreeSlug; reason: string }[],
+    remove: [] as { slug: WorktreeSlug; reason: string }[],
   }
-  const seam: WorktreeSeam = {
-    async spawn(input) {
-      calls.spawn.push(input)
+  const service: MockWorktreeService = {
+    async spawn(request: WorktreeSpawnRequest): Promise<WorktreeSpawnResult> {
+      calls.spawn.push(request)
       if (refusals.spawn !== undefined) throw refusals.spawn
-      const slug = `wt-${input.seat}-${input.sessionName}`
-      if (!rows.has(slug)) {
-        rows.set(slug, {
-          seat: input.seat,
-          path: join(base, input.seat, input.sessionName),
-          branch: `worktree/${input.seat}/${input.sessionName}`,
-          sessionName: input.sessionName,
-          locked: false,
-        })
-      }
-      const row = rows.get(slug)
-      if (row === undefined) throw new Error('mock seam lost the minted row')
-      return { slug, branch: row.branch, path: row.path, sessionName: row.sessionName, seat: row.seat }
+      const slug = `wt-${nextSlug++}` as WorktreeSlug
+      const branch = `${request.seat}/${slug}`
+      const session = `${request.seat}.${slug}`
+      const path = join(base, request.seat, slug)
+      const lockReason = `${request.seat} ${session}`
+      rows.set(slug, {
+        slug,
+        seat: request.seat,
+        branch,
+        session,
+        path,
+        branchRef: 'master',
+        createdAt: 0,
+        lockReason,
+        lastReason: request.intent,
+      })
+      return { slug, seat: request.seat, branch, session, path, branchRef: 'master', lockReason, copied: [] }
     },
-    async list() {
+    list() {
       if (refusals.list !== undefined) throw refusals.list
       return [...rows.values()]
     },
-    async lock(ref, reason) {
-      calls.lock.push({ ref, reason })
+    async lock(slug: WorktreeSlug, reason: string) {
+      calls.lock.push({ slug, reason })
       if (refusals.lock !== undefined) throw refusals.lock
-      const row = rows.get(ref)
-      if (row === undefined) throw new WorktreeSeamError('worktree-unknown', `worktree "${ref}" is not live`)
-      if (row.locked) {
-        throw new WorktreeSeamError('worktree-locked', `worktree "${ref}" is already locked: ${row.lockReason ?? 'unspecified'}`)
+      const row = rows.get(slug)
+      if (row === undefined) throw new WorktreeError(`no live worktree carries slug ${JSON.stringify(slug)}`, 'NO_ROW')
+      if (row.lockReason !== undefined) {
+        throw new WorktreeError(
+          `worktree ${slug} is already locked (reason: ${JSON.stringify(row.lockReason)}); ` +
+          'unlock with a reason before locking again',
+          'ALREADY_LOCKED',
+        )
       }
-      rows.set(ref, { ...row, locked: true, lockReason: reason })
+      const locked = { ...row, lockReason: reason, lastReason: reason }
+      rows.set(slug, locked)
+      return locked
     },
-    async remove(ref, reason) {
-      calls.remove.push({ ref, reason })
-      if (refusals.remove !== undefined) throw refusals.remove
-      const row = rows.get(ref)
-      if (row === undefined) throw new WorktreeSeamError('worktree-unknown', `worktree "${ref}" is not live`)
-      if (row.locked) {
-        throw new WorktreeSeamError('worktree-locked', `worktree "${ref}" is locked: ${row.lockReason ?? 'unspecified'}; the removal naming "${reason}" was refused`)
+    async unlock(slug: WorktreeSlug, reason: string) {
+      const row = rows.get(slug)
+      if (row === undefined) throw new WorktreeError(`no live worktree carries slug ${JSON.stringify(slug)}`, 'NO_ROW')
+      if (row.lockReason === undefined) {
+        throw new WorktreeError(`worktree ${slug} is not locked; nothing to unlock`, 'NOT_LOCKED')
       }
-      rows.delete(ref)
+      const { lockReason: _stripped, ...unlocked } = row
+      const committed = { ...unlocked, lastReason: reason }
+      rows.set(slug, committed)
+      return committed
+    },
+    async remove(slug: WorktreeSlug, reason: string) {
+      calls.remove.push({ slug, reason })
+      if (refusals.remove !== undefined) throw refusals.remove
+      const row = rows.get(slug)
+      if (row === undefined) throw new WorktreeError(`no live worktree carries slug ${JSON.stringify(slug)}`, 'NO_ROW')
+      if (row.lockReason !== undefined) {
+        throw new WorktreeError(
+          `worktree ${slug} is locked (reason: ${JSON.stringify(row.lockReason)}); ` +
+          'unlock with a reason before removing',
+          'LOCKED',
+        )
+      }
+      rows.delete(slug)
     },
   }
-  return { seam, calls, rows }
+  return { service, calls, rows }
 }
 
 /** Compose the API over real Session, Agent, Storage, Domain, and Workspace services. */
-async function harness(seam?: WorktreeSeam, persistence: unknown = { list: () => Promise.resolve([]) }) {
+async function harness(service?: MockWorktreeService, persistence: unknown = { list: () => Promise.resolve([]) }) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'dsh-apiproxy-worktree-')))
   const ctx = new Context()
   await ctx.plugin(SessionStore)
@@ -131,7 +170,7 @@ async function harness(seam?: WorktreeSeam, persistence: unknown = { list: () =>
   ctx.provide('storageDomain', storageDomain)
   ctx.provide('sessionPersistence', persistence as never)
   await ctx.plugin(WorkspaceRegistry)
-  if (seam !== undefined) ctx.provide('worktree', seam)
+  if (service !== undefined) ctx.provide('worktrees', service as never)
 
   const factory: AgentFactory = {
     async createAgent(_ownerCtx, options) {
@@ -163,21 +202,40 @@ async function harness(seam?: WorktreeSeam, persistence: unknown = { list: () =>
 
 describe('worktree.list', () => {
   it('serves every live row with lock state and reason', async () => {
-    const { seam } = mockSeam()
-    const { api } = await harness(seam)
+    const { service } = mockService()
+    const { api } = await harness(service)
     const handle = expectOk(await api.worktree.create(request({ seat: 'eve', sessionName: 'task' }))).worktree
 
+    // Born locked: the service's creation lock carries `<seat> <session>`.
     expect(expectOk(await api.worktree.list(request({}))).items).toEqual([
-      { seat: 'eve', path: '/wt/eve/task', branch: 'worktree/eve/task', sessionName: 'task', locked: false },
+      {
+        seat: 'eve',
+        path: join('/wt', 'eve', handle.slug),
+        branch: `eve/${handle.slug}`,
+        sessionName: `eve.${handle.slug}`,
+        locked: true,
+        lockReason: `eve eve.${handle.slug}`,
+      },
+    ])
+
+    await service.unlock(handle.slug as WorktreeSlug, 'work starts')
+    expect(expectOk(await api.worktree.list(request({}))).items).toEqual([
+      {
+        seat: 'eve',
+        path: join('/wt', 'eve', handle.slug),
+        branch: `eve/${handle.slug}`,
+        sessionName: `eve.${handle.slug}`,
+        locked: false,
+      },
     ])
 
     expectOk(await api.worktree.lock(request({ ref: handle.slug as WorktreeRef, reason: 'rebase in flight' })))
     expect(expectOk(await api.worktree.list(request({}))).items).toEqual([
       {
         seat: 'eve',
-        path: '/wt/eve/task',
-        branch: 'worktree/eve/task',
-        sessionName: 'task',
+        path: join('/wt', 'eve', handle.slug),
+        branch: `eve/${handle.slug}`,
+        sessionName: `eve.${handle.slug}`,
         locked: true,
         lockReason: 'rebase in flight',
       },
@@ -190,31 +248,35 @@ describe('worktree.list', () => {
     expect(response.result).toMatchObject({ ok: false, error: { code: 'worktree-unavailable' } })
   })
 
-  it('surfaces a seam read failure with its reason', async () => {
-    const { seam } = mockSeam({ list: new Error('registry store unreadable') })
-    const { api } = await harness(seam)
+  it('surfaces a service read failure with its reason', async () => {
+    const { service } = mockService({ list: new Error('registry store unreadable') })
+    const { api } = await harness(service)
     const response = await api.worktree.list(request({}))
     expect(response.result).toMatchObject({
       ok: false,
-      error: { code: 'worktree-refused', message: 'registry store unreadable', details: { op: 'worktree.list' } },
+      error: {
+        code: 'worktree-refused',
+        message: 'registry store unreadable',
+        details: { op: 'worktree.list', seamCode: 'worktree-forbidden' },
+      },
     })
   })
 })
 
 describe('worktree.create', () => {
-  it('forwards the spawn input verbatim and returns the minted handle', async () => {
-    const { seam, calls } = mockSeam()
-    const { api } = await harness(seam)
+  it('forwards the seat and the session-as-intent and answers the minted handle', async () => {
+    const { service, calls } = mockService()
+    const { api } = await harness(service)
 
     const value = expectOk(await api.worktree.create(request({ seat: 'eve', sessionName: 'task' })))
     expect(value.worktree).toEqual({
-      slug: 'wt-eve-task',
-      branch: 'worktree/eve/task',
-      path: '/wt/eve/task',
-      sessionName: 'task',
+      slug: 'wt-1',
+      branch: 'eve/wt-1',
+      path: join('/wt', 'eve', 'wt-1'),
+      sessionName: 'eve.wt-1',
       seat: 'eve',
     })
-    expect(calls.spawn).toEqual([{ seat: 'eve', sessionName: 'task' }])
+    expect(calls.spawn).toEqual([{ seat: 'eve', intent: 'task' }])
   })
 
   it('refuses with worktree-unavailable when the seam is absent', async () => {
@@ -223,91 +285,93 @@ describe('worktree.create', () => {
     expect(response.result).toMatchObject({ ok: false, error: { code: 'worktree-unavailable' } })
   })
 
-  it('surfaces the seam\u2019s typed refusal with its code', async () => {
-    const { seam } = mockSeam({ spawn: new WorktreeSeamError('worktree-forbidden', 'seat "eve" is frozen') })
-    const { api } = await harness(seam)
+  it('surfaces the service\u2019s typed refusal with its code', async () => {
+    const { service } = mockService({
+      spawn: new WorktreeError('invalid seat "eve(guest)": must match the session-name grammar', 'SEAT_INVALID'),
+    })
+    const { api } = await harness(service)
     const response = await api.worktree.create(request({ seat: 'eve', sessionName: 'task' }))
     expect(response.result).toMatchObject({
       ok: false,
       error: {
         code: 'worktree-refused',
-        message: 'seat "eve" is frozen',
+        message: 'invalid seat "eve(guest)": must match the session-name grammar',
         details: { op: 'worktree.create', seat: 'eve', seamCode: 'worktree-forbidden' },
       },
     })
   })
 
   it('surfaces a non-Error refusal as its string', async () => {
-    const { seam } = mockSeam({ spawn: 'seat registry offline' })
-    const { api } = await harness(seam)
+    const { service } = mockService({ spawn: 'worktree registry offline' })
+    const { api } = await harness(service)
     const response = await api.worktree.create(request({ seat: 'eve', sessionName: 'task' }))
     expect(response.result).toMatchObject({
       ok: false,
-      error: { code: 'worktree-refused', message: 'seat registry offline' },
+      error: { code: 'worktree-refused', message: 'worktree registry offline', details: { seamCode: 'worktree-forbidden' } },
     })
   })
 })
 
 describe('worktree.lock / worktree.remove', () => {
-  it('surfaces an already-locked refusal with the seam\u2019s reason', async () => {
-    const { seam } = mockSeam()
-    const { api } = await harness(seam)
+  it('surfaces an already-locked refusal with the service\u2019s reason', async () => {
+    const { service } = mockService()
+    const { api } = await harness(service)
     const handle = expectOk(await api.worktree.create(request({ seat: 'eve', sessionName: 'task' }))).worktree
-    expectOk(await api.worktree.lock(request({ ref: handle.slug as WorktreeRef, reason: 'rebase in flight' })))
 
+    // Born locked: the wire lock meets the service's creation lock.
     const second = await api.worktree.lock(request({ ref: handle.slug as WorktreeRef, reason: 'second holder' }))
     expect(second.result).toMatchObject({
       ok: false,
       error: {
         code: 'worktree-refused',
-        message: 'worktree "wt-eve-task" is already locked: rebase in flight',
+        message: `worktree ${handle.slug} is already locked (reason: "eve eve.${handle.slug}"); unlock with a reason before locking again`,
         details: { op: 'worktree.lock', ref: handle.slug, seamCode: 'worktree-locked' },
       },
     })
   })
 
   it('surfaces an unknown-reference refusal', async () => {
-    const { seam } = mockSeam()
-    const { api } = await harness(seam)
+    const { service } = mockService()
+    const { api } = await harness(service)
     const response = await api.worktree.lock(request({ ref: 'wt-ghost' as WorktreeRef, reason: 'why' }))
     expect(response.result).toMatchObject({
       ok: false,
       error: {
         code: 'worktree-refused',
-        message: 'worktree "wt-ghost" is not live',
+        message: 'no live worktree carries slug "wt-ghost"',
         details: { op: 'worktree.lock', ref: 'wt-ghost', seamCode: 'worktree-unknown' },
       },
     })
   })
 
   it('refuses removing a locked worktree and keeps it listed with its reason', async () => {
-    const { seam } = mockSeam()
-    const { api } = await harness(seam)
+    const { service } = mockService()
+    const { api } = await harness(service)
     const handle = expectOk(await api.worktree.create(request({ seat: 'eve', sessionName: 'task' }))).worktree
-    expectOk(await api.worktree.lock(request({ ref: handle.slug as WorktreeRef, reason: 'session still running' })))
 
     const response = await api.worktree.remove(request({ ref: handle.slug as WorktreeRef, reason: 'cleanup' }))
     expect(response.result).toMatchObject({
       ok: false,
       error: {
         code: 'worktree-refused',
-        message: 'worktree "wt-eve-task" is locked: session still running; the removal naming "cleanup" was refused',
+        message: `worktree ${handle.slug} is locked (reason: "eve eve.${handle.slug}"); unlock with a reason before removing`,
         details: { op: 'worktree.remove', ref: handle.slug, seamCode: 'worktree-locked' },
       },
     })
     expect(expectOk(await api.worktree.list(request({}))).items).toEqual([
-      expect.objectContaining({ seat: 'eve', sessionName: 'task', locked: true, lockReason: 'session still running' }),
+      expect.objectContaining({ seat: 'eve', sessionName: `eve.${handle.slug}`, locked: true }),
     ])
   })
 
-  it('removes an unlocked worktree through the seam', async () => {
-    const { seam, calls } = mockSeam()
-    const { api } = await harness(seam)
+  it('removes an unlocked worktree through the service', async () => {
+    const { service, calls } = mockService()
+    const { api } = await harness(service)
     const handle = expectOk(await api.worktree.create(request({ seat: 'eve', sessionName: 'task' }))).worktree
+    await service.unlock(handle.slug as WorktreeSlug, 'work starts')
 
     expect(expectOk(await api.worktree.remove(request({ ref: handle.slug as WorktreeRef, reason: 'obsolete' }))))
       .toEqual({ removed: true })
-    expect(calls.remove).toEqual([{ ref: handle.slug, reason: 'obsolete' }])
+    expect(calls.remove).toEqual([{ slug: 'wt-1', reason: 'obsolete' }])
     expect(expectOk(await api.worktree.list(request({}))).items).toEqual([])
   })
 
@@ -323,13 +387,13 @@ describe('worktree.lock / worktree.remove', () => {
 describe('session.create worktree intent', () => {
   it('spawns the session inside the seam-minted worktree', async () => {
     const base = realpathSync.native(mkdtempSync(join(tmpdir(), 'dsh-apiproxy-worktree-spawn-')))
-    const { seam, calls } = mockSeam({}, base)
-    const { api, ctx } = await harness(seam)
+    const { service, calls } = mockService({}, base)
+    const { api, ctx } = await harness(service)
 
     const value = expectOk(await api.sessions.create(request({ worktree: { seat: 'eve', sessionName: 'task' } })))
-    expect(calls.spawn).toEqual([{ seat: 'eve', sessionName: 'task' }])
+    expect(calls.spawn).toEqual([{ seat: 'eve', intent: 'task' }])
     expect(expectOk(await api.sessions.list(request({}))).items).toContainEqual(
-      expect.objectContaining({ sessionId: value.sessionId, cwd: join(base, 'eve', 'task') }),
+      expect.objectContaining({ sessionId: value.sessionId, cwd: join(base, 'eve', 'wt-1') }),
     )
     expect(ctx.agents.get(value.sessionId)).toBeDefined()
   })
@@ -344,24 +408,26 @@ describe('session.create worktree intent', () => {
     expect(expectOk(await api.sessions.list(request({}))).items.map(item => item.cwd)).not.toContain(root)
   })
 
-  it('refuses the spawn with the seam\u2019s reason and creates no session', async () => {
-    const { seam, calls } = mockSeam({ spawn: new WorktreeSeamError('worktree-forbidden', 'seat "eve" is frozen') })
-    const { api, ctx } = await harness(seam)
+  it('refuses the spawn with the service\u2019s reason and creates no session', async () => {
+    const { service, calls } = mockService({
+      spawn: new WorktreeError('work session requires DEEPSEEK_API_KEY in the environment', 'ENV_MISSING'),
+    })
+    const { api, ctx } = await harness(service)
     const response = await api.sessions.create(request({ worktree: { seat: 'eve', sessionName: 'task' } }))
     expect(response.result).toMatchObject({
       ok: false,
       error: {
         code: 'worktree-refused',
-        message: 'seat "eve" is frozen',
+        message: 'work session requires DEEPSEEK_API_KEY in the environment',
         details: { op: 'session.create', seat: 'eve', seamCode: 'worktree-forbidden' },
       },
     })
-    expect(calls.spawn).toEqual([{ seat: 'eve', sessionName: 'task' }])
+    expect(calls.spawn).toEqual([{ seat: 'eve', intent: 'task' }])
     expect(ctx.agents.list()).toHaveLength(0)
   })
 
   it('keeps a minted worktree visible when the session create fails afterwards', async () => {
-    const { seam } = mockSeam()
+    const { service } = mockService()
     const coldId = SessionId('session-cold-conflict')
     const coldCwd = '/cold/elsewhere'
     const coldHeader = { version: 0, id: coldId, createdAt: 0, cwd: coldCwd }
@@ -369,7 +435,7 @@ describe('session.create worktree intent', () => {
       list: () => Promise.resolve([coldHeader]),
       inspect: () => Promise.resolve({ meta: coldHeader, events: [] }),
     }
-    const { api } = await harness(seam, persistence)
+    const { api } = await harness(service, persistence)
 
     const response = await api.sessions.create(request({
       sessionId: coldId,
@@ -379,7 +445,7 @@ describe('session.create worktree intent', () => {
     // The worktree minted before the failure stays live and listed — never
     // silently reclaimed or fenced out of the registry.
     expect(expectOk(await api.worktree.list(request({}))).items).toEqual([
-      expect.objectContaining({ seat: 'eve', sessionName: 'task', locked: false }),
+      expect.objectContaining({ seat: 'eve', sessionName: 'eve.wt-1', locked: true }),
     ])
   })
 })

@@ -29,9 +29,9 @@ export { AbstractApiClient, InProcessApiClient } from './fetch/client.ts'
 export type { IApiClient } from './fetch/client.ts'
 export { createApiProxy } from './api-proxy.ts'
 export type { ApiProxyDefaults } from './api-proxy.ts'
-// The worktree seam's consumer-declared contract, re-exported so composition
-// authors (and the seam provider's integration commit) resolve the declared
-// surface from the package root.
+// The worktree seam's consumer-facing contract and its adaptation over
+// @deepseek-ai/dsh-worktree, re-exported so composition authors resolve the
+// declared surface from the package root.
 export { WorktreeSeamError } from './worktree-seam.ts'
 export type { WorktreeSeam, WorktreeSeamRefusalCode } from './worktree-seam.ts'
 

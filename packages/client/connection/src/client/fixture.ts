@@ -36,7 +36,7 @@ import type {
   ModelProviderGroup, ModelSelection, RpcRequest, RpcResponse, RpcResult, ServerRequest, ServerResponse, SessionSummary,
   ToolCallView, ToolEventView, ToolResultView, WorkspaceId, WorkspaceView,
 } from './api.ts'
-import type { RequestPayload, ResponseValue, RpcMethodMap } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type { RequestPayload, ResponseValue, RpcMethodMap, WorktreeRow } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { AbstractApiClient, RpcId, SESSION_SEARCH_RESULT_LIMIT } from './api.ts'
 import { randomUuid } from './random-uuid.ts'
 import type { ClientConnectionRpc } from '../rpc.ts'
@@ -1563,6 +1563,11 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
   // Registry-global archive set mirroring the host: archived sessions keep
   // their workspace accounting slot and only grouping surfaces hide them.
   const archivedSessionIds: SessionId[] = []
+  // In-memory worktree registry keyed by the minted slug; rows are born
+  // locked like the real service's spawns, and unlock lives seat-side, so the
+  // fixture exposes no unlock path either.
+  const worktreeRows = new Map<string, WorktreeRow>()
+  let nextWorktreeSlug = 1
 
   // In-memory browse tree behind the fixture's `browse` picker capability —
   // deterministic content mirroring the design mock so assembled Web tests
@@ -2972,6 +2977,63 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         details: { reason: 'no mailbox registry is composed in this deployment' },
       }),
     },
+    worktree: {
+      list: request => ok(request, { items: [...worktreeRows.values()] }),
+      create: (request) => {
+        const { seat } = request.payload
+        const slug = `fk-wt-${nextWorktreeSlug++}`
+        const row: WorktreeRow = {
+          seat,
+          path: `/f/wt/${seat}-${slug}`,
+          branch: `${seat}/${slug}`,
+          sessionName: `${seat}.${slug}`,
+          locked: true,
+          lockReason: `${seat} ${seat}.${slug}`,
+        }
+        worktreeRows.set(slug, row)
+        return ok(request, { worktree: { slug, branch: row.branch, path: row.path, sessionName: row.sessionName, seat } })
+      },
+      lock: (request) => {
+        const { ref, reason } = request.payload
+        const row = worktreeRows.get(ref)
+        if (row === undefined) {
+          return err(request, {
+            code: 'worktree-refused',
+            message: `no live worktree carries slug "${ref}"`,
+            details: { op: 'worktree.lock', ref, seamCode: 'worktree-unknown' },
+          })
+        }
+        if (row.locked) {
+          return err(request, {
+            code: 'worktree-refused',
+            message: `worktree ${ref} is already locked (reason: ${JSON.stringify(row.lockReason)}); unlock with a reason before locking again`,
+            details: { op: 'worktree.lock', ref, seamCode: 'worktree-locked' },
+          })
+        }
+        worktreeRows.set(ref, { ...row, locked: true, lockReason: reason })
+        return ok(request, { locked: true as const })
+      },
+      remove: (request) => {
+        const { ref } = request.payload
+        const row = worktreeRows.get(ref)
+        if (row === undefined) {
+          return err(request, {
+            code: 'worktree-refused',
+            message: `no live worktree carries slug "${ref}"`,
+            details: { op: 'worktree.remove', ref, seamCode: 'worktree-unknown' },
+          })
+        }
+        if (row.locked) {
+          return err(request, {
+            code: 'worktree-refused',
+            message: `worktree ${ref} is locked (reason: ${JSON.stringify(row.lockReason)}); unlock with a reason before removing`,
+            details: { op: 'worktree.remove', ref, seamCode: 'worktree-locked' },
+          })
+        }
+        worktreeRows.delete(ref)
+        return ok(request, { removed: true as const })
+      },
+    },
     respond(message: ClientResponse): Promise<RpcReceipt> {
       // Same routing discipline as the host: rpcId first, then the payload's
       // audit correlation; a settled or unknown id is not-pending.
@@ -3115,6 +3177,10 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'workspace.insertBefore': return this.api.workspace.insertBefore(request)
       case 'workspace.insertSessionBefore': return this.api.workspace.insertSessionBefore(request)
       case 'workspace.archiveSession': return this.api.workspace.archiveSession(request)
+      case 'worktree.list': return this.api.worktree.list(request)
+      case 'worktree.create': return this.api.worktree.create(request)
+      case 'worktree.lock': return this.api.worktree.lock(request)
+      case 'worktree.remove': return this.api.worktree.remove(request)
       case 'skill.list': return this.api.skills.list(request)
       case 'agentPreset.list': return this.api.agentPresets.list(request)
       case 'agentPreset.select': return this.api.agentPresets.select(request)

@@ -284,6 +284,21 @@ export class FakeApiClient implements IApiClient {
     }))),
   }
 
+  readonly worktree: IApiClient['worktree'] = {
+    list: payload => this.record('worktree.list', payload, Promise.resolve(ok({ items: [] }))),
+    create: payload => this.record('worktree.create', payload, Promise.resolve(ok({
+      worktree: {
+        slug: 'fk-wt-1',
+        branch: 'eve/fk-wt-1',
+        path: '/f/wt/eve-fk-wt-1',
+        sessionName: 'eve.fk-wt-1',
+        seat: (payload as { seat: string }).seat,
+      },
+    }))),
+    lock: payload => this.record('worktree.lock', payload, Promise.resolve(ok({ locked: true as const }))),
+    remove: payload => this.record('worktree.remove', payload, Promise.resolve(ok({ removed: true as const }))),
+  }
+
   /** When true, streams never fire onOpen (misbehaving-carrier material for the handshake timeout guard). */
   suppressStreamOpen = false
 

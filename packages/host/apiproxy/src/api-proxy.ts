@@ -116,10 +116,10 @@ import {
   inspectApiRemoteSession,
 } from '@deepseek-ai/dsh-api-remotes'
 import { canOpenNativePath, openNativePath, openNativeTextFile } from './native-path-opener.ts'
-// The worktree seam's consumer-declared contract (see the module's header):
-// the error class narrows seam rejections at this wire boundary, and the
-// type-only service merge resolves `ctx.get('worktree')` — an optional read.
-import { WorktreeSeamError } from './worktree-seam.ts'
+// The worktree seam's adaptation over @deepseek-ai/dsh-worktree (see the
+// module's header): the error class narrows seam rejections at this wire
+// boundary, and worktreeSeamOf reads the mounted service — an optional read.
+import { WorktreeSeamError, worktreeSeamOf } from './worktree-seam.ts'
 
 /** Page size when history is called without maxMessages. */
 const DEFAULT_MAX_MESSAGES = 50
@@ -2355,7 +2355,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         // know whether the seat's worktree hosts other sessions.
         let worktreeCwd: string | undefined
         if (request.payload.worktree !== undefined) {
-          const seam = ctx.get('worktree')
+          const seam = worktreeSeamOf(ctx)
           if (seam === undefined) {
             return err(request, worktreeUnavailable())
           }
@@ -3133,7 +3133,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     // its reason.
     worktree: {
       async list(request) {
-        const seam = ctx.get('worktree')
+        const seam = worktreeSeamOf(ctx)
         if (seam === undefined) return err(request, worktreeUnavailable())
         try {
           return ok(request, { items: await seam.list() })
@@ -3143,7 +3143,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async create(request) {
-        const seam = ctx.get('worktree')
+        const seam = worktreeSeamOf(ctx)
         if (seam === undefined) return err(request, worktreeUnavailable())
         try {
           return ok(request, { worktree: await seam.spawn(request.payload) })
@@ -3153,7 +3153,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async lock(request) {
-        const seam = ctx.get('worktree')
+        const seam = worktreeSeamOf(ctx)
         if (seam === undefined) return err(request, worktreeUnavailable())
         const { ref, reason } = request.payload
         try {
@@ -3165,7 +3165,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async remove(request) {
-        const seam = ctx.get('worktree')
+        const seam = worktreeSeamOf(ctx)
         if (seam === undefined) return err(request, worktreeUnavailable())
         const { ref, reason } = request.payload
         try {
