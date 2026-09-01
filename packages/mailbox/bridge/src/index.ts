@@ -136,8 +136,8 @@ export const DEFAULT_DEPTH_WINDOW_MS = 60_000
 /** Default window within which a substantially identical repeat is suppressed. */
 export const DEFAULT_REPEAT_WINDOW_MS = 300_000
 
-/** Default maximum admitted deliveries one `traceId` chain may carry. */
-export const DEFAULT_MAX_HOPS_PER_TRACE = 8
+/** Default maximum admitted deliveries one `traceId` chain may carry per UTC day. */
+export const DEFAULT_MAX_HOPS_PER_TRACE = 50
 
 /**
  * Recent admission fingerprints remembered per sender→recipient pair for
@@ -146,6 +146,14 @@ export const DEFAULT_MAX_HOPS_PER_TRACE = 8
  * messages in one window the depth cap is the backstop.
  */
 const RECENT_FINGERPRINTS_PER_PAIR = 8
+/** Admitted-delivery count for one trace chain, stamped with its UTC day. */
+interface HopCount {
+  /** Admissions recorded on the chain so far today. */
+  count: number
+  /** UTC calendar day (`YYYY-MM-DD`) the count was last recorded on. */
+  utcDay: string
+}
+
 /** One resident seat: its agent handle plus the residency's release path. */
 export interface ResidentSeat {
   /** Dispose the agent and release the per-name lock (idle expiry or replacement). */
@@ -248,15 +256,16 @@ export interface Config {
    */
   readonly repeatWindowMs?: number
   /**
-   * Maximum admitted deliveries one `traceId` chain may carry before further
-   * mail on that trace is refused. The trace id is the correlation field
-   * that rides the message producer → delivery → bounce (the routing-failure
-   * bounce path preserves it), so a relayed chain terminates instead of
-   * hopping forever. The counter is per mounted bridge and counts hops as
-   * they are ADMITTED — a queued burst on one trace is judged per hop, not
-   * by the backlog ahead of it — and resets on host restart. Conversation
-   * mail that does not thread a trace id is bounded by the depth and repeat
-   * guards instead.
+   * Maximum admitted deliveries one `traceId` chain may carry per UTC day
+   * before further mail on that trace is refused. The trace id is the
+   * correlation field that rides the message producer → delivery → bounce
+   * (the routing-failure bounce path preserves it), so a relayed chain
+   * terminates instead of hopping forever. The counter is per mounted
+   * bridge and counts hops as they are ADMITTED — a queued burst on one
+   * trace is judged per hop, not by the backlog ahead of it — and resets
+   * at 00:00 UTC and on host restart, so a chronic but legitimate relay
+   * thread never locks permanently. Conversation mail that does not thread
+   * a trace id is bounded by the depth and repeat guards instead.
    */
   readonly maxHopsPerTrace?: number
   /**
@@ -444,7 +453,7 @@ const MAX_TRACED_CHAINS = 1024
 export class LoopGuards {
   private readonly depth = new Map<string, number[]>()
   private readonly repeats = new Map<string, StoredFingerprint[]>()
-  private readonly hops = new Map<string, number>()
+  private readonly hops = new Map<string, HopCount>()
 
   /**
    * @param limits - the resolved guard limits this instance enforces.
@@ -474,7 +483,7 @@ export class LoopGuards {
     if (depth !== undefined) return depth
     const repeat = this.repeatRefusal(lease, at, fingerprintOf(lease, rendered))
     if (repeat !== undefined) return repeat
-    return this.hopRefusal(lease)
+    return this.hopRefusal(lease, at)
   }
 
   /**
@@ -501,10 +510,13 @@ export class LoopGuards {
     const { traceId } = lease.message
     if (traceId === undefined) return
     // Refresh-on-touch LRU: re-recording a chain moves it to the newest
-    // slot, so eviction takes the least recently used chain.
-    const carried = this.hops.get(traceId) ?? 0
+    // slot, so eviction takes the least recently used chain. The count
+    // restarts when the stored UTC day is not today.
+    const today = utcDayOf(at)
+    const stored = this.hops.get(traceId)
+    const count = stored !== undefined && stored.utcDay === today ? stored.count + 1 : 1
     this.hops.delete(traceId)
-    this.hops.set(traceId, carried + 1)
+    this.hops.set(traceId, { count, utcDay: today })
     while (this.hops.size > this.limits.maxTracedChains) {
       // The loop condition guarantees at least one entry; Map iteration
       // order is insertion order, so the first key is the oldest touch.
@@ -548,19 +560,33 @@ export class LoopGuards {
 
   /**
    * The hop counter: how many deliveries this bridge has already admitted
-   * on the lease's trace chain. A message without a trace id starts no
-   * chain and is not hop-counted; the depth and repeat guards bound it
-   * instead.
+   * on the lease's trace chain TODAY (UTC). A message without a trace id
+   * starts no chain and is not hop-counted; the depth and repeat guards
+   * bound it instead. The count carries a UTC date stamp and reads as zero
+   * once the day has turned, so a chronic but legitimate relay thread is
+   * bounded per day, never permanently.
    * @param lease - the claimed lease under judgment.
+   * @param at - judgment time, epoch milliseconds.
    * @returns the refusal reason, or undefined when under the cap.
    */
-  private hopRefusal(lease: MailboxLease): string | undefined {
+  private hopRefusal(lease: MailboxLease, at: number): string | undefined {
     const { traceId } = lease.message
     if (traceId === undefined) return undefined
-    const carried = this.hops.get(traceId) ?? 0
+    const stored = this.hops.get(traceId)
+    const carried = stored !== undefined && stored.utcDay === utcDayOf(at) ? stored.count : 0
     if (carried < this.limits.maxHopsPerTrace) return undefined
-    return `hop-limit-exceeded: trace "${traceId}" already carried ${carried} admitted hops (cap ${this.limits.maxHopsPerTrace})`
+    return `hop-limit-exceeded: trace "${traceId}" already carried ${carried} admitted hops today (cap ${this.limits.maxHopsPerTrace}, resets daily at 00:00 UTC)`
   }
+}
+
+/**
+ * The UTC calendar day an epoch-millisecond instant falls on, the granularity
+ * the hop counter resets at.
+ * @param at - instant, epoch milliseconds.
+ * @returns `YYYY-MM-DD` in UTC.
+ */
+function utcDayOf(at: number): string {
+  return new Date(at).toISOString().slice(0, 10)
 }
 
 /**

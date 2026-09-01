@@ -1401,6 +1401,82 @@ describe('loop guards', () => {
     expect(live.steer).toHaveBeenCalledTimes(4)
   })
 
+  it('sails a trace past the legacy 8-hop lock — the default cap is 50 per UTC day', async () => {
+    const { live } = liveTarget()
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    const spec = specWithGuards(
+      { addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 20, staleClaimMs: 600_000, admitFrom: ['sender'] },
+      {},
+      { at: 1_000_000 },
+    )
+    // Nine hops on one trace: hop 9 is past the old lifetime cap of 8 and
+    // must admit under the 50/day cap.
+    const ids: string[] = []
+    for (let index = 1; index <= 9; index++) {
+      ids.push(await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: `relay ${index}`, traceId: 'legacy-lock' }))
+    }
+    await bridge.internals.drainOnce(h.ctx, spec)
+    for (const id of ids) {
+      await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'done' })
+    }
+    expect(live.steer).toHaveBeenCalledTimes(9)
+  })
+
+  it('refuses hop 51 with an honest message naming the 50/day cap and the daily reset', async () => {
+    const { live } = liveTarget()
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    // The depth guard judges BEFORE hops and also defaults to 50/60s; raise
+    // it so the HOP guard is the one that fires at the 51st message.
+    const spec = specWithGuards(
+      { addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 60, staleClaimMs: 600_000, admitFrom: ['sender'] },
+      { maxDepthPerAddress: 1_000 },
+      { at: 1_000_000 },
+    )
+    const ids: string[] = []
+    for (let index = 1; index <= 51; index++) {
+      ids.push(await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: `flood ${index}`, traceId: 'flood' }))
+    }
+    await bridge.internals.drainOnce(h.ctx, spec)
+    await expect(rowState(h.storePath, ids[49])).resolves.toMatchObject({ state: 'done' })
+    const refused = await rowState(h.storePath, ids[50])
+    expect(refused.state).toBe('failed')
+    const reason = JSON.parse(refused.result ?? '{}').reason as string
+    expect(reason).toContain('hop-limit-exceeded')
+    expect(reason).toContain('already carried 50 admitted hops today')
+    expect(reason).toContain('cap 50')
+    expect(reason).toContain('resets daily at 00:00 UTC')
+  })
+
+  it('resets the trace hop counter when the UTC day turns, so a chronic relay thread never locks', async () => {
+    const { live } = liveTarget()
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    const clock: Clock = { at: 1_000_000 }
+    const spec = specWithGuards(
+      { addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000, admitFrom: ['sender'] },
+      { maxHopsPerTrace: 2 },
+      clock,
+    )
+    const day1: string[] = []
+    for (let index = 1; index <= 3; index++) {
+      day1.push(await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: `day-one ${index}`, traceId: 'chronic' }))
+    }
+    await bridge.internals.drainOnce(h.ctx, spec)
+    await expect(rowState(h.storePath, day1[0])).resolves.toMatchObject({ state: 'done' })
+    await expect(rowState(h.storePath, day1[1])).resolves.toMatchObject({ state: 'done' })
+    expect(JSON.parse((await rowState(h.storePath, day1[2])).result ?? '{}').reason as string).toContain('hop-limit-exceeded')
+
+    clock.at += 86_400_000 // next UTC day: the counter must read as zero again
+    const day2: string[] = []
+    for (let index = 1; index <= 3; index++) {
+      day2.push(await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: `day-two ${index}`, traceId: 'chronic' }))
+    }
+    await bridge.internals.drainOnce(h.ctx, spec)
+    await expect(rowState(h.storePath, day2[0])).resolves.toMatchObject({ state: 'done' })
+    await expect(rowState(h.storePath, day2[1])).resolves.toMatchObject({ state: 'done' })
+    expect(JSON.parse((await rowState(h.storePath, day2[2])).result ?? '{}').reason as string).toContain('resets daily')
+    expect(live.steer).toHaveBeenCalledTimes(4)
+  })
+
   it('forgets an evicted chain instead of wedging on traced-chain memory', async () => {
     const { live } = liveTarget()
     const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
