@@ -28,6 +28,7 @@
   "files": [
     "lib/index.js",
     "lib/invariant.js",
+    "lib/cli.js",
     "lib/types/**/*.d.ts"
   ],
   "license": "MIT",
@@ -42,5 +43,8 @@
   "devDependencies": {
     "@deepseek-ai/dsh-invariants": "workspace:^",
     "@deepseek-ai/cordis": "workspace:^"
+  },
+  "bin": {
+    "dsh-worktree": "lib/cli.js"
   }
 }
