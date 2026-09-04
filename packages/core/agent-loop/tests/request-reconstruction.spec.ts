@@ -48,6 +48,28 @@ function waitForIdle(ctx: Context, agent: Agent): Promise<void> {
   })
 }
 
+/**
+ * Like {@link waitForIdle} but resolves only on the Nth `'idle'` transition
+ * after attaching — for a sequence where a first turn's own conclusion and a
+ * later corrective turn's conclusion could both land before (or straddle)
+ * any single synchronous checkpoint the test can insert, so a fresh
+ * single-shot listener attached "in between" cannot be relied on to land
+ * strictly after the first and strictly before the second.
+ */
+function waitForIdleTimes(ctx: Context, agent: Agent, times: number): Promise<void> {
+  return new Promise((resolve) => {
+    let seen = 0
+    const dispose = ctx.on('agent/status', ({ agent: subject, status }) => {
+      if (subject !== agent || status !== 'idle') return
+      seen += 1
+      if (seen >= times) {
+        dispose()
+        resolve()
+      }
+    })
+  })
+}
+
 function send(agent: Agent, text: string) {
   agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
 }
@@ -817,5 +839,138 @@ describe('tool-registration race recovery (SWD-115)', () => {
     // corrective dispatch from the mid-turn tools/change.
     expect(adapter.requests).toHaveLength(2)
     expect(agent.session.events.filter(event => event.type === 'user/message')).toHaveLength(1)
+    // The other half of the claim this design leans on: the turn's own
+    // natural second step really did pick up the newly registered tool —
+    // not just "no spurious third call", but "the second call was correct".
+    expect(adapter.requests[1]?.tools?.map(tool => tool.name)).toEqual(
+      expect.arrayContaining(['echo', 'late']),
+    )
+  })
+
+  it("BLOCKING 1: a drift found on a turn's LAST step is not lost forever -- it self-corrects once the agent actually goes idle", async () => {
+    // MockAdapter's script entries resolve instantly with no real delay, so
+    // driving this deterministically requires an adapter whose stream can be
+    // held open under test control -- this one gates its first response so
+    // the test can assert the agent is genuinely still 'running' (mid its
+    // one, final step) at the exact moment the late registration lands.
+    class GatedThenScriptedAdapter extends MockAdapter {
+      readonly gate = Promise.withResolvers<undefined>()
+      private gatedCallMade = false
+
+      constructor(private readonly firstText: string, followingScript: ConstructorParameters<typeof MockAdapter>[0]) {
+        super(followingScript)
+      }
+
+      override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        if (this.gatedCallMade) {
+          yield* super.stream(options)
+          return
+        }
+        this.gatedCallMade = true
+        this.requests.push(options)
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: this.firstText }
+        await this.gate.promise
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: this.firstText } }
+        yield { type: 'usage', usage: { inputTokens: 10, outputTokens: this.firstText.length } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+
+    const adapter = new GatedThenScriptedAdapter('one', [textResponse('ack')])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('tool-race-final-step'), { provider: 'mock', model: 'mock' })
+
+    // Attached before anything happens: two idle transitions are expected
+    // here (turn 1 concluding, then the corrective turn concluding), and
+    // fake-timer microtask flushing can drive both of them through before a
+    // freshly-attached listener would ever get a chance to see the first.
+    const corrected = waitForIdleTimes(ctx, agent, 2)
+
+    vi.useFakeTimers()
+    try {
+      send(agent, 'go')
+      // Flush microtasks (no timer involved yet) until the model call
+      // actually starts streaming and pauses at the gate.
+      await vi.advanceTimersByTimeAsync(0)
+      expect(adapter.requests).toHaveLength(1)
+      expect(agent.status).toBe('running')
+
+      // The late registration lands while the model is still mid-stream on
+      // what will turn out to be the turn's only (and therefore last) step
+      // -- exactly the ticket's own repro shape.
+      registerEcho(ctx)
+      await vi.advanceTimersByTimeAsync(TOOL_SNAPSHOT_SETTLE_MS)
+      // The debounce fired while genuinely still running: it must have
+      // deferred rather than acted -- confirm nothing was dispatched yet.
+      expect(adapter.requests).toHaveLength(1)
+
+      // Now let the step actually conclude: no tool call, so the turn ends
+      // and the agent goes idle carrying a still-stale header.
+      adapter.gate.resolve(undefined)
+      await vi.advanceTimersByTimeAsync(0)
+    } finally {
+      vi.useRealTimers()
+    }
+    await corrected
+
+    // The decisive evidence: the drift found mid-turn was NOT dropped once
+    // the turn ended with no further step coming -- a second real dispatch
+    // went out once the agent actually went idle, carrying the corrected
+    // tool set.
+    expect(adapter.requests).toHaveLength(2)
+    expect(adapter.requests[1]?.tools?.map(tool => tool.name)).toEqual(['echo'])
+  })
+
+  it('BLOCKING 2: cancel() dropping a maintenance-latched correction does not permanently disable the recheck', async () => {
+    const adapter = new MockAdapter([textResponse('one'), textResponse('corrected')])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('tool-race-maintenance-cancel'), { provider: 'mock', model: 'mock' })
+
+    send(agent, 'go')
+    await waitForIdle(ctx, agent)
+    expect(adapter.requests).toHaveLength(1)
+
+    const maintenanceGate = Promise.withResolvers<undefined>()
+    let observedSignal: AbortSignal | undefined
+    const maintenance = agent.runMaintenance(async (signal) => {
+      observedSignal = signal
+      await maintenanceGate.promise
+    })
+
+    // Drift lands while maintenance is in flight: `status` reads 'idle'
+    // during maintenance, so the recheck proceeds and latches a corrective
+    // wake behind the maintenance job instead of starting it immediately.
+    vi.useFakeTimers()
+    try {
+      registerEcho(ctx)
+      await vi.advanceTimersByTimeAsync(TOOL_SNAPSHOT_SETTLE_MS)
+    } finally {
+      vi.useRealTimers()
+    }
+    // Not yet dispatched: the corrective wake is latched behind maintenance,
+    // not running.
+    expect(adapter.requests).toHaveLength(1)
+
+    // A real call site cancelling without keepInbox while maintenance is
+    // still in flight (e.g. packages/acp/acp/src/index.ts's
+    // cancel({kind:'user'}) call sites) -- this clears the inbox and the
+    // wakeRequested latch together, dropping the corrective message before
+    // it was ever delivered.
+    agent.cancel({ kind: 'user' })
+    expect(observedSignal?.aborted).toBe(true)
+
+    const corrected = waitForIdle(ctx, agent)
+    maintenanceGate.resolve(undefined)
+    await maintenance
+    await corrected
+
+    // The decisive evidence: cancel() dropping the latch did not leave the
+    // mechanism permanently stuck -- a real corrective dispatch still went
+    // out once maintenance actually concluded, carrying the corrected tool
+    // set. Without the fix, this second call never happens (0-length stays
+    // at 1 forever, for the rest of the agent's life).
+    expect(adapter.requests).toHaveLength(2)
+    expect(adapter.requests[1]?.tools?.map(tool => tool.name)).toEqual(['echo'])
   })
 })

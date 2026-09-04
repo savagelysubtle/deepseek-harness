@@ -108,14 +108,36 @@ export class ReactLoopAgent implements Agent {
   /**
    * Set the instant a corrective wake is dispatched for a lost tool-registration
    * race (see {@link recheckToolSnapshot}), cleared the instant any real turn
-   * next starts (see {@link setPhase}). Guards only the window where a wake
-   * is latched behind {@link runMaintenance} — outside maintenance, `send`'s
-   * own synchronous transition to phase `'running'` already makes the idle
-   * check in {@link recheckToolSnapshot} the sole guard needed; during
-   * maintenance `status` stays `'idle'` while a wake sits latched, which
-   * would otherwise let a second burst queue a second corrective message.
+   * next starts (see {@link setPhase}). Guards the window where a wake is
+   * latched behind {@link runMaintenance} rather than started immediately —
+   * outside maintenance, `send`'s own synchronous transition to phase
+   * `'running'` already makes the idle check in {@link recheckToolSnapshot}
+   * the sole guard needed; during maintenance `status` stays `'idle'` while
+   * a wake sits latched, which would otherwise let a second burst queue a
+   * second corrective message.
+   *
+   * A latched wake can also be dropped out from under this flag — a
+   * {@link cancel} without `keepInbox` before maintenance finishes clears
+   * the inbox and the latch together, so the transition to `'running'` this
+   * flag is waiting for never comes. `cancel` detects exactly that and
+   * re-arms {@link toolSnapshotRecheckDeferred} instead of leaving this
+   * stuck `true`, which would otherwise silently disable every later
+   * recheck for the rest of the agent's life.
    */
   private toolSnapshotCorrectionPending = false
+
+  /**
+   * Set when {@link recheckToolSnapshot} finds real drift but the agent is
+   * mid-turn, so it deliberately did nothing (rule: a running turn's own
+   * next `preStep`/`buildRequest` self-corrects for free). That only holds
+   * when another step is actually coming — a turn whose in-flight step is
+   * its LAST one has no next `preStep`, so a drift found there would
+   * otherwise be dropped forever the instant the turn ends. {@link setPhase}
+   * re-verifies on the very next transition to true `'idle'` and clears this
+   * flag; also set by {@link cancel} when it discovers a latched correction
+   * was just dropped, for the same reason.
+   */
+  private toolSnapshotRecheckDeferred = false
 
   constructor(
     private loopCtx: Context,
@@ -161,6 +183,13 @@ export class ReactLoopAgent implements Agent {
     // Any real turn starting resolves whatever race the pending flag was
     // latched for: the driver about to run reads the registry live.
     if (next.kind === 'running') this.toolSnapshotCorrectionPending = false
+    // The one place a deferred mid-turn (or cancel-dropped) recheck gets
+    // caught up: genuinely going idle, not merely between turns of the same
+    // kick() loop (which never passes through here — see `turn()`).
+    if (next.kind === 'idle' && this.toolSnapshotRecheckDeferred) {
+      this.toolSnapshotRecheckDeferred = false
+      this.runToolSnapshotRecheck()
+    }
     const status = this.status
     if (status !== previousStatus) {
       this.dispatch.emit('agent/status', { status })
@@ -192,6 +221,20 @@ export class ReactLoopAgent implements Agent {
     if (!options.keepInbox) {
       this.inbox.clear()
       if (this.phase.kind !== 'idle') this.phase.wakeRequested = false
+      if (this.toolSnapshotCorrectionPending) {
+        // The corrective wake this flag is guarding was just dropped: its
+        // message left the inbox, and (if it was still latched behind
+        // maintenance) its wakeRequested latch was just cleared above too —
+        // so the transition to 'running' that would normally clear this
+        // flag is never coming for it. Re-arm via the deferred path instead
+        // of leaving it stuck true, which would silently disable every
+        // later recheck for the rest of this agent's life.
+        this.toolSnapshotCorrectionPending = false
+        this.toolSnapshotRecheckDeferred = true
+        this.ctx.logger.info(
+          `agent "${this.id}": tool-snapshot correction dropped by cancel(); will re-verify on the next idle transition`,
+        )
+      }
     }
     if (this.phase.kind !== 'idle') this.phase.abort.abort(cause)
   }
@@ -293,11 +336,16 @@ export class ReactLoopAgent implements Agent {
     if (this.toolsSettleTimer !== undefined) clearTimeout(this.toolsSettleTimer)
     this.toolsSettleTimer = setTimeout(() => {
       this.toolsSettleTimer = undefined
-      this.recheckToolSnapshot().catch((error: unknown) => {
-        this.ctx.logger.warn(`agent "${this.id}": tool-snapshot recheck failed: ${errorChain(error)}`)
-      })
+      this.runToolSnapshotRecheck()
     }, TOOL_SNAPSHOT_SETTLE_MS)
     this.toolsSettleTimer.unref()
+  }
+
+  /** Fire-and-forget {@link recheckToolSnapshot}, logging rather than throwing on failure. */
+  private runToolSnapshotRecheck(): void {
+    this.recheckToolSnapshot().catch((error: unknown) => {
+      this.ctx.logger.warn(`agent "${this.id}": tool-snapshot recheck failed: ${errorChain(error)}`)
+    })
   }
 
   /**
@@ -311,19 +359,44 @@ export class ReactLoopAgent implements Agent {
    * `preStep`/`buildRequest` cycle re-assembles live and self-corrects for
    * free — `buildRequest` already diffs and logs a `request/header` change
    * on every step — so acting here too would just race a dispatch already
-   * on its way. An idle agent has no such cycle coming: the wake that lost
-   * the race already produced its one step and went idle. The fix for that
-   * case is to synthesize one internal message and drive it through the
-   * ordinary wake path (`send(..., 'next-turn', true)`), which forces
-   * exactly one real `step()`/`buildRequest()` and therefore one corrected
-   * outbound request — a bare empty self-wake would not do this, since a
-   * wake with an empty inbox short-circuits before `step()` ever runs.
+   * on its way. THAT ONLY HOLDS IF ANOTHER STEP IS ACTUALLY COMING: a turn
+   * whose in-flight step is its last one (a plain-text answer, no tool call)
+   * has no next `preStep` to self-correct on, so doing nothing here would
+   * silently drop the drift forever — the exact failure class this ticket
+   * exists to fix. `setPhase` re-verifies via {@link toolSnapshotRecheckDeferred}
+   * on the next genuine transition to idle instead.
+   *
+   * An idle agent has no such cycle coming at all: the wake that lost the
+   * race already produced its one step and went idle. The fix for that case
+   * is to synthesize one internal message and drive it through the ordinary
+   * wake path (`send(..., 'next-turn', true)`), which forces exactly one
+   * real `step()`/`buildRequest()` and therefore one corrected outbound
+   * request — a bare empty self-wake would not do this, since a wake with an
+   * empty inbox short-circuits before `step()` ever runs.
    */
   private async recheckToolSnapshot(): Promise<void> {
     const lastUsed = this.session.requestHeader()?.tools ?? []
     const assembly = await this.loopCtx.systemPrompt.assemble(assembleContextFor(this))
     if (sameToolSet(lastUsed, assembly.tools)) return
-    if (this.status !== 'idle' || this.toolSnapshotCorrectionPending) return
+    if (this.status !== 'idle') {
+      // Mid-turn: normally self-corrects for free on the next step (see the
+      // doc above) — but only when there IS a next step. Never silently drop
+      // this: re-verify on the next real idle transition instead.
+      this.toolSnapshotRecheckDeferred = true
+      this.ctx.logger.info(
+        `agent "${this.id}": tool-snapshot recheck deferred (turn in flight, drift found on what may be its last step); `
+        + 'will re-verify on the next idle transition',
+      )
+      return
+    }
+    if (this.toolSnapshotCorrectionPending) {
+      // A correction is already in flight (latched behind maintenance, most
+      // likely) — do not queue a second one on top of it.
+      this.ctx.logger.info(
+        `agent "${this.id}": tool-snapshot recheck short-circuited (a correction is already pending)`,
+      )
+      return
+    }
     this.toolSnapshotCorrectionPending = true
     this.send(
       createUserMessage({
