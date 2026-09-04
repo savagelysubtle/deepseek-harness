@@ -975,70 +975,120 @@ describe('tool-registration race recovery (SWD-115)', () => {
   })
 })
 
-describe('DIAGNOSTIC (temporary): disposal racing a latched tool-snapshot correction', () => {
-  it('observes what actually happens when disposal races the fire-and-forget recheck it just triggered', async () => {
-    const adapter = new MockAdapter([textResponse('one'), textResponse('would-be-corrective')])
+/**
+ * Shared setup for the disposal-races-a-latched-recheck scenario (SWD-115):
+ * an agent parked in maintenance picks up a corrective tool-snapshot wake,
+ * that wake is latched (maintenance can't take it directly), and then the
+ * agent is disposed while the latch is still pending. Returns the evidence
+ * every assertion in this describe block reads, gathered once so each `it`
+ * stays focused on one invariant instead of re-deriving the race.
+ */
+async function raceDisposalAgainstLatchedRecheck() {
+  const adapter = new MockAdapter([textResponse('one'), textResponse('would-be-corrective')])
+  const ctx = await harness(adapter)
+  const handle = await ctx.agents.create({
+    sessionId: SessionId('tool-race-dispose'),
+    agentOptions: { provider: 'mock', model: 'mock' },
+  })
+  const agent = handle.agent
+
+  send(agent, 'go')
+  await waitForIdle(ctx, agent)
+  expect(adapter.requests).toHaveLength(1)
+
+  const warnCalls: unknown[][] = []
+  const origWarn = agent.ctx.logger.warn.bind(agent.ctx.logger)
+  agent.ctx.logger.warn = ((...args: unknown[]) => {
+    warnCalls.push(args)
+    origWarn(...(args as [never]))
+  }) as typeof agent.ctx.logger.warn
+
+  const maintenanceGate = Promise.withResolvers<undefined>()
+  const maintenance = agent.runMaintenance(async () => {
+    await maintenanceGate.promise
+  })
+
+  vi.useFakeTimers()
+  try {
+    registerEcho(ctx)
+    await vi.advanceTimersByTimeAsync(TOOL_SNAPSHOT_SETTLE_MS)
+  } finally {
+    vi.useRealTimers()
+  }
+  // The recheck found drift and latched a corrective wake behind maintenance
+  // (see agent.ts's `toolSnapshotCorrectionPending`) -- nothing has dispatched yet.
+  expect(adapter.requests).toHaveLength(1)
+  const preDisposeEventCount = agent.session.events.length
+
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+  process.on('unhandledRejection', onUnhandled)
+
+  let disposeError: unknown
+  const disposal = handle.dispose().catch((error: unknown) => { disposeError = error })
+  // Resolving the gate lets maintenance conclude, which re-arms the dropped
+  // latch (`toolSnapshotRecheckDeferred`) and, on the transition back to
+  // idle, fires the fire-and-forget recheck again -- this time landing well
+  // after dispose() itself has resolved.
+  maintenanceGate.resolve(undefined)
+  await maintenance.catch(() => undefined)
+  await disposal
+  // Give the dangling fire-and-forget chain a chance to reach its own
+  // dispatch attempt before inspecting state and removing the listener.
+  await new Promise(resolve => setTimeout(resolve, 50))
+  process.off('unhandledRejection', onUnhandled)
+
+  return { agent, adapter, warnCalls, unhandled, disposeError, preDisposeEventCount }
+}
+
+describe('disposal racing a latched tool-snapshot correction (SWD-115)', () => {
+  it('does not dispatch a second request or grow the session once dispose has resolved', async () => {
+    const { agent, adapter, disposeError, unhandled, preDisposeEventCount } =
+      await raceDisposalAgainstLatchedRecheck()
+
+    // The defect: a real second model call went out and completed against a
+    // torn-down agent, growing the session, with dispose() itself reporting
+    // success throughout. None of that may happen now.
+    expect(disposeError).toBeUndefined()
+    expect(unhandled).toHaveLength(0)
+    expect(adapter.requests).toHaveLength(1)
+
+    // The one legitimate way this can still grow: cancel() durably records
+    // discarding the message the first (latched) recheck had queued, and the
+    // blocked retry durably records its own queued message before the guard
+    // in wakeDriver() ever lets it start a driver -- both are inert inbox
+    // bookkeeping for work that never ran. What must never reappear is any
+    // event only a real dispatch produces.
+    const newEvents = agent.session.events.slice(preDisposeEventCount)
+    expect(newEvents.every(event => event.type === 'agent/inbox/spliced')).toBe(true)
+    for (const dispatchOnly of ['turn/start', 'step/start', 'assistant/message', 'request/header'] as const) {
+      expect(newEvents.some(event => event.type === dispatchOnly)).toBe(false)
+    }
+  })
+
+  it('surfaces the blocked dispatch with a reason naming disposal', async () => {
+    const { warnCalls } = await raceDisposalAgainstLatchedRecheck()
+
+    // The guard must not fail silently: the fire-and-forget recheck's own
+    // error handling (agent.ts's runToolSnapshotRecheck) logs the rejection
+    // it caught, and that rejection must be traceable to disposal by name.
+    expect(warnCalls.some(args => args.some(arg => String(arg).includes('disposed')))).toBe(true)
+  })
+})
+
+describe('dispatch guard on a disposed agent (SWD-115)', () => {
+  it('refuses synchronously, by name, when something tries to wake a disposed agent directly', async () => {
+    const adapter = new MockAdapter([textResponse('should never dispatch')])
     const ctx = await harness(adapter)
     const handle = await ctx.agents.create({
-      sessionId: SessionId('tool-race-dispose-diagnostic'),
+      sessionId: SessionId('disposed-direct-wake'),
       agentOptions: { provider: 'mock', model: 'mock' },
     })
     const agent = handle.agent
 
-    send(agent, 'go')
-    await waitForIdle(ctx, agent)
-    expect(adapter.requests).toHaveLength(1)
+    await handle.dispose()
 
-    const warnCalls: unknown[][] = []
-    const infoCalls: unknown[][] = []
-    const origWarn = agent.ctx.logger.warn.bind(agent.ctx.logger)
-    const origInfo = agent.ctx.logger.info.bind(agent.ctx.logger)
-    agent.ctx.logger.warn = ((...args: unknown[]) => {
-      warnCalls.push(args)
-      origWarn(...(args as [never]))
-    }) as typeof agent.ctx.logger.warn
-    agent.ctx.logger.info = ((...args: unknown[]) => {
-      infoCalls.push(args)
-      origInfo(...(args as [never]))
-    }) as typeof agent.ctx.logger.info
-
-    const maintenanceGate = Promise.withResolvers<undefined>()
-    const maintenance = agent.runMaintenance(async () => {
-      await maintenanceGate.promise
-    })
-
-    vi.useFakeTimers()
-    try {
-      registerEcho(ctx)
-      await vi.advanceTimersByTimeAsync(TOOL_SNAPSHOT_SETTLE_MS)
-    } finally {
-      vi.useRealTimers()
-    }
-    expect(adapter.requests).toHaveLength(1)
-    console.log('DIAGNOSTIC: pre-dispose requests =', adapter.requests.length)
-    console.log('DIAGNOSTIC: pre-dispose session events =', agent.session.events.length)
-
-    const unhandled: unknown[] = []
-    const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
-    process.on('unhandledRejection', onUnhandled)
-
-    let disposeError: unknown
-    const disposal = handle.dispose().catch((error: unknown) => { disposeError = error })
-    maintenanceGate.resolve(undefined)
-    await maintenance.catch((error: unknown) => {
-      console.log('DIAGNOSTIC: maintenance job rejected:', String(error))
-    })
-    await disposal
-    // Give any straggling microtasks/macrotasks a chance to surface before
-    // we inspect state and remove the unhandledRejection listener.
-    await new Promise(resolve => setTimeout(resolve, 50))
-    process.off('unhandledRejection', onUnhandled)
-
-    console.log('DIAGNOSTIC: dispose() rejected with =', disposeError === undefined ? '(no)' : JSON.stringify(disposeError))
-    console.log('DIAGNOSTIC: post-dispose requests =', adapter.requests.length)
-    console.log('DIAGNOSTIC: post-dispose session events =', agent.session.events.length)
-    console.log('DIAGNOSTIC: warn() calls =', JSON.stringify(warnCalls))
-    console.log('DIAGNOSTIC: info() calls =', JSON.stringify(infoCalls))
-    console.log('DIAGNOSTIC: unhandledRejection count =', unhandled.length, unhandled.map(String))
+    expect(() => { send(agent, 'too late') }).toThrow(/disposed/)
+    expect(adapter.requests).toHaveLength(0)
   })
 })

@@ -88,6 +88,23 @@ export class ReactLoopAgent implements Agent {
   private phase: Phase
   private activityDone: Promise<void> = Promise.resolve()
 
+  /**
+   * Set exactly once, synchronously, the instant {@link cancel} is invoked
+   * with `{kind: 'disposed'}` (see the disposal sequence in the plugin's
+   * `dispose()`) and never cleared again. This is deliberately independent
+   * of `phase` and of any {@link AbortController}: a phase transition always
+   * mints a fresh, unaborted controller (see {@link wakeDriver}), so an async
+   * chain that closed over this agent before disposal -- a fire-and-forget
+   * tool-snapshot recheck latched behind {@link runMaintenance}, for
+   * instance -- can still observe a live idle phase and a signal that was
+   * never told to abort, well after disposal resolved. `disposed` cannot be
+   * fooled by that: it is read synchronously at the single choke point
+   * every new driver activity passes through ({@link wakeDriver}), so no
+   * teardown ordering, timer, or promise race can let a dispatch slip past
+   * it.
+   */
+  private disposed = false
+
   /** The agent-scoped registration boundary; the lifecycle owner unwinds it after the driver exits. */
   readonly scope: Scope
   readonly ctx: Context
@@ -218,6 +235,10 @@ export class ReactLoopAgent implements Agent {
   }
 
   cancel(cause: AgentCancelCause, options: CancelOptions = {}): void {
+    // Durable and permanent, set before anything else below so it is visible
+    // to every later synchronous check regardless of how this cancel races
+    // with concurrent phase transitions -- see the field doc on `disposed`.
+    if (cause.kind === 'disposed') this.disposed = true
     if (!options.keepInbox) {
       this.inbox.clear()
       if (this.phase.kind !== 'idle') this.phase.wakeRequested = false
@@ -279,6 +300,16 @@ export class ReactLoopAgent implements Agent {
         this.phase.wakeRequested = true
       }
       return
+    }
+    if (this.disposed) {
+      // Refuse loudly, at the sole gateway into a new driver: about to mint a
+      // fresh, never-aborted AbortController and start `kick()`, so nothing
+      // downstream of this point can be trusted to notice disposal on its
+      // own. See the `disposed` field doc for why this cannot be a
+      // teardown-ordering or abort-signal check instead. A wake landing
+      // while some other phase is still converging (handled above) is not
+      // this: it never reaches a dispatch, so it stays a silent no-op.
+      this.throwError(new Error(`agent "${this.id}": dispatch blocked, agent is disposed`))
     }
     const driver = Promise.withResolvers<void>()
     this.activityDone = driver.promise
