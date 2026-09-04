@@ -315,6 +315,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [],
       },
       {
+        signature: 'worktree: WorktreeApi',
+        description: 'Seat→worktree→branch registry visibility and management over the worktree seam.',
+        parameters: [],
+      },
+      {
         signature: 'downloads: DownloadsApi',
         description: 'Host-only download surfaces (GET, no wire envelope); absent from IApiClient.',
         parameters: [],
@@ -950,7 +955,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
   {
     key: 'memory',
     summary: 'Abstract memory service.',
-    description: 'Abstract memory service. Providers implement the four operations over one storage root; every operation resolves the project scope from the caller\'s absolute `cwd`, so two checkouts never share notes and one checkout shares them across every session, restart, and seat.',
+    description: 'Abstract memory service. Providers implement the four operations over one storage root; every operation resolves the project scope from the caller\'s absolute `cwd` through the project anchor, so two repositories never share notes, every worktree of one repository shares one scope, and the scope persists across every session, restart, and seat.',
     methods: [
       {
         signature: 'abstract read(cwd: string, path: string): Promise<string>',
@@ -2250,6 +2255,82 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
     ],
   },
+  {
+    key: 'worktrees',
+    summary: 'Registry over the process\'s worktree providers plus the fenced lifecycle operations.',
+    description: 'Registry over the process\'s worktree providers plus the fenced lifecycle operations. Registering the same provider name twice fails loud; the returned disposer unregisters exactly that contribution.',
+    methods: [
+      {
+        signature: 'readonly repoRoot: string',
+        description: 'Resolved absolute path of the main checkout.',
+        parameters: [],
+      },
+      {
+        signature: 'readonly worktreesRoot: string',
+        description: 'Resolved absolute directory worktrees are created under.',
+        parameters: [],
+      },
+      {
+        signature: 'readonly mainRef: string',
+        description: 'Resolved default ref new worktrees branch from.',
+        parameters: [],
+      },
+      {
+        signature: 'registerProvider(provider: WorktreeProvider): () => void',
+        description: 'Register one worktree provider under its own name.',
+        parameters: [{ name: 'provider', description: 'the provider implementation to admit.' }],
+        returns: 'the disposer that unregisters this provider; fiber disposal triggers it.',
+        throws: ['WorktreeError with code `DUPLICATE_PROVIDER` when a live provider already holds the name.'],
+      },
+      {
+        signature: 'getProvider(name: string): WorktreeProvider | undefined',
+        description: 'Look up one registered provider by exact name.',
+        parameters: [{ name: 'name', description: 'the provider\'s registry name.' }],
+        returns: 'the provider, or undefined when the name is not live.',
+      },
+      {
+        signature: 'listProviders(): string[]',
+        description: 'Enumerate the live provider names in registration order.',
+        parameters: [],
+        returns: 'fresh provider names.',
+      },
+      {
+        signature: 'async spawn(request: WorktreeSpawnRequest, providerName?: string): Promise<WorktreeSpawnResult>',
+        description: 'Spawn one seat-scoped worktree: verify the working environment, mint the slug, refuse the states force would paper over, create the worktree locked, run the copy-list bootstrap, and publish the row. No mutation happens before every check passes; a bootstrap failure rolls the worktree back before the error surfaces.',
+        parameters: [{ name: 'request', description: 'seat, intent, and optional main ref.' }, { name: 'providerName', description: 'provider to use; omitted resolves the single registered provider and refuses ambiguity.' }],
+        returns: 'the published spawn result.',
+      },
+      {
+        signature: 'list(): readonly WorktreeRow[]',
+        description: 'Enumerate the live registry rows in spawn order — one row per live branch.',
+        parameters: [],
+        returns: 'fresh row snapshots.',
+      },
+      {
+        signature: 'row(slug: WorktreeSlug): WorktreeRow | undefined',
+        description: 'Look up one registry row by slug.',
+        parameters: [{ name: 'slug', description: 'the seam-minted slug.' }],
+        returns: 'the row, or undefined when no live branch carries it.',
+      },
+      {
+        signature: 'async lock(slug: WorktreeSlug, reason: string, providerName?: string): Promise<WorktreeRow>',
+        description: 'Lock an unlocked worktree with a reason.',
+        parameters: [{ name: 'slug', description: 'the worktree\'s slug.' }, { name: 'reason', description: 'why the worktree is being locked; carried on the row, the git lock, and the event.' }, { name: 'providerName', description: 'provider to use; same resolution as {@link spawn}.' }],
+        returns: 'the committed row.',
+      },
+      {
+        signature: 'async unlock(slug: WorktreeSlug, reason: string, providerName?: string): Promise<WorktreeRow>',
+        description: 'Remove an existing lock, recording why.',
+        parameters: [{ name: 'slug', description: 'the worktree\'s slug.' }, { name: 'reason', description: 'why the fence is coming down; carried on the row and the event.' }, { name: 'providerName', description: 'provider to use; same resolution as {@link spawn}.' }],
+        returns: 'the committed row.',
+      },
+      {
+        signature: 'async remove(slug: WorktreeSlug, reason: string, providerName?: string): Promise<void>',
+        description: 'Remove an unlocked worktree and delete its row. A locked worktree refuses with its lock reason — the caller must unlock with a reason first. The branch itself survives removal; reusing its name stays forbidden.',
+        parameters: [{ name: 'slug', description: 'the worktree\'s slug.' }, { name: 'reason', description: 'why the worktree is being removed; carried on the event.' }, { name: 'providerName', description: 'provider to use; same resolution as {@link spawn}.' }],
+      },
+    ],
+  },
 ]
 
 /** Every harness event, sorted by name. */
@@ -2717,6 +2798,38 @@ export const EVENT_API: readonly EventApiEntry[] = [
     summary: 'A workflow run started — the script\'s meta block validated, the body about to execute.',
     description: 'A workflow run started — the script\'s meta block validated, the body about to execute. Paired with Events[\'workflow/end\'].',
     parameters: [{ name: 'info', description: 'the run\'s identity snapshot (id + meta).' }],
+  },
+  {
+    name: 'worktree/locked',
+    mode: 'emit',
+    signature: '\'worktree/locked\'(payload: WorktreeEventPayload): void',
+    summary: 'A worktree was locked with the carried reason.',
+    description: 'A worktree was locked with the carried reason.',
+    parameters: [{ name: 'payload', description: 'the committed row and the lock reason.' }],
+  },
+  {
+    name: 'worktree/removed',
+    mode: 'emit',
+    signature: '\'worktree/removed\'(payload: WorktreeEventPayload): void',
+    summary: 'A worktree was removed and its registry row deleted; the branch itself survives removal.',
+    description: 'A worktree was removed and its registry row deleted; the branch itself survives removal.',
+    parameters: [{ name: 'payload', description: 'the deleted row and the removal reason.' }],
+  },
+  {
+    name: 'worktree/spawned',
+    mode: 'emit',
+    signature: '\'worktree/spawned\'(payload: WorktreeEventPayload): void',
+    summary: 'A worktree was created, locked at birth with reason `<seat> <session>`, its copy-list bootstrap finished, and its registry row published.',
+    description: 'A worktree was created, locked at birth with reason `<seat> <session>`, its copy-list bootstrap finished, and its registry row published.',
+    parameters: [{ name: 'payload', description: 'the committed row and the spawn\'s reason.' }],
+  },
+  {
+    name: 'worktree/unlocked',
+    mode: 'emit',
+    signature: '\'worktree/unlocked\'(payload: WorktreeEventPayload): void',
+    summary: 'A worktree\'s lock was removed; the committed row\'s `lockReason` is undefined.',
+    description: 'A worktree\'s lock was removed; the committed row\'s `lockReason` is undefined.',
+    parameters: [{ name: 'payload', description: 'the committed row and the unlock reason.' }],
   },
 ]
 
@@ -4849,6 +4962,50 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'WorkflowStopReason',
     declaration: 'export type WorkflowStopReason = \'completed\' | \'cancelled\' | \'error\';',
+  },
+  {
+    name: 'WorktreeAddSpec',
+    declaration: 'export interface WorktreeAddSpec {\n    readonly path: string;\n    readonly branch: string;\n    readonly mainRef: string;\n    readonly lockReason: string;\n}',
+  },
+  {
+    name: 'WorktreeApi',
+    declaration: 'export interface WorktreeApi {\n    list(request: RpcRequest<{}>): Promise<RpcResponse<{\n        items: WorktreeRow[];\n    }>>;\n    create(request: RpcRequest<WorktreeSpawnInput>): Promise<RpcResponse<{\n        worktree: WorktreeHandle;\n    }>>;\n    lock(request: RpcRequest<{\n        ref: WorktreeRef;\n        reason: string;\n    }>): Promise<RpcResponse<{\n        locked: true;\n    }>>;\n    remove(request: RpcRequest<{\n        ref: WorktreeRef;\n        reason: string;\n    }>): Promise<RpcResponse<{\n        removed: true;\n    }>>;\n}',
+  },
+  {
+    name: 'WorktreeEventPayload',
+    declaration: 'export interface WorktreeEventPayload {\n    readonly row: WorktreeRow;\n    readonly reason: string;\n}',
+  },
+  {
+    name: 'WorktreeHandle',
+    declaration: 'export interface WorktreeHandle {\n    slug: string;\n    branch: string;\n    path: string;\n    sessionName: string;\n    seat: string;\n}',
+  },
+  {
+    name: 'WorktreeListEntry',
+    declaration: 'export interface WorktreeListEntry {\n    readonly path: string;\n    readonly branch?: string | undefined;\n    readonly locked: boolean;\n    readonly lockReason?: string | undefined;\n}',
+  },
+  {
+    name: 'WorktreeProvider',
+    declaration: 'export interface WorktreeProvider {\n    readonly name: string;\n    add(spec: WorktreeAddSpec): Promise<void>;\n    lock(path: string, reason: string): Promise<void>;\n    unlock(path: string): Promise<void>;\n    remove(path: string): Promise<void>;\n    pathExists(path: string): Promise<boolean>;\n    branchExists(branch: string): Promise<boolean>;\n    list(): Promise<readonly WorktreeListEntry[]>;\n}',
+  },
+  {
+    name: 'WorktreeRef',
+    declaration: 'export type WorktreeRef = Branded<\'WorktreeRef\'>;',
+  },
+  {
+    name: 'WorktreeSlug',
+    declaration: 'export type WorktreeSlug = Branded<\'worktree-slug\'>;',
+  },
+  {
+    name: 'WorktreeSpawnInput',
+    declaration: 'export interface WorktreeSpawnInput {\n    seat: string;\n    sessionName: string;\n}',
+  },
+  {
+    name: 'WorktreeSpawnRequest',
+    declaration: 'export interface WorktreeSpawnRequest {\n    readonly seat: string;\n    readonly intent: string;\n    readonly mainRef?: string | undefined;\n}',
+  },
+  {
+    name: 'WorktreeSpawnResult',
+    declaration: 'export interface WorktreeSpawnResult {\n    readonly slug: WorktreeSlug;\n    readonly seat: string;\n    readonly branch: string;\n    readonly session: string;\n    readonly path: string;\n    readonly branchRef: string;\n    readonly lockReason: string;\n    readonly copied: readonly string[];\n}',
   },
 ]
 

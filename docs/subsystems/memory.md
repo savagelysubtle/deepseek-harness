@@ -89,7 +89,7 @@ Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnp
 
 ### `ctx.memory` — `MemoryService` (abstract seam)
 
-Abstract memory service. Providers implement the four operations over one storage root; every operation resolves the project scope from the caller's absolute `cwd`, so two checkouts never share notes and one checkout shares them across every session, restart, and seat.
+Abstract memory service. Providers implement the four operations over one storage root; every operation resolves the project scope from the caller's absolute `cwd` through the project anchor, so two repositories never share notes, every worktree of one repository shares one scope, and the scope persists across every session, restart, and seat.
 
 ```ts cordis-catalog
 /**
@@ -130,5 +130,5 @@ abstract list(cwd: string): Promise<MemoryEntry[]>
 abstract search(cwd: string, query: string, limit?: number): Promise<MemoryMatch[]>
 ```
 
-Source: [`packages/memory/memory/src/index.ts:37`](../../packages/memory/memory/src/index.ts)
+Source: [`packages/memory/memory/src/index.ts:39`](../../packages/memory/memory/src/index.ts)
 <!-- END GENERATED cordis-surface -->
