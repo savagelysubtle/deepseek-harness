@@ -2400,6 +2400,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'payload', description: '.message - the inserted message. Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.' }],
   },
   {
+    name: 'agent/loop-aborted',
+    mode: 'emit',
+    signature: '\'agent/loop-aborted\'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; channel: LoopAbortChannel; reason: string; fragment: string }): void',
+    summary: 'A drift-tolerant loop-guard detector tripped: the model was stuck repeating itself in reasoning/output text (drift-tolerant, so an exact repeat is not required), or re-issuing the same tool call against an unchanging world.',
+    description: 'A drift-tolerant loop-guard detector tripped: the model was stuck repeating itself in reasoning/output text (drift-tolerant, so an exact repeat is not required), or re-issuing the same tool call against an unchanging world. The loop always aborts the turn when this fires — `dsh-agent-loop` throws before this dispatch returns, so the paired `turn/end` carries `{ kind: \'error\', error: { code: \'LOOP_ABORTED\' } }` — this event exists so a human or listener gets the named reason and the offending fragment without parsing the error chain.',
+    parameters: [{ name: 'payload', description: '.fragment - the repeated text or tool call quoted back for a human to inspect; length-bounded. Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.' }],
+  },
+  {
     name: 'agent/pre-step',
     mode: 'waterfall',
     signature: '\'agent/pre-step\'(this: Scoped<Agent>, payload: { agent: Agent; messages: UserMessage[]; turn: number; step: number; signal: AbortSignal }, next: () => Promise<PreStepDecision>): Promise<PreStepDecision>',
@@ -3542,6 +3550,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'LlmRuntime',
     declaration: 'export class LlmRuntime extends Service {\n    constructor(ctx: Context);\n    registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHandle;\n    listProviders(): LlmProviderInfo[];\n    registerConfigurableProviders(entries: readonly LlmConfigurableProvider[]): DirectoryRegistrationHandle;\n    listConfigurableProviders(): LlmConfigurableProvider[];\n    registerModelDiscovery(settingsNs: string, discover: (request: LlmModelDiscoveryRequest) => Promise<readonly LlmDiscoveredModel[]>): () => void;\n    async discoverModels(settingsNs: string, request: LlmModelDiscoveryRequest): Promise<LlmDiscoveredModel[]>;\n    providerRetryPolicy(provider: string): ResolvedRetryPolicy;\n    async listModels(provider: string): Promise<LlmModelInfo[]>;\n    async resolveModelInfo(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo>;\n    async resolveCallConfig(config: LlmCallConfig, signal?: AbortSignal): Promise<LlmCallConfig>;\n    async prepareCall(config: LlmCallConfig, signal?: AbortSignal): Promise<PreparedLlmCall>;\n    stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n}',
+  },
+  {
+    name: 'LoopAbortChannel',
+    declaration: 'export type LoopAbortChannel = \'reasoning\' | \'tool-call\';',
   },
   {
     name: 'LspHover',
