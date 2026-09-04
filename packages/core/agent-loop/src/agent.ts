@@ -57,7 +57,7 @@ type PreparedStep =
 function argsPreview(args: unknown): string {
   if (typeof args === 'string') return args
   try {
-    return JSON.stringify(args) ?? String(args)
+    return JSON.stringify(args)
   } catch {
     return String(args)
   }

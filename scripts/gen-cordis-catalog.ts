@@ -278,6 +278,7 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   SessionEvent: 'session.md',
   SessionId: 'core.md',
   SessionStartSource: 'core.md',
+  LoopAbortChannel: 'core.md',
   SessionLogSnapshot: 'session-query.md',
   SessionSurfaceSnapshot: 'session-query.md',
   ApprovalOutcome: 'approval.md',
