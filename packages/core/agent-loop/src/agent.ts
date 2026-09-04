@@ -16,11 +16,12 @@ import type {
   RequestErrorAction,
 } from '@deepseek-ai/dsh-agent'
 import { Inbox, agentEvents, assembleContextFor } from '@deepseek-ai/dsh-agent'
-import type { GenerateOptions, LlmCallConfig, Message, PreparedLlmCall } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmCallConfig, Message, PreparedLlmCall, ToolSchema } from '@deepseek-ai/dsh-llm'
 import {
   BlockAssembler,
   LlmError,
   createAssistantMessage,
+  createUserMessage,
   deepFreeze,
   errorChain,
   markAgentLoopRequest,
@@ -32,6 +33,7 @@ import { canonicalHeader, headerEquals } from '@deepseek-ai/dsh-session'
 import { joinContextSections, renderContextSections, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import type { Context } from '@deepseek-ai/cordis'
+import { TOOL_SNAPSHOT_SETTLE_MS } from './constants.ts'
 import { RuntimeContextProjection } from './runtime-context.ts'
 import { executeToolCalls } from './tool-calls.ts'
 
@@ -60,6 +62,26 @@ function requestProposal(header: EpochHeader): LlmCallConfig {
   return proposal
 }
 
+/** Package id stamped on the synthesized tool-roster recovery message's plugin source. */
+const TOOL_SNAPSHOT_RECOVERY_SOURCE = '@deepseek-ai/dsh-agent-loop'
+
+/**
+ * Internal notice driven through the normal wake path when a wake's own tool
+ * snapshot went stale (see {@link ReactLoopAgent.recheckToolSnapshot}). The
+ * `{kind:'plugin'}` source is load-bearing: it is what keeps this out of the
+ * human-facing transcript as a user prompt, the same pattern every other
+ * synthesized system message in this codebase relies on (compare
+ * `runtime-context.ts`, `repeat-tool-reminder`, `time-context`).
+ */
+const TOOL_SNAPSHOT_RECOVERY_TEXT =
+  'Tool roster updated: additional tools finished registering after this session woke and are now '
+  + 'available. No user input occurred; continue normally using the full current tool list.'
+
+/** Order-sensitive tool-schema-set equality, matching how a logged header's own tools compare. */
+function sameToolSet(a: readonly ToolSchema[], b: readonly ToolSchema[]): boolean {
+  return a.length === b.length && a.every((tool, i) => JSON.stringify(tool) === JSON.stringify(b[i]))
+}
+
 /** Drives one session through turn and step boundaries. */
 export class ReactLoopAgent implements Agent {
   readonly inbox: Inbox
@@ -76,6 +98,24 @@ export class ReactLoopAgent implements Agent {
   /** Whether this loop instance has appended its initial/resume request anchor. */
   private requestHeaderLogged = false
   private readonly runtimeContext: RuntimeContextProjection
+
+  /**
+   * Debounce handle for {@link scheduleToolSnapshotRecheck}, cleared on the
+   * next mutation (coalescing a burst) and on scope disposal.
+   */
+  private toolsSettleTimer: ReturnType<typeof setTimeout> | undefined
+
+  /**
+   * Set the instant a corrective wake is dispatched for a lost tool-registration
+   * race (see {@link recheckToolSnapshot}), cleared the instant any real turn
+   * next starts (see {@link setPhase}). Guards only the window where a wake
+   * is latched behind {@link runMaintenance} — outside maintenance, `send`'s
+   * own synchronous transition to phase `'running'` already makes the idle
+   * check in {@link recheckToolSnapshot} the sole guard needed; during
+   * maintenance `status` stays `'idle'` while a wake sits latched, which
+   * would otherwise let a second burst queue a second corrective message.
+   */
+  private toolSnapshotCorrectionPending = false
 
   constructor(
     private loopCtx: Context,
@@ -94,6 +134,20 @@ export class ReactLoopAgent implements Agent {
     this.scope = createScope(loopCtx, this)
     this.ctx = this.scope.ctx.extend({ agent: this })
     this.runtimeContext = new RuntimeContextProjection(this.ctx, session)
+    // Insurance against the built-in/MCP tool-registration race: a wake's
+    // first snapshot (in `preStep`, via `buildRequest`) can be taken before
+    // every registration has landed, and most turns take exactly one step,
+    // so there is otherwise no later step to notice the registry caught up.
+    // `tools/change` is the registry's own unfiltered "something registered
+    // or unregistered" signal (see `dsh-tools`); react to it here instead of
+    // delaying the first turn on it.
+    this.ctx.effect(() => {
+      const stopToolsChange = this.ctx.on('tools/change', () => { this.scheduleToolSnapshotRecheck() })
+      return () => {
+        stopToolsChange()
+        if (this.toolsSettleTimer !== undefined) clearTimeout(this.toolsSettleTimer)
+      }
+    }, 'agent.toolSnapshotRecheck()')
   }
 
   get status(): AgentStatus {
@@ -104,6 +158,9 @@ export class ReactLoopAgent implements Agent {
   private setPhase(next: Phase): void {
     const previousStatus = this.status
     this.phase = next
+    // Any real turn starting resolves whatever race the pending flag was
+    // latched for: the driver about to run reads the registry live.
+    if (next.kind === 'running') this.toolSnapshotCorrectionPending = false
     const status = this.status
     if (status !== previousStatus) {
       this.dispatch.emit('agent/status', { status })
@@ -220,6 +277,62 @@ export class ReactLoopAgent implements Agent {
         if (wakeRequested && this.inbox.hasPending) this.wakeDriver()
       }
     }
+  }
+
+  /**
+   * Coalesce a burst of `tools/change` notifications into one settle point,
+   * then re-verify the live tool assembly against the set actually used by
+   * the session's last dispatched request.
+   *
+   * Skipped before this instance's own first header is logged: that first
+   * request always reads the registry live (see {@link preStep}), so there is
+   * nothing yet to correct, and no baseline exists to compare against.
+   */
+  private scheduleToolSnapshotRecheck(): void {
+    if (!this.requestHeaderLogged) return
+    if (this.toolsSettleTimer !== undefined) clearTimeout(this.toolsSettleTimer)
+    this.toolsSettleTimer = setTimeout(() => {
+      this.toolsSettleTimer = undefined
+      this.recheckToolSnapshot().catch((error: unknown) => {
+        this.ctx.logger.warn(`agent "${this.id}": tool-snapshot recheck failed: ${errorChain(error)}`)
+      })
+    }, TOOL_SNAPSHOT_SETTLE_MS)
+    this.toolsSettleTimer.unref()
+  }
+
+  /**
+   * Re-assemble the live prompt/tool registry and compare it against the
+   * tools the session's most recent `request/header` actually carried —
+   * i.e. what the last real dispatch to the model actually sent, not any
+   * cached snapshot (there is none to invalidate: {@link preStep} already
+   * reads the registry live on every step).
+   *
+   * A drift only matters while this agent is idle. A running turn's own next
+   * `preStep`/`buildRequest` cycle re-assembles live and self-corrects for
+   * free — `buildRequest` already diffs and logs a `request/header` change
+   * on every step — so acting here too would just race a dispatch already
+   * on its way. An idle agent has no such cycle coming: the wake that lost
+   * the race already produced its one step and went idle. The fix for that
+   * case is to synthesize one internal message and drive it through the
+   * ordinary wake path (`send(..., 'next-turn', true)`), which forces
+   * exactly one real `step()`/`buildRequest()` and therefore one corrected
+   * outbound request — a bare empty self-wake would not do this, since a
+   * wake with an empty inbox short-circuits before `step()` ever runs.
+   */
+  private async recheckToolSnapshot(): Promise<void> {
+    const lastUsed = this.session.requestHeader()?.tools ?? []
+    const assembly = await this.loopCtx.systemPrompt.assemble(assembleContextFor(this))
+    if (sameToolSet(lastUsed, assembly.tools)) return
+    if (this.status !== 'idle' || this.toolSnapshotCorrectionPending) return
+    this.toolSnapshotCorrectionPending = true
+    this.send(
+      createUserMessage({
+        content: [{ type: 'text', text: TOOL_SNAPSHOT_RECOVERY_TEXT }],
+        source: { kind: 'plugin', plugin: TOOL_SNAPSHOT_RECOVERY_SOURCE },
+      }),
+      'next-turn',
+      true,
+    )
   }
 
   private async preStep(target: InboxTarget, position: { turn: number; step: number }): Promise<PreparedStep> {

@@ -5,7 +5,7 @@
  * replacement or header change explains the difference.
  */
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, { createUserMessage, LlmError, ReasoningEffortId  } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmModelReasoningInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -15,6 +15,7 @@ import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import { TOOL_SNAPSHOT_SETTLE_MS } from '../src/constants.ts'
 import { MockAdapter, textResponse, toolCallResponse } from './mock-adapter.ts'
 
 async function harness(adapter: MockAdapter, persona = 'stable base') {
@@ -66,6 +67,17 @@ function registerEcho(ctx: Context) {
     parameters: { text: { type: 'string' } },
     async execute(args) {
       return [{ type: 'text', text: `echo: ${String(args.text)}` }]
+    },
+  }))
+}
+
+function registerLate(ctx: Context) {
+  ctx.tools.register(defineContentToolFixture({
+    name: 'late',
+    description: 'registers after the others',
+    parameters: {},
+    async execute() {
+      return [{ type: 'text', text: 'late' }]
     },
   }))
 }
@@ -702,5 +714,108 @@ describe('request/context capacity records', () => {
       { provider: 'mock', model: 'known', contextWindow: 64_000 },
       { provider: 'mock', model: 'unknown' },
     ])
+  })
+})
+
+describe('tool-registration race recovery (SWD-115)', () => {
+  it('a wake whose only turn ended idle before a tool finished registering gets one corrective dispatch carrying the full tool set', async () => {
+    // Turn 1 ends on plain text — no tool call, so no second step ever
+    // happens naturally, and the agent goes idle having seen zero tools.
+    const adapter = new MockAdapter([textResponse('one'), textResponse('ack')])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('tool-race'), { provider: 'mock', model: 'mock' })
+
+    send(agent, 'go')
+    await waitForIdle(ctx, agent)
+
+    expect(adapter.requests).toHaveLength(1)
+    expect(adapter.requests[0]?.tools ?? []).toHaveLength(0)
+
+    // Attached before the fake-timer advance, since `vi.advanceTimersByTimeAsync`
+    // flushes microtasks thoroughly enough that this simple mock-driven
+    // corrective turn can run to completion (idle -> running -> idle) entirely
+    // inside that call — a listener attached only afterward would miss it.
+    const corrected = waitForIdle(ctx, agent)
+    vi.useFakeTimers()
+    try {
+      // The "late" registration: the turn has already gone idle, so nothing
+      // would naturally re-assemble and notice this without the recheck.
+      registerEcho(ctx)
+      await vi.advanceTimersByTimeAsync(TOOL_SNAPSHOT_SETTLE_MS)
+    } finally {
+      vi.useRealTimers()
+    }
+    // In case the corrective turn was still mid-flight when the timers were
+    // switched back, let it finish under real timers before asserting on it.
+    await corrected
+
+    // The decisive evidence: a SECOND real dispatch actually went out, and it
+    // carried the corrected tool set — not just a log entry claiming so.
+    expect(adapter.requests).toHaveLength(2)
+    expect(adapter.requests[1]?.tools?.map(tool => tool.name)).toEqual(['echo'])
+
+    // The injected corrective message must not read as a user prompt.
+    const userMessages = agent.session.events.filter(event => event.type === 'user/message')
+    expect(userMessages).toHaveLength(2)
+    expect(userMessages[0]?.data.source.kind).toBe('user')
+    expect(userMessages[1]?.data.source.kind).toBe('plugin')
+  })
+
+  it('does not dispatch a corrective turn when the assembled tool set already matches what was last sent', async () => {
+    const adapter = new MockAdapter([textResponse('one')])
+    const ctx = await harness(adapter)
+    registerEcho(ctx)
+    const agent = ctx.agentLoop.create(SessionId('tool-race-healthy'), { provider: 'mock', model: 'mock' })
+
+    send(agent, 'go')
+    await waitForIdle(ctx, agent)
+    expect(adapter.requests).toHaveLength(1)
+
+    // Re-emit the registry-change notification with nothing actually changed
+    // (e.g. an unrelated scope's registration elsewhere) and confirm the
+    // recheck stays a no-op: no extra dispatch, no injected message.
+    vi.useFakeTimers()
+    try {
+      ctx.emit('tools/change')
+      await vi.advanceTimersByTimeAsync(TOOL_SNAPSHOT_SETTLE_MS)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(adapter.requests).toHaveLength(1)
+    expect(agent.session.events.filter(event => event.type === 'user/message')).toHaveLength(1)
+  })
+
+  it('does not fire an extra turn when tools/change occurs mid-turn on an already-healthy session (e.g. an MCP server connecting late) — this is the regression a log-only recheck would have introduced on every healthy seat', async () => {
+    const adapter = new MockAdapter([
+      toolCallResponse('c1', 'echo', { text: 'one' }, 'first'),
+      textResponse('done'),
+    ])
+    const ctx = await harness(adapter)
+    registerEcho(ctx)
+    const agent = ctx.agentLoop.create(SessionId('tool-race-mid-turn'), { provider: 'mock', model: 'mock' })
+
+    // Attached up front, before the turn even starts — same reasoning as the
+    // race test above: this scripted turn can run to full completion inside
+    // `vi.advanceTimersByTimeAsync`'s microtask flushing.
+    const done = waitForIdle(ctx, agent)
+    vi.useFakeTimers()
+    try {
+      send(agent, 'go')
+      // `send` synchronously flips the agent to 'running' before returning
+      // (wakeDriver commits the phase transition inline), so the agent is
+      // already mid-turn here.
+      expect(agent.status).toBe('running')
+      registerLate(ctx)
+      await vi.advanceTimersByTimeAsync(TOOL_SNAPSHOT_SETTLE_MS)
+    } finally {
+      vi.useRealTimers()
+    }
+    await done
+
+    // Exactly the two calls the scripted turn itself makes — no extra
+    // corrective dispatch from the mid-turn tools/change.
+    expect(adapter.requests).toHaveLength(2)
+    expect(agent.session.events.filter(event => event.type === 'user/message')).toHaveLength(1)
   })
 })
