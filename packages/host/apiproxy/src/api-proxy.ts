@@ -1430,6 +1430,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       try {
         const inspected = await inspectServable(sessionId)
         followTailer.start(sessionId, inspected.meta, inspected.events)
+        await attachHeadlessSessionToWorkspace(sessionId, inspected.meta)
       } catch {
         // Not a session this host can serve (another project's bucket, or a
         // log mid-creation). The next tick re-tries at no cost.
@@ -1712,6 +1713,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     if (owner !== undefined) {
       const inspected = await inspectServable(sessionId)
       followTailer.start(sessionId, inspected.meta, inspected.events)
+      await attachHeadlessSessionToWorkspace(sessionId, inspected.meta)
       return { kind: 'detached', header: inspected.meta, events: inspected.events }
     }
     // Defensive and idempotent: the tailer also self-stops once ITS OWN
@@ -1908,6 +1910,49 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     })
     workspaceCreationChain = operation.then(() => undefined, () => undefined)
     return operation
+  }
+
+  /**
+   * Attach a headless-owned session to its workspace the moment this host
+   * learns of it, instead of leaving it ungrouped until the next time the
+   * WorkspaceRegistry service opens (host restart).
+   *
+   * A `dsh --profile headless [--session-name ...]` run is an independent
+   * process that never calls `session.create` — nothing else ever gives it
+   * the eager `ensureWorkspace`/`attachSession` pair a UI-created session
+   * gets. The two call sites below (the follow-tail sweep and a cold
+   * `history()` read) are the only places this host discovers such a session
+   * at all, so they are "creation" from this host's point of view.
+   *
+   * Reuses `ensureWorkspace` and `Workspace#attachSession` — the same
+   * idempotent primitives `session.create` already uses — so there is one
+   * attach code path, not two. Both are safe to call repeatedly and safe to
+   * race against the restart-time `attachKnownSessions` reconciliation: an
+   * existing workspace is resolved rather than recreated, and an already
+   * accounted session is left alone.
+   * @param sessionId - the discovered session's identity.
+   * @param header - its persisted header, read for the cwd to attach by.
+   */
+  async function attachHeadlessSessionToWorkspace(sessionId: SessionId, header: SessionHeader): Promise<void> {
+    const workspaceRegistry = ctx.get('workspaceRegistry')
+    if (workspaceRegistry === undefined) return // this deployment composes no Workspace surface
+    if (header.cwd === undefined) {
+      ctx.logger.error(
+        `follow-tail: session "${sessionId}" cannot be attached to a workspace: its stored header carries no cwd`,
+      )
+      return
+    }
+    try {
+      const { workspace } = await ensureWorkspace(header.cwd)
+      await workspace.attachSession(sessionId)
+    } catch (error: unknown) {
+      // Never a silent skip: an unresolvable cwd or a write failure here
+      // means the session stays ungrouped, which is exactly the defect this
+      // function exists to close, so it must be visible rather than swallowed.
+      ctx.logger.error(
+        `follow-tail: session "${sessionId}" (cwd "${header.cwd}") could not be attached to its workspace: ${String(error)}`,
+      )
+    }
   }
 
   /**
