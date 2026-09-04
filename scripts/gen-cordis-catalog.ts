@@ -598,6 +598,7 @@ export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
   WorkflowAgentEndInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
   WorkflowAgentInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
   WorkflowResultInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
+  WorktreeEventPayload: 'event payload contract is owned by packages/worktree/worktree/src/types.ts',
 }
 
 /** Repository data policy consumed by the Cordis catalog projector. */
