@@ -36,6 +36,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { TOOL_SNAPSHOT_SETTLE_MS } from './constants.ts'
 import { RuntimeContextProjection } from './runtime-context.ts'
 import { executeToolCalls } from './tool-calls.ts'
+import { ReasoningDriftDetector, ToolRepeatDetector, toolCallSignature } from './loop-guard.ts'
+import { boundFragment, FragmentTail, LoopAbortedError } from './loop-abort.ts'
 
 type Phase =
   | { kind: 'idle'; lastTurn: number }
@@ -52,6 +54,16 @@ type StepEndReason = Extract<TurnEndReason, { kind: 'completed' | 'max-tokens' }
 type PreparedStep =
   | { kind: 'reject' }
   | { kind: 'enter'; messages: UserMessage[]; assembly: PromptAssembly }
+
+/** Render tool-call arguments for the loop-aborted fragment; never throws on a hostile value. */
+function argsPreview(args: unknown): string {
+  if (typeof args === 'string') return args
+  try {
+    return JSON.stringify(args)
+  } catch {
+    return String(args)
+  }
+}
 
 /** Remove adapter-derived values before plugins propose the next request config. */
 function requestProposal(header: EpochHeader): LlmCallConfig {
@@ -156,6 +168,15 @@ export class ReactLoopAgent implements Agent {
    */
   private toolSnapshotRecheckDeferred = false
 
+  /**
+   * Tool-channel loop guard: lives for the whole agent, not one step or turn
+   * — the real incident this catches (the same call repeated 5-6 times with
+   * no state change) plays out across successive steps, not within one.
+   * Its own streak logic resets on any differing signature, so no explicit
+   * reset is needed here.
+   */
+  private readonly toolRepeatGuard: ToolRepeatDetector
+
   constructor(
     private loopCtx: Context,
     public readonly id: SessionId,
@@ -187,6 +208,7 @@ export class ReactLoopAgent implements Agent {
         if (this.toolsSettleTimer !== undefined) clearTimeout(this.toolsSettleTimer)
       }
     }, 'agent.toolSnapshotRecheck()')
+    this.toolRepeatGuard = new ToolRepeatDetector(loopCtx.agentLoop.config.loopGuard.toolRepeatThreshold)
   }
 
   get status(): AgentStatus {
@@ -552,6 +574,7 @@ export class ReactLoopAgent implements Agent {
     const { turn, step, abort: { signal } } = this.phase
     signal.throwIfAborted()
     const system = renderPrompt(assembly)
+    const loopGuardConfig = this.loopCtx.agentLoop.config.loopGuard
 
     while (true) {
       const { request, preparedCall } = await this.buildRequest(
@@ -559,12 +582,34 @@ export class ReactLoopAgent implements Agent {
       )
       const assembler = new BlockAssembler()
       const chunkSeqs: number[] = []
+      // Reasoning-channel loop guard: scoped to this one request attempt (not
+      // the whole agent, like the tool guard below) because the incident it
+      // catches is one degenerate reasoning block within a single response;
+      // a fresh retry after `agent/request-error` starts a clean stream and
+      // must not inherit a near-trip count from the attempt it is replacing.
+      const reasoningDrift = new ReasoningDriftDetector(
+        loopGuardConfig.reasoningShingleSize,
+        loopGuardConfig.reasoningWindowSize,
+        loopGuardConfig.reasoningDriftThreshold,
+      )
+      const reasoningFragment = new FragmentTail()
       const stream = preparedCall?.stream(request) ?? this.loopCtx.llm.stream(request)
       signal.throwIfAborted()
       for await (const chunk of stream) {
         signal.throwIfAborted()
         chunkSeqs.push(this.session.append('assistant/chunk', { turn, step, chunk }).seq)
         assembler.push(chunk)
+        if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') {
+          reasoningFragment.push(chunk.text)
+          if (reasoningDrift.push(chunk.text)) {
+            const reason = 'reasoning/output text repeated the same structural pattern '
+              + `${loopGuardConfig.reasoningDriftThreshold}+ times within a trailing `
+              + `${loopGuardConfig.reasoningWindowSize}-shingle window`
+            const fragment = boundFragment(reasoningFragment.snapshot())
+            this.dispatch.emit('agent/loop-aborted', { turn, step, channel: 'reasoning', reason, fragment })
+            throw new LoopAbortedError('reasoning', reason, fragment)
+          }
+        }
       }
       signal.throwIfAborted()
       const finish = assembler.finish
@@ -612,6 +657,14 @@ export class ReactLoopAgent implements Agent {
       const { concluded } = await executeToolCalls(
         this.loopCtx, turn, step, toolCalls, signal,
         context => this.inbox.splice('next-step', this.inbox.nextStep.length, 0, [context]),
+        (name, args, resultContent) => {
+          if (!this.toolRepeatGuard.record(toolCallSignature(name, args, resultContent))) return
+          const reason = `tool call "${name}" repeated with identical arguments and result `
+            + `${loopGuardConfig.toolRepeatThreshold}+ times in a row with no state change`
+          const fragment = boundFragment(`${name}(${argsPreview(args)})`)
+          this.dispatch.emit('agent/loop-aborted', { turn, step, channel: 'tool-call', reason, fragment })
+          throw new LoopAbortedError('tool-call', reason, fragment)
+        },
       )
       return concluded ? { kind: 'completed' } : null
     }

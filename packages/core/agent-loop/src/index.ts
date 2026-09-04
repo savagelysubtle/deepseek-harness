@@ -28,6 +28,8 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { ReactLoopAgent } from './agent.ts'
 import { DEFAULT_MAX_PARALLEL_TOOL_CALLS } from './constants.ts'
+import { resolveLoopGuardConfig } from './loop-abort.ts'
+import type { LoopGuardConfig, ResolvedLoopGuardConfig } from './loop-abort.ts'
 
 /** Fiber states that cannot own or serve a new lifecycle. */
 const INACTIVE_STATES: ReadonlySet<FiberState> = new Set([
@@ -258,6 +260,12 @@ export interface Config {
    * omission defaults to {@link DEFAULT_MAX_PARALLEL_TOOL_CALLS}.
    */
   maxParallelToolCalls?: number
+  /**
+   * Drift-tolerant loop-guard thresholds (reasoning/output-text drift and
+   * repeated no-op tool calls). Omission, or an omitted individual field,
+   * takes the detectors' own sane defaults — see {@link resolveLoopGuardConfig}.
+   */
+  loopGuard?: LoopGuardConfig
   /** Agents created or resumed at plugin startup. */
   agents: (AgentOptions & {
     /** Stable config label used in logs and as the fresh combined-id prefix. */
@@ -272,7 +280,7 @@ export interface Config {
 }
 
 /** Agent-loop configuration after defaults and load-time validation. */
-type ResolvedConfig = Config & { maxParallelToolCalls: number }
+type ResolvedConfig = Config & { maxParallelToolCalls: number; loopGuard: ResolvedLoopGuardConfig }
 
 /** Reject self-contained identity conflicts before any configured agent starts. */
 function validateConfiguredAgents(agents: Config['agents']): void {
@@ -331,6 +339,9 @@ export class AgentLoop extends Service implements AgentFactory {
       get maxParallelToolCalls() {
         return source().maxParallelToolCalls
       },
+      // Resolved once at startup (unlike maxParallelToolCalls, not live-patchable
+      // settings): every agent's detectors read this at construction.
+      loopGuard: resolveLoopGuardConfig(config.loopGuard),
     }
     installSettingsSection(ctx, AGENT_LOOP_SETTINGS_NAMESPACE, AGENT_LOOP_SETTINGS_SCHEMA, entry, {
       // The schema admits any integer above zero; `resolveMaxParallelToolCalls`
