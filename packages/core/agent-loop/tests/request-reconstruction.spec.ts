@@ -974,3 +974,71 @@ describe('tool-registration race recovery (SWD-115)', () => {
     expect(adapter.requests[1]?.tools?.map(tool => tool.name)).toEqual(['echo'])
   })
 })
+
+describe('DIAGNOSTIC (temporary): disposal racing a latched tool-snapshot correction', () => {
+  it('observes what actually happens when disposal races the fire-and-forget recheck it just triggered', async () => {
+    const adapter = new MockAdapter([textResponse('one'), textResponse('would-be-corrective')])
+    const ctx = await harness(adapter)
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('tool-race-dispose-diagnostic'),
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+    const agent = handle.agent
+
+    send(agent, 'go')
+    await waitForIdle(ctx, agent)
+    expect(adapter.requests).toHaveLength(1)
+
+    const warnCalls: unknown[][] = []
+    const infoCalls: unknown[][] = []
+    const origWarn = agent.ctx.logger.warn.bind(agent.ctx.logger)
+    const origInfo = agent.ctx.logger.info.bind(agent.ctx.logger)
+    agent.ctx.logger.warn = ((...args: unknown[]) => {
+      warnCalls.push(args)
+      origWarn(...(args as [never]))
+    }) as typeof agent.ctx.logger.warn
+    agent.ctx.logger.info = ((...args: unknown[]) => {
+      infoCalls.push(args)
+      origInfo(...(args as [never]))
+    }) as typeof agent.ctx.logger.info
+
+    const maintenanceGate = Promise.withResolvers<undefined>()
+    const maintenance = agent.runMaintenance(async () => {
+      await maintenanceGate.promise
+    })
+
+    vi.useFakeTimers()
+    try {
+      registerEcho(ctx)
+      await vi.advanceTimersByTimeAsync(TOOL_SNAPSHOT_SETTLE_MS)
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(adapter.requests).toHaveLength(1)
+    console.log('DIAGNOSTIC: pre-dispose requests =', adapter.requests.length)
+    console.log('DIAGNOSTIC: pre-dispose session events =', agent.session.events.length)
+
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+
+    let disposeError: unknown
+    const disposal = handle.dispose().catch((error: unknown) => { disposeError = error })
+    maintenanceGate.resolve(undefined)
+    await maintenance.catch((error: unknown) => {
+      console.log('DIAGNOSTIC: maintenance job rejected:', String(error))
+    })
+    await disposal
+    // Give any straggling microtasks/macrotasks a chance to surface before
+    // we inspect state and remove the unhandledRejection listener.
+    await new Promise(resolve => setTimeout(resolve, 50))
+    process.off('unhandledRejection', onUnhandled)
+
+    console.log('DIAGNOSTIC: dispose() rejected with =', disposeError === undefined ? '(no)' : JSON.stringify(disposeError))
+    console.log('DIAGNOSTIC: post-dispose requests =', adapter.requests.length)
+    console.log('DIAGNOSTIC: post-dispose session events =', agent.session.events.length)
+    console.log('DIAGNOSTIC: warn() calls =', JSON.stringify(warnCalls))
+    console.log('DIAGNOSTIC: info() calls =', JSON.stringify(infoCalls))
+    console.log('DIAGNOSTIC: unhandledRejection count =', unhandled.length, unhandled.map(String))
+  })
+})
