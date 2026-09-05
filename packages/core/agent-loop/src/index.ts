@@ -189,6 +189,20 @@ declare module '@deepseek-ai/cordis' {
 export { DEFAULT_MAX_PARALLEL_TOOL_CALLS }
 
 /**
+ * Loop-guard defaults, re-exported so a deployment — and the cross-guard
+ * ordering test in `repeat-tool-reminder` — can read the abort threshold
+ * without reaching into an internal module. The tool-repeat default sits
+ * deliberately above the reminder guard's escalation tiers; see the constant's
+ * own documentation before changing it.
+ */
+export {
+  DEFAULT_DRIFT_THRESHOLD,
+  DEFAULT_SHINGLE_SIZE,
+  DEFAULT_TOOL_REPEAT_THRESHOLD,
+  DEFAULT_WINDOW_SIZE,
+} from './loop-guard.ts'
+
+/**
  * One launcher-selected session identity for a configured agent. `resume`
  * distinguishes rehydrating existing persisted history from creating the
  * session fresh under that exact id, which the two config keys express as

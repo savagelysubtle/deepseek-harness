@@ -186,7 +186,10 @@ describe('loop guard wiring: tool-call channel', () => {
       toolCallResponse('c2', 'check_status', { id: 'job-1' }),
       toolCallResponse('c3', 'check_status', { id: 'job-1' }),
     ])
-    const ctx = await harness(adapter) // default toolRepeatThreshold: 3
+    // Explicit override: the production default now sits above the
+    // repeat-tool-reminder escalation ladder, so this wiring test pins its own
+    // threshold rather than depending on a policy number that must be free to move.
+    const ctx = await harness(adapter, { toolRepeatThreshold: 3 })
     ctx.tools.register(defineContentToolFixture({
       name: 'check_status',
       description: 'always reports the same stuck state',
