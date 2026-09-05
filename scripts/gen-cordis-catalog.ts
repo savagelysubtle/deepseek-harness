@@ -108,6 +108,7 @@ export const SERVICE_PAGE: Record<string, string> = {
   web: 'web.md',
   workflowEngine: 'workflow.md',
   workspaceRegistry: 'workspace.md',
+  worktrees: 'worktree.md',
 }
 
 /**
@@ -186,6 +187,7 @@ export const EVENT_SCOPE_PAGE: Record<string, string> = {
   'session-telemetry': 'session-telemetry.md',
   'tools': 'tools.md',
   'workflow': 'workflow.md',
+  'worktree': 'worktree.md',
 }
 
 /**
@@ -278,6 +280,7 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   SessionEvent: 'session.md',
   SessionId: 'core.md',
   SessionStartSource: 'core.md',
+  LoopAbortChannel: 'core.md',
   SessionLogSnapshot: 'session-query.md',
   SessionSurfaceSnapshot: 'session-query.md',
   ApprovalOutcome: 'approval.md',
@@ -492,6 +495,11 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   TypertPackageRecord: 'invariants.md',
   TypertSchemaFilter: 'invariants.md',
   TypertSchemaRecord: 'invariants.md',
+  WorktreeProvider: 'worktree.md',
+  WorktreeRow: 'worktree.md',
+  WorktreeSlug: 'worktree.md',
+  WorktreeSpawnRequest: 'worktree.md',
+  WorktreeSpawnResult: 'worktree.md',
 }
 
 /** TypeScript lib and pinned framework types with no repository-owned data page. */

@@ -1989,6 +1989,36 @@
       "doc": "docs/subsystems/feedback.md",
       "symbol": "MessageFeedbackDeleteResult",
       "source": "packages/feedback/message-feedback/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/worktree.md",
+      "symbol": "WorktreeSpawnRequest",
+      "source": "packages/worktree/worktree/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/worktree.md",
+      "symbol": "WorktreeSpawnResult",
+      "source": "packages/worktree/worktree/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/worktree.md",
+      "symbol": "WorktreeRow",
+      "source": "packages/worktree/worktree/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/worktree.md",
+      "symbol": "WorktreeAddSpec",
+      "source": "packages/worktree/worktree/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/worktree.md",
+      "symbol": "WorktreeListEntry",
+      "source": "packages/worktree/worktree/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/worktree.md",
+      "symbol": "WorktreeProvider",
+      "source": "packages/worktree/worktree/src/provider.ts"
     }
   ]
 }

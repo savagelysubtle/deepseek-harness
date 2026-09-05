@@ -182,7 +182,7 @@ describe('ToolRepeatDetector', () => {
   const resultB: ContentBlock[] = [{ type: 'text', text: 'different result' }]
 
   it('trips on exactly the third consecutive identical signature, not the second or fourth', () => {
-    const detector = new ToolRepeatDetector()
+    const detector = new ToolRepeatDetector(3)
     const sig = toolCallSignature('read_file', { path: '/a.txt' }, resultA)
 
     expect(detector.record(sig)).toBe(false)
@@ -191,7 +191,7 @@ describe('ToolRepeatDetector', () => {
   })
 
   it('does not trip a polling tool that returns two identical results then a different one', () => {
-    const detector = new ToolRepeatDetector()
+    const detector = new ToolRepeatDetector(3)
     const args = { jobId: 'job-1' }
 
     expect(detector.record(toolCallSignature('poll_status', args, resultA))).toBe(false)
@@ -200,7 +200,7 @@ describe('ToolRepeatDetector', () => {
   })
 
   it('a differing signature resets the streak', () => {
-    const detector = new ToolRepeatDetector()
+    const detector = new ToolRepeatDetector(3)
     const sigA = toolCallSignature('read_file', { path: '/a.txt' }, resultA)
     const sigB = toolCallSignature('read_file', { path: '/b.txt' }, resultA)
 
@@ -213,7 +213,7 @@ describe('ToolRepeatDetector', () => {
   })
 
   it('reset() clears the streak so a prior near-trip does not carry over', () => {
-    const detector = new ToolRepeatDetector()
+    const detector = new ToolRepeatDetector(3)
     const sig = toolCallSignature('read_file', { path: '/a.txt' }, resultA)
 
     expect(detector.record(sig)).toBe(false)

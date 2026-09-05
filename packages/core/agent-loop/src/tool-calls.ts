@@ -12,7 +12,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { assertNever, createToolResultMessage, type ToolCallBlock } from '@deepseek-ai/dsh-llm'
+import { assertNever, createToolResultMessage, type ContentBlock, type ToolCallBlock } from '@deepseek-ai/dsh-llm'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import { TOOL_ABORTED_BEFORE_DISPATCH, TOOL_RUNTIME_SCHEDULER, type ToolExecutionInput, type ToolExecutionMode, type ToolExecutionResult, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 
@@ -55,6 +55,12 @@ interface GroupOutcome {
  * @param toolCalls - assistant calls in model order.
  * @param signal - abort signal shared by the step.
  * @param acceptContext - accepts committed result context for the next step boundary.
+ * @param onCommittedResult - observes each call's name, parsed arguments, and
+ * result content in model-committed order, right after its durable
+ * `tool/result` is appended. Feeds the tool-repeat loop guard; a listener
+ * that throws (a detected loop) propagates exactly like an internal
+ * scheduler failure — new dispatch stops, already-started calls drain, no
+ * synthetic result is fabricated for what never committed.
  */
 export async function executeToolCalls(
   ctx: Context,
@@ -63,6 +69,7 @@ export async function executeToolCalls(
   toolCalls: ToolCallBlock[],
   signal: AbortSignal,
   acceptContext: (context: UserMessage) => void,
+  onCommittedResult?: (name: string, args: unknown, resultContent: ContentBlock[]) => void,
 ): Promise<{ concluded: boolean }> {
   const agent = ctx.agents.requireInitiator()
   const { session } = agent
@@ -88,7 +95,7 @@ export async function executeToolCalls(
     const mode = ctx.tools.executionMode(first.exec).kind
     const group = mode === 'parallel' ? planned.slice(next) : [first]
     const outcome = await runGroup(
-      ctx, turn, step, group, mode, signal, acceptContext,
+      ctx, turn, step, group, mode, signal, acceptContext, onCommittedResult,
     )
     next += outcome.consumed
     concluded ||= outcome.concluded
@@ -126,6 +133,7 @@ async function runGroup(
   mode: ToolExecutionMode['kind'],
   signal: AbortSignal,
   acceptContext: (context: UserMessage) => void,
+  onCommittedResult?: (name: string, args: unknown, resultContent: ContentBlock[]) => void,
 ): Promise<GroupOutcome> {
   const { session } = ctx.agents.requireInitiator()
   const { maxParallelToolCalls } = ctx.agentLoop.config
@@ -153,6 +161,8 @@ async function runGroup(
         : ctx.tools[TOOL_RUNTIME_SCHEDULER].finish(slot.exec, slot.result)
       // oxlint-disable-next-line typescript/no-non-null-assertion -- bounded index
       appendToolResult(session, turn, step, call!.block, result, callSeqs[committed]!)
+      // oxlint-disable-next-line typescript/no-non-null-assertion -- bounded index
+      onCommittedResult?.(call!.exec.name, call!.exec.arguments, result.content)
       for (const context of result.additionalContexts ?? []) acceptContext(context)
       concluded ||= result.concludesTurn === true
       committed++
