@@ -607,12 +607,18 @@ describe('ChatView', () => {
 
   it('SWD-120: renders distinct localized text for a user stop, a system stop, and a crash interruption', () => {
     const stoppedByUser = makeHarness({ nodes: [user(1, 'try'), turnStopped(2, 'user')] })
-    expect(render(<stoppedByUser.ChatView {...stoppedByUser.props} />).getByRole('status').textContent)
-      .toBe('已停止你手动停止了本轮。')
+    const userView = render(<stoppedByUser.ChatView {...stoppedByUser.props} />)
+    expect(userView.getByRole('status').textContent).toBe('已停止你手动停止了本轮。')
+    // Each case renders its own snapshot; unmount before the next render so
+    // getByRole('status') (bound to document.body by default) cannot match a
+    // still-mounted node left over from a previous case in this same test.
+    userView.unmount()
 
     const stoppedBySystem = makeHarness({ nodes: [user(1, 'try'), turnStopped(2, 'system')] })
-    expect(render(<stoppedBySystem.ChatView {...stoppedBySystem.props} />).getByRole('status').textContent)
+    const systemView = render(<stoppedBySystem.ChatView {...stoppedBySystem.props} />)
+    expect(systemView.getByRole('status').textContent)
       .toBe('已停止本轮被系统自动取消（例如父会话结束或权限钩子拒绝）。')
+    systemView.unmount()
 
     const crashed = makeHarness({ nodes: [user(1, 'try'), turnStopped(2, 'crash')] })
     const crashedView = render(<crashed.ChatView {...crashed.props} />)

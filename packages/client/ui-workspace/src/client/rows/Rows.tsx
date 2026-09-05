@@ -383,7 +383,13 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
   const selected = node.id === currentId
   const statuses = sessionStatuses(node, t)
   const primaryStatus = statuses[0]
-  const showStatus = primaryStatus.state !== 'done' || row.completed
+  // A settled SWD-120 stop/crash/error cause always shows, even though
+  // 'stopped' shares the ordinary completed/idle dot's 'done' state: unlike
+  // the bare completion reminder (suppressed once `completed` is false — an
+  // already-viewed or never-finished row shows no dot at all), a stop, a
+  // crash, or an error is a distinguishing fact about the row, not a
+  // dismissible reminder.
+  const showStatus = row.endStatus !== undefined || primaryStatus.state !== 'done' || row.completed
   const [menuOpen, setMenuOpen] = useState(false)
   // Archive hides the row through the registry-global archive set and never
   // touches the session log, so it is not styled as destructive and needs no
