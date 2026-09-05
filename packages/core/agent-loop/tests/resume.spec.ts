@@ -8,11 +8,12 @@ import LlmRuntime from '@deepseek-ai/dsh-llm'
 import SessionStore, { SESSION_FORMAT_VERSION, Session, SessionId, SessionPreparation } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import { TOOL_SNAPSHOT_SETTLE_MS } from '../src/constants.ts'
 import { MockAdapter, textResponse } from './mock-adapter.ts'
 
 const dirs: string[] = []
@@ -940,5 +941,103 @@ describe('configured-start failure edges', () => {
     expect(failures).toEqual([])
     await configured.fiber.dispose()
     await ctx.fiber.dispose()
+  })
+})
+
+describe('a disposal-blocked recheck does not orphan a message into a later resume (SWD-137)', () => {
+  it('dispatches exactly one request, carrying the real user message, after a fresh agent resumes over the raced session', async () => {
+    const sessionId = SessionId('orphan-inbox-repro')
+
+    // Lifecycle 1: race a tool-snapshot correction against disposal, exactly
+    // as packages/core/agent-loop/tests/request-reconstruction.spec.ts's
+    // raceDisposalAgainstLatchedRecheck() does, but on a real disk-backed
+    // session so a genuinely fresh agent can be built over the same log
+    // afterward.
+    const adapter1 = new MockAdapter([textResponse('one')])
+    const { ctx: ctx1, root } = await persistentHarness(adapter1)
+    const handle = await ctx1.agents.create({
+      sessionId,
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+    const agent = handle.agent
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx1, agent)
+    expect(adapter1.requests).toHaveLength(1)
+
+    const maintenanceGate = Promise.withResolvers<undefined>()
+    const maintenance = agent.runMaintenance(async () => { await maintenanceGate.promise })
+
+    // Drift lands while maintenance is in flight: the recheck latches a
+    // corrective wake behind maintenance instead of dispatching immediately.
+    vi.useFakeTimers()
+    try {
+      ctx1.tools.register(defineContentToolFixture({
+        name: 'echo',
+        description: 'echo back',
+        parameters: { text: { type: 'string' } },
+        async execute(args) {
+          return [{ type: 'text', text: `echo: ${String(args.text)}` }]
+        },
+      }))
+      await vi.advanceTimersByTimeAsync(TOOL_SNAPSHOT_SETTLE_MS)
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(adapter1.requests).toHaveLength(1)
+
+    // Dispose while the correction is still latched behind maintenance: this
+    // durably discards the first latch and re-arms a deferred second
+    // recheck (see agent.ts's toolSnapshotRecheckDeferred). Resolving the
+    // gate lets maintenance conclude, which fires that second recheck --
+    // this time landing well after disposal, exactly the race the ticket
+    // describes.
+    const disposal = handle.dispose()
+    maintenanceGate.resolve(undefined)
+    await maintenance.catch(() => undefined)
+    await disposal
+    // Give the dangling fire-and-forget second recheck a chance to reach its
+    // own blocked send() attempt before tearing the fiber down.
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    // Full teardown: session-persistence flushes every live session durably
+    // as part of this, so no separate write-behind wait is needed.
+    await ctx1.fiber.dispose()
+
+    // Lifecycle 2: mount a brand-new Context over the same on-disk root and
+    // resume -- a genuinely new agent instance with no memory of the
+    // disposed one.
+    const adapter2 = new MockAdapter([textResponse('real answer')])
+    const ctx2 = await mountPersistentHarness(root, adapter2)
+    const resumedHandle = await ctx2.agents.resume({
+      resumeSessionId: sessionId,
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+    const resumedAgent = resumedHandle.agent
+
+    // The decisive evidence, part one: nothing is waiting to be claimed
+    // before anything is sent -- the blocked recheck's message was refused
+    // before it was ever queued, not merely discarded some other way.
+    expect(resumedAgent.inbox.nextTurn).toEqual([])
+    expect(resumedAgent.inbox.nextStep).toEqual([])
+
+    // The decisive evidence, part two -- the harm itself: sending one real
+    // user message must produce exactly one dispatch, and that dispatch
+    // must carry the user's own message, not a phantom turn answering
+    // synthetic internal text ahead of it.
+    resumedAgent.followup(createUserMessage({
+      content: [{ type: 'text', text: 'hello after resume' }],
+      source: { kind: 'user' },
+    }))
+    await waitForIdle(ctx2, resumedAgent)
+
+    expect(adapter2.requests).toHaveLength(1)
+    const lastMessage = adapter2.requests[0]?.messages.at(-1)
+    expect(lastMessage).toMatchObject({
+      role: 'user',
+      content: [{ type: 'text', text: 'hello after resume' }],
+    })
+
+    await ctx2.fiber.dispose()
   })
 })

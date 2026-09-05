@@ -1054,12 +1054,14 @@ describe('disposal racing a latched tool-snapshot correction (SWD-115)', () => {
     expect(adapter.requests).toHaveLength(1)
 
     // The one legitimate way this can still grow: cancel() durably records
-    // discarding the message the first (latched) recheck had queued, and the
-    // blocked retry durably records its own queued message before the guard
-    // in wakeDriver() ever lets it start a driver -- both are inert inbox
-    // bookkeeping for work that never ran. What must never reappear is any
+    // discarding the message the first (latched) recheck had queued -- inert
+    // inbox bookkeeping for work that never ran. The blocked retry itself
+    // (SWD-137's fix, in agent.ts's send()) is now refused before it ever
+    // touches the inbox, so it records nothing at all -- only the one
+    // cancel-discard splice may appear. What must never reappear is any
     // event only a real dispatch produces.
     const newEvents = agent.session.events.slice(preDisposeEventCount)
+    expect(newEvents).toHaveLength(1)
     expect(newEvents.every(event => event.type === 'agent/inbox/spliced')).toBe(true)
     for (const dispatchOnly of ['turn/start', 'step/start', 'assistant/message', 'request/header'] as const) {
       expect(newEvents.some(event => event.type === dispatchOnly)).toBe(false)
@@ -1090,5 +1092,108 @@ describe('dispatch guard on a disposed agent (SWD-115)', () => {
 
     expect(() => { send(agent, 'too late') }).toThrow(/disposed/)
     expect(adapter.requests).toHaveLength(0)
+  })
+})
+
+describe('insert guard on a disposed agent (SWD-137)', () => {
+  it('refuses a waking steer() before it ever touches the inbox, not just the dispatch it never requests', async () => {
+    // steer() (wakeup: true) shares this exposure with followup(): both would
+    // durably queue a message for a driver that will never run. Complementary
+    // to the dispatch-based proof in resume.spec.ts's SWD-137 reproduction --
+    // the insert itself must never land, not merely get discarded downstream.
+    const adapter = new MockAdapter([textResponse('should never dispatch')])
+    const ctx = await harness(adapter)
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('disposed-steer'),
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+    const agent = handle.agent
+    const preDisposeEventCount = agent.session.events.length
+
+    await handle.dispose()
+
+    expect(() => {
+      agent.steer(createUserMessage({ content: [{ type: 'text', text: 'too late' }], source: { kind: 'user' } }))
+    }).toThrow(/disposed/)
+
+    expect(agent.session.events.slice(preDisposeEventCount).some(event => event.type === 'agent/inbox/spliced'))
+      .toBe(false)
+    expect(adapter.requests).toHaveLength(0)
+  })
+
+  it('does NOT refuse a non-waking inject() on a disposed agent -- a documented contract depends on this', async () => {
+    // inject() (wakeup: false) only ever targets next-step, which nothing
+    // claims except an already-running turn -- it cannot produce the phantom
+    // extra dispatch this ticket is about, so it is deliberately left out of
+    // the send() guard. packages/subagent/tool-subagent-report's README
+    // documents exactly this: "a registered parent already in host-owned
+    // disposal still accepts while its log admits appends" (its 'quiet'
+    // delivery mode is agent.inject()). This test pins that boundary so a
+    // future change does not "fix" inject() into breaking that contract --
+    // see packages/subagent/tool-subagent-report/tests/tool-subagent-report.spec.ts's
+    // "accepts a report into a host-disposing but still-registered parent".
+    const adapter = new MockAdapter([textResponse('should never dispatch')])
+    const ctx = await harness(adapter)
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('disposed-inject'),
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+    const agent = handle.agent
+
+    await handle.dispose()
+
+    expect(() => {
+      agent.inject(createUserMessage({ content: [{ type: 'text', text: 'still lands' }], source: { kind: 'user' } }))
+    }).not.toThrow()
+
+    expect(agent.inbox.nextStep).toHaveLength(1)
+    expect(agent.inbox.nextStep[0]?.content).toEqual([{ type: 'text', text: 'still lands' }])
+    expect(adapter.requests).toHaveLength(0)
+  })
+
+  it('wakeDriver() itself still refuses by name for its two direct callers, independent of send()', async () => {
+    // send()'s new guard covers every waking call made through it
+    // (followup/steer/recheckToolSnapshot), so wakeDriver()'s OWN disposed
+    // check is no longer reachable that way. It is still the correct
+    // defense for its two other callers -- runMaintenance()'s and kick()'s
+    // own `finally` blocks, which call wakeDriver() directly on
+    // already-latched inbox content -- so this pins it still working there.
+    //
+    // In real production disposal (the plugin's dispose() always calls
+    // cancel({kind:'disposed'}) with no options, so keepInbox defaults
+    // false) this exact state can never arise: cancel() clears the very
+    // wakeRequested latch these finally blocks read, in the same call that
+    // sets `disposed`. This test constructs it directly with
+    // keepInbox: true, the same idiom cancel.spec.ts already uses for
+    // other keepInbox scenarios, purely to keep wakeDriver()'s own guard
+    // meaningfully exercised as defense-in-depth.
+    const adapter = new MockAdapter([textResponse('one')])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('wakedriver-direct-disposed'), { provider: 'mock', model: 'mock' })
+
+    send(agent, 'go')
+    await waitForIdle(ctx, agent)
+    expect(adapter.requests).toHaveLength(1)
+
+    const maintenanceGate = Promise.withResolvers<undefined>()
+    const maintenance = agent.runMaintenance(async () => { await maintenanceGate.promise })
+
+    // Latch a wake behind maintenance the ordinary way, before disposal.
+    send(agent, 'latched')
+    expect(adapter.requests).toHaveLength(1)
+
+    // Dispose without clearing the inbox/latch, so the latch survives to
+    // the finally block below.
+    agent.cancel({ kind: 'disposed' }, { keepInbox: true })
+
+    let wakeDriverError: unknown
+    maintenanceGate.resolve(undefined)
+    await maintenance.catch((error: unknown) => { wakeDriverError = error })
+
+    // wakeDriver() itself threw, from the direct runMaintenance-finally call
+    // site, not from send() -- distinguishable by its own message.
+    expect(wakeDriverError).toBeInstanceOf(Error)
+    expect((wakeDriverError as Error).message).toMatch(/dispatch blocked, agent is disposed/)
+    expect(adapter.requests).toHaveLength(1)
   })
 })
