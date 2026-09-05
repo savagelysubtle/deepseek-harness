@@ -79,6 +79,7 @@
     "@deepseek-ai/dsh-session-telemetry-otel": "workspace:^",
     "@deepseek-ai/dsh-session-title": "workspace:^",
     "@deepseek-ai/dsh-session-title-first-prompt-llm": "workspace:^",
+    "@deepseek-ai/dsh-session-turn-status": "workspace:^",
     "@deepseek-ai/dsh-settings-file": "workspace:^",
     "@deepseek-ai/dsh-skill": "workspace:^",
     "@deepseek-ai/dsh-skill-badge": "workspace:^",

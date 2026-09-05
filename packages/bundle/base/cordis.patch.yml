@@ -126,6 +126,16 @@
     - id: session-projection
       name: '@deepseek-ai/dsh-session-projection'
 
+    # Whole-log turn-open bit and last-close cause (SWD-120): distinguishes a
+    # deliberate user stop from a programmatic cancellation, a crash-repair
+    # interruption, an error, and normal completion, so `session.list` rows
+    # and a future watchdog can read the difference without replaying the
+    # log. Mounted at this shared layer (like session-title above) rather
+    # than a surface-specific bundle, since every profile's session-list
+    # consumers need the same distinction.
+    - id: session-turn-status
+      name: '@deepseek-ai/dsh-session-turn-status'
+
     # Session telemetry is mounted but disabled by default. DSH_TELEMETRY_MODE
     # explicitly opts into FULL or FEEDBACK_ONLY reporting; uploading mirrors
     # session-log records onto OTLP/HTTP logs with no session-telemetry/record redaction

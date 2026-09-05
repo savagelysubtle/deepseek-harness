@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest'
 import type {
   SessionId, SessionListState, SessionSummary, WorkspaceId, WorkspaceView,
 } from '@deepseek-ai/dsh-client-runtime/client'
+// Side-effect only: merges the `turnStatus` key so the SWD-120 tests below
+// can build a projectionValues.turnStatus fixture that type-checks.
+import type {} from '@deepseek-ai/dsh-session-turn-status/client'
 import {
   deriveFlat, deriveGroups, deriveSearchResults, workspaceLabel, relativeTime,
   UNGROUPED_KEY, UNGROUPED_LABEL,
@@ -138,6 +141,53 @@ describe('deriveGroups', () => {
     expect(deriveFlat(sessions, noArchive).find(node => node.id === done.id)!.completed).toBe(true)
     const search = deriveSearchResults(sessions, [workspace('first', ['done', 'plain'])], 'done', noArchive, { items: [], hasMore: false }, 10)
     expect(search.items[0]?.completed).toBe(true)
+  })
+
+  it('SWD-120: derives the stop/crash/error distinction from the turnStatus projection, never confusing a stop for a crash or vice versa', () => {
+    const stopped = {
+      ...summary('stopped', 3),
+      projectionValues: { turnStatus: { open: false, cause: { kind: 'aborted' as const, cause: { kind: 'user' as const } } } },
+    }
+    const crashedClosed = {
+      ...summary('crashed-closed', 3),
+      projectionValues: { turnStatus: { open: false, cause: { kind: 'interrupted' as const } } },
+    }
+    const errored = {
+      ...summary('errored', 3),
+      projectionValues: { turnStatus: { open: false, cause: { kind: 'error' as const, code: 'E', message: 'm' } } },
+    }
+    const completed = {
+      ...summary('completed', 3),
+      projectionValues: { turnStatus: { open: false, cause: { kind: 'completed' as const } } },
+    }
+    // The SWD-120 gotcha: a dangling open turn with nothing attached is a
+    // crash that has not been reloaded yet — it must render as 'interrupted',
+    // never as a stop and never as the plain idle/completed fallback.
+    const danglingNotRunning = {
+      ...summary('dangling', 3),
+      running: false,
+      projectionValues: { turnStatus: { open: true, cause: null } },
+    }
+    // The same open turn WHILE the agent is actually attached is ordinary
+    // in-flight work, not a crash: no special status.
+    const openAndRunning = {
+      ...summary('open-running', 3),
+      running: true,
+      projectionValues: { turnStatus: { open: true, cause: null } },
+    }
+    const noProjection = summary('no-projection', 3)
+
+    const sessions = list(stopped, crashedClosed, errored, completed, danglingNotRunning, openAndRunning, noProjection)
+    const flat = deriveFlat(sessions, noArchive)
+    const endStatus = (id: string) => flat.find(node => node.id === sid(id))!.endStatus
+
+    expect(endStatus('stopped')).toBe('stopped')
+    expect(endStatus('crashed-closed')).toBe('interrupted')
+    expect(endStatus('errored')).toBe('error')
+    expect(endStatus('completed')).toBeUndefined()
+    expect(endStatus('dangling')).toBe('interrupted')
+    expect(endStatus('open-running')).toBeUndefined()
+    expect(endStatus('no-projection')).toBeUndefined()
   })
 
   it('hides subagent-origin sessions without hiding ordinary forks', () => {

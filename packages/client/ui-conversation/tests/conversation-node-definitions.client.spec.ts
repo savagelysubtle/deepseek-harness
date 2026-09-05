@@ -15,6 +15,7 @@ import { retryDefinition } from '../src/client/conversation-nodes/retry.ts'
 import { toolDefinition } from '../src/client/conversation-nodes/tool.ts'
 import { turnErrorDefinition } from '../src/client/conversation-nodes/turn-error.ts'
 import { turnMaxTokensDefinition } from '../src/client/conversation-nodes/turn-max-tokens.ts'
+import { turnStoppedDefinition } from '../src/client/conversation-nodes/turn-stopped.ts'
 import { turnTailDefinition } from '../src/client/conversation-nodes/turn-tail.ts'
 import type {
   AssistantChatData, ManualCompactionChatData, RetryChatData, ToolChatData, TurnTailChatData,
@@ -31,6 +32,7 @@ const DEFINITIONS: readonly ConversationNodeDefinition[] = [
   retryDefinition,
   turnErrorDefinition,
   turnMaxTokensDefinition,
+  turnStoppedDefinition,
   turnTailDefinition,
 ]
 
@@ -881,6 +883,98 @@ describe('built-in conversation node Definitions', () => {
       match(6, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
     )).toBe(state)
     expect(turnMaxTokensDefinition.buildViewNode?.(context(undefined))).toBeNull()
+  })
+
+  it('SWD-120: distinguishes a deliberate user stop from a programmatic one and from a crash interruption', () => {
+    const userStopped = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } }),
+    ])
+    expect(node(snapshot(userStopped), 'turn-stopped')?.data)
+      .toMatchObject({ kind: 'turn-stopped', seq: 2, turn: 1, cause: 'user' })
+
+    const parentCancelled = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'parent' } } }),
+    ])
+    expect(node(snapshot(parentCancelled), 'turn-stopped')?.data)
+      .toMatchObject({ kind: 'turn-stopped', cause: 'system' })
+
+    const hookCancelled = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'hook', reason: 'denied' } } }),
+    ])
+    expect(node(snapshot(hookCancelled), 'turn-stopped')?.data)
+      .toMatchObject({ kind: 'turn-stopped', cause: 'system' })
+
+    // The exact synthetic marker crash repair (interruptedTurnClosers) appends
+    // on reload — this must never read as a user or system stop.
+    const crashed = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'turn/end', { turn: 1, reason: { kind: 'interrupted' } }),
+    ])
+    expect(node(snapshot(crashed), 'turn-stopped')?.data)
+      .toMatchObject({ kind: 'turn-stopped', cause: 'crash' })
+  })
+
+  it('SWD-120: a stopped turn never also renders as an error or max-tokens notice, and vice versa', () => {
+    const stopped = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } }),
+    ])
+    expect(node(snapshot(stopped), 'turn-error')).toBeUndefined()
+    expect(node(snapshot(stopped), 'turn-max-tokens')).toBeUndefined()
+
+    const errored = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'turn/end', {
+        turn: 1,
+        reason: { kind: 'error', error: { code: 'TRANSPORT', message: 'failed' } },
+      }),
+    ])
+    expect(node(snapshot(errored), 'turn-stopped')).toBeUndefined()
+
+    const maxedOut = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'turn/end', { turn: 1, reason: { kind: 'max-tokens' } }),
+    ])
+    expect(node(snapshot(maxedOut), 'turn-stopped')).toBeUndefined()
+
+    const completed = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
+    ])
+    expect(node(snapshot(completed), 'turn-stopped')).toBeUndefined()
+  })
+
+  it('keeps the turn-stopped notice when the window starts after the owning turn/start', () => {
+    const value = assembler([
+      at(9, 'turn/end', { turn: 3, reason: { kind: 'aborted', reason: { kind: 'user' } } }),
+    ], true)
+    const notice = node(snapshot(value), 'turn-stopped')
+    expect(notice?.data).toMatchObject({ kind: 'turn-stopped', seq: 9, turn: 3, cause: 'user' })
+  })
+
+  it('pins the turn-stopped Definition edges the engine cannot reach', () => {
+    const match = (seq: number, type: string, data: unknown) => ({
+      event: { seq, time: seq * 1_000, type, data },
+      view: undefined,
+      role: 'start',
+      location: undefined,
+    }) as unknown as Parameters<typeof turnStoppedDefinition.start>[1]
+    const context = (state: unknown, matches: unknown[] = []) => ({
+      key: 'k', kind: 'turn-stopped', id: '1', matches, start: undefined, state, current: new Map(),
+    }) as unknown as Parameters<NonNullable<typeof turnStoppedDefinition.buildViewNode>>[0]
+    const reader = { previous: () => undefined }
+
+    expect(() => turnStoppedDefinition.start(context(undefined), match(1, 'turn/start', { turn: 1 }), reader))
+      .toThrow('turn-stopped start requires an aborted or interrupted turn/end')
+    const state = { turn: 1, seq: 5, time: 5_000, cause: 'user' as const }
+    expect(turnStoppedDefinition.update(
+      context(state) as Parameters<typeof turnStoppedDefinition.update>[0],
+      match(6, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
+    )).toBe(state)
+    expect(turnStoppedDefinition.buildViewNode?.(context(undefined))).toBeNull()
   })
 
   it('preserves nested Tools and manual compaction evidence when their start events are outside the window', () => {

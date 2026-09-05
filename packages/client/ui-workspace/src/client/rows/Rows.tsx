@@ -220,7 +220,7 @@ interface SessionStatus {
  * outranks completion reminders.
  */
 function sessionStatuses(
-  node: Pick<SessionNode, 'pendingInteraction' | 'running' | 'runningSubagentCount' | 'completed'>,
+  node: Pick<SessionNode, 'pendingInteraction' | 'running' | 'runningSubagentCount' | 'completed' | 'endStatus'>,
   t: RowTranslate,
 ): readonly [SessionStatus, ...SessionStatus[]] {
   const subagents: SessionStatus | undefined = node.runningSubagentCount === 0
@@ -255,6 +255,17 @@ function sessionStatuses(
     return subagents === undefined ? [primary] : [primary, subagents]
   }
   if (subagents !== undefined) return [subagents]
+  // SWD-120: a settled row's stop/crash/error cause, when the deployment
+  // composes the turnStatus projection — otherwise falls through to the
+  // pre-existing completed/idle rendering below, unchanged.
+  switch (node.endStatus) {
+    case 'stopped': return [{ state: 'done', label: t('status.stopped') }]
+    case 'interrupted': return [{ state: 'warning', label: t('status.interrupted') }]
+    case 'error': return [{ state: 'error', label: t('status.failed') }]
+    case undefined: break
+    /* v8 ignore next -- closed SessionEndStatusKind union */
+    default: return assertNever(node.endStatus)
+  }
   if (node.completed) return [{ state: 'done', label: t('status.completed') }]
   return [{ state: 'done', label: t('status.idle') }]
 }
