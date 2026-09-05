@@ -13,7 +13,7 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
-import type { Session } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, TurnEndCancelCause, TurnEndReason } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import * as SessionTurnStatusPlugin from '@deepseek-ai/dsh-session-turn-status'
 import { sessionTurnStatusProjectionDefinition } from '@deepseek-ai/dsh-session-turn-status/src/projection.ts'
@@ -66,6 +66,23 @@ describe('turnStatus projection unit (registry drive)', () => {
     })
   })
 
+  it('distinguishes the remaining programmatic sub-causes, including a legacy import with no recorded cause', async () => {
+    const { ctx, session } = await harness(true)
+    session.append('turn/start', { turn: 1 })
+    session.append('turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'parent' } } })
+    expect(status(ctx, session).cause).toEqual({ kind: 'aborted', cause: { kind: 'parent' } })
+
+    session.append('turn/start', { turn: 2 })
+    session.append('turn/end', { turn: 2, reason: { kind: 'aborted', reason: { kind: 'disposed' } } })
+    expect(status(ctx, session).cause).toEqual({ kind: 'aborted', cause: { kind: 'disposed' } })
+
+    session.append('turn/start', { turn: 3 })
+    // 'legacy' is not a cast: it is TurnEndCancelCause's own arm for an
+    // imported historical record that carried no cause at all.
+    session.append('turn/end', { turn: 3, reason: { kind: 'aborted', reason: { kind: 'legacy' } } })
+    expect(status(ctx, session).cause).toEqual({ kind: 'aborted', cause: { kind: 'legacy' } })
+  })
+
   it('distinguishes a crash-repair interruption from a deliberate stop', async () => {
     const { ctx, session } = await harness(true)
     session.append('turn/start', { turn: 1 })
@@ -86,6 +103,34 @@ describe('turnStatus projection unit (registry drive)', () => {
     const value = status(ctx, session)
     expect(value.open).toBe(true)
     expect(value.cause).toBeNull()
+  })
+
+  it('degrades an unrecognized cancellation sub-cause to legacy rather than throwing', async () => {
+    const { ctx, session } = await harness(true)
+    session.append('turn/start', { turn: 1 })
+    // TurnEndCancelCause is exhaustively user | parent | hook | disposed |
+    // legacy, so no legitimately-typed value reaches stopCauseFrom's default
+    // arm today. This cast stands in for a future AgentCancelCause arm this
+    // package has not yet been taught, proving the fold degrades to
+    // 'legacy' instead of throwing when that day comes.
+    session.append('turn/end', {
+      turn: 1,
+      reason: { kind: 'aborted', reason: { kind: 'not-yet-invented' } as unknown as TurnEndCancelCause },
+    })
+    expect(status(ctx, session).cause).toEqual({ kind: 'aborted', cause: { kind: 'legacy' } })
+  })
+
+  it('degrades an unrecognized turn/end reason to other rather than throwing', async () => {
+    const { ctx, session } = await harness(true)
+    session.append('turn/start', { turn: 1 })
+    // Same forward-compat proof one layer out: TurnEndReasonMap is
+    // merge-extensible, so a plugin this package has not been taught about
+    // could add an arm; causeFrom must degrade to 'other', never throw.
+    session.append('turn/end', {
+      turn: 1,
+      reason: { kind: 'not-yet-invented' } as unknown as TurnEndReason,
+    })
+    expect(status(ctx, session).cause).toEqual({ kind: 'other' })
   })
 
   it('reports a terminal error with its code and message', async () => {
@@ -163,8 +208,29 @@ describe('turnStatus projection unit (registry drive)', () => {
     expect('turnStatus' in ctx.sessionProjections.snapshot(session).values).toBe(false)
   })
 
+  it('apply() returns the same state reference for a redundant turn/start and for any event outside its domain', () => {
+    const def = sessionTurnStatusProjectionDefinition
+    const init = def.init()
+    const opened = def.apply(init, at(0, 'turn/start', { turn: 1 }))
+    expect(opened).not.toBe(init)
+    expect(opened).toEqual({ open: true, cause: null })
+
+    // A second turn/start while already open is a no-op: the exact same
+    // reference back, per the unit contract's reference-stability rule
+    // (an unchanged reference produces zero downstream work).
+    expect(def.apply(opened, at(1, 'turn/start', { turn: 1 }))).toBe(opened)
+
+    // An event outside turn/start|turn/end is equally uninteresting.
+    expect(def.apply(opened, at(2, 'step/start', { turn: 1, step: 1 }))).toBe(opened)
+  })
+
   it('exports the raw unit definition unchanged', () => {
     expect(sessionTurnStatusProjectionDefinition.key).toBe('turnStatus')
     expect(sessionTurnStatusProjectionDefinition.stateVersion).toBe(1)
   })
 })
+
+/** Build one synthetic committed event with a controlled timestamp (mirrors dsh-session-stats's test helper). */
+function at(time: number, type: string, data: unknown): SessionEvent {
+  return { type, seq: time, time, data } as unknown as SessionEvent
+}
