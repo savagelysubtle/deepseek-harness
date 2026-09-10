@@ -572,6 +572,34 @@ describe('routing outcomes', () => {
     expect(JSON.parse(badRow.result ?? '{}').reason).toContain('boom')
     await expect(rowState(h.storePath, good)).resolves.toMatchObject({ state: 'done' })
   })
+
+  it('a live agent disposed between the registry lookup and delivery fails the lease loud, never a silent drop (SWD-137 follow-up)', async () => {
+    // The registry can still hand back an entry for a session that is mid
+    // host-owned disposal (see agent.ts's own `disposed` field doc): both
+    // steer() and its followup() fallback refuse in that window, exactly
+    // like the generic "isolates a poison delivery" case above -- but this
+    // is the SPECIFIC shape that motivated deliverToLive's `delivered` return
+    // and the explicit failTerminal call at its use site, rather than relying
+    // on an accidental propagation up to drainOnce's catch-all. Asserting the
+    // real disposed-agent error message (not a generic stand-in) is the point:
+    // the reason recorded and bounced back to the sender is the actual cause,
+    // not a guess.
+    const disposed = {
+      status: 'idle' as const,
+      steer: vi.fn(() => { throw new Error('agent "target": send refused, agent is disposed') }),
+      followup: vi.fn(() => { throw new Error('agent "target": send refused, agent is disposed') }),
+    }
+    const h = await makeHarness({
+      liveBySession: { [String(deriveNamedSessionId('target'))]: disposed },
+    })
+    const id = await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(['target'])))
+    expect(disposed.steer).toHaveBeenCalledTimes(1)
+    expect(disposed.followup).toHaveBeenCalledTimes(1)
+    const row = await rowState(h.storePath, id)
+    expect(row.state).toBe('failed')
+    expect((JSON.parse(row.result ?? '{}') as { reason?: string }).reason).toContain('disposed')
+  })
 })
 
 describe('seat-alias routing (web-host live seats)', () => {

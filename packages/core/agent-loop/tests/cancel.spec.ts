@@ -232,13 +232,31 @@ describe('Agent.cancel()', () => {
 
     // Dispose cancels with `{ kind: 'disposed' }`; a wake landing in the
     // abort-to-idle window must not latch, so `whenIdle()` does not wait on
-    // a model turn over the session being torn down.
+    // a model turn over the session being torn down. Before SWD-137's fix
+    // this late send() silently queued its message with no throw at all
+    // (`disposed` blocks the latch in wakeDriver(), but wakeDriver() is only
+    // reached once phase.kind reads 'idle' -- while still mid-abort here, it
+    // returned without ever getting that far, and the insert it had already
+    // made durable was never undone): an orphan indistinguishable from the
+    // ticket's own repro, just reached through this timing window instead of
+    // a tool-snapshot recheck. send() now refuses before the insert, in
+    // every timing window, so this must throw loudly instead of vanishing.
     const disposal = handle.dispose()
-    setTimeout(() => { send(agent, 'late wake') }, 10)
+    let lateWakeError: unknown
+    setTimeout(() => {
+      try {
+        send(agent, 'late wake')
+      } catch (error) {
+        lateWakeError = error
+      }
+    }, 10)
     await disposal
 
     expect(adapter.requests).toHaveLength(1)
     expect(userTexts(agent)).toEqual(['active'])
+    expect(lateWakeError).toBeInstanceOf(Error)
+    expect((lateWakeError as Error).message).toMatch(/disposed/)
+    expect(agent.inbox.nextTurn).toHaveLength(0)
   })
 
   it('cancel after waking send closes its synchronously opened turn without a step', async () => {

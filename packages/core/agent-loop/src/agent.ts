@@ -110,10 +110,24 @@ export class ReactLoopAgent implements Agent {
    * tool-snapshot recheck latched behind {@link runMaintenance}, for
    * instance -- can still observe a live idle phase and a signal that was
    * never told to abort, well after disposal resolved. `disposed` cannot be
-   * fooled by that: it is read synchronously at the single choke point
-   * every new driver activity passes through ({@link wakeDriver}), so no
-   * teardown ordering, timer, or promise race can let a dispatch slip past
-   * it.
+   * fooled by that: it is read synchronously at two choke points, both
+   * required. {@link send} reads it first, for a *waking* send only, before
+   * the message ever touches the inbox -- a disposed agent must never
+   * durably queue `next-turn` work for a driver that will never claim it,
+   * since a later resume of the same session would otherwise replay that
+   * insert as live pending work and hand it a phantom extra turn ahead of
+   * whatever the resumed caller actually sends. A non-waking send (`inject()`)
+   * is deliberately exempt: it only ever lands in `next-step`, which nothing
+   * claims except an already-running turn, so it cannot produce that phantom
+   * turn, and a documented cross-package contract relies on exactly this
+   * still succeeding into a disposing-but-still-registered agent (see
+   * `packages/subagent/tool-subagent-report`'s README). {@link wakeDriver}
+   * reads `disposed` again at the single choke point every new driver
+   * activity passes through, for the two call sites ({@link runMaintenance}
+   * and {@link kick}'s own `finally` blocks) that wake on already-queued
+   * inbox content without going through `send()`. No teardown ordering,
+   * timer, or promise race can let either a queued waking insert or a
+   * dispatch slip past these.
    */
   private disposed = false
 
@@ -236,6 +250,30 @@ export class ReactLoopAgent implements Agent {
   }
 
   send(message: UserMessage, target: InboxTarget, wakeup: boolean): void {
+    // Refuse before anything is touched, but only for a waking send: a
+    // disposed agent must never durably queue work for a driver that will
+    // never claim it, because a later resume of this same session would
+    // replay the insert as live pending work and hand it to the very next
+    // real turn (see the `disposed` field doc) -- exactly this ticket's
+    // measured harm. This is deliberately ahead of the `wakeDriver` disposal
+    // check below, which only guards the dispatch side and runs too late
+    // for this purpose: by the time it would see `disposed`, the insert
+    // this guard exists to prevent has already committed.
+    //
+    // A non-waking send (`inject()`, `wakeup: false`) is deliberately left
+    // out of this guard: it only ever targets `next-step`, which nothing
+    // ever claims on its own -- `Inbox.claim()` only runs from inside an
+    // already-running turn, so a lone `next-step` entry cannot produce the
+    // phantom extra dispatch this ticket is about; at worst it is folded
+    // as extra context into whatever real turn eventually claims it. A
+    // documented cross-package contract (packages/subagent/tool-subagent-report's
+    // README: "a registered parent already in host-owned disposal still
+    // accepts while its log admits appends") deliberately relies on exactly
+    // this succeeding, so refusing it here would fix a harm this path
+    // cannot cause while breaking a real, tested product contract.
+    if (wakeup && this.disposed) {
+      this.throwError(new Error(`agent "${this.id}": send refused, agent is disposed`))
+    }
     // Waking input cannot join an aborted activity, so it starts the next turn.
     // Captured before the insertion so a reentrant cancel from a splice observer cannot reclassify it.
     const wakingAfterAbort = wakeup && this.phase.kind !== 'idle' && this.phase.abort.signal.aborted
