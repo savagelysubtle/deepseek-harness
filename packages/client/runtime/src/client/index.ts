@@ -78,7 +78,7 @@ export type {
   ContextMessageNode, ConversationNode, ConversationSnapshot, ModelRetryNode, QueuedMessage,
   LegacyConversationSlice, PartialAssistant, RunningToolCall,
   SteeringMessageNode, TodoItem, ToolCallBlock, ToolResultNode, TurnErrorNode, TurnMaxTokensNode,
-  UnknownSurfaceNode, UserMessageNode,
+  TurnStoppedNode, UnknownSurfaceNode, UserMessageNode,
 } from './sessions/conversation.ts'
 export {
   EMPTY_CHAT_SNAPSHOT, EMPTY_CONVERSATION_VIEWS, toAssistantBlock, toAssistantBlocks,

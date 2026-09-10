@@ -8,12 +8,30 @@ import {
   type SessionSearchResultItem, type SessionSummary, type SubagentDescendantSummary,
   type WorkspaceId, type WorkspaceView,
 } from '@deepseek-ai/dsh-client-runtime/client'
+// Side-effect only: merges the `turnStatus` key into SessionProjectionMap so
+// `SessionSummary.projectionValues.turnStatus` below type-checks.
+import type {} from '@deepseek-ai/dsh-session-turn-status/client'
 
 /** Group key for Sessions outside every Workspace. */
 export const UNGROUPED_KEY = ''
 
 /** Display label for the ungrouped bucket row. */
 export const UNGROUPED_LABEL = 'Ungrouped'
+
+/**
+ * SWD-120: how a non-running row's most recent turn concluded, distinct from
+ * the ordinary completed/idle bucket. `'stopped'` covers every deliberate or
+ * programmatic cancellation (`turnStatus.cause.kind === 'aborted'`, any
+ * sub-cause); `'interrupted'` covers BOTH a crash-repair reload
+ * (`cause.kind === 'interrupted'`) and the SWD-120 dangling-turn gotcha — a
+ * turn left open (`turnStatus.open === true`) by a process that is no longer
+ * attached (`!running`), which is a crash that has not been reloaded yet and
+ * must never read as a stop; `'error'` covers a terminal failure. Every other
+ * outcome (completed, blocked, max-tokens, an unrecognized future cause, or a
+ * deployment without the projection composed) leaves this absent and falls
+ * back to the pre-existing completed/idle rendering.
+ */
+export type SessionEndStatusKind = 'stopped' | 'interrupted' | 'error'
 
 /** One top-level session row in a group or the flat list. */
 export interface SessionNode {
@@ -29,7 +47,32 @@ export interface SessionNode {
   runningSubagentCount: number
   /** Finished running while not selected and not yet opened (the green "done" reminder dot). */
   completed: boolean
+  /** SWD-120 stop/crash/error distinction; see {@link SessionEndStatusKind}. Absent = fall back to completed/idle. */
+  endStatus?: SessionEndStatusKind
   updatedAt: number
+}
+
+/**
+ * Derive the SWD-120 stop/crash/error distinction from the `turnStatus`
+ * projection, when the deployment composes it. `open` is read together with
+ * the row's own `running` bit: a session with an open turn that is NOT
+ * attached is exactly the crash-but-not-yet-reloaded gotcha (a process died
+ * mid-turn and nothing has reloaded it since), and it must render as
+ * `'interrupted'`, never as the default idle/completed bucket a bare `open`
+ * check would otherwise fall into.
+ * @param summary - the session-list row to derive from.
+ * @returns the distinguishing status, or undefined to keep today's rendering.
+ */
+function sessionEndStatus(summary: SessionSummary): SessionEndStatusKind | undefined {
+  const turnStatus = summary.projectionValues?.turnStatus
+  if (turnStatus === undefined) return undefined
+  if (turnStatus.open) return summary.running ? undefined : 'interrupted'
+  switch (turnStatus.cause?.kind) {
+    case 'aborted': return 'stopped'
+    case 'interrupted': return 'interrupted'
+    case 'error': return 'error'
+    default: return undefined
+  }
 }
 
 /** Session order selected by the Workspace browser. */
@@ -215,6 +258,7 @@ function sessionNode(
   s: SessionSummary,
   descendants: ReadonlyMap<SessionId, SubagentDescendantSummary>,
 ): SessionNode {
+  const endStatus = sessionEndStatus(s)
   return {
     id: s.id,
     title: sessionTitle(s),
@@ -224,6 +268,7 @@ function sessionNode(
     completed: s.completed === true,
     updatedAt: s.updatedAt,
     ...(s.pendingInteraction === undefined ? {} : { pendingInteraction: s.pendingInteraction }),
+    ...(endStatus === undefined ? {} : { endStatus }),
   }
 }
 

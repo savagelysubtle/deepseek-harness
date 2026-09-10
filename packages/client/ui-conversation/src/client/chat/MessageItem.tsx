@@ -6,7 +6,7 @@
 import { memo, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import type {
-  ModelRetryNode, TurnErrorNode, UserMessageNode,
+  ModelRetryNode, TurnErrorNode, TurnStoppedNode, UserMessageNode,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import { JsonBlock, MessageText, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ChatNodeViewProps, ChatViewSlotProps } from '../contract/slots.ts'
@@ -140,6 +140,34 @@ function TurnMaxTokensItem({ t }: {
       <div className={css.turnErrorCopy}>
         <span className={css.maxTokensTitle}>{t('message.maxTokens')}</span>
         <span className={css.turnErrorMessage}>{t('message.maxTokens.hint')}</span>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Persistent, turn-positioned notice distinguishing a deliberate stop from a
+ * crash (SWD-120): the three `TurnStoppedNode['cause']` values each carry
+ * their own title/hint pair and dot color — a user stop reads as settled
+ * ("done"), a programmatic or crash-repaired cancellation as worth a second
+ * look ("warning").
+ */
+function TurnStoppedItem({ node, t }: {
+  node: TurnStoppedNode
+  t: ChatViewSlotProps['t']
+}) {
+  const title = node.cause === 'crash' ? t('message.turnStopped.crash') : t('message.turnStopped.stopped')
+  const hint = node.cause === 'user'
+    ? t('message.turnStopped.user.hint')
+    : node.cause === 'system'
+      ? t('message.turnStopped.system.hint')
+      : t('message.turnStopped.crash.hint')
+  return (
+    <div className={css.turnErrorRow} role="status">
+      <StateDot state={node.cause === 'user' ? 'done' : 'warning'} className={css.turnErrorDot} />
+      <div className={css.turnErrorCopy}>
+        <span className={node.cause === 'user' ? css.stoppedTitle : css.maxTokensTitle}>{title}</span>
+        <span className={css.turnErrorMessage}>{hint}</span>
       </div>
     </div>
   )
@@ -291,6 +319,11 @@ export const TurnErrorNodeView = memo(function TurnErrorNodeView({ node, t }: Ch
 /** Max-tokens turn-end notice keyed Chat renderer. */
 export const TurnMaxTokensNodeView = memo(function TurnMaxTokensNodeView({ t }: ChatNodeViewProps<'turn-max-tokens'>) {
   return <TurnMaxTokensItem t={t} />
+})
+
+/** Stop-vs-crash turn-end notice keyed Chat renderer (SWD-120). */
+export const TurnStoppedNodeView = memo(function TurnStoppedNodeView({ node, t }: ChatNodeViewProps<'turn-stopped'>) {
+  return <TurnStoppedItem node={node.data} t={t} />
 })
 
 /** Explicit unknown-surface keyed Chat renderer. */

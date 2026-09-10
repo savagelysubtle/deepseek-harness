@@ -250,6 +250,14 @@
   font-weight: 600;
 }
 
+/* A deliberate stop (SWD-120) reads as settled, not alarming — the success
+ * color pairs it with the same "done" StateDot state the sidebar row uses. */
+.stoppedTitle {
+  margin-right: 6px;
+  color: var(--dsw-alias-state-success-primary);
+  font-weight: 600;
+}
+
 @keyframes retry-shimmer {
   from {
     background-position: 100% 50%;

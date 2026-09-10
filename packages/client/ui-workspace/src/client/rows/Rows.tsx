@@ -220,7 +220,7 @@ interface SessionStatus {
  * outranks completion reminders.
  */
 function sessionStatuses(
-  node: Pick<SessionNode, 'pendingInteraction' | 'running' | 'runningSubagentCount' | 'completed'>,
+  node: Pick<SessionNode, 'pendingInteraction' | 'running' | 'runningSubagentCount' | 'completed' | 'endStatus'>,
   t: RowTranslate,
 ): readonly [SessionStatus, ...SessionStatus[]] {
   const subagents: SessionStatus | undefined = node.runningSubagentCount === 0
@@ -255,6 +255,17 @@ function sessionStatuses(
     return subagents === undefined ? [primary] : [primary, subagents]
   }
   if (subagents !== undefined) return [subagents]
+  // SWD-120: a settled row's stop/crash/error cause, when the deployment
+  // composes the turnStatus projection — otherwise falls through to the
+  // pre-existing completed/idle rendering below, unchanged.
+  switch (node.endStatus) {
+    case 'stopped': return [{ state: 'done', label: t('status.stopped') }]
+    case 'interrupted': return [{ state: 'warning', label: t('status.interrupted') }]
+    case 'error': return [{ state: 'error', label: t('status.failed') }]
+    case undefined: break
+    /* v8 ignore next -- closed SessionEndStatusKind union */
+    default: return assertNever(node.endStatus)
+  }
   if (node.completed) return [{ state: 'done', label: t('status.completed') }]
   return [{ state: 'done', label: t('status.idle') }]
 }
@@ -372,7 +383,13 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
   const selected = node.id === currentId
   const statuses = sessionStatuses(node, t)
   const primaryStatus = statuses[0]
-  const showStatus = primaryStatus.state !== 'done' || row.completed
+  // A settled SWD-120 stop/crash/error cause always shows, even though
+  // 'stopped' shares the ordinary completed/idle dot's 'done' state: unlike
+  // the bare completion reminder (suppressed once `completed` is false — an
+  // already-viewed or never-finished row shows no dot at all), a stop, a
+  // crash, or an error is a distinguishing fact about the row, not a
+  // dismissible reminder.
+  const showStatus = row.endStatus !== undefined || primaryStatus.state !== 'done' || row.completed
   const [menuOpen, setMenuOpen] = useState(false)
   // Archive hides the row through the registry-global archive set and never
   // touches the session log, so it is not styled as destructive and needs no
