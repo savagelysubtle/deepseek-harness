@@ -638,15 +638,36 @@ function pairKey(lease: MailboxLease): string {
  * admission is immediate; the caller settles.
  * @param agent - the live agent addressed by the lease.
  * @param message - the rendered delivery turn.
+ * @returns `{delivered: true}` once either channel admits the message.
+ *   `{delivered: false, reason}` only when BOTH refuse — most notably when
+ *   the agent has been torn down in the exact window between the caller's
+ *   registry lookup and this call (host-owned disposal racing admission:
+ *   the registry can still hand back an entry for a session mid-disposal),
+ *   but the shape covers any cause the fallback itself reports, carrying
+ *   its actual message rather than assuming why. Either way there is
+ *   nothing left to queue into. The caller settles this as a terminal
+ *   routing failure via {@link failTerminal}, exactly like any other
+ *   post-admission delivery failure — never a silent drop.
  */
-function deliverToLive(agent: Agent, message: UserMessage): void {
+function deliverToLive(
+  agent: Agent,
+  message: UserMessage,
+): { delivered: true } | { delivered: false; reason: string } {
   try {
     agent.steer(message)
   } catch {
-    // A boundary refused the interruption between admission and steer;
-    // an ordinary queued turn still admits the message this cycle.
-    agent.followup(message)
+    // A boundary refused the interruption between admission and steer; an
+    // ordinary queued turn still admits the message this cycle -- unless
+    // the fallback itself now refuses (most notably: the agent has since
+    // been disposed in this same window), in which case delivery has
+    // genuinely failed and there is nothing left to queue into.
+    try {
+      agent.followup(message)
+    } catch (error) {
+      return { delivered: false, reason: error instanceof Error ? error.message : String(error) }
+    }
   }
+  return { delivered: true }
 }
 
 /**
@@ -883,7 +904,19 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
   // human input and mail converge on one agent with no fence in between.
   const live = ctx.agents.get(sessionId)
   if (live !== undefined) {
-    deliverToLive(live, relayUserMessage(lease, senderClass))
+    const outcome = deliverToLive(live, relayUserMessage(lease, senderClass))
+    if (!outcome.delivered) {
+      // The registry still held this session, but delivery itself refused on
+      // both channels -- most commonly because the agent had already been
+      // torn down by the time delivery reached it (host-owned disposal racing
+      // this lookup). A real, terminal delivery failure, not a silent drop.
+      // This is post-admission, so it is recorded the same way any other
+      // routing failure is, not as an admission refusal (see `refuse` above):
+      // settle failed and bounce, exactly per the module's own "a drop is
+      // never silent, and never mysterious."
+      await failTerminal(ctx, lease, outcome.reason)
+      return { kind: 'failed', reason: outcome.reason }
+    }
     await mailbox.settle(lease.leaseRef, admittedOutcome(lease))
     // Guard memory records the admission only now that it actually happened:
     // a lease settled `pending` below is re-claimed and re-judged, and must
