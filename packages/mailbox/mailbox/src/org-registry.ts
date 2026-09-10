@@ -22,6 +22,21 @@ import { MAILBOX_SEGMENT_PATTERN_SOURCE } from './address.ts'
 
 const SEGMENT_PATTERN = new RegExp(MAILBOX_SEGMENT_PATTERN_SOURCE)
 
+/**
+ * A seat's tool restriction, mirroring the shape of the tool-restriction
+ * primitive in `@deepseek-ai/dsh-tools` (`RestrictOptions`). Declared locally
+ * rather than imported: this package parses the roster, it does not depend
+ * on the tools package, and TypeScript's structural typing lines the two up
+ * for free where they actually meet — in the caller that applies this to a
+ * live tool set.
+ */
+export interface OrgRegistrySeatTools {
+  /** Tool names to keep; all others are hidden. */
+  readonly allow?: readonly string[]
+  /** Tool names to hide; everything else stays. */
+  readonly deny?: readonly string[]
+}
+
 /** One seat's roster entry: where it runs. Its name is its mailbox address. */
 export interface OrgRegistrySeat {
   /**
@@ -45,6 +60,8 @@ export interface OrgRegistrySeat {
   readonly sessionId?: string
   /** Marks a throwaway seat; an edge may never cross the test boundary. */
   readonly test?: boolean
+  /** Restricts which tools the seat's agent may use; absent means unrestricted. */
+  readonly tools?: OrgRegistrySeatTools
 }
 
 /** One undirected edge: both directions are implied unless a later rule excepts them. */
@@ -119,11 +136,13 @@ export function parseOrgRegistry(text: string, options: OrgRegistryParseOptions 
     if (seat.test !== undefined && typeof seat.test !== 'boolean') {
       throw new Error(`org registry field seats.${name}.test must be a boolean when present`)
     }
+    const tools = seat.tools === undefined ? undefined : parseSeatTools(seat.tools, name)
     seats[name] = {
       cwd: expandTilde(seat.cwd, home),
       ...seat.lead === undefined ? {} : { lead: seat.lead },
       ...seat.sessionId === undefined ? {} : { sessionId: seat.sessionId },
       ...seat.test === undefined ? {} : { test: seat.test },
+      ...tools === undefined ? {} : { tools },
     }
   }
 
@@ -314,5 +333,40 @@ function assertObject(value: unknown, label: string): asserts value is Record<st
 function assertNonEmptyString(value: unknown, label: string): asserts value is string {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new Error(`org registry field "${label}" must be a non-empty string`)
+  }
+}
+
+/**
+ * Validate and shape one seat's `tools` field. Tool NAMES are not checked
+ * against any real tool set here — this layer has no idea what tools exist,
+ * and a name that is momentarily unavailable (a server down) is a legitimate
+ * runtime situation handled elsewhere, not a reason to refuse the whole
+ * registry.
+ * @param value - the raw `tools` value from the parsed document.
+ * @param seatName - the owning seat, for error messages a human can act on.
+ * @returns the validated tool restriction.
+ * @throws when the shape is malformed, or neither `allow` nor `deny` is given.
+ */
+function parseSeatTools(value: unknown, seatName: string): OrgRegistrySeatTools {
+  assertObject(value, `seats.${seatName}.tools`)
+  if (value.allow !== undefined) assertStringArray(value.allow, `seats.${seatName}.tools.allow`)
+  if (value.deny !== undefined) assertStringArray(value.deny, `seats.${seatName}.tools.deny`)
+  if (value.allow === undefined && value.deny === undefined) {
+    throw new Error(`org registry field seats.${seatName}.tools must include "allow" and/or "deny" (an empty tools rule is meaningless)`)
+  }
+  return {
+    ...value.allow === undefined ? {} : { allow: value.allow },
+    ...value.deny === undefined ? {} : { deny: value.deny },
+  }
+}
+
+/**
+ * Assert a value is an array of non-empty strings.
+ * @param value - the value under judgment.
+ * @param label - the field label, for the error message.
+ */
+function assertStringArray(value: unknown, label: string): asserts value is readonly string[] {
+  if (!Array.isArray(value) || value.some(entry => typeof entry !== 'string' || entry.trim().length === 0)) {
+    throw new Error(`org registry field "${label}" must be a list of non-empty strings`)
   }
 }
