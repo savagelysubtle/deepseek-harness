@@ -5,7 +5,7 @@
  * mail ahead of its own task turn.
  */
 
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -25,7 +25,8 @@ import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SessionStore from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
-import { deriveNamedSessionId } from '@deepseek-ai/dsh-named-sessions'
+import { deriveNamedSessionId, namedLockPath } from '@deepseek-ai/dsh-named-sessions'
+import { createScope, scopeOf } from '@deepseek-ai/dsh-scope'
 import MailboxRegistry from '@deepseek-ai/dsh-mailbox'
 import MailboxLocal, { openMailboxDatabase, SqliteMailboxStore } from '@deepseek-ai/dsh-mailbox-local'
 import * as HeadlessRunnerModule from '../../../bundle/headless/src/index.ts'
@@ -45,14 +46,27 @@ function testRegistryPath(): string {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-composition-registry-'))
   const path = join(dir, 'registry.yml')
   const seats = ['hook-target', 'hook-gate', 'target', 'gotham-seat']
+  // Seat tool-restriction fixtures, alongside the fixture tools every boot
+  // registers (see FIXTURE_TOOL_NAMES below): 'tool-open' carries no `tools`
+  // field at all (the unconfigured-by-default case), 'tool-narrow' allows
+  // only one real registered tool, and 'tool-degraded' allows a name that is
+  // never registered — the degrade-instead-of-crash case.
+  const toolSeats = [
+    '  tool-open: { cwd: . }',
+    '  tool-narrow: { cwd: ., tools: { allow: [alpha-tool] } }',
+    '  tool-degraded: { cwd: ., tools: { allow: [ghost-tool] } }',
+  ]
   writeFileSync(
     path,
-    `baseDir: ${dir}\nseats:\n${seats.map(seat => `  ${seat}: { cwd: . }`).join('\n')}\nedges: []\n`,
+    `baseDir: ${dir}\nseats:\n${seats.map(seat => `  ${seat}: { cwd: . }`).join('\n')}\n${toolSeats.join('\n')}\nedges: []\n`,
     'utf8',
   )
   cachedRegistryPath = path
   return path
 }
+
+/** Global tool names every `boot()` registers, for the seat tool-restriction tests below. */
+const FIXTURE_TOOL_NAMES = ['alpha-tool', 'beta-tool', 'gamma-tool'] as const
 
 
 /** The headless launcher's swappable process streams, captured per boot. */
@@ -137,6 +151,21 @@ function storedState(storePath: string, messageId: string): string {
   }
 }
 
+/**
+ * Concatenate every jsonl session log file under one sessions root,
+ * recursively — the jsonl backend groups sessions under a project-keyed
+ * subdirectory (or `_no-cwd`), so a cold-provisioned seat's log is never at
+ * the root itself.
+ * @param root - the sessions root a boot's `env.sessionsRoot` names.
+ */
+function allSessionLogText(root: string): string {
+  return readdirSync(root, { recursive: true })
+    .map(entry => join(root, String(entry)))
+    .filter(path => statSync(path).isFile())
+    .map(path => readFileSync(path, 'utf8'))
+    .join('')
+}
+
 /** Poll a condition until it holds or the budget expires. */
 async function until(holds: () => boolean, budgetMs = 120_000): Promise<void> {
   const started = Date.now()
@@ -155,8 +184,15 @@ interface BootOptions {
   readonly responses?: readonly string[]
   /** Inner command line for the launcher; absent boots run without one. */
   readonly args?: readonly string[]
-  /** Resolves once the boot may dispose (run exited / delivery observed). */
-  readonly settled: () => Promise<void>
+  /**
+   * Resolves once the boot may dispose (run exited / delivery observed). The
+   * live composed context is handed through so a caller can inspect the real
+   * registries before teardown, rather than inferring state from request
+   * traffic alone — e.g. `ctx.agents.get(id).ctx.tools.schemas(scopeOf(agent.ctx))`;
+   * `schemas()` with no scope argument reads the GLOBAL unscoped view, not
+   * what one agent's restriction narrows it to.
+   */
+  readonly settled: (ctx: ContextType) => Promise<void>
   /**
    * Await full tree quiescence before the settled condition. A polling plugin
    * never reaches quiescence, so its boots must opt out.
@@ -191,6 +227,48 @@ async function boot(env: ReturnType<typeof makeEnv>, options: BootOptions): Prom
     '',
   ].join('\n'))
 
+  // Fixture tools every boot registers globally, so a seat tool-restriction
+  // test can prove real narrowing against the actual tool registry instead of
+  // asserting only the helper's returned outcome. Inert for every other test
+  // in this file: nothing else names these tools or asserts an exact schema
+  // list.
+  //
+  // Rows in one `cordis:include` config mount CONCURRENTLY (the loader
+  // `Promise.allSettled`s every row's own `create()`), so nothing guarantees
+  // this plugin's registration loop finishes before a sibling row's `apply()`
+  // runs — including the polling mailbox-bridge row, whose OWN `apply()`
+  // forces one full inline delivery (and, for a tool-restricted seat, a
+  // one-time read of `tools.schemas()`) before it even returns. A seat
+  // created from that race reads back whatever the registry held at that
+  // instant, permanently — unlike the model-adapter fixture below, an early
+  // miss here cannot self-correct on a later poll. So this plugin PROVIDES a
+  // marker service once registration completes, and the tool-restriction
+  // seats' own bridge row below (`toolSeatBridgeRows`) injects it — a real
+  // Cordis dependency edge, not a timing hope — so the bridge's row cannot
+  // even start mounting until every fixture tool is genuinely on the
+  // registry.
+  const toolsFixturePath = join(configDir, 'fixture-tools.mjs')
+  await writeFile(toolsFixturePath, [
+    'export const name = "test-fixture-tools"',
+    'export const inject = ["tools"]',
+    'export function apply(ctx) {',
+    `  for (const toolName of ${JSON.stringify(FIXTURE_TOOL_NAMES)}) {`,
+    '    ctx.tools.register({',
+    '      name: toolName,',
+    '      description: `fixture tool ${toolName}`,',
+    '      parameters: { type: "object", properties: {}, additionalProperties: false },',
+    '      output: {',
+    '        schema: { type: "object", properties: {}, additionalProperties: false },',
+    '        render: () => [],',
+    '      },',
+    '      execute: async () => ({}),',
+    '    })',
+    '  }',
+    '  ctx.provide("mailboxCompositionToolsFixtureReady", true)',
+    '}',
+    '',
+  ].join('\n'))
+
   const configPath = join(configDir, 'cordis.yml')
   const rows = [
     "- name: '@deepseek-ai/dsh-session'",
@@ -201,6 +279,7 @@ async function boot(env: ReturnType<typeof makeEnv>, options: BootOptions): Prom
     "- name: '@deepseek-ai/dsh-llm'",
     "- name: '@deepseek-ai/dsh-system-prompt'",
     "- name: '@deepseek-ai/dsh-tools'",
+    `- name: ${JSON.stringify(pathToFileURL(toolsFixturePath).href)}`,
     "- name: '@deepseek-ai/dsh-agent'",
     "- name: '@deepseek-ai/dsh-agent-loop'",
     `- name: ${JSON.stringify(pathToFileURL(mockPath).href)}`,
@@ -296,7 +375,7 @@ async function boot(env: ReturnType<typeof makeEnv>, options: BootOptions): Prom
       await ctx.loader.await()
     }
     await Promise.all([
-      options.settled(),
+      options.settled(ctx),
       options.args !== undefined && options.awaitQuiescence !== false
         ? exited.then((code) => { exitCode = code })
         : Promise.resolve(),
@@ -593,6 +672,192 @@ describe('mailbox delivery over real compositions', () => {
       })
       expect(mail.content?.[0]?.text).toMatch(/^\[.+ - from .+ \((?:seat|unverified)\)(?: · trace [0-9a-f-]+)?\]$/m)
       expect(mail.content?.[0]?.text).toContain('\n\nwake up')
+    },
+  )
+})
+
+/**
+ * Config rows for one mailbox-bridge serving `address`, admitting the fixture
+ * sender, over the tool-restriction seats {@link testRegistryPath} declares.
+ * @param address - the served seat address.
+ * @param options - `residencyIdleMs` override — 0 forces the bridge's own
+ *   flush-and-dispose to complete inside the SAME drain that delivered the
+ *   mail, which a durable-log assertion needs; the default (resident) is
+ *   fine when only the in-memory model request is under test.
+ */
+function toolSeatBridgeRows(address: string, options: { readonly residencyIdleMs?: number } = {}): string[] {
+  return [
+    "- name: '@deepseek-ai/dsh-mailbox-bridge'",
+    // Real Cordis dependency edge, not a timing hope: the fixture-tools
+    // plugin above only provides this once every fixture tool is registered,
+    // so this row's `apply()` — and the forced inline first drain inside it —
+    // cannot start until the registry this test inspects is actually
+    // populated. See the fixture-tools comment in `boot()` for the race this
+    // closes.
+    '  inject: [mailboxCompositionToolsFixtureReady]',
+    '  config:',
+    // Never the user's real ~/.dsh/org/registry.yml: a test that reads live
+    // operator state is both flaky and a way to mutate it by accident.
+    `    orgRegistryPath: ${JSON.stringify(testRegistryPath())}`,
+    `    addresses: ["${address}"]`,
+    '    pollIntervalMs: 10',
+    '    admitFrom:',
+    '      - sender',
+    ...options.residencyIdleMs !== undefined ? [`    residencyIdleMs: ${options.residencyIdleMs}`] : [],
+  ]
+}
+
+describe('seat tool-restriction over a real tool registry', () => {
+  it(
+    'narrows a restricted seat\'s live tool set against the real registry, never just the returned outcome',
+    { timeout: 180_000 },
+    async () => {
+      const env = makeEnv()
+      const id = await seed(env.storePath, 'tool-narrow')
+      const adapter = new ScriptedAdapter(['ok'])
+      await boot(env, {
+        adapter,
+        awaitQuiescence: false,
+        extraRows: toolSeatBridgeRows('tool-narrow'),
+        settled: async () => {
+          await until(() => storedState(env.storePath, id) === 'done')
+          await until(() => adapter.requests.length >= 1)
+        },
+      })
+      const toolNames = (adapter.requests[0]?.tools ?? []).map(tool => tool.name).sort()
+      expect(toolNames).toEqual(['alpha-tool'])
+    },
+  )
+
+  it(
+    'leaves an existing UNCONFIGURED seat\'s tool set identical to before — nobody is restricted by default',
+    { timeout: 180_000 },
+    async () => {
+      // The founder's hard constraint this feature rests on: a seat that
+      // never opted in must see exactly what it always saw. Compared against
+      // the SAME fixture tool set the narrowed-seat test above restricts, so
+      // "identical to before" means "every fixture tool, unfiltered" here.
+      const env = makeEnv()
+      const id = await seed(env.storePath, 'tool-open')
+      const adapter = new ScriptedAdapter(['ok'])
+      await boot(env, {
+        adapter,
+        awaitQuiescence: false,
+        extraRows: toolSeatBridgeRows('tool-open'),
+        settled: async () => {
+          await until(() => storedState(env.storePath, id) === 'done')
+          await until(() => adapter.requests.length >= 1)
+        },
+      })
+      const toolNames = (adapter.requests[0]?.tools ?? []).map(tool => tool.name).sort()
+      expect(toolNames).toEqual([...FIXTURE_TOOL_NAMES].sort())
+    },
+  )
+
+  it(
+    'degrades an allow-list naming a never-registered tool to the intersected set and logs a structured, findable notice',
+    { timeout: 180_000 },
+    async () => {
+      const env = makeEnv()
+      const id = await seed(env.storePath, 'tool-degraded')
+      const adapter = new ScriptedAdapter(['ok'])
+      const run = await boot(env, {
+        adapter,
+        awaitQuiescence: false,
+        // residencyIdleMs: 0 — the bridge's own flush-and-dispose completes
+        // inside the drain that delivered the mail, so the notice is
+        // guaranteed on disk once the mailbox row settles `done`, rather than
+        // racing this boot's teardown against a floating residency flush.
+        extraRows: toolSeatBridgeRows('tool-degraded', { residencyIdleMs: 0 }),
+        settled: async () => {
+          await until(() => storedState(env.storePath, id) === 'done')
+          await until(() => !existsSync(namedLockPath('tool-degraded')))
+        },
+      })
+      expect(run.code).toBe(0)
+
+      // The seat still boots and still runs its turn — degrading, never crashing.
+      expect(adapter.requests.length).toBeGreaterThanOrEqual(1)
+      const toolNames = (adapter.requests[0]?.tools ?? []).map(tool => tool.name)
+      expect(toolNames).toEqual([])
+
+      // The structured notice is on disk, findable by an external tool
+      // reading the log directly — the seat that would report this has, by
+      // construction, no tools left to send mail with. A cold-provisioned
+      // seat's log nests under a project-keyed subdirectory (the jsonl
+      // backend groups by cwd), so the walk is recursive rather than
+      // top-level-only.
+      const logText = allSessionLogText(env.sessionsRoot)
+      expect(logText).toContain('"kind":"mailbox-bridge-tool-restriction"')
+      expect(logText).toContain('"degraded":true')
+      expect(logText).toContain('"ghost-tool"')
+      expect(logText).toContain('"seatName":"tool-degraded"')
+    },
+  )
+
+  it(
+    'a restricted seat\'s own subagent inherits the narrowing and cannot widen back out',
+    { timeout: 180_000 },
+    async () => {
+      // A subagent is, in `@deepseek-ai/dsh-tools` terms, exactly a scope
+      // whose parent chain (`@deepseek-ai/dsh-scope`) includes the spawning
+      // agent's scope key — that is the ONE primitive `dsh-subagent`'s own
+      // preset-join (`agentPresets.composeFrom`) rides to give a real child
+      // its parent's composition. Minting that same parent-child scope
+      // relationship directly here, with the real registered `ctx.tools`,
+      // proves the chain-intersection behavior this change relies on but
+      // never touches — without pulling in the whole subagent/preset stack
+      // this minimal composition does not otherwise need.
+      const env = makeEnv()
+      const id = await seed(env.storePath, 'tool-narrow')
+      const adapter = new ScriptedAdapter(['ok'])
+      let parentTools: string[] = []
+      let childTools: string[] = []
+      let childToolsAfterWidenAttempt: string[] = []
+      await boot(env, {
+        adapter,
+        awaitQuiescence: false,
+        extraRows: toolSeatBridgeRows('tool-narrow'),
+        settled: async (ctx) => {
+          await until(() => storedState(env.storePath, id) === 'done')
+          await until(() => adapter.requests.length >= 1)
+          const agent = ctx.agents.get(deriveNamedSessionId('tool-narrow'))
+          if (agent === undefined) {
+            throw new Error('composition test bug: the restricted seat is not resident after delivery')
+          }
+          const parentScope = scopeOf(agent.ctx)
+          if (parentScope === undefined) {
+            throw new Error('composition test bug: the restricted seat carries no scope key to parent a child under')
+          }
+          // `schemas()` with no argument reads the GLOBAL unscoped view —
+          // every production caller that wants what ONE scope sees passes
+          // its scope key explicitly (e.g. the cordis-host-runner guard);
+          // omitting it here would read back all three fixture tools
+          // regardless of the seat's restriction and prove nothing.
+          parentTools = agent.ctx.tools.schemas(parentScope).map(schema => schema.name).sort()
+
+          // Minted from the PARENT's own scoped context, not the bare root
+          // `ctx`: a scope's dependency-injection visibility (here, `.tools`)
+          // is inherited from whichever context it was minted under, and only
+          // `agent.ctx` — already proven to reach `.tools` above — carries
+          // that entitlement forward to the child.
+          const child = createScope(agent.ctx, { probe: 'tool-narrow-child' }, { parent: parentScope })
+          try {
+            const childScope = scopeOf(child.ctx)
+            childTools = child.ctx.tools.schemas(childScope).map(schema => schema.name).sort()
+            // The child tries to widen itself back to every fixture tool; an
+            // ancestor's restriction still masks what a descendant scope
+            // admits, so this must not grant back what the parent took away.
+            child.ctx.tools.restrict({ allow: [...FIXTURE_TOOL_NAMES] })
+            childToolsAfterWidenAttempt = child.ctx.tools.schemas(childScope).map(schema => schema.name).sort()
+          } finally {
+            await child.dispose()
+          }
+        },
+      })
+      expect(parentTools).toEqual(['alpha-tool'])
+      expect(childTools).toEqual(['alpha-tool'])
+      expect(childToolsAfterWidenAttempt).toEqual(['alpha-tool'])
     },
   )
 })

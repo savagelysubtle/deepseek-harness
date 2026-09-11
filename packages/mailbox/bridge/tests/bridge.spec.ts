@@ -19,7 +19,7 @@ import MailboxLocal from '@deepseek-ai/dsh-mailbox-local'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import * as mailCli from '../../local/src/cli.ts'
 import * as bridge from '../src/index.ts'
-import { admittedOutcome, relaySource, relayText } from '../src/delivery.ts'
+import { admittedOutcome, relaySource, relayText, seatToolRestrictionSource, seatToolRestrictionText } from '../src/delivery.ts'
 
 let homes: string[] = []
 
@@ -50,9 +50,10 @@ beforeEach(() => {
  * alice→other is a legal-but-indirect pair a topology refusal can name a
  * route for. `island` has no edges at all — the no-route refusal case.
  * @param seats - seat names to roster.
- * @param options - edges, test-marked seats, and call-up seats; each test
- *   writing its own registry passes a distinct temp path, so the module-level
- *   mtime-keyed registry cache never sees a stale file.
+ * @param options - edges, test-marked seats, call-up seats, and a per-seat
+ *   tool restriction; each test writing its own registry passes a distinct
+ *   temp path, so the module-level mtime-keyed registry cache never sees a
+ *   stale file.
  */
 function writeTestRegistry(
   seats: readonly string[],
@@ -60,12 +61,21 @@ function writeTestRegistry(
     readonly edges?: readonly (readonly [string, string])[]
     readonly testSeats?: readonly string[]
     readonly callUp?: readonly string[]
+    readonly tools?: Readonly<Record<string, { readonly allow?: readonly string[]; readonly deny?: readonly string[] }>>
   } = {},
 ): string {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-bridge-registry-'))
   const path = join(dir, 'registry.yml')
   const testSeats = new Set(options.testSeats ?? [])
-  const rows = seats.map(seat => `  ${seat}: { cwd: ${seat}${testSeats.has(seat) ? ', test: true' : ''} }`).join('\n')
+  const toolsRow = (seat: string): string => {
+    const rule = options.tools?.[seat]
+    if (rule === undefined) return ''
+    const parts: string[] = []
+    if (rule.allow !== undefined) parts.push(`allow: [${rule.allow.join(', ')}]`)
+    if (rule.deny !== undefined) parts.push(`deny: [${rule.deny.join(', ')}]`)
+    return `, tools: { ${parts.join(', ')} }`
+  }
+  const rows = seats.map(seat => `  ${seat}: { cwd: ${seat}${testSeats.has(seat) ? ', test: true' : ''}${toolsRow(seat)} }`).join('\n')
   const edges = options.edges ?? [['alice', 'target'], ['alice', 'ghost'], ['ghost', 'other']]
   const edgeBlock = edges.length === 0
     ? 'edges: []'
@@ -108,6 +118,13 @@ async function makeHarness(options: {
   storePath?: string
   /** Explicit live-seat roster passed through to the spec (web-seat tests). */
   seatAliases?: readonly { readonly address: string; readonly sessionId: string }[]
+  /**
+   * The tool names the fake `agentCtx.tools` reports as currently known,
+   * handed to every `setup` callback create/resume invoke. Defaults to a
+   * small fixed set; a test asserting a seat's tool-restriction wiring
+   * overrides it to control what a configured rule intersects against.
+   */
+  knownTools?: readonly string[]
 } = {}): Promise<{
   ctx: ContextType
   storePath: string
@@ -118,6 +135,8 @@ async function makeHarness(options: {
   flushes: () => number
   /** The stub agent a resume/create registered under one session id. */
   agentFor: (id: string) => { session: { append: ReturnType<typeof vi.fn> } } | undefined
+  /** Every call the setup-invoked fake `agentCtx.tools.restrict()` recorded. */
+  toolsRestrictCalls: () => unknown[][]
 }> {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-mailbox-bridge-unit-'))
   homes.push(dir)
@@ -146,18 +165,29 @@ async function makeHarness(options: {
     }
     return { agent, handle: { agent, dispose: async () => { state.disposes += 1 } } }
   }
+  // The setup callback create/resume are handed needs a real Cordis Context
+  // (installModelSelection calls `agentCtx.on(...)`) with a stubbed `tools`
+  // service — a bare plain object has no `.on()` and would throw the moment
+  // setup ran. Shared across every create/resume in one harness, mirroring
+  // how one bridge-managed seat has one live tool registry.
+  const toolsSchemas = vi.fn(() => (options.knownTools ?? ['read', 'bash']).map(toolName => ({ name: toolName })))
+  const toolsRestrict = vi.fn()
+  const fakeAgentCtx = new Context()
+  fakeAgentCtx.provide('tools', { schemas: toolsSchemas, restrict: toolsRestrict } as never)
   const agents = {
     get: (id: string) => options.liveBySession?.[id] ?? registered.get(id),
-    resume: vi.fn(async (resumeOptions: { resumeSessionId: SessionId }) => {
+    resume: vi.fn(async (resumeOptions: { resumeSessionId: SessionId; setup?: (agentCtx: ContextType) => unknown }) => {
       state.resumes += 1
       const { agent, handle } = makeHandle()
       registered.set(String(resumeOptions.resumeSessionId), agent)
+      await resumeOptions.setup?.(fakeAgentCtx)
       return handle
     }),
-    create: vi.fn(async (createOptions: { sessionId: SessionId }) => {
+    create: vi.fn(async (createOptions: { sessionId: SessionId; setup?: (agentCtx: ContextType) => unknown }) => {
       state.creates.push(String(createOptions.sessionId))
       const { agent, handle } = makeHandle()
       registered.set(String(createOptions.sessionId), agent)
+      await createOptions.setup?.(fakeAgentCtx)
       return handle
     }),
   }
@@ -182,6 +212,7 @@ async function makeHarness(options: {
     flushes: () => state.flushes,
     /** The stub agent a resume/create registered under one session id. */
     agentFor: (id: string) => registered.get(id) as { session: { append: ReturnType<typeof vi.fn> } } | undefined,
+    toolsRestrictCalls: () => toolsRestrict.mock.calls,
   }
 }
 
@@ -371,6 +402,47 @@ describe('delivery rendering', () => {
     expect(bare).not.toHaveProperty('subject')
     expect(bare).not.toHaveProperty('blocking')
     expect(bare.form === 'relay' && bare.senderClass).toBe('unverified')
+  })
+})
+
+describe('seat tool-restriction notice rendering', () => {
+  it('renders a deny-only rule, exercising the denied-tools line the allow-only cases above never hit', () => {
+    const text = seatToolRestrictionText('target', { rule: { deny: ['bash'] }, missing: [] })
+    expect(text).toContain('Denied tools: bash')
+    expect(text).not.toContain('Allowed tools:')
+    const source = seatToolRestrictionSource('target', { rule: { deny: ['bash'] }, missing: [] })
+    expect(source).toMatchObject({ kind: 'mailbox-bridge-tool-restriction', form: 'notice', seatName: 'target', degraded: false, missing: [], rule: { deny: ['bash'] } })
+    expect(source.summary).toBe('Seat "target" tool restriction applied.')
+  })
+
+  it('renders an empty deny list as "(none)", the same way an empty allow list already does', () => {
+    const text = seatToolRestrictionText('target', { rule: { deny: [] }, missing: [] })
+    expect(text).toContain('Denied tools: (none)')
+  })
+
+  it('pluralizes the dropped-name line and summary for two or more missing names', () => {
+    const outcome = { rule: { allow: ['read'] }, missing: ['ghost-one', 'ghost-two'] }
+    const text = seatToolRestrictionText('target', outcome)
+    expect(text).toContain('Configured tool names were not currently known and dropped: ghost-one, ghost-two.')
+    const source = seatToolRestrictionSource('target', outcome)
+    expect(source.summary).toBe('Seat "target" tool restriction degraded: 2 configured names missing.')
+    expect(source).toMatchObject({ degraded: true, missing: ['ghost-one', 'ghost-two'] })
+  })
+
+  it('renders a single missing name with the singular form, and a deny-only degradation without the all-tools-gone line', () => {
+    const outcome = { rule: { deny: ['ghost-tool'] }, missing: ['ghost-tool'] }
+    const text = seatToolRestrictionText('target', outcome)
+    expect(text).toContain('Configured tool name was not currently known and dropped: ghost-tool.')
+    // A degraded DENY rule never empties the tool set the way an all-missing
+    // ALLOW rule does, so the "no tools at all" line must not appear here.
+    expect(text).not.toContain('NO tools at all')
+    const source = seatToolRestrictionSource('target', outcome)
+    expect(source.summary).toBe('Seat "target" tool restriction degraded: 1 configured name missing.')
+  })
+
+  it('spells out that the seat has no tools at all when every allowed name was missing', () => {
+    const text = seatToolRestrictionText('target', { rule: { allow: [] }, missing: ['ghost-tool'] })
+    expect(text).toContain('Every allowed tool name was missing: this seat now has NO tools at all.')
   })
 })
 
@@ -599,6 +671,41 @@ describe('routing outcomes', () => {
     const row = await rowState(h.storePath, id)
     expect(row.state).toBe('failed')
     expect((JSON.parse(row.result ?? '{}') as { reason?: string }).reason).toContain('disposed')
+  })
+})
+
+describe('seat tool-restriction wiring', () => {
+  it('a seat WITH a configured rule causes the setup-installed tools.restrict() to run', async () => {
+    const toolsRegistryPath = writeTestRegistry(['target', 'alice', 'ghost', 'other'], {
+      tools: { target: { allow: ['read'] } },
+    })
+    // Unpersisted: exercises createTarget's half of the wiring.
+    const h = await makeHarness({ persisted: false, knownTools: ['read', 'bash'] })
+    const id = await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec({ ...targetSpec(), orgRegistryPath: toolsRegistryPath }))
+    expect(h.toolsRestrictCalls()).toEqual([[{ allow: ['read'] }]])
+    await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'done' })
+  })
+
+  it('a seat WITH a configured rule also restricts on cold-resume, not only first creation', async () => {
+    const toolsRegistryPath = writeTestRegistry(['target', 'alice', 'ghost', 'other'], {
+      tools: { target: { deny: ['bash'] } },
+    })
+    // Persisted: exercises resumeTarget's half of the wiring.
+    const h = await makeHarness({ persisted: true, knownTools: ['read', 'bash'] })
+    await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec({ ...targetSpec(), orgRegistryPath: toolsRegistryPath }))
+    expect(h.toolsRestrictCalls()).toEqual([[{ deny: ['bash'] }]])
+  })
+
+  it('a seat with NO configured rule never calls tools.restrict()', async () => {
+    // The suite's default registry (`beforeEach`) rosters "target" with no
+    // `tools` field at all — the unconfigured-by-default case this feature's
+    // hard constraint rests on.
+    const h = await makeHarness({ persisted: false })
+    await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec()))
+    expect(h.toolsRestrictCalls()).toEqual([])
   })
 })
 

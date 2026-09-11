@@ -13,6 +13,13 @@
  * session rather than delivered to the recipient — the harness reporting on
  * the sender's own action, never correspondence and never store mail.
  *
+ * A seat's configured TOOL RESTRICTION renders through
+ * {@link seatToolRestrictionUserMessage}, logged into that SEAT's own session
+ * at create/resume — its own `kind` (never `mailbox`, since it carries no mail
+ * provenance at all) with structured fields a reader that isn't a person can
+ * still act on: whether the rule degraded and which configured names went
+ * missing.
+ *
  * @module @deepseek-ai/dsh-mailbox-bridge/delivery
  */
 
@@ -20,6 +27,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { boundContextSummary } from '@deepseek-ai/dsh-llm'
 import type { MailboxLease, MailboxMessageSource, MailboxRefusalSource, MailboxOutcome } from '@deepseek-ai/dsh-mailbox'
+import type { SeatToolRestrictionOutcome } from './seat-tool-restriction.ts'
 
 /**
  * Sender class stated on every delivered envelope, derived by the caller from
@@ -254,5 +262,108 @@ export function refusalUserMessage(lease: MailboxLease, reason: string): UserMes
   return createUserMessage({
     content: [{ type: 'text', text: refusalText(lease, reason) }],
     source: refusalSource(lease, reason),
+  })
+}
+
+/**
+ * Durable attribution for the runtime's own account of a seat's configured
+ * tool restriction being applied at create/resume. Deliberately its OWN
+ * `kind` rather than the mailbox `kind` above: this notice carries no mail
+ * provenance whatsoever — no sender, no recipient, no store message — it is
+ * the harness stating what it just did to the seat's own tool set, so
+ * crediting it to "mailbox" would misrepresent where it came from.
+ *
+ * The structured fields are the point, not the prose: a seat whose entire
+ * `allow` list went missing ends up with NO tools at all and therefore
+ * cannot send mail to report that — the durable log entry has to be
+ * findable by an external tool reading the session log directly, not only
+ * readable by a person who happens to open the transcript.
+ */
+export interface SeatToolRestrictionNoticeSource {
+  readonly kind: 'mailbox-bridge-tool-restriction'
+  /** A runtime account shown without expanding the row (`notice` context form). */
+  readonly form: 'notice'
+  /** One-line account, bounded the same way every other `notice` producer bounds it. */
+  readonly summary: string
+  /** The seat this restriction was applied to. */
+  readonly seatName: string
+  /**
+   * Whether the configured rule degraded: at least one configured tool name
+   * was not currently known and was dropped rather than crashing creation.
+   */
+  readonly degraded: boolean
+  /** Configured names that were not currently known, in configured order; empty when not degraded. */
+  readonly missing: readonly string[]
+  /** The rule actually applied, after intersecting against the known tool set. */
+  readonly rule: {
+    readonly allow?: readonly string[]
+    readonly deny?: readonly string[]
+  }
+}
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'mailbox-bridge-tool-restriction': SeatToolRestrictionNoticeSource
+  }
+}
+
+/**
+ * Render the model-visible text of one seat tool-restriction notice: what was
+ * applied, and — when the rule degraded — which configured names were
+ * dropped and why, including the "this seat now has no tools at all" case
+ * spelled out so a reader (model or human) is never left to infer it.
+ * @param seatName - the seat the restriction was applied to.
+ * @param outcome - the effective rule and any names dropped, from {@link applySeatToolRestriction}.
+ * @returns the plain-text turn content.
+ */
+export function seatToolRestrictionText(seatName: string, outcome: SeatToolRestrictionOutcome): string {
+  const { rule, missing } = outcome
+  const lines = [`Tool restriction applied for seat "${seatName}".`]
+  if (rule.allow !== undefined) lines.push(`Allowed tools: ${rule.allow.length > 0 ? rule.allow.join(', ') : '(none)'}`)
+  if (rule.deny !== undefined) lines.push(`Denied tools: ${rule.deny.length > 0 ? rule.deny.join(', ') : '(none)'}`)
+  if (missing.length > 0) {
+    lines.push(`Configured tool name${missing.length > 1 ? 's were' : ' was'} not currently known and dropped: ${missing.join(', ')}.`)
+    if (rule.allow !== undefined && rule.allow.length === 0) {
+      lines.push('Every allowed tool name was missing: this seat now has NO tools at all.')
+    }
+  }
+  return lines.join('\n')
+}
+
+/**
+ * Build the seat tool-restriction notice source for one applied restriction.
+ * @param seatName - the seat the restriction was applied to.
+ * @param outcome - the effective rule and any names dropped, from {@link applySeatToolRestriction}.
+ * @returns the attribution object merged into the notice's user turn.
+ */
+export function seatToolRestrictionSource(seatName: string, outcome: SeatToolRestrictionOutcome): SeatToolRestrictionNoticeSource {
+  const degraded = outcome.missing.length > 0
+  const summaryText = degraded
+    ? `Seat "${seatName}" tool restriction degraded: ${outcome.missing.length} configured name${outcome.missing.length > 1 ? 's' : ''} missing.`
+    : `Seat "${seatName}" tool restriction applied.`
+  return {
+    kind: 'mailbox-bridge-tool-restriction',
+    form: 'notice',
+    seatName,
+    degraded,
+    missing: outcome.missing,
+    rule: outcome.rule,
+    summary: boundContextSummary(summaryText),
+  }
+}
+
+/**
+ * Render one applied seat tool-restriction as the durable user-role context
+ * turn logged into the SEAT's own session. Like {@link refusalUserMessage},
+ * this is appended directly to the session log — never handed to
+ * `steer`/`followup` — so it wakes nothing and starts no turn.
+ * @param seatName - the seat the restriction was applied to.
+ * @param outcome - the effective rule and any names dropped, from {@link applySeatToolRestriction}.
+ * @returns the identified prompt content of the notice.
+ */
+export function seatToolRestrictionUserMessage(seatName: string, outcome: SeatToolRestrictionOutcome): UserMessage {
+  return createUserMessage({
+    content: [{ type: 'text', text: seatToolRestrictionText(seatName, outcome) }],
+    source: seatToolRestrictionSource(seatName, outcome),
   })
 }

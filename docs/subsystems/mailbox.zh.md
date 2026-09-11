@@ -289,5 +289,5 @@ The bridge refused a claimed lease terminally at admission — registry health, 
 'mailbox/refused'(refusal: MailboxRefusal): void
 ```
 
-Source: [`packages/mailbox/bridge/src/index.ts:1369`](../../packages/mailbox/bridge/src/index.ts)
+Source: [`packages/mailbox/bridge/src/index.ts:1446`](../../packages/mailbox/bridge/src/index.ts)
 <!-- END GENERATED cordis-surface -->
