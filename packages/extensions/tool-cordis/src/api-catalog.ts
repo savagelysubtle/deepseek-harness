@@ -2592,6 +2592,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'refusal', description: 'the sender and recipient addresses and the terminal reason.' }],
   },
   {
+    name: 'mailbox/seat-tools-restricted',
+    mode: 'emit',
+    signature: '\'mailbox/seat-tools-restricted\'(restriction: SeatToolsRestricted): void',
+    summary: 'A seat\'s configured tool restriction was resolved at create or cold-resume, in one of two shapes:',
+    description: 'A seat\'s configured tool restriction was resolved at create or cold-resume, in one of two shapes:\n\n- `muted: false` — `composeSeatAgent` applied it and the seat composed normally. This event is the restriction\'s LIVE outlet, emitted alongside (never instead of) the durable notice node `seatToolRestrictionUserMessage` appends into the seat\'s OWN session — that durable append is the outlet that does not depend on anyone watching a live stream, and this event is the one that reaches a listener right now.\n- `muted: true` — the rule left the seat with NO tools at all, so `composeSeatAgent`\'s `setup` threw SeatMutedToolsError before anything was ever published; the seat was never composed, so it has no session to notice. `deliverLease` catches that error, warns the host log, emits this event, and routes the mail through `refuse()` instead — whose own `mailbox/refused` event and durable SENDER-side notice report the refusal itself. This event exists alongside that one because `mailbox/refused` carries only `{ from, to, reason }`: this is the richer, domain-specific record of WHY — the missing/remaining tool names a listener would otherwise have to parse back out of the reason string.\n\nListener failures are logged and contained by Cordis dispatch.',
+    parameters: [{ name: 'restriction', description: 'the seat, the effective outcome, and the muted/degraded conditions.' }],
+  },
+  {
     name: 'session-telemetry/record',
     mode: 'waterfall',
     signature: '\'session-telemetry/record\'(record: SessionTelemetryRecord, next: () => SessionTelemetryRecord): SessionTelemetryRecord',
@@ -4042,6 +4050,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SearchResultView',
     declaration: 'export type SearchResultView = SearchMatchesResultView | SearchPathsResultView;',
+  },
+  {
+    name: 'SeatToolsRestricted',
+    declaration: 'export interface SeatToolsRestricted {\n    readonly seatName: string;\n    readonly muted: boolean;\n    readonly degraded: boolean;\n    readonly missing: readonly string[];\n    readonly remaining: readonly string[];\n}',
   },
   {
     name: 'ServerResponse',

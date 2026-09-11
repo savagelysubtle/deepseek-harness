@@ -60,6 +60,18 @@ export interface SeatToolRestrictionOutcome {
   readonly rule: SeatToolRestrictionRule
   /** Configured names that named a tool not currently known, in configured order. */
   readonly missing: readonly string[]
+  /**
+   * The tool names the seat is actually left with once `rule` is applied to
+   * the known set — `rule.allow` (or, absent one, every known name) minus
+   * `rule.deny`, sorted for a stable comparison. This is the only reliable
+   * signal for whether a seat ended up with NO tools at all: `missing` only
+   * counts configured names that were dropped, so a deliberately-narrow rule
+   * that names nothing missing can still leave a seat here with an empty
+   * `remaining` (an all-covering `deny` list, or an `allow` list whose names
+   * were all unknown). Callers MUST check `remaining`, never infer muteness
+   * from `missing`.
+   */
+  readonly remaining: readonly string[]
 }
 
 /** Intersect one configured name list against the known set, splitting kept names from missing ones. */
@@ -78,6 +90,24 @@ function intersect(
 }
 
 /**
+ * Compute the tool names a seat is actually left with once `rule` (already
+ * intersected against `known`) is applied: `rule.allow` when given, else
+ * every known name, minus `rule.deny` when given. Sorted for a stable,
+ * comparison-friendly order — the caller does not care about configured
+ * order here, only about the resulting set.
+ * @param known - the tool names known to the registry before restricting.
+ * @param rule - the effective (already-intersected) restriction rule.
+ * @returns the sorted surviving tool names.
+ */
+function remainingToolNames(known: ReadonlySet<string>, rule: SeatToolRestrictionRule): readonly string[] {
+  const base = new Set(rule.allow ?? known)
+  if (rule.deny !== undefined) {
+    for (const name of rule.deny) base.delete(name)
+  }
+  return [...base].sort()
+}
+
+/**
  * Apply one seat's configured tool restriction, degrading missing names
  * instead of letting the registry throw on them.
  *
@@ -92,12 +122,25 @@ function intersect(
  * back to unrestricted would silently widen a security boundary, which is
  * the one outcome that is unacceptable. `deny` has nothing to remove that
  * is not there, so an all-missing `deny` list degrades to a no-op.
+ *
+ * A MUTED outcome — `remaining` comes back empty, by either route above —
+ * is deliberately never handed to `restrict()` at all: a half-applied
+ * restriction on an agent scope the caller is about to throw away (see
+ * `composeSeatAgent` in the bridge's `index.ts`, which aborts composition
+ * entirely for this outcome) would mutate the registry for no reason, and
+ * "no rule was ever applied" is a strictly simpler state to reason about
+ * than "a rule was applied to a scope that never got composed." The caller
+ * decides what a muted outcome MEANS (here, it means: never compose this
+ * seat, refuse the mail instead); this function only ever decides what the
+ * outcome IS.
  * @param agentContext - the seat's scoped context exposing the tool registry.
  * @param seatName - the seat this restriction belongs to, used to attribute
  *   a registry `restrict()` failure to the seat that caused it.
  * @param rule - the seat's configured restriction, or `undefined` for none.
- * @returns the effective rule applied and the configured names that were not
- *   currently present, or `undefined` when there was no rule to apply.
+ * @returns the effective rule computed, the configured names that were not
+ *   currently present, and the tool names the seat is actually left with, or
+ *   `undefined` when there was no rule to apply. `restrict()` is called only
+ *   when `remaining` is non-empty — see above.
  */
 export function applySeatToolRestriction(
   agentContext: SeatToolRegistryContext,
@@ -119,11 +162,15 @@ export function applySeatToolRestriction(
     ...deny !== undefined ? { deny } : {},
   }
 
-  try {
-    agentContext.tools.restrict(effective)
-  } catch (error) {
-    throw new Error(`seat "${seatName}": failed to apply tool restriction`, { cause: error })
+  const remaining = remainingToolNames(known, effective)
+
+  if (remaining.length > 0) {
+    try {
+      agentContext.tools.restrict(effective)
+    } catch (error) {
+      throw new Error(`seat "${seatName}": failed to apply tool restriction`, { cause: error })
+    }
   }
 
-  return { rule: effective, missing: [...missing] }
+  return { rule: effective, missing: [...missing], remaining }
 }

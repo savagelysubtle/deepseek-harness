@@ -345,7 +345,8 @@ function assertNonEmptyString(value: unknown, label: string): asserts value is s
  * @param value - the raw `tools` value from the parsed document.
  * @param seatName - the owning seat, for error messages a human can act on.
  * @returns the validated tool restriction.
- * @throws when the shape is malformed, or neither `allow` nor `deny` is given.
+ * @throws when the shape is malformed, when neither `allow` nor `deny` is
+ *   given, or when a given `allow`/`deny` is present but empty.
  */
 function parseSeatTools(value: unknown, seatName: string): OrgRegistrySeatTools {
   assertObject(value, `seats.${seatName}.tools`)
@@ -353,6 +354,18 @@ function parseSeatTools(value: unknown, seatName: string): OrgRegistrySeatTools 
   if (value.deny !== undefined) assertStringArray(value.deny, `seats.${seatName}.tools.deny`)
   if (value.allow === undefined && value.deny === undefined) {
     throw new Error(`org registry field seats.${seatName}.tools must include "allow" and/or "deny" (an empty tools rule is meaningless)`)
+  }
+  // A PRESENT but empty list reads like an oversight (a typo'd name list that
+  // silently resolved to nothing), yet parses cleanly and leaves the seat
+  // with zero tools — the same "meaningless as configuration" problem the
+  // whole-field guard above catches, just one level deeper. Reject it here
+  // too, rather than letting it through to become a muted seat nobody
+  // configured on purpose.
+  if (value.allow !== undefined && value.allow.length === 0) {
+    throw new Error(`org registry field seats.${seatName}.tools.allow must not be an empty list (an empty tools rule is meaningless)`)
+  }
+  if (value.deny !== undefined && value.deny.length === 0) {
+    throw new Error(`org registry field seats.${seatName}.tools.deny must not be an empty list (an empty tools rule is meaningless)`)
   }
   return {
     ...value.allow === undefined ? {} : { allow: value.allow },

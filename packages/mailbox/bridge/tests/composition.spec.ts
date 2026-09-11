@@ -769,43 +769,55 @@ describe('seat tool-restriction over a real tool registry', () => {
   )
 
   it(
-    'degrades an allow-list naming a never-registered tool to the intersected set and logs a structured, findable notice',
+    'refuses mail to an allow-list naming ONLY a never-registered tool — muted, never composed — instead of degrading it to a running, toolless seat',
     { timeout: 180_000 },
     async () => {
+      // `tool-degraded`'s configured allow list names exactly one tool,
+      // `ghost-tool`, which the real registry never registers: intersected
+      // against the fixture tool set this is `allow: []` — the seat's
+      // EFFECTIVE tool set is empty. Founder ruling (see `SeatMutedToolsError`
+      // in `src/index.ts`): a seat left with no tools at all cannot call
+      // `mailbox_send` to report its own condition, so it must never be
+      // composed to run a turn in the first place — the mail addressed to it
+      // is refused at its source instead. This is the real-registry-level
+      // proof of that; `bridge.spec.ts`'s fake-registry suite covers the same
+      // behavior against the drain internals directly.
       const env = makeEnv()
       const id = await seed(env.storePath, 'tool-degraded')
       const adapter = new ScriptedAdapter(['ok'])
-      const run = await boot(env, {
+      await boot(env, {
         adapter,
         awaitQuiescence: false,
-        // residencyIdleMs: 0 — the bridge's own flush-and-dispose completes
-        // inside the drain that delivered the mail, so the notice is
-        // guaranteed on disk once the mailbox row settles `done`, rather than
-        // racing this boot's teardown against a floating residency flush.
         extraRows: toolSeatBridgeRows('tool-degraded', { residencyIdleMs: 0 }),
         settled: async () => {
-          await until(() => storedState(env.storePath, id) === 'done')
+          await until(() => storedState(env.storePath, id) === 'failed')
           await until(() => !existsSync(namedLockPath('tool-degraded')))
         },
       })
-      expect(run.code).toBe(0)
 
-      // The seat still boots and still runs its turn — degrading, never crashing.
-      expect(adapter.requests.length).toBeGreaterThanOrEqual(1)
-      const toolNames = (adapter.requests[0]?.tools ?? []).map(tool => tool.name)
-      expect(toolNames).toEqual([])
+      // The seat never boots and never runs a turn — nothing to degrade,
+      // because nothing was ever composed.
+      expect(adapter.requests).toHaveLength(0)
 
-      // The structured notice is on disk, findable by an external tool
-      // reading the log directly — the seat that would report this has, by
-      // construction, no tools left to send mail with. A cold-provisioned
-      // seat's log nests under a project-keyed subdirectory (the jsonl
-      // backend groups by cwd), so the walk is recursive rather than
-      // top-level-only.
+      // Terminal on the recipient's row, with the reason naming both the
+      // cause and the seat.
+      const db = new DatabaseSync(env.storePath)
+      let reason: string
+      try {
+        const row = db.prepare('SELECT result FROM messages WHERE id = ?').get(id) as unknown as { result: string | null }
+        reason = (JSON.parse(row.result ?? '{}') as { reason?: string }).reason ?? ''
+      } finally {
+        db.close()
+      }
+      expect(reason).toContain('seat-tools-muted')
+      expect(reason).toContain('tool-degraded')
+
+      // No seat-side session log exists to carry the durable
+      // tool-restriction notice — the seat was never composed, so there is
+      // nothing to log into. The muted seat's own log directory is simply
+      // never created.
       const logText = allSessionLogText(env.sessionsRoot)
-      expect(logText).toContain('"kind":"mailbox-bridge-tool-restriction"')
-      expect(logText).toContain('"degraded":true')
-      expect(logText).toContain('"ghost-tool"')
-      expect(logText).toContain('"seatName":"tool-degraded"')
+      expect(logText).not.toContain('"kind":"mailbox-bridge-tool-restriction"')
     },
   )
 

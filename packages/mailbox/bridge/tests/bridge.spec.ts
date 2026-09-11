@@ -183,18 +183,26 @@ async function makeHarness(options: {
   fakeAgentCtx.provide('tools', { schemas: toolsSchemas, restrict: toolsRestrict } as never)
   const agents = {
     get: (id: string) => options.liveBySession?.[id] ?? registered.get(id),
+    // Registration and the resume/create counts happen AFTER `setup`
+    // resolves, never before — mirroring the real `AgentRegistry` contract
+    // (`AgentSetup`'s own doc): a `setup` throw rolls the whole creation or
+    // resume back without ever publishing the session or agent id. A fake
+    // that registered eagerly would let a muted seat's setup-time throw
+    // "succeed" as far as this stub's own bookkeeping is concerned, which is
+    // exactly the case the seat-tools-muted refusal tests need to tell apart
+    // from a real composition.
     resume: vi.fn(async (resumeOptions: { resumeSessionId: SessionId; setup?: (agentCtx: ContextType) => unknown }) => {
-      state.resumes += 1
       const { agent, handle } = makeHandle()
-      registered.set(String(resumeOptions.resumeSessionId), agent)
       await resumeOptions.setup?.(fakeAgentCtx)
+      state.resumes += 1
+      registered.set(String(resumeOptions.resumeSessionId), agent)
       return handle
     }),
     create: vi.fn(async (createOptions: { sessionId: SessionId; setup?: (agentCtx: ContextType) => unknown }) => {
-      state.creates.push(String(createOptions.sessionId))
       const { agent, handle } = makeHandle()
-      registered.set(String(createOptions.sessionId), agent)
       await createOptions.setup?.(fakeAgentCtx)
+      state.creates.push(String(createOptions.sessionId))
+      registered.set(String(createOptions.sessionId), agent)
       return handle
     }),
   }
@@ -414,30 +422,31 @@ describe('delivery rendering', () => {
 
 describe('seat tool-restriction notice rendering', () => {
   it('renders a deny-only rule, exercising the denied-tools line the allow-only cases above never hit', () => {
-    const text = seatToolRestrictionText('target', { rule: { deny: ['bash'] }, missing: [] })
+    const outcome = { rule: { deny: ['bash'] }, missing: [], remaining: ['read'] }
+    const text = seatToolRestrictionText('target', outcome)
     expect(text).toContain('Denied tools: bash')
     expect(text).not.toContain('Allowed tools:')
-    const source = seatToolRestrictionSource('target', { rule: { deny: ['bash'] }, missing: [] })
-    expect(source).toMatchObject({ kind: 'mailbox-bridge-tool-restriction', form: 'notice', seatName: 'target', degraded: false, missing: [], rule: { deny: ['bash'] } })
+    const source = seatToolRestrictionSource('target', outcome)
+    expect(source).toMatchObject({ kind: 'mailbox-bridge-tool-restriction', form: 'notice', seatName: 'target', degraded: false, muted: false, missing: [], rule: { deny: ['bash'] } })
     expect(source.summary).toBe('Seat "target" tool restriction applied.')
   })
 
   it('renders an empty deny list as "(none)", the same way an empty allow list already does', () => {
-    const text = seatToolRestrictionText('target', { rule: { deny: [] }, missing: [] })
+    const text = seatToolRestrictionText('target', { rule: { deny: [] }, missing: [], remaining: ['read', 'bash'] })
     expect(text).toContain('Denied tools: (none)')
   })
 
   it('pluralizes the dropped-name line and summary for two or more missing names', () => {
-    const outcome = { rule: { allow: ['read'] }, missing: ['ghost-one', 'ghost-two'] }
+    const outcome = { rule: { allow: ['read'] }, missing: ['ghost-one', 'ghost-two'], remaining: ['read'] }
     const text = seatToolRestrictionText('target', outcome)
     expect(text).toContain('Configured tool names were not currently known and dropped: ghost-one, ghost-two.')
     const source = seatToolRestrictionSource('target', outcome)
     expect(source.summary).toBe('Seat "target" tool restriction degraded: 2 configured names missing.')
-    expect(source).toMatchObject({ degraded: true, missing: ['ghost-one', 'ghost-two'] })
+    expect(source).toMatchObject({ degraded: true, muted: false, missing: ['ghost-one', 'ghost-two'] })
   })
 
   it('renders a single missing name with the singular form, and a deny-only degradation without the all-tools-gone line', () => {
-    const outcome = { rule: { deny: ['ghost-tool'] }, missing: ['ghost-tool'] }
+    const outcome = { rule: { deny: ['ghost-tool'] }, missing: ['ghost-tool'], remaining: ['read', 'bash'] }
     const text = seatToolRestrictionText('target', outcome)
     expect(text).toContain('Configured tool name was not currently known and dropped: ghost-tool.')
     // A degraded DENY rule never empties the tool set the way an all-missing
@@ -445,11 +454,31 @@ describe('seat tool-restriction notice rendering', () => {
     expect(text).not.toContain('NO tools at all')
     const source = seatToolRestrictionSource('target', outcome)
     expect(source.summary).toBe('Seat "target" tool restriction degraded: 1 configured name missing.')
+    expect(source.muted).toBe(false)
   })
 
-  it('spells out that the seat has no tools at all when every allowed name was missing', () => {
-    const text = seatToolRestrictionText('target', { rule: { allow: [] }, missing: ['ghost-tool'] })
-    expect(text).toContain('Every allowed tool name was missing: this seat now has NO tools at all.')
+  it('spells out that the seat has no tools at all when `remaining` is empty — independent of `missing`', () => {
+    // Route 1: every allowed name was missing (missing is non-empty here).
+    const missingAllowText = seatToolRestrictionText('target', { rule: { allow: [] }, missing: ['ghost-tool'], remaining: [] })
+    expect(missingAllowText).toContain('This seat now has NO tools at all — it cannot call any tool, which includes the tool it would use to report this.')
+
+    // Route 2: a deny list that happens to cover every known tool — nothing
+    // was "missing" (every configured name matched), yet the seat is still
+    // muted. `missing` alone could never catch this; `remaining` does.
+    const denyEverythingText = seatToolRestrictionText('target', { rule: { deny: ['read', 'bash'] }, missing: [], remaining: [] })
+    expect(denyEverythingText).toContain('This seat now has NO tools at all — it cannot call any tool, which includes the tool it would use to report this.')
+  })
+
+  it('reports `muted: true` on the source for both muted routes, and stamps a MUTED summary ahead of the ordinary applied/degraded wording', () => {
+    const missingAllowSource = seatToolRestrictionSource('target', { rule: { allow: [] }, missing: ['ghost-tool'], remaining: [] })
+    expect(missingAllowSource).toMatchObject({ muted: true, degraded: true })
+    expect(missingAllowSource.summary).toBe('Seat "target" tool restriction MUTED: this seat now has NO tools at all.')
+
+    const denyEverythingSource = seatToolRestrictionSource('target', { rule: { deny: ['read', 'bash'] }, missing: [], remaining: [] })
+    // Nothing was missing here, yet still muted — degraded and muted are
+    // genuinely independent booleans, not one blended condition.
+    expect(denyEverythingSource).toMatchObject({ muted: true, degraded: false })
+    expect(denyEverythingSource.summary).toBe('Seat "target" tool restriction MUTED: this seat now has NO tools at all.')
   })
 })
 
@@ -713,6 +742,78 @@ describe('seat tool-restriction wiring', () => {
     await publishHello(h.ctx)
     await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec()))
     expect(h.toolsRestrictCalls()).toEqual([])
+  })
+})
+
+describe('muted seats (a resolved tool restriction leaving NO tools at all) are refused, never composed', () => {
+  it('a deny list covering every known tool refuses the mail on first creation: never restricted, never registered, the sender told why', async () => {
+    const toolsRegistryPath = writeTestRegistry(['target', 'alice', 'ghost', 'other'], {
+      tools: { target: { deny: ['read', 'bash'] } },
+    })
+    // Unpersisted: exercises createTarget's half of the muted-abort wiring.
+    const h = await makeHarness({ persisted: false, knownTools: ['read', 'bash'] })
+    const refusals: bridge.MailboxRefusal[] = []
+    h.ctx.on('mailbox/refused', (refusal) => { refusals.push(refusal) })
+    const restrictions: unknown[] = []
+    h.ctx.on('mailbox/seat-tools-restricted', (restriction) => { restrictions.push(restriction) })
+    const id = await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(undefined, { orgRegistryPath: toolsRegistryPath })))
+
+    // The registry was never mutated: applySeatToolRestriction skips
+    // restrict() entirely for a muted outcome.
+    expect(h.toolsRestrictCalls()).toEqual([])
+    // No agent was ever published under the target's session id — the setup
+    // throw rolled the whole creation back before announce/publish, and the
+    // stub only registers after setup succeeds (mirroring that contract).
+    expect(h.createdSessions()).not.toContain(String(deriveNamedSessionId('target')))
+    expect(h.agentFor(String(deriveNamedSessionId('target')))).toBeUndefined()
+
+    // The mail is refused, not left pending or silently dropped, and the
+    // reason names both the cause and the seat.
+    const row = await rowState(h.storePath, id)
+    expect(row.state).toBe('failed')
+    const reason = (JSON.parse(row.result ?? '{}') as { reason: string }).reason
+    expect(reason).toContain('seat-tools-muted')
+    expect(reason).toContain('target')
+
+    // The sender-facing refusal fired exactly once, with the same reason.
+    expect(refusals).toEqual([{ from: 'sender', to: String(TARGET), reason }])
+
+    // The richer domain-specific event fired too, describing WHY.
+    expect(restrictions).toEqual([{ seatName: 'target', muted: true, degraded: false, missing: [], remaining: [] }])
+  })
+
+  it('an allow list whose every name is unknown refuses on cold-resume as well: never restricted, never resumed', async () => {
+    const toolsRegistryPath = writeTestRegistry(['target', 'alice', 'ghost', 'other'], {
+      tools: { target: { allow: ['ghost-tool', 'wraith-tool'] } },
+    })
+    // Persisted: exercises resumeTarget's half of the muted-abort wiring.
+    const h = await makeHarness({ persisted: true, knownTools: ['read', 'bash'] })
+    const id = await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(undefined, { orgRegistryPath: toolsRegistryPath })))
+
+    expect(h.toolsRestrictCalls()).toEqual([])
+    // The stub's own resume counter increments only after setup succeeds —
+    // a muted setup throw means this never happens.
+    expect(h.resumeCalls()).toBe(0)
+    expect(h.agentFor(String(deriveNamedSessionId('target')))).toBeUndefined()
+
+    const row = await rowState(h.storePath, id)
+    expect(row.state).toBe('failed')
+    const reason = (JSON.parse(row.result ?? '{}') as { reason: string }).reason
+    expect(reason).toContain('seat-tools-muted')
+  })
+
+  it('the host log gets a live warning naming the seat when a mail addressed to a muted seat is refused', async () => {
+    const denyEverythingPath = writeTestRegistry(['target', 'alice', 'ghost', 'other'], {
+      tools: { target: { deny: ['read', 'bash'] } },
+    })
+    const h = await makeHarness({ persisted: false, knownTools: ['read', 'bash'] })
+    const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
+    await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(undefined, { orgRegistryPath: denyEverythingPath })))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('NO tools at all'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('target'))
   })
 })
 

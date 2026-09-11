@@ -289,5 +289,49 @@ The bridge refused a claimed lease terminally at admission — registry health, 
 'mailbox/refused'(refusal: MailboxRefusal): void
 ```
 
-Source: [`packages/mailbox/bridge/src/index.ts:1455`](../../packages/mailbox/bridge/src/index.ts)
+Source: [`packages/mailbox/bridge/src/index.ts:1561`](../../packages/mailbox/bridge/src/index.ts)
+
+<a id="mailboxseat-tools-restricted--emit"></a>
+
+#### `mailbox/seat-tools-restricted` — emit
+
+A seat's configured tool restriction was resolved at create or cold-resume, in one of two shapes:
+
+- `muted: false` — `composeSeatAgent` applied it and the seat composed normally. This event is the restriction's LIVE outlet, emitted alongside (never instead of) the durable notice node `seatToolRestrictionUserMessage` appends into the seat's OWN session — that durable append is the outlet that does not depend on anyone watching a live stream, and this event is the one that reaches a listener right now.
+- `muted: true` — the rule left the seat with NO tools at all, so `composeSeatAgent`'s `setup` threw SeatMutedToolsError before anything was ever published; the seat was never composed, so it has no session to notice. `deliverLease` catches that error, warns the host log, emits this event, and routes the mail through `refuse()` instead — whose own `mailbox/refused` event and durable SENDER-side notice report the refusal itself. This event exists alongside that one because `mailbox/refused` carries only `{ from, to, reason }`: this is the richer, domain-specific record of WHY — the missing/remaining tool names a listener would otherwise have to parse back out of the reason string.
+
+Listener failures are logged and contained by Cordis dispatch.
+
+```ts cordis-catalog
+/**
+ * A seat's configured tool restriction was resolved at create or
+ * cold-resume, in one of two shapes:
+ *
+ * - `muted: false` — `composeSeatAgent` applied it and the seat composed
+ *   normally. This event is the restriction's LIVE outlet, emitted
+ *   alongside (never instead of) the durable notice node
+ *   `seatToolRestrictionUserMessage` appends into the seat's OWN
+ *   session — that durable append is the outlet that does not depend on
+ *   anyone watching a live stream, and this event is the one that
+ *   reaches a listener right now.
+ * - `muted: true` — the rule left the seat with NO tools at all, so
+ *   `composeSeatAgent`'s `setup` threw {@link SeatMutedToolsError}
+ *   before anything was ever published; the seat was never composed, so
+ *   it has no session to notice. `deliverLease` catches that error,
+ *   warns the host log, emits this event, and routes the mail through
+ *   `refuse()` instead — whose own `mailbox/refused` event and durable
+ *   SENDER-side notice report the refusal itself. This event exists
+ *   alongside that one because `mailbox/refused` carries only
+ *   `{ from, to, reason }`: this is the richer, domain-specific record
+ *   of WHY — the missing/remaining tool names a listener would otherwise
+ *   have to parse back out of the reason string.
+ *
+ * Listener failures are logged and contained by Cordis dispatch.
+ * @param restriction - the seat, the effective outcome, and the muted/degraded conditions.
+ * @mode emit
+ */
+'mailbox/seat-tools-restricted'(restriction: SeatToolsRestricted): void
+```
+
+Source: [`packages/mailbox/bridge/src/index.ts:1590`](../../packages/mailbox/bridge/src/index.ts)
 <!-- END GENERATED cordis-surface -->

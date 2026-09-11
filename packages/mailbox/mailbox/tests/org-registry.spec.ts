@@ -60,6 +60,12 @@ describe('parseOrgRegistry', () => {
     ['seats:\n  solo: { cwd: one, tools: { allow: [bash, 1] } }', 'seats.solo.tools.allow'],
     ['seats:\n  solo: { cwd: one, tools: { deny: "bash" } }', 'seats.solo.tools.deny'],
     ['seats:\n  solo: { cwd: one, tools: { deny: [""] } }', 'seats.solo.tools.deny'],
+    // A PRESENT but empty allow/deny list parses cleanly and silently leaves
+    // the seat with zero tools — the same "meaningless as configuration"
+    // problem the whole-field guard above catches, one level deeper. Reject
+    // it here too, naming both the seat and the specific empty field.
+    ['seats:\n  solo: { cwd: one, tools: { allow: [] } }', 'seats.solo.tools.allow'],
+    ['seats:\n  solo: { cwd: one, tools: { deny: [] } }', 'seats.solo.tools.deny'],
   ])('rejects %j loudly naming the field', (_document, message) => {
     const document = _document.includes('baseDir') ? _document : `${_document}\nbaseDir: /projects`
     expect(() => parseOrgRegistry(document)).toThrow(message)
