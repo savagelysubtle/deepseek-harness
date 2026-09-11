@@ -638,8 +638,17 @@ describe('mailbox delivery over real compositions', () => {
       const aliasedId = deriveNamedSessionId('gotham-seat')
       const id = await seed(env.storePath, 'alfred', 'console')
 
-      const run = await boot(env, {
-        responses: ['seat wake reply'],
+      // `done` is recorded the instant the mail is handed to the resident
+      // agent: the bridge does not await `handle.agent.followup(...)` before
+      // `mailbox.settle(...)`. Settling on `done` alone therefore proves
+      // ADMISSION and never that the turn reached the model, so tearing the
+      // boot down on it races the very request this test asserts. Same
+      // observed-delivery condition the guest-wake and cold-resume cases
+      // already carry — which is why the adapter is built here, rather than
+      // read off the outcome after the boot has already disposed.
+      const wakeAdapter = new ScriptedAdapter(['seat wake reply'])
+      await boot(env, {
+        adapter: wakeAdapter,
         awaitQuiescence: false,
         extraRows: [
           "- name: '@deepseek-ai/dsh-mailbox-bridge'",
@@ -656,10 +665,15 @@ describe('mailbox delivery over real compositions', () => {
           '      - address: alfred',
           '        sessionId: ' + JSON.stringify(String(aliasedId)),
         ],
-        settled: () => until(() => storedState(env.storePath, id) === 'done'),
+        settled: async () => {
+          await until(() => storedState(env.storePath, id) === 'done')
+          await until(() => wakeAdapter.requests.some(request =>
+            request.messages.some(message =>
+              (message as { source?: { kind?: string } }).source?.kind === 'mailbox')))
+        },
       })
 
-      const mailboxMessages = scriptedAdapterOf(run).requests
+      const mailboxMessages = wakeAdapter.requests
         .flatMap(request => request.messages)
         .filter(message => (message as { source?: { kind?: string } }).source?.kind === 'mailbox')
       expect(mailboxMessages.length).toBeGreaterThanOrEqual(1)
