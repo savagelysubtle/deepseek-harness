@@ -86,14 +86,21 @@ function writeTestRegistry(
   return path
 }
 
-function targetSpec(addresses = ['target']): Parameters<typeof bridge.resolveBridgeSpec>[0] {
+function targetSpec(
+  addresses = ['target'],
+  // Overrides are named rather than spread over the returned spec: the spec's
+  // declared type reads as a class instance to the linter, so `{ ...targetSpec() }`
+  // trips no-misused-spread. Callers that need a different registry path take
+  // this route instead of spreading.
+  overrides: { orgRegistryPath?: string } = {},
+): Parameters<typeof bridge.resolveBridgeSpec>[0] {
   return {
     addresses,
     pollIntervalMs: 5,
     maxClaimPerCycle: 10,
     staleClaimMs: 600_000,
     admitFrom: ['sender'],
-    orgRegistryPath: registryPath,
+    orgRegistryPath: overrides.orgRegistryPath ?? registryPath,
   }
 }
 
@@ -682,7 +689,7 @@ describe('seat tool-restriction wiring', () => {
     // Unpersisted: exercises createTarget's half of the wiring.
     const h = await makeHarness({ persisted: false, knownTools: ['read', 'bash'] })
     const id = await publishHello(h.ctx)
-    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec({ ...targetSpec(), orgRegistryPath: toolsRegistryPath }))
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(undefined, { orgRegistryPath: toolsRegistryPath })))
     expect(h.toolsRestrictCalls()).toEqual([[{ allow: ['read'] }]])
     await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'done' })
   })
@@ -694,7 +701,7 @@ describe('seat tool-restriction wiring', () => {
     // Persisted: exercises resumeTarget's half of the wiring.
     const h = await makeHarness({ persisted: true, knownTools: ['read', 'bash'] })
     await publishHello(h.ctx)
-    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec({ ...targetSpec(), orgRegistryPath: toolsRegistryPath }))
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(undefined, { orgRegistryPath: toolsRegistryPath })))
     expect(h.toolsRestrictCalls()).toEqual([[{ deny: ['bash'] }]])
   })
 
