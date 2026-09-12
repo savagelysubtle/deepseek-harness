@@ -2918,6 +2918,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         if (agent === undefined) {
           return ok(request, { ownTurnStopped: false, descendants: 'ok' as const })
         }
+        let ownTurnStopped: boolean
         if (hasSubagentOwner(agent.session, agent)) {
           // `cancel` refuses subagent ownership outright; stopping a
           // session-backed subagent's own turn goes through the interrupt
@@ -2931,7 +2932,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             })
           }
           try {
-            ctx.subagents.interrupt(sessionId, { kind: 'user', parentSessionId })
+            ownTurnStopped = ctx.subagents.interrupt(sessionId, { kind: 'user', parentSessionId })
           } catch (error: unknown) {
             return err(request, {
               code: 'internal',
@@ -2940,13 +2941,13 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             })
           }
         } else {
-          agent.cancel({ kind: 'user' }, { keepInbox: true })
+          ownTurnStopped = agent.cancel({ kind: 'user' }, { keepInbox: true })
         }
         // Always drain descendants, whichever branch stopped the node's own
         // turn: the cascade this RPC exists to provide is the descendant
         // teardown, not just the one node's cancel.
         return ok(request, {
-          ownTurnStopped: true,
+          ownTurnStopped,
           descendants: await drainDescendantsResult(ctx, [agent]),
         })
       },
@@ -2958,14 +2959,18 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           .filter(session => session.header.origin !== 'subagent')
           .map(session => ctx.agents.get(session.id))
           .filter((agent): agent is Agent => agent !== undefined)
+        // Cancel every root regardless of what it reports — the count below
+        // is about honest reporting, not about skipping the cancel call for
+        // a root this loop guesses is already idle.
+        let stoppedCount = 0
         for (const agent of roots) {
-          agent.cancel({ kind: 'user' }, { keepInbox: true })
+          if (agent.cancel({ kind: 'user' }, { keepInbox: true })) stoppedCount += 1
         }
         // One shared drain across every root: the primitive publishes its
         // admission cutoff for all roots before its first await and merges
         // converging teardowns, which N separate calls would not.
         return ok(request, {
-          stoppedCount: roots.length,
+          stoppedCount,
           descendants: await drainDescendantsResult(ctx, roots),
         })
       },

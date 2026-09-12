@@ -163,7 +163,7 @@ function observeCancel(agent: Agent, callback: () => void): void {
       observed = true
       callback()
     }
-    cancel(cause, options)
+    return cancel(cause, options)
   })
 }
 

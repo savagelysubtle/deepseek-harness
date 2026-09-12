@@ -251,9 +251,12 @@ export class SubagentRuntime extends Service {
    * @param authority - the human parent address or exact live ancestor Agent.
    * @throws {SubagentError} `UNAUTHORIZED` when the authority does not own the
    *   live target.
+   * @returns whether the target actually had active work aborted by this
+   *   call. A manager-less composition, which cannot own a live Activation,
+   *   always reports `false`.
    */
-  interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): void {
-    this.continuations?.interrupt(targetSessionId, authority)
+  interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): boolean {
+    return this.continuations?.interrupt(targetSessionId, authority) ?? false
   }
 
   /**

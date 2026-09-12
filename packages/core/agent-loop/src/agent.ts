@@ -294,7 +294,11 @@ export class ReactLoopAgent implements Agent {
     this.send(input, 'next-step', false)
   }
 
-  cancel(cause: AgentCancelCause, options: CancelOptions = {}): void {
+  cancel(cause: AgentCancelCause, options: CancelOptions = {}): boolean {
+    // Captured before any of the below runs: whether there is active work to
+    // abort is fixed at entry, and this call is the only thing that could
+    // still change it before the read below.
+    const activeWorkAborted = this.phase.kind !== 'idle'
     // Durable and permanent, set before anything else below so it is visible
     // to every later synchronous check regardless of how this cancel races
     // with concurrent phase transitions -- see the field doc on `disposed`.
@@ -318,6 +322,7 @@ export class ReactLoopAgent implements Agent {
       }
     }
     if (this.phase.kind !== 'idle') this.phase.abort.abort(cause)
+    return activeWorkAborted
   }
 
   runMaintenance<T>(job: (signal: AbortSignal) => Promise<T>): Promise<T> {

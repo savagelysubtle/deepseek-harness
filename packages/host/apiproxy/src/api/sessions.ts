@@ -408,9 +408,16 @@ export interface SessionsApi {
    * stop request racing natural completion or a repeated click must not read
    * as an error. A session-backed-subagent target stops through
    * `subagent.interrupt`'s own authorization instead of `cancel`, since
-   * `cancel` refuses subagent ownership outright. Root descendant teardown
-   * failures never masquerade as a clean stop: a joined teardown failure
-   * comes back as `descendants: { failed }`, not as `accepted`/`ok`.
+   * `cancel` refuses subagent ownership outright. `ownTurnStopped` reports
+   * whether the target actually had a live turn or maintenance task aborted
+   * by this call, taken from `cancel`/`interrupt`'s own answer rather than
+   * guessed from the target's public `status` — a running maintenance task
+   * leaves `status` at `'idle'` the whole time, so a status read from
+   * outside would wrongly call it unstopped. An already-idle target (no live
+   * turn and no maintenance task) reports `false`, the same as an absent
+   * one. Root descendant teardown failures never masquerade as a clean
+   * stop: a joined teardown failure comes back as `descendants: { failed }`,
+   * not as `accepted`/`ok`.
    */
   stopTree(request: RpcRequest<{ sessionId: SessionId }>): Promise<RpcResponse<{
     ownTurnStopped: boolean
@@ -423,9 +430,13 @@ export interface SessionsApi {
    * owning top-level session), then drains every root's live descendant
    * forest in one shared call so the drain's admission cutoff and converging
    * teardown apply across all roots at once rather than racing N independent
-   * calls. `stoppedCount` counts the top-level sessions whose own turn was
-   * cancelled; a partial descendant-teardown failure still reports
-   * `descendants: { failed }` rather than folding into a bare success.
+   * calls. Every root is cancelled regardless of its reported outcome — the
+   * count never causes work to be skipped. `stoppedCount` counts only the
+   * roots that actually had a live turn or maintenance task aborted by this
+   * call, never the number of roots merely considered or cancelled against;
+   * an already-idle root does not add to the count. A partial
+   * descendant-teardown failure still reports `descendants: { failed }`
+   * rather than folding into a bare success.
    */
   stopAll(request: RpcRequest<{}>): Promise<RpcResponse<{
     stoppedCount: number

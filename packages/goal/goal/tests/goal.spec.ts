@@ -42,7 +42,7 @@ function stubAgentForSession(session: Session): StubAgent {
     followup: () => {},
     steer: () => {},
     inject(input) { inbox.append('next-step', input) },
-    cancel() {},
+    cancel() { return false },
     runMaintenance: task => task(new AbortController().signal),
     whenIdle() { return Promise.resolve() },
   }

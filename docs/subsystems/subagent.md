@@ -524,8 +524,11 @@ async followup( parent: Agent, childId: SessionId, content: ContentBlock[], opti
  * @param authority - the human parent address or exact live ancestor Agent.
  * @throws {SubagentError} `UNAUTHORIZED` when the authority does not own the
  *   live target.
+ * @returns whether the target actually had active work aborted by this
+ *   call. A manager-less composition, which cannot own a live Activation,
+ *   always reports `false`.
  */
-interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): void
+interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): boolean
 
 /**
  * Deliver selected content from one live continuable child to its durable

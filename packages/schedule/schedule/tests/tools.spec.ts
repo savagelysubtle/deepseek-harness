@@ -34,7 +34,7 @@ function stubAgent(ctx: Context, id: string): Agent {
     ctx: new Context(),
     send(_message: UserMessage, _target: InboxTarget, _wakeup: boolean) {},
     runMaintenance: task => task(signal),
-    cancel(_cause: AgentCancelCause) {},
+    cancel(_cause: AgentCancelCause) { return false },
     whenIdle: () => Promise.resolve(),
     followup(_message: UserMessage) {},
     steer(_message: UserMessage) {},
