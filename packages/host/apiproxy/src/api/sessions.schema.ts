@@ -13,6 +13,7 @@ import type { Wire } from './rpc.schema.ts'
 import type {
   HistoryEntry, ModelCatalogFailure, ModelCatalogModel, ModelProviderGroup, ModelReasoning,
   ModelReasoningEffort, ModelSelection, SessionListMetadata, SessionProjectionsBlock, SessionSearchItem, SessionSummary,
+  StopDescendantsResult,
 } from './sessions.ts'
 import type { ToolEventView } from './events.ts'
 import type { AttachmentIdType, ImageAttachmentLimits, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -362,3 +363,29 @@ export const sessionCancelRequestSchema = z.object({
 export const sessionCancelValueSchema = z.object({
   accepted: z.literal(true),
 }) satisfies z.ZodType<Wire<ResponseValue<'session.cancel'>>>
+
+/** Shared session.stopTree / session.stopAll descendant-drain outcome. */
+export const stopDescendantsResultSchema = z.union([
+  z.literal('ok'),
+  z.object({ failed: z.string() }),
+]) satisfies z.ZodType<Wire<StopDescendantsResult>>
+
+/** session.stopTree request payload. */
+export const sessionStopTreeRequestSchema = z.object({
+  sessionId: sessionIdSchema,
+}) satisfies z.ZodType<Wire<RequestPayload<'session.stopTree'>>>
+
+/** session.stopTree response value. */
+export const sessionStopTreeValueSchema = z.object({
+  ownTurnStopped: z.boolean(),
+  descendants: stopDescendantsResultSchema,
+}) satisfies z.ZodType<Wire<ResponseValue<'session.stopTree'>>>
+
+/** session.stopAll request payload (no arguments — stops every live top-level session). */
+export const sessionStopAllRequestSchema = z.object({}) satisfies z.ZodType<Wire<RequestPayload<'session.stopAll'>>>
+
+/** session.stopAll response value. */
+export const sessionStopAllValueSchema = z.object({
+  stoppedCount: z.number().int().nonnegative(),
+  descendants: stopDescendantsResultSchema,
+}) satisfies z.ZodType<Wire<ResponseValue<'session.stopAll'>>>

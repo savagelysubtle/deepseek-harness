@@ -30,6 +30,8 @@ import {
   sessionRenameValueSchema,
   sessionSearchValueSchema,
   sessionSelectModelValueSchema,
+  sessionStopAllValueSchema,
+  sessionStopTreeValueSchema,
   sessionUpdateQueueValueSchema,
 } from '../api/sessions.schema.ts'
 import {
@@ -104,6 +106,8 @@ export interface IApiClient {
     attachment(payload: RequestPayload<'session.attachment'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'session.attachment'>>>
     updateQueue(payload: RequestPayload<'session.updateQueue'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'session.updateQueue'>>>
     cancel(payload: RequestPayload<'session.cancel'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'session.cancel'>>>
+    stopTree(payload: RequestPayload<'session.stopTree'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'session.stopTree'>>>
+    stopAll(payload: RequestPayload<'session.stopAll'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'session.stopAll'>>>
   }
   subagents: {
     list(payload: RequestPayload<'subagent.list'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'subagent.list'>>>
@@ -199,6 +203,8 @@ const UNARY_VALUE_SCHEMAS: { [K in keyof RpcMethodMap]: z.ZodType<Wire<ResponseV
   'session.attachment': sessionAttachmentValueSchema,
   'session.updateQueue': sessionUpdateQueueValueSchema,
   'session.cancel': sessionCancelValueSchema,
+  'session.stopTree': sessionStopTreeValueSchema,
+  'session.stopAll': sessionStopAllValueSchema,
   'subagent.list': subagentListValueSchema,
   'subagent.history': subagentHistoryValueSchema,
   'subagent.prompt': subagentPromptValueSchema,
@@ -452,6 +458,8 @@ export abstract class AbstractApiClient implements IApiClient {
     attachment: (payload, signal) => this.callUnary('session.attachment', payload, signal),
     updateQueue: (payload, signal) => this.callUnary('session.updateQueue', payload, signal),
     cancel: (payload, signal) => this.callUnary('session.cancel', payload, signal),
+    stopTree: (payload, signal) => this.callUnary('session.stopTree', payload, signal),
+    stopAll: (payload, signal) => this.callUnary('session.stopAll', payload, signal),
   }
 
   readonly subagents: IApiClient['subagents'] = {

@@ -174,6 +174,16 @@ export type QueueAction =
   | { kind: 'remove' }
   | { kind: 'steer' }
 
+/**
+ * Outcome of draining a stop's live descendant forest. `'ok'` means every
+ * continuable descendant beneath the stopped root(s) released cleanly.
+ * `{ failed }` carries the one joined teardown-failure message the drain
+ * primitive throws when any branch did not release — surfaced here rather
+ * than folded into a bare success, since a stop control that reports done
+ * while something kept running is the one outcome this API must never produce.
+ */
+export type StopDescendantsResult = 'ok' | { failed: string }
+
 /** One Session list entry. */
 export interface SessionSummary {
   sessionId: SessionId
@@ -390,5 +400,36 @@ export interface SessionsApi {
    * subagents reject with `agent-busy`.
    */
   cancel(request: RpcRequest<{ sessionId: SessionId }>): Promise<RpcResponse<{ accepted: true }>>
+
+  /**
+   * Stops one session's own current turn and every live continuable
+   * descendant beneath it, child-first. An absent live agent is an accepted
+   * no-op (`ownTurnStopped: false`), never a `session-not-found` failure — a
+   * stop request racing natural completion or a repeated click must not read
+   * as an error. A session-backed-subagent target stops through
+   * `subagent.interrupt`'s own authorization instead of `cancel`, since
+   * `cancel` refuses subagent ownership outright. Root descendant teardown
+   * failures never masquerade as a clean stop: a joined teardown failure
+   * comes back as `descendants: { failed }`, not as `accepted`/`ok`.
+   */
+  stopTree(request: RpcRequest<{ sessionId: SessionId }>): Promise<RpcResponse<{
+    ownTurnStopped: boolean
+    descendants: StopDescendantsResult
+  }>>
+
+  /**
+   * Stops every live top-level session's own current turn (session-backed
+   * subagents are never roots here — they stop as descendants of their
+   * owning top-level session), then drains every root's live descendant
+   * forest in one shared call so the drain's admission cutoff and converging
+   * teardown apply across all roots at once rather than racing N independent
+   * calls. `stoppedCount` counts the top-level sessions whose own turn was
+   * cancelled; a partial descendant-teardown failure still reports
+   * `descendants: { failed }` rather than folding into a bare success.
+   */
+  stopAll(request: RpcRequest<{}>): Promise<RpcResponse<{
+    stoppedCount: number
+    descendants: StopDescendantsResult
+  }>>
 
 }

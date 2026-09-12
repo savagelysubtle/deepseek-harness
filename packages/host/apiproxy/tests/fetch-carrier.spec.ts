@@ -108,6 +108,12 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
       async cancel(request) {
         return { rpcId: request.rpcId, result: { ok: true, value: { accepted: true as const } } }
       },
+      async stopTree(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { ownTurnStopped: true, descendants: 'ok' as const } } }
+      },
+      async stopAll(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { stoppedCount: 0, descendants: 'ok' as const } } }
+      },
     },
     subagents: {
       async list(request) {
