@@ -253,6 +253,7 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   MessageFeedbackDeleteResult: 'feedback.md',
   MessageFeedbackDeleteValue: 'feedback.md',
   MailboxRefusal: 'mailbox.md',
+  SeatToolsRestricted: 'mailbox.md',
   MessageFeedbackFailure: 'feedback.md',
   MessageFeedbackItem: 'feedback.md',
   MessageFeedbackListRequest: 'feedback.md',

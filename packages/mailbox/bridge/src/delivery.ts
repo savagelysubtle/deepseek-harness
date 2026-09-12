@@ -13,6 +13,13 @@
  * session rather than delivered to the recipient — the harness reporting on
  * the sender's own action, never correspondence and never store mail.
  *
+ * A seat's configured TOOL RESTRICTION renders through
+ * {@link seatToolRestrictionUserMessage}, logged into that SEAT's own session
+ * at create/resume — its own `kind` (never `mailbox`, since it carries no mail
+ * provenance at all) with structured fields a reader that isn't a person can
+ * still act on: whether the rule degraded and which configured names went
+ * missing.
+ *
  * @module @deepseek-ai/dsh-mailbox-bridge/delivery
  */
 
@@ -20,6 +27,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { boundContextSummary } from '@deepseek-ai/dsh-llm'
 import type { MailboxLease, MailboxMessageSource, MailboxRefusalSource, MailboxOutcome } from '@deepseek-ai/dsh-mailbox'
+import type { SeatToolRestrictionOutcome } from './seat-tool-restriction.ts'
 
 /**
  * Sender class stated on every delivered envelope, derived by the caller from
@@ -254,5 +262,147 @@ export function refusalUserMessage(lease: MailboxLease, reason: string): UserMes
   return createUserMessage({
     content: [{ type: 'text', text: refusalText(lease, reason) }],
     source: refusalSource(lease, reason),
+  })
+}
+
+/**
+ * Durable attribution for the runtime's own account of a seat's configured
+ * tool restriction being applied at create/resume. Deliberately its OWN
+ * `kind` rather than the mailbox `kind` above: this notice carries no mail
+ * provenance whatsoever — no sender, no recipient, no store message — it is
+ * the harness stating what it just did to the seat's own tool set, so
+ * crediting it to "mailbox" would misrepresent where it came from.
+ *
+ * This shape can still describe a `muted: true` outcome (rendered by
+ * {@link seatToolRestrictionText}/{@link seatToolRestrictionSource} below),
+ * but a MUTED seat itself never actually receives this as a durable log
+ * entry: `composeSeatAgent` (`src/index.ts`) aborts composition entirely for
+ * that outcome rather than finish creating a seat that could never call
+ * `mailbox_send` to report its own condition, so there is no session to log
+ * into. The mail that would have woken it is refused at its source instead
+ * (`refuse()`), which carries its own reason string and sender-facing notice.
+ * A NON-muted outcome (an ordinary narrowing, or a degrade that still leaves
+ * the seat with something) is what actually reaches this notice, logged into
+ * the seat's own session — findable by an external tool reading the log
+ * directly, not only readable by a person who happens to open the
+ * transcript.
+ */
+export interface SeatToolRestrictionNoticeSource {
+  readonly kind: 'mailbox-bridge-tool-restriction'
+  /** A runtime account shown without expanding the row (`notice` context form). */
+  readonly form: 'notice'
+  /** One-line account, bounded the same way every other `notice` producer bounds it. */
+  readonly summary: string
+  /** The seat this restriction was applied to. */
+  readonly seatName: string
+  /**
+   * Whether the configured rule degraded: at least one configured tool name
+   * was not currently known and was dropped rather than crashing creation.
+   * This is a DIFFERENT condition from `muted` and the two must never be
+   * blended into one field — a rule can degrade without muting (a partial
+   * `deny` list drops a name but the seat keeps every other tool) and can
+   * mute without degrading (`allow: []` configured on purpose, or a `deny`
+   * list that happens to name every known tool: nothing was "missing",
+   * every configured name matched, and the seat still has zero tools).
+   */
+  readonly degraded: boolean
+  /** Configured names that were not currently known, in configured order; empty when not degraded. */
+  readonly missing: readonly string[]
+  /**
+   * Whether the seat's EFFECTIVE tool set is empty — it has no tools at all,
+   * by any route (a fully-missing or explicitly empty `allow`, or a `deny`
+   * that covers every known tool). A muted seat cannot call `mailbox_send`
+   * and therefore cannot report its own condition, which is exactly why this
+   * field exists as its own explicit signal rather than something a reader
+   * has to infer from `degraded` and `missing`.
+   */
+  readonly muted: boolean
+  /** The rule actually applied, after intersecting against the known tool set. */
+  readonly rule: {
+    readonly allow?: readonly string[]
+    readonly deny?: readonly string[]
+  }
+}
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'mailbox-bridge-tool-restriction': SeatToolRestrictionNoticeSource
+  }
+}
+
+/**
+ * Render the model-visible text of one seat tool-restriction notice: what was
+ * applied, which configured names were dropped (when any were), and —
+ * independent of whether anything was reported missing — the "this seat now
+ * has no tools at all" case spelled out so a reader (model or human) is
+ * never left to infer it. That last line fires off `outcome.remaining`, not
+ * `missing`: a `deny` list that happens to cover every known tool, or an
+ * `allow: []` configured outright, both leave a seat with zero tools while
+ * `missing` stays empty — nothing was "missing", every configured name
+ * matched, and the seat is still muted.
+ * @param seatName - the seat the restriction was applied to.
+ * @param outcome - the effective rule, any names dropped, and the surviving
+ *   tool set, from {@link applySeatToolRestriction}.
+ * @returns the plain-text turn content.
+ */
+export function seatToolRestrictionText(seatName: string, outcome: SeatToolRestrictionOutcome): string {
+  const { rule, missing, remaining } = outcome
+  const lines = [`Tool restriction applied for seat "${seatName}".`]
+  if (rule.allow !== undefined) lines.push(`Allowed tools: ${rule.allow.length > 0 ? rule.allow.join(', ') : '(none)'}`)
+  if (rule.deny !== undefined) lines.push(`Denied tools: ${rule.deny.length > 0 ? rule.deny.join(', ') : '(none)'}`)
+  if (missing.length > 0) {
+    lines.push(`Configured tool name${missing.length > 1 ? 's were' : ' was'} not currently known and dropped: ${missing.join(', ')}.`)
+  }
+  if (remaining.length === 0) {
+    lines.push('This seat now has NO tools at all — it cannot call any tool, which includes the tool it would use to report this.')
+  }
+  return lines.join('\n')
+}
+
+/**
+ * Build the seat tool-restriction notice source for one applied restriction.
+ * `muted` is derived from `outcome.remaining`, never from `missing` — see
+ * {@link SeatToolRestrictionNoticeSource.muted} for why those two conditions
+ * must stay separate. A muted summary says so plainly, ahead of the ordinary
+ * degraded/applied wording, so a human scanning a log catches it without
+ * having to read the structured fields.
+ * @param seatName - the seat the restriction was applied to.
+ * @param outcome - the effective rule, any names dropped, and the surviving
+ *   tool set, from {@link applySeatToolRestriction}.
+ * @returns the attribution object merged into the notice's user turn.
+ */
+export function seatToolRestrictionSource(seatName: string, outcome: SeatToolRestrictionOutcome): SeatToolRestrictionNoticeSource {
+  const degraded = outcome.missing.length > 0
+  const muted = outcome.remaining.length === 0
+  const summaryText = muted
+    ? `Seat "${seatName}" tool restriction MUTED: this seat now has NO tools at all.`
+    : degraded
+      ? `Seat "${seatName}" tool restriction degraded: ${outcome.missing.length} configured name${outcome.missing.length > 1 ? 's' : ''} missing.`
+      : `Seat "${seatName}" tool restriction applied.`
+  return {
+    kind: 'mailbox-bridge-tool-restriction',
+    form: 'notice',
+    seatName,
+    degraded,
+    muted,
+    missing: outcome.missing,
+    rule: outcome.rule,
+    summary: boundContextSummary(summaryText),
+  }
+}
+
+/**
+ * Render one applied seat tool-restriction as the durable user-role context
+ * turn logged into the SEAT's own session. Like {@link refusalUserMessage},
+ * this is appended directly to the session log — never handed to
+ * `steer`/`followup` — so it wakes nothing and starts no turn.
+ * @param seatName - the seat the restriction was applied to.
+ * @param outcome - the effective rule and any names dropped, from {@link applySeatToolRestriction}.
+ * @returns the identified prompt content of the notice.
+ */
+export function seatToolRestrictionUserMessage(seatName: string, outcome: SeatToolRestrictionOutcome): UserMessage {
+  return createUserMessage({
+    content: [{ type: 'text', text: seatToolRestrictionText(seatName, outcome) }],
+    source: seatToolRestrictionSource(seatName, outcome),
   })
 }

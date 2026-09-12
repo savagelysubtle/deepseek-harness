@@ -79,6 +79,11 @@ import z from '@deepseek-ai/schemastery'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentHandle, AgentSetup, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
+// Type-only: the bridge does not depend on the tools package at runtime, but
+// this augments `Context` with `.tools` so `agentCtx.tools` type-checks
+// inside the setup callbacks below — the same bare type-only import idiom
+// used by the API proxy, agent-loop, agent-tool-presentation, and mcp-client.
+import type {} from '@deepseek-ai/dsh-tools'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import {
   acquireSessionLock,
@@ -98,11 +103,13 @@ import type { OrgRegistry, OrgRegistrySeat } from '@deepseek-ai/dsh-mailbox'
 import type { MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxMessageId } from '@deepseek-ai/dsh-mailbox'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
-import { admittedOutcome, refusalUserMessage, relayUserMessage } from './delivery.ts'
+import { admittedOutcome, refusalUserMessage, relayUserMessage, seatToolRestrictionUserMessage } from './delivery.ts'
 import type { SenderClass } from './delivery.ts'
+import { applySeatToolRestriction } from './seat-tool-restriction.ts'
+import type { SeatToolRestrictionOutcome, SeatToolRestrictionRule } from './seat-tool-restriction.ts'
 
-export { admittedOutcome, HEADLESS_BACKLOG_LIMIT, HEADLESS_BACKLOG_STALE_CLAIM_MS, messageEnvelope, refusalSource, refusalText, refusalUserMessage, relaySource, relayText, relayUserMessage } from './delivery.ts'
-export type { SenderClass } from './delivery.ts'
+export { admittedOutcome, HEADLESS_BACKLOG_LIMIT, HEADLESS_BACKLOG_STALE_CLAIM_MS, messageEnvelope, refusalSource, refusalText, refusalUserMessage, relaySource, relayText, relayUserMessage, seatToolRestrictionSource, seatToolRestrictionText, seatToolRestrictionUserMessage } from './delivery.ts'
+export type { SenderClass, SeatToolRestrictionNoticeSource } from './delivery.ts'
 
 /** Default pause between drain cycles. */
 export const DEFAULT_POLL_INTERVAL_MS = 5_000
@@ -794,7 +801,7 @@ async function injectRefusalNotice(ctx: Context, spec: BridgeSpec, lease: Mailbo
       // own path.
       return
     }
-    handle = await resumeTarget(ctx, sessionId)
+    handle = await resumeTarget(ctx, spec, sessionId, from)
     // Resume only — no followup, no steer: the dormant sender is rebuilt,
     // receives the durable node, and is released without ever driving a turn.
     handle.agent.session.append('user/message', refusalUserMessage(lease, reason), { surfaceOp: 'append' })
@@ -948,8 +955,8 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
     }
     const persisted = (await persistence.list()).some(header => header.id === sessionId)
     const handle = persisted
-      ? await resumeTarget(ctx, sessionId)
-      : await createTarget(ctx, sessionId, await seatCwd(spec, name))
+      ? await resumeTarget(ctx, spec, sessionId, name)
+      : await createTarget(ctx, spec, sessionId, await seatCwd(spec, name), name)
     // A freshly resident agent takes the delivery as an ordinary FIFO turn;
     // steering a cold resume would skip reconstructing prior context.
     handle.agent.followup(relayUserMessage(lease, senderClass))
@@ -973,6 +980,19 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
     return { kind: 'done' }
   } catch (error) {
     lock.release()
+    // A muted recipient never got composed at all (see `SeatMutedToolsError`
+    // and `composeSeatAgent`) — this is the ONE place both `resumeTarget` and
+    // `createTarget` funnel through, and the only place with the claimed
+    // lease in scope to route the failure through the real refusal path
+    // instead of the drain loop's generic bounce. The warn and the bus event
+    // fire here, describing WHY the refusal happened, before `refuse` itself
+    // settles the row, warns again with the generic admission-refusal
+    // framing, reports `mailbox/refused`, and notices the SENDER.
+    if (error instanceof SeatMutedToolsError) {
+      ctx.logger.warn(`mailbox-bridge: seat "${error.seatName}" tool restriction leaves it with NO tools at all — it cannot report this itself; refusing mail to it instead of composing it`)
+      emitSeatToolsRestricted(ctx, error.seatName, error.outcome)
+      return refuse(ctx, spec, lease, `seat-tools-muted: seat "${name}"'s configured tool restriction leaves it with no tools at all and cannot receive mail`)
+    }
     throw error
   }
 }
@@ -1138,6 +1158,33 @@ async function seatCwd(spec: BridgeSpec, name: string): Promise<string> {
 }
 
 /**
+ * Resolve one seat's configured tool restriction from the org registry.
+ *
+ * A registry that will not load, or a name unknown to the roster, carries no
+ * restriction: unlike {@link seatCwd} this never throws and never provisions
+ * anything, it only widens or narrows a set of tools, so the safe default on
+ * either doubt is unrestricted — the same "applies to nobody by default"
+ * contract an absent `tools` field on a known seat already carries. Mirrors
+ * {@link seatSessionId}'s shape: same two parameters, same registry read.
+ * @param spec - resolved serving parameters carrying the registry path.
+ * @param name - the seat name (which is also its address).
+ * @returns the seat's configured rule, or undefined for no restriction.
+ */
+async function seatToolsRule(spec: BridgeSpec, name: string): Promise<SeatToolRestrictionRule | undefined> {
+  let registry: OrgRegistry
+  try {
+    registry = await cachedRegistry(spec.orgRegistryPath)
+  } catch {
+    // A registry that will not load cannot know any seat's restriction, and
+    // this is never the caller that should refuse for it — the registry
+    // health check upstream (`judgmentRegistry` in `deliverLease`) already
+    // owns that decision.
+    return undefined
+  }
+  return seatEntry(registry, name)?.tools
+}
+
+/**
  * One roster seat looked up defensively (own properties only, per the same
  * rule `senderClassFor` applies), or undefined when the name is not a seat.
  * @param registry - the parsed registry.
@@ -1267,52 +1314,178 @@ async function senderClassFor(spec: BridgeSpec, from: string): Promise<SenderCla
 /**
  * Create the first session for a seat that has never run — the basic
  * wake-up: mail alone provisions the seat, no hire script required.
+ *
+ * Also installs the seat's configured tool restriction, when it has one: the
+ * rule is resolved from the registry before `setup` is defined (mirroring how
+ * the model selection above it is resolved), then applied inside `setup`
+ * against the real tool registry `setup` exposes — the same out-parameter
+ * idiom the model-selection install two lines above already uses, since
+ * `applySeatToolRestriction`'s outcome is only known once `setup` runs. A
+ * seat with no configured rule leaves the box empty and nothing changes for
+ * it: this wiring applies to nobody by default.
  * @param ctx - plugin context carrying the agent registry and default model.
+ * @param spec - resolved serving parameters carrying the registry path.
  * @param sessionId - the derived durable session id to create.
  * @param cwd - the seat's own project directory, from the org registry.
+ * @param name - the seat name (which is also its address), for its tool rule and attribution.
+ * @throws {@link SeatMutedToolsError} when the resolved tool rule leaves the
+ *   seat with no tools at all — caught in `deliverLease`, never here.
  */
 async function createTarget(
   ctx: Context,
+  spec: BridgeSpec,
   sessionId: ReturnType<typeof deriveNamedSessionId>,
   cwd: string,
+  name: string,
 ): Promise<AgentHandle> {
-  const defaultModel = ctx.get('agentDefaultModel')
-  if (defaultModel === undefined) {
-    throw new Error('mailbox-bridge: wake requires the default model-selection service')
-  }
-  const selection = defaultModel.currentSelection()
-  const agentOptions = { provider: selection.provider, model: selection.model }
-  const setup: AgentSetup = (agentCtx): void => {
-    const selected: ModelSelectionRef = { current: selection, assembled: undefined }
-    installModelSelection(agentCtx, selected)
-  }
   // The SEAT's directory, never `process.cwd()`. The host's cwd is wherever it
   // was launched from — systemd sets none, so it resolves to the home directory
   // — and the UI groups sessions by cwd. A seat provisioned with the host's cwd
   // is filed under a workspace nobody opens: the session is live and correct and
   // simply cannot be found. That is the "ghost session" class.
-  return ctx.agents.create({ sessionId, meta: { cwd }, agentOptions, setup })
+  return composeSeatAgent(ctx, spec, name, 'wake', (agentOptions, setup) =>
+    ctx.agents.create({ sessionId, meta: { cwd }, agentOptions, setup }))
 }
 
 /**
  * Cold-resume the dormant agent owning `sessionId`, composing the same model
  * selection path the host's direct runner uses. Missing model wiring fails
  * loud here rather than delivering a silently de-tuned turn.
+ *
+ * Also installs the seat's configured tool restriction on every resume, same
+ * as {@link createTarget} — a seat's tools must stay restricted across a cold
+ * resume, not only at its first creation, and this is the one path every
+ * resume goes through regardless of which caller resumed it (the drain's own
+ * wake, or a refusal notice resuming a dormant sender).
  * @param ctx - plugin context carrying the agent registry and default model.
+ * @param spec - resolved serving parameters carrying the registry path.
  * @param sessionId - the derived durable session id to resume.
+ * @param name - the seat name (which is also its address), for its tool rule and attribution.
+ * @throws {@link SeatMutedToolsError} when the resolved tool rule leaves the
+ *   seat with no tools at all. `deliverLease` catches it for the drain's own
+ *   wake path; `injectRefusalNotice`'s call (resuming a dormant SENDER to
+ *   notice it) already wraps this in a best-effort catch-all, so a sender
+ *   that happens to be muted itself degrades to "notice not logged" rather
+ *   than a second refusal.
  */
-async function resumeTarget(ctx: Context, sessionId: ReturnType<typeof deriveNamedSessionId>): Promise<AgentHandle> {
+async function resumeTarget(
+  ctx: Context,
+  spec: BridgeSpec,
+  sessionId: ReturnType<typeof deriveNamedSessionId>,
+  name: string,
+): Promise<AgentHandle> {
+  return composeSeatAgent(ctx, spec, name, 'cold-resume', (agentOptions, setup) =>
+    ctx.agents.resume({ resumeSessionId: sessionId, agentOptions, setup }))
+}
+
+/**
+ * Thrown from inside a seat's `setup` callback ({@link composeSeatAgent})
+ * when its configured tool restriction would leave it with NO tools at all —
+ * `applySeatToolRestriction`'s `remaining` comes back empty. Deliberately a
+ * THROW rather than a silently-returned muted outcome: `AgentSetup`'s own
+ * contract (see `@deepseek-ai/dsh-agent`) rolls the whole creation/resume
+ * back without ever publishing the session or agent id when setup throws, so
+ * this is what makes "the agent is never created or resumed" true at the
+ * actual registry-publish boundary, not just true by convention. A seat this
+ * narrow cannot call `mailbox_send` to report its own condition, so it must
+ * never exist in composed form at all — the mail addressed to it is refused
+ * at its source instead (see the `catch` in {@link deliverLease}, the only
+ * place this is caught, where the claimed lease is in scope to route through
+ * `refuse()`).
+ */
+class SeatMutedToolsError extends Error {
+  constructor(
+    readonly seatName: string,
+    readonly outcome: SeatToolRestrictionOutcome,
+  ) {
+    super(`seat "${seatName}": configured tool restriction leaves it with no tools at all`)
+    this.name = 'SeatMutedToolsError'
+  }
+}
+
+/**
+ * Emit the live signal for one seat tool-restriction outcome: the durable
+ * append (or, for a muted outcome, the refusal `deliverLease` performs
+ * instead) is the outlet that survives a reload, and this is the one a
+ * listener watching right now can observe. Kept as its own function because
+ * both the ordinary post-composition path and the muted/aborted path in
+ * `deliverLease` need to raise the identical event shape, and this is the
+ * one place that decides what "identical" means.
+ * @param ctx - plugin context carrying the mailbox registry.
+ * @param seatName - the seat the restriction was computed for.
+ * @param outcome - the effective rule, missing names, and surviving tool set.
+ */
+function emitSeatToolsRestricted(ctx: Context, seatName: string, outcome: SeatToolRestrictionOutcome): void {
+  ctx.emit('mailbox/seat-tools-restricted', {
+    seatName,
+    muted: outcome.remaining.length === 0,
+    degraded: outcome.missing.length > 0,
+    missing: outcome.missing,
+    remaining: outcome.remaining,
+  })
+}
+
+/**
+ * The one composition path both {@link createTarget} and {@link resumeTarget}
+ * run through, so a seat is composed identically however it came to be awake.
+ * Only the minting call differs between them, which is what `mint` carries.
+ *
+ * Kept as one function deliberately: the two callers previously held byte-identical
+ * bodies, and a seat that was restricted on first creation but not on cold resume
+ * — or noticed on one path and silently not the other — is exactly the kind of
+ * half-applied fence this whole feature exists to avoid.
+ *
+ * A muted outcome aborts composition entirely: `setup` throws
+ * {@link SeatMutedToolsError} instead of recording the outcome for the
+ * post-mint notice, so `mint()` rejects and no agent or session is ever
+ * published for this seat. That rejection is deliberately NOT caught here —
+ * only `deliverLease` (the caller with the claimed lease in scope) can turn
+ * it into a refusal, so it propagates through {@link createTarget} and
+ * {@link resumeTarget} unmodified.
+ * @param ctx - plugin context carrying the agent registry and default model.
+ * @param spec - resolved serving parameters carrying the registry path.
+ * @param name - the seat name (which is also its address), for its tool rule and attribution.
+ * @param requirement - names the caller in the missing-model error, so a failure says which path needed it.
+ * @param mint - creates or resumes the agent with the composed options.
+ * @throws {@link SeatMutedToolsError} when the seat's configured tool
+ *   restriction leaves it with no tools at all.
+ */
+async function composeSeatAgent(
+  ctx: Context,
+  spec: BridgeSpec,
+  name: string,
+  requirement: string,
+  mint: (agentOptions: { provider: string; model: string }, setup: AgentSetup) => Promise<AgentHandle>,
+): Promise<AgentHandle> {
   const defaultModel = ctx.get('agentDefaultModel')
   if (defaultModel === undefined) {
-    throw new Error('mailbox-bridge: cold-resume requires the default model-selection service')
+    throw new Error(`mailbox-bridge: ${requirement} requires the default model-selection service`)
   }
   const selection = defaultModel.currentSelection()
-  const agentOptions = { provider: selection.provider, model: selection.model }
+  const rule = await seatToolsRule(spec, name)
+  let restriction: SeatToolRestrictionOutcome | undefined
   const setup: AgentSetup = (agentCtx): void => {
     const selected: ModelSelectionRef = { current: selection, assembled: undefined }
     installModelSelection(agentCtx, selected)
+    const outcome = applySeatToolRestriction(agentCtx, name, rule)
+    if (outcome !== undefined && outcome.remaining.length === 0) {
+      // Thrown, not recorded: see the class doc for why this has to abort
+      // the mint rather than let a muted seat finish composing.
+      throw new SeatMutedToolsError(name, outcome)
+    }
+    restriction = outcome
   }
-  return ctx.agents.resume({ resumeSessionId: sessionId, agentOptions, setup })
+  const handle = await mint({ provider: selection.provider, model: selection.model }, setup)
+  // Setup composes, it never drives (see its own contract) — the durable
+  // notice of what setup did is appended here, after creation resolves,
+  // mirroring the refusal notice's append through the returned handle.
+  // `restriction` is NEVER a muted outcome here: that branch above threw and
+  // this line was never reached for it.
+  if (restriction !== undefined) {
+    handle.agent.session.append('user/message', seatToolRestrictionUserMessage(name, restriction), { surfaceOp: 'append' })
+    emitSeatToolsRestricted(ctx, name, restriction)
+  }
+  return handle
 }
 
 /** Stable Cordis plugin name. */
@@ -1342,6 +1515,25 @@ export interface MailboxRefusal {
   readonly reason: string
 }
 
+/**
+ * One drain-time (or cold-resume) seat tool-restriction outcome, carried on
+ * the context bus. Mirrors the durable notice's structured fields — see
+ * {@link SeatToolRestrictionNoticeSource} for why `degraded` and `muted` are
+ * kept as two separate booleans rather than blended into one.
+ */
+export interface SeatToolsRestricted {
+  /** The seat the restriction was applied to. */
+  readonly seatName: string
+  /** Whether the seat's effective tool set is empty — it has no tools at all. */
+  readonly muted: boolean
+  /** Whether at least one configured tool name was not currently known and was dropped. */
+  readonly degraded: boolean
+  /** Configured names that were not currently known, in configured order; empty when not degraded. */
+  readonly missing: readonly string[]
+  /** The tool names the seat is actually left with, sorted; empty when muted. */
+  readonly remaining: readonly string[]
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     /** Union of every mounted bridge's serving roster in mount order. */
@@ -1367,6 +1559,35 @@ declare module '@deepseek-ai/cordis' {
      * @mode emit
      */
     'mailbox/refused'(refusal: MailboxRefusal): void
+
+    /**
+     * A seat's configured tool restriction was resolved at create or
+     * cold-resume, in one of two shapes:
+     *
+     * - `muted: false` — `composeSeatAgent` applied it and the seat composed
+     *   normally. This event is the restriction's LIVE outlet, emitted
+     *   alongside (never instead of) the durable notice node
+     *   `seatToolRestrictionUserMessage` appends into the seat's OWN
+     *   session — that durable append is the outlet that does not depend on
+     *   anyone watching a live stream, and this event is the one that
+     *   reaches a listener right now.
+     * - `muted: true` — the rule left the seat with NO tools at all, so
+     *   `composeSeatAgent`'s `setup` threw {@link SeatMutedToolsError}
+     *   before anything was ever published; the seat was never composed, so
+     *   it has no session to notice. `deliverLease` catches that error,
+     *   warns the host log, emits this event, and routes the mail through
+     *   `refuse()` instead — whose own `mailbox/refused` event and durable
+     *   SENDER-side notice report the refusal itself. This event exists
+     *   alongside that one because `mailbox/refused` carries only
+     *   `{ from, to, reason }`: this is the richer, domain-specific record
+     *   of WHY — the missing/remaining tool names a listener would otherwise
+     *   have to parse back out of the reason string.
+     *
+     * Listener failures are logged and contained by Cordis dispatch.
+     * @param restriction - the seat, the effective outcome, and the muted/degraded conditions.
+     * @mode emit
+     */
+    'mailbox/seat-tools-restricted'(restriction: SeatToolsRestricted): void
   }
 }
 
