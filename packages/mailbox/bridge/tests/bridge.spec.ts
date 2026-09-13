@@ -104,6 +104,25 @@ function targetSpec(
   }
 }
 
+/**
+ * A resolved spec for the idle-retire tests, carrying `residencyIdleMs`.
+ * Built directly rather than as `{ ...targetSpec(), residencyIdleMs }` — see
+ * the comment on {@link targetSpec}'s own override parameter for why spreading
+ * its return trips `no-misused-spread`.
+ * @param residencyIdleMs - idle milliseconds before the resident retires.
+ */
+function residencySpec(residencyIdleMs: number): ReturnType<typeof bridge.resolveBridgeSpec> {
+  return bridge.resolveBridgeSpec({
+    addresses: ['target'],
+    pollIntervalMs: 5,
+    maxClaimPerCycle: 10,
+    staleClaimMs: 600_000,
+    admitFrom: ['sender'],
+    orgRegistryPath: registryPath,
+    residencyIdleMs,
+  })
+}
+
 interface LiveAgentStub {
   status: 'idle' | 'running'
   followup: ReturnType<typeof vi.fn>
@@ -707,6 +726,158 @@ describe('routing outcomes', () => {
     const row = await rowState(h.storePath, id)
     expect(row.state).toBe('failed')
     expect((JSON.parse(row.result ?? '{}') as { reason?: string }).reason).toContain('disposed')
+  })
+})
+
+/**
+ * A stub `ctx.get('subagents')` whose `hasLiveDescendants` answer the test
+ * controls from tick to tick, mirroring the real `SubagentRuntime` surface
+ * `retire()` reads (`ctx.get('subagents')?.hasLiveDescendants(handle.agent)`).
+ * @param initial - the answer returned until {@link set} changes it.
+ */
+function subagentsStub(initial: boolean): {
+  readonly api: { hasLiveDescendants: ReturnType<typeof vi.fn> }
+  set(value: boolean): void
+} {
+  let live = initial
+  return {
+    api: { hasLiveDescendants: vi.fn(() => live) },
+    set(value: boolean) { live = value },
+  }
+}
+
+describe('idle-retire deferral for a seat with live continuable descendants', () => {
+  afterEach(() => {
+    // Only the tests in this block opt into a fake clock; restore
+    // unconditionally so a failure mid-test cannot leak it into later files.
+    vi.useRealTimers()
+  })
+
+  it('retires a seat with no live descendants exactly as before once its idle timer fires', async () => {
+    const h = await makeHarness({ persisted: true })
+    const stub = subagentsStub(false)
+    h.ctx.provide('subagents', stub.api as never)
+    vi.useFakeTimers()
+    await publishHello(h.ctx)
+    const spec = residencySpec(1000)
+    await bridge.internals.drainOnce(h.ctx, spec)
+    expect(spec.residents.has('target')).toBe(true)
+
+    await vi.advanceTimersByTimeAsync(1000)
+
+    expect(stub.api.hasLiveDescendants).toHaveBeenCalled()
+    expect(h.flushes()).toBe(1)
+    expect(h.disposeCalls()).toBe(1)
+    expect(spec.residents.has('target')).toBe(false)
+    expect(existsSync(namedLockPath('target'))).toBe(false)
+  })
+
+  it('does not retire while the seat has a live continuable descendant — stays resident, lock held, agent undisposed', async () => {
+    const h = await makeHarness({ persisted: true })
+    const stub = subagentsStub(true)
+    h.ctx.provide('subagents', stub.api as never)
+    vi.useFakeTimers()
+    await publishHello(h.ctx)
+    const spec = residencySpec(1000)
+    await bridge.internals.drainOnce(h.ctx, spec)
+
+    await vi.advanceTimersByTimeAsync(1000)
+
+    expect(stub.api.hasLiveDescendants).toHaveBeenCalled()
+    expect(h.disposeCalls()).toBe(0)
+    expect(spec.residents.has('target')).toBe(true)
+    expect(existsSync(namedLockPath('target'))).toBe(true)
+  })
+
+  it('retires once the live descendant is gone', async () => {
+    const h = await makeHarness({ persisted: true })
+    const stub = subagentsStub(true)
+    h.ctx.provide('subagents', stub.api as never)
+    vi.useFakeTimers()
+    await publishHello(h.ctx)
+    const spec = residencySpec(1000)
+    await bridge.internals.drainOnce(h.ctx, spec)
+
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.disposeCalls()).toBe(0)
+
+    stub.set(false)
+    await vi.advanceTimersByTimeAsync(1000)
+
+    expect(h.disposeCalls()).toBe(1)
+    expect(h.flushes()).toBe(1)
+    expect(spec.residents.has('target')).toBe(false)
+    expect(existsSync(namedLockPath('target'))).toBe(false)
+  })
+
+  it('release() still tears down immediately even with a live descendant — the documented bypass', async () => {
+    const h = await makeHarness({ persisted: true })
+    const stub = subagentsStub(true)
+    h.ctx.provide('subagents', stub.api as never)
+    await publishHello(h.ctx)
+    const spec = residencySpec(1000)
+    await bridge.internals.drainOnce(h.ctx, spec)
+
+    const resident = spec.residents.get('target')
+    expect(resident).toBeDefined()
+    resident!.release()
+
+    // `hardRetire()`'s flush-then-dispose chain is fire-and-forget (`void`),
+    // so disposal lands a tick later than the synchronous release call.
+    await vi.waitFor(() => { expect(h.disposeCalls()).toBe(1) })
+    expect(spec.residents.has('target')).toBe(false)
+    expect(existsSync(namedLockPath('target'))).toBe(false)
+  })
+
+  it('logs on the first blocked tick — never a silent fence', async () => {
+    const h = await makeHarness({ persisted: true })
+    const stub = subagentsStub(true)
+    h.ctx.provide('subagents', stub.api as never)
+    const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
+    vi.useFakeTimers()
+    await publishHello(h.ctx)
+    const spec = residencySpec(1000)
+    await bridge.internals.drainOnce(h.ctx, spec)
+
+    await vi.advanceTimersByTimeAsync(1000)
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('staying resident past its idle window'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('"target"'))
+  })
+})
+
+describe('describeBlockedResident cadence', () => {
+  const { describeBlockedResident, DESCENDANT_REANNOUNCE_TICKS, DESCENDANT_ESCALATE_TICKS } = bridge.internals
+  const sid = deriveNamedSessionId('target')
+
+  it('logs on the first blocked tick with routine wording', () => {
+    const result = describeBlockedResident('target', sid, 1)
+    expect(result).toBeDefined()
+    expect(result?.escalate).toBe(false)
+    expect(result?.message).toContain('staying resident past its idle window')
+  })
+
+  it('stays quiet on ticks between reannounces', () => {
+    expect(describeBlockedResident('target', sid, 2)).toBeUndefined()
+    expect(describeBlockedResident('target', sid, DESCENDANT_REANNOUNCE_TICKS - 1)).toBeUndefined()
+  })
+
+  it('reannounces at the reannounce tick, still routine wording', () => {
+    const result = describeBlockedResident('target', sid, DESCENDANT_REANNOUNCE_TICKS)
+    expect(result).toBeDefined()
+    expect(result?.escalate).toBe(false)
+  })
+
+  it('flips from routine to escalating wording at the escalate threshold', () => {
+    // The reannounce tick one cadence short of escalation is still routine —
+    // escalation is a coarser highwater over the same reannounce cadence.
+    const stillRoutine = describeBlockedResident('target', sid, DESCENDANT_ESCALATE_TICKS - DESCENDANT_REANNOUNCE_TICKS)
+    expect(stillRoutine?.escalate).toBe(false)
+
+    const escalated = describeBlockedResident('target', sid, DESCENDANT_ESCALATE_TICKS)
+    expect(escalated).toBeDefined()
+    expect(escalated?.escalate).toBe(true)
+    expect(escalated?.message).toContain('this has now run far longer than one idle window is meant to mean')
   })
 })
 
