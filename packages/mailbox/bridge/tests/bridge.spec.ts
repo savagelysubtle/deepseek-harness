@@ -5,7 +5,7 @@
  * routing outcomes a claimed lease can take.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -846,6 +846,296 @@ describe('idle-retire deferral for a seat with live continuable descendants', ()
   })
 })
 
+/**
+ * A stub `ctx.get('subagents')` whose `hasLiveDescendants` answer is tracked
+ * PER AGENT OBJECT rather than one shared flag — {@link subagentsStub} above
+ * cannot tell two generations of one renamed seat apart, but the rename
+ * (SWD-138) tests below need exactly that: the old conversation and the new
+ * one carry distinct stub agent objects (one per `makeHandle()` call in
+ * {@link makeHarness}), so keying live-ness off object identity mirrors what
+ * the real `SubagentRuntime.hasLiveDescendants(agent)` call site actually
+ * receives.
+ */
+function perAgentSubagentsStub(): {
+  readonly api: { hasLiveDescendants: ReturnType<typeof vi.fn> }
+  setLive(agent: unknown, value: boolean): void
+} {
+  const live = new Set<unknown>()
+  return {
+    api: { hasLiveDescendants: vi.fn((agent: unknown) => live.has(agent)) },
+    setLive(agent: unknown, value: boolean) {
+      if (value) live.add(agent)
+      else live.delete(agent)
+    },
+  }
+}
+
+/**
+ * Write a throwaway one-seat registry pinning `target` to an explicit
+ * (non-derived) session id — the shape a real seat rename produces: the org
+ * registry's `sessionId` row for one name is repointed at a different,
+ * already-existing session. Returns the registry path so a test can rewrite
+ * it in place (see {@link repinSeatSessionId}) to simulate the rename itself.
+ * @param sessionId - the session id `target` starts pinned to.
+ */
+function writePinnedRegistry(sessionId: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-bridge-rename-registry-'))
+  const path = join(dir, 'registry.yml')
+  writeFileSync(path, `baseDir: ${dir}\nseats:\n  target: { cwd: target, sessionId: ${sessionId} }\nedges: []\n`, 'utf8')
+  mkdirSync(join(dir, 'target'), { recursive: true })
+  return path
+}
+
+/**
+ * The next forced mtime (epoch ms) to stamp on a registry path this test file
+ * repins, keyed by path. See {@link repinSeatSessionId}: a plain
+ * `Date.now() + 60_000` on every call can collide when two repins land in the
+ * same millisecond (a real risk here — a test can repin the same path twice
+ * with nothing but synchronous JS between the calls), which would leave the
+ * bridge's mtime-keyed registry cache unbusted for the second rename. Tracking
+ * the last forced value per path and always adding to THAT instead of to
+ * `Date.now()` guarantees strictly increasing mtimes regardless of how fast
+ * the calls land.
+ */
+const forcedRegistryMtimeMs = new Map<string, number>()
+
+/**
+ * Repin `target`'s recorded session id in a registry {@link writePinnedRegistry}
+ * wrote, simulating the rename itself. The bridge's registry cache keys on
+ * `mtimeMs` (see `cachedRegistry`), so a rewrite alone is not guaranteed to
+ * invalidate it — see {@link forcedRegistryMtimeMs} for why a monotonic
+ * per-path counter is used instead of trusting real-clock resolution.
+ * @param path - the registry path from {@link writePinnedRegistry}.
+ * @param sessionId - the session id `target` is repinned to.
+ */
+function repinSeatSessionId(path: string, sessionId: string): void {
+  const dir = dirname(path)
+  writeFileSync(path, `baseDir: ${dir}\nseats:\n  target: { cwd: target, sessionId: ${sessionId} }\nedges: []\n`, 'utf8')
+  const nextMs = (forcedRegistryMtimeMs.get(path) ?? Date.now()) + 60_000
+  forcedRegistryMtimeMs.set(path, nextMs)
+  const forced = new Date(nextMs)
+  utimesSync(path, forced, forced)
+}
+
+describe('seat rename supersedes the old resident instead of releasing it (SWD-138)', () => {
+  afterEach(() => {
+    // Same reasoning as the idle-retire block above: only these tests opt
+    // into a fake clock, so it must never leak into a later file on failure.
+    vi.useRealTimers()
+  })
+
+  it('does not dispose the old conversation while it still has live background work, and the new seat takes over the name immediately', async () => {
+    const registryPath2 = writePinnedRegistry('session-a')
+    const h = await makeHarness()
+    const stub = perAgentSubagentsStub()
+    h.ctx.provide('subagents', stub.api as never)
+    const spec = bridge.resolveBridgeSpec({
+      addresses: ['target'],
+      pollIntervalMs: 5,
+      maxClaimPerCycle: 10,
+      staleClaimMs: 600_000,
+      admitFrom: ['sender'],
+      orgRegistryPath: registryPath2,
+      residencyIdleMs: 1000,
+    })
+
+    await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, spec)
+    expect(h.createdSessions()).toEqual(['session-a'])
+    const agentA = h.agentFor('session-a')
+    expect(agentA).toBeDefined()
+    stub.setLive(agentA, true)
+
+    // The rename: the registry now resolves `target` to a fresh session.
+    repinSeatSessionId(registryPath2, 'session-b')
+    const secondId = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'after rename' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+
+    // The new seat was created and admitted the second message normally —
+    // the founder's ruling names this explicitly: the name moves immediately,
+    // the rename is never refused or deferred waiting on the old conversation.
+    expect(h.createdSessions()).toEqual(['session-a', 'session-b'])
+    await expect(rowState(h.storePath, secondId)).resolves.toMatchObject({ state: 'done' })
+    // The old conversation's agent was never disposed — it is still finishing
+    // its background work, exactly as the founder ruled.
+    expect(h.disposeCalls()).toBe(0)
+
+    // And the new seat works normally in the meantime: a THIRD message to the
+    // same name rides the new (live, in-process) resident with no further
+    // creation — proving the rename did not leave `target` in some degraded
+    // or blocked state while the old conversation lingers.
+    const thirdId = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'still works' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+    expect(h.createdSessions()).toEqual(['session-a', 'session-b'])
+    await expect(rowState(h.storePath, thirdId)).resolves.toMatchObject({ state: 'done' })
+  })
+
+  it('disposes the old conversation once its background work finishes, after a rename', async () => {
+    const registryPath2 = writePinnedRegistry('session-a')
+    const h = await makeHarness()
+    const stub = perAgentSubagentsStub()
+    h.ctx.provide('subagents', stub.api as never)
+    // Wired here, before anything runs, the same way the idle-retire block's
+    // own "logs on the first blocked tick" test spies before its first drain:
+    // this is the ONLY thing that proves the supersede path actually calls
+    // `logBlockedAnnouncement` with the 'superseded' reason at all — the
+    // disposal-timing assertions below would pass identically even if that
+    // call were dropped from `retireSuperseded` entirely, or wired with the
+    // wrong reason literal.
+    const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
+    const spec = bridge.resolveBridgeSpec({
+      addresses: ['target'],
+      pollIntervalMs: 5,
+      maxClaimPerCycle: 10,
+      staleClaimMs: 600_000,
+      admitFrom: ['sender'],
+      orgRegistryPath: registryPath2,
+      residencyIdleMs: 1000,
+    })
+    vi.useFakeTimers()
+
+    await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, spec)
+    const agentA = h.agentFor('session-a')
+    stub.setLive(agentA, true)
+
+    repinSeatSessionId(registryPath2, 'session-b')
+    await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'after rename' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+    // The new (current) resident is marked live too, so ITS OWN ordinary
+    // idle-retire timer — armed for the same `idleMs` and due at the same
+    // tick as the old resident's supersede recheck below — defers rather
+    // than coincidentally hardRetiring on schedule and confusing this test's
+    // dispose count with a seat this test never meant to touch.
+    stub.setLive(h.agentFor('session-b'), true)
+    expect(h.disposeCalls()).toBe(0)
+
+    // The rename itself is the first blocked tick — `supersede()` runs its
+    // own first live-descendant check synchronously, so the announcement (see
+    // `describeBlockedResident`'s "first occurrence always announces" rule)
+    // fires during the rename's own drain, never a silent linger even for
+    // one tick. It must carry the SUPERSEDE wording, never the idle-retire
+    // wording the current (session-b) resident's own deferred idle timer
+    // would produce instead.
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('is being kept alive after the name moved to a new session'))
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('staying resident past its idle window'))
+
+    // Still finishing: a recheck tick with the descendant still live changes
+    // nothing.
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.disposeCalls()).toBe(0)
+
+    // The background work completes — the next recheck tears it down.
+    stub.setLive(agentA, false)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.disposeCalls()).toBe(1)
+    expect(h.flushes()).toBe(1)
+  })
+
+  it('a rename with no live background work behaves exactly as before — the old conversation disposes immediately (the common case is unchanged)', async () => {
+    const registryPath2 = writePinnedRegistry('session-a')
+    const h = await makeHarness()
+    // No `subagents` service mounted at all — the same "never materialized a
+    // descendant" deployment shape `retire()`'s own doc already covers.
+    const spec = bridge.resolveBridgeSpec({
+      addresses: ['target'],
+      pollIntervalMs: 5,
+      maxClaimPerCycle: 10,
+      staleClaimMs: 600_000,
+      admitFrom: ['sender'],
+      orgRegistryPath: registryPath2,
+      residencyIdleMs: 1000,
+    })
+
+    await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, spec)
+    expect(h.disposeCalls()).toBe(0)
+
+    repinSeatSessionId(registryPath2, 'session-b')
+    await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'after rename' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+
+    // No deferral at all: the old resident tore down in the very same drain
+    // that created the new one, with no recheck timer ever needed.
+    expect(h.disposeCalls()).toBe(1)
+    expect(h.flushes()).toBe(1)
+    expect(spec.residents.size).toBe(1)
+    expect(spec.residents.has('target')).toBe(true)
+  })
+
+  it('more than one lingering conversation drains independently without corrupting `spec.residents` — a second rename while the first is still finishing', async () => {
+    const registryPath2 = writePinnedRegistry('session-a')
+    const h = await makeHarness()
+    const stub = perAgentSubagentsStub()
+    h.ctx.provide('subagents', stub.api as never)
+    const spec = bridge.resolveBridgeSpec({
+      addresses: ['target'],
+      pollIntervalMs: 5,
+      maxClaimPerCycle: 10,
+      staleClaimMs: 600_000,
+      admitFrom: ['sender'],
+      orgRegistryPath: registryPath2,
+      residencyIdleMs: 1000,
+    })
+    vi.useFakeTimers()
+
+    await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, spec)
+    const agentA = h.agentFor('session-a')
+    // Every generation below is marked live so none disposes until this test
+    // explicitly clears it — including the CURRENT (third) generation, so its
+    // own ordinary idle-retire timer (armed for the same `idleMs`) defers
+    // exactly like any other busy seat instead of coincidentally hardRetiring
+    // and deleting the very map entry this test is asserting stays intact.
+    stub.setLive(agentA, true)
+
+    repinSeatSessionId(registryPath2, 'session-b')
+    await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'rename one' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+    const agentB = h.agentFor('session-b')
+    stub.setLive(agentB, true)
+
+    // A second rename lands while the FIRST superseded conversation
+    // (session-a) is still finishing — this is the scenario the ticket calls
+    // out by name: more than one lingering conversation at once.
+    repinSeatSessionId(registryPath2, 'session-c')
+    await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'rename two' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+    const agentC = h.agentFor('session-c')
+    stub.setLive(agentC, true)
+
+    expect(h.createdSessions()).toEqual(['session-a', 'session-b', 'session-c'])
+    const current = spec.residents.get('target')
+    expect(current).toBeDefined()
+    expect(h.disposeCalls()).toBe(0)
+
+    // One full recheck cadence: every generation is still live, so nothing
+    // disposes and `target` still maps to the same (third-generation)
+    // resident — the recheck loops never touch the map at all.
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.disposeCalls()).toBe(0)
+    expect(spec.residents.get('target')).toBe(current)
+
+    // The FIRST generation (session-a) finishes; only it tears down. The
+    // second generation and the current resident are untouched.
+    stub.setLive(agentA, false)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.disposeCalls()).toBe(1)
+    expect(spec.residents.get('target')).toBe(current)
+
+    // The SECOND generation (session-b) finishes next; the current resident
+    // — a third, still-independent generation — remains completely
+    // unaffected throughout, proving multiple lingering conversations do not
+    // corrupt `spec.residents` bookkeeping for one another or for the seat
+    // presently holding the name.
+    stub.setLive(agentB, false)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.disposeCalls()).toBe(2)
+    expect(spec.residents.get('target')).toBe(current)
+    expect(spec.residents.size).toBe(1)
+  })
+})
+
 describe('describeBlockedResident cadence', () => {
   const { describeBlockedResident, DESCENDANT_REANNOUNCE_TICKS, DESCENDANT_ESCALATE_TICKS } = bridge.internals
   const sid = deriveNamedSessionId('target')
@@ -878,6 +1168,28 @@ describe('describeBlockedResident cadence', () => {
     expect(escalated).toBeDefined()
     expect(escalated?.escalate).toBe(true)
     expect(escalated?.message).toContain('this has now run far longer than one idle window is meant to mean')
+  })
+
+  it('defaults to the idle wording when no reason is passed, for every existing caller', () => {
+    expect(describeBlockedResident('target', sid, 1)?.message).toContain('staying resident past its idle window')
+  })
+
+  it('uses the rename/supersede wording — and cadence/escalation identically — when reason is "superseded"', () => {
+    const first = describeBlockedResident('target', sid, 1, 'superseded')
+    expect(first).toBeDefined()
+    expect(first?.escalate).toBe(false)
+    expect(first?.message).toContain('is being kept alive after the name moved to a new session')
+    expect(first?.message).not.toContain('staying resident past its idle window')
+
+    // Same cadence constants govern both reasons: quiet between reannounces,
+    expect(describeBlockedResident('target', sid, 2, 'superseded')).toBeUndefined()
+    // reannounces on schedule,
+    expect(describeBlockedResident('target', sid, DESCENDANT_REANNOUNCE_TICKS, 'superseded')?.escalate).toBe(false)
+    // and escalates at the same threshold, with wording for THIS reason.
+    const escalated = describeBlockedResident('target', sid, DESCENDANT_ESCALATE_TICKS, 'superseded')
+    expect(escalated?.escalate).toBe(true)
+    expect(escalated?.message).toContain('this has now run far longer than one idle window is meant to mean')
+    expect(escalated?.message).toContain('this conversation should not still be running')
   })
 })
 
