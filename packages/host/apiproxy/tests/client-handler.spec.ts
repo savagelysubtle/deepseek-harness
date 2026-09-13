@@ -63,6 +63,7 @@ function scriptedApi(overrides: {
       cancel: r => ok(r, { accepted: true as const }),
       stopTree: r => ok(r, { ownTurnStopped: true, descendants: 'ok' as const }),
       stopAll: r => ok(r, { stoppedCount: 0, descendants: 'ok' as const }),
+      sendAll: r => ok(r, { sentCount: 0, result: 'ok' as const }),
       ...overrides.sessions,
     },
     subagents: {
@@ -158,7 +159,7 @@ describe('unary round trip', () => {
       sessions: {
         list: (r) => {
           seen = r
-          return ok(r, { items: [{ sessionId: sid('s1'), updatedAt: 7, running: false, blank: false }] })
+          return ok(r, { items: [{ sessionId: sid('s1'), updatedAt: 7, running: false, attached: true, blank: false }] })
         },
       },
     })
@@ -167,7 +168,7 @@ describe('unary round trip', () => {
     expect(seen?.payload).toEqual({ cursor: 'c1' })
     expect(seen?.rpcId).toBeTruthy()
     expect(response.rpcId).toBe(seen?.rpcId)
-    expect(response.result).toEqual({ ok: true, value: { items: [{ sessionId: 's1', updatedAt: 7, running: false, blank: false }] } })
+    expect(response.result).toEqual({ ok: true, value: { items: [{ sessionId: 's1', updatedAt: 7, running: false, attached: true, blank: false }] } })
   })
 
   it('round-trips a trimmed session search query and its bounded result metadata', async () => {

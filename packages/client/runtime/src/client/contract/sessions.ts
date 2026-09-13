@@ -9,7 +9,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type {
-  RpcResult, SessionId, SubagentAddress,
+  PromptContentPart, RpcResult, SendAllResult, SessionId, StopDescendantsResult, SubagentAddress,
 } from '@deepseek-ai/dsh-api-remotes/client'
 import type { HostObservable, SessionMaybeProvideInfo } from '@deepseek-ai/dsh-client-ui-slots'
 import type { AgentContext } from '../agents/scope.ts'
@@ -127,4 +127,22 @@ export interface ISessions {
    * @returns binding, or undefined for a session neither listed nor already scoped.
    */
   binding(id: SessionId): SessionBinding | undefined
+  /**
+   * Stop every live top-level session's own turn and drain every root's
+   * descendant forest in one shared host call (org-wide Stop All, SWD-130).
+   * Never mutates the list snapshot: running/idle state settles through the
+   * normal event/frame path, so the caller must read `descendants` itself
+   * rather than trust a folded success.
+   * @returns the host result or a folded transport error.
+   */
+  stopAll(): Promise<RpcResult<{ stoppedCount: number; descendants: StopDescendantsResult }>>
+  /**
+   * Steer every live top-level session with the same content in one host
+   * call (org-wide Send All, SWD-131) — immediately, mid-turn, never queued.
+   * Never mutates the list snapshot; the caller reads `result` for whether
+   * every root actually received it.
+   * @param content - prompt content broadcast to every live top-level session.
+   * @returns the host result or a folded transport error.
+   */
+  sendAll(content: PromptContentPart[]): Promise<RpcResult<{ sentCount: number; result: SendAllResult }>>
 }

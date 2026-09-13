@@ -16,7 +16,8 @@
  */
 import type { Context, Fiber } from '@deepseek-ai/cordis'
 import type {
-  IApiClient, RpcError, RpcResult, SessionId, SubagentAddress, JobView, WorkspaceId,
+  IApiClient, PromptContentPart, RpcError, RpcResult, SendAllResult, SessionId, StopDescendantsResult,
+  SubagentAddress, JobView, WorkspaceId,
 } from '@deepseek-ai/dsh-api-remotes/client'
 // Value import from the inline-safe wire layer (not the connection plugin):
 // plugin-to-plugin value imports are a bundle purity error.
@@ -56,6 +57,14 @@ export interface SessionSummary {
   /** Coarse durable origin for navigation filtering; not a continuation capability. */
   origin?: 'subagent'
   running: boolean
+  /**
+   * Whether a live in-memory Agent currently backs this session — the same
+   * fact `session.stopAll`/`session.sendAll` root selection reads on the
+   * host to decide who is reachable. Independent of `running`: a session
+   * idling between turns is `attached: true, running: false`, and is
+   * exactly a broadcast control's intended audience, not an edge case of it.
+   */
+  attached: boolean
   /** User interaction currently blocking this session (sidebar amber-dot state). */
   pendingInteraction?: PendingInteractionStatus
   /** Finished while not selected and not yet opened — the sidebar's green "done" reminder. Absent = false. */
@@ -578,6 +587,25 @@ export class SessionRuntime implements ISessions {
   }
 
   /**
+   * Stop every live top-level session's own turn and drain every root's
+   * descendant forest in one shared host call (org-wide Stop All, SWD-130).
+   * @returns the host result or a folded transport error.
+   */
+  stopAll(): Promise<RpcResult<{ stoppedCount: number; descendants: StopDescendantsResult }>> {
+    return this.manager.stopAll()
+  }
+
+  /**
+   * Steer every live top-level session with the same content in one host
+   * call (org-wide Send All, SWD-131) — immediately, mid-turn, never queued.
+   * @param content - prompt content broadcast to every live top-level session.
+   * @returns the host result or a folded transport error.
+   */
+  sendAll(content: PromptContentPart[]): Promise<RpcResult<{ sentCount: number; result: SendAllResult }>> {
+    return this.manager.sendAll(content)
+  }
+
+  /**
    * Resolve one session's render-layer standard-props bundle (ctx never
    * enters the render layer; the renderer subscribes to
    * {@link SessionRuntime.currentProvideInfo}). Pure resolution — render-safe:
@@ -669,6 +697,7 @@ export class SessionRuntime implements ISessions {
         id: entry.sessionId,
         displayTitle: displayTitleOf(entry.title, entry.cwd, entry.sessionId),
         running: entry.running,
+        attached: entry.attached,
         ...(entry.completed ? { completed: true } : {}),
         blank: entry.blank,
         updatedAt: entry.updatedAt,
@@ -703,6 +732,10 @@ export class SessionRuntime implements ISessions {
             parentId: address.parentSessionId,
             origin: 'subagent',
             running: child.activity === 'running',
+            // Breadcrumb-only row, never a broadcast root (origin excludes
+            // it from stopAll/sendAll counting regardless of this value);
+            // mirrors `running` as the closest available liveness proxy.
+            attached: child.activity === 'running',
             blank: false,
             updatedAt: 0,
           }

@@ -183,6 +183,11 @@
     - id: ui-sidebar
       name: '@deepseek-ai/dsh-client-ui-sidebar'
 
+    # Org-wide Stop All / Send All (SWD-130/SWD-131): two entries in
+    # ui-sidebar's own sidebar.footer.action ring, beside Settings.
+    - id: ui-org-controls
+      name: '@deepseek-ai/dsh-client-ui-org-controls'
+
     - id: ui-settings
       name: '@deepseek-ai/dsh-client-ui-settings'
 

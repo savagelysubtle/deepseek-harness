@@ -624,13 +624,20 @@ function sessionListFields(header: SessionHeader, events: readonly SessionEvent[
   }
 }
 
-/** SessionSummary projection for attached (in-memory) sessions. */
-function summarize(session: Session, running: boolean): SessionSummary {
+/**
+ * SessionSummary projection for attached (in-memory) sessions. `attached` is
+ * a separate parameter from `running` on purpose: this function's own caller
+ * computes both from the same `ctx.agents.get` lookup, and a session can be
+ * attached (a live Agent exists) while idle between turns — the exact state
+ * `session.sendAll` targets and a bare `running` bit cannot express.
+ */
+function summarize(session: Session, running: boolean, attached: boolean): SessionSummary {
   const metadata = sessionListMetadata(session.events)
   return {
     sessionId: session.id,
     updatedAt: sessionListUpdatedAt(session.header, metadata),
     running,
+    attached,
     blank: metadata.blank,
     ...sessionListFields(session.header, session.events),
   }
@@ -690,6 +697,7 @@ async function summarizeCold(
     sessionId: meta.id,
     updatedAt: sessionListUpdatedAt(meta, probed ?? metadata),
     running: false,
+    attached: false,
     blank: metadata?.blank === false ? false : probed?.blank ?? false,
     // Header-only: reading the log for a blank-window preset switch would
     // defeat the same index read, and attaching the session replaces this row
@@ -1992,7 +2000,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       const agent = ctx.agents.get(session.id)
       const projections = listProjectionsFor(ctx, session.header, session)
       return {
-        ...summarize(session, agent?.status === 'running'),
+        ...summarize(session, agent?.status === 'running', agent !== undefined),
         ...projections === undefined ? {} : { projections },
       }
     }
@@ -2972,6 +2980,53 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         return ok(request, {
           stoppedCount,
           descendants: await drainDescendantsResult(ctx, roots),
+        })
+      },
+
+      async sendAll(request) {
+        // Same root selection as stopAll: session-backed subagents are never
+        // targeted directly here — reaching one means steering the
+        // top-level session that owns it.
+        const roots = ctx.sessions.list()
+          .filter(session => session.header.origin !== 'subagent')
+          .map(session => ctx.agents.get(session.id))
+          .filter((agent): agent is Agent => agent !== undefined)
+        let durable: ContentBlock[]
+        try {
+          durable = await durablePromptContent(ctx, request.payload.content)
+        } catch (error: unknown) {
+          if (error instanceof AttachmentError) {
+            return err(request, {
+              code: 'attachment-error',
+              message: error.message,
+              details: { reason: error.code },
+            })
+          }
+          return err(request, {
+            code: 'internal',
+            message: `sendAll content admission failed: ${errorChain(error)}`,
+            details: {},
+          })
+        }
+        // Steer every root independently: one throw (an agent disposing
+        // between root selection and delivery) must never stop the
+        // broadcast from reaching every other seat, and must never be
+        // silently folded into a bare success either — a partial send that
+        // reports "sent" is exactly the defect this epic exists to remove.
+        let sentCount = 0
+        const failures: string[] = []
+        for (const agent of roots) {
+          const source: MessageSource = { kind: 'user', rpcId: request.rpcId }
+          try {
+            agent.steer(createUserMessage({ content: durable, source }))
+            sentCount += 1
+          } catch (error: unknown) {
+            failures.push(`${agent.id}: ${errorChain(error)}`)
+          }
+        }
+        return ok(request, {
+          sentCount,
+          result: failures.length === 0 ? 'ok' as const : { failed: failures.join('; ') },
         })
       },
     },
