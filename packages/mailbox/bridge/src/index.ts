@@ -84,6 +84,12 @@ import type {} from '@deepseek-ai/dsh-agent-default-model'
 // inside the setup callbacks below — the same bare type-only import idiom
 // used by the API proxy, agent-loop, agent-tool-presentation, and mcp-client.
 import type {} from '@deepseek-ai/dsh-tools'
+// Type-only, same idiom: augments `Context` with `.subagents` so the
+// idle-retire check below (`ctx.get('subagents')?.hasLiveDescendants(...)`)
+// type-checks. A composition without the subagent runtime mounted resolves
+// this to `undefined` at runtime, which the `?? false` fallback treats as
+// "no descendants" — never a missing-service crash.
+import type {} from '@deepseek-ai/dsh-subagent'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import {
   acquireSessionLock,
@@ -998,10 +1004,75 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
 }
 
 /**
+ * Upper bound on how often the idle-retire timer rechecks a blocked seat for
+ * live continuable descendants, once it has any. Recheck is a synchronous
+ * in-memory scan (see `SubagentRuntime.hasLiveDescendants`), so it costs
+ * nothing to run far more often than `idleMs` itself: bounding it below
+ * `idleMs` (`Math.min`) is what keeps a real deployment's 10-minute default
+ * from leaving a finished seat pinned open for up to 10 more minutes before
+ * anyone notices its last descendant actually settled.
+ */
+const DESCENDANT_RECHECK_MS = 30_000
+
+/**
+ * Recheck ticks between repeated "still held open" log lines once a seat is
+ * blocked on live descendants. The first tick always logs (a fence must
+ * never be silent at the moment it starts); after that, logging every tick
+ * would turn one long-running background task into one log line per recheck
+ * interval. Expressed in ticks rather than wall-clock time so the same
+ * constant means "N rechecks of being blocked" whether `idleMs` is a real
+ * deployment's 10 minutes or a test's few milliseconds.
+ */
+const DESCENDANT_REANNOUNCE_TICKS = 20
+
+/**
+ * Blocked ticks past which a still-held seat's log escalates from `warn` to
+ * `error` and its wording changes from routine to unusual. A seat held open
+ * by legitimate background work is expected and must not read as an
+ * incident; a seat still held after this many rechecks (roughly an hour, at
+ * the recheck cap above) is unusual enough that a founder watching the log
+ * should be able to tell the difference without reading source — this is the
+ * legibility the module owes for choosing never to time out or kill the
+ * underlying work itself.
+ */
+const DESCENDANT_ESCALATE_TICKS = 120
+
+/**
+ * Decide whether one blocked idle-retire recheck should log, and how. Pulled
+ * out of {@link retainResident} as a pure function so the reannounce and
+ * escalate thresholds are unit-testable without waiting on real timers.
+ * @param name - the seat's address (its session name).
+ * @param sessionId - the resident agent's durable session id.
+ * @param blockedTicks - consecutive recheck ticks this seat has spent blocked
+ *   on a live continuable descendant, counting the current one.
+ * @returns the log level and message for this tick, or `undefined` when this
+ *   tick reannounces nothing.
+ */
+function describeBlockedResident(
+  name: string,
+  sessionId: SessionId,
+  blockedTicks: number,
+): { readonly escalate: boolean; readonly message: string } | undefined {
+  if (blockedTicks !== 1 && blockedTicks % DESCENDANT_REANNOUNCE_TICKS !== 0) return undefined
+  const escalate = blockedTicks >= DESCENDANT_ESCALATE_TICKS
+  const message = `mailbox-bridge: seat "${name}" (${sessionId}) is staying resident past its idle window — `
+    + 'live background subagents are still running, so it is being kept open rather than retired'
+    + (escalate
+      ? '; this has now run far longer than one idle window is meant to mean — '
+        + 'check its background work if this seat should not still be running'
+      : '')
+  return { escalate, message }
+}
+
+/**
  * Keep one woken agent resident under this bridge's pen: the per-name lock
  * stays held (stray headless runs refuse cleanly), the agent stays registered
  * so the operator's composer and later mail steer it in place, and an idle
- * timer flushes, disposes the agent, and releases the lock after `idleMs`.
+ * timer flushes, disposes the agent, and releases the lock after `idleMs` —
+ * unless the seat still has a live continuable descendant, in which case the
+ * founder's ruling applies: nothing here stops, cancels, or drains that
+ * descendant (that would silently orphan or kill work the seat's own
+ * conversation may still depend on), so the timer defers instead of retiring.
  * @param ctx - plugin context carrying the session store service.
  * @param spec - resolved serving parameters carrying the residency map.
  * @param name - the seat's address (its session name).
@@ -1020,7 +1091,18 @@ function retainResident(
   const previous = spec.residents.get(name)
   previous?.release()
   let timer: ReturnType<typeof setTimeout> | undefined
-  const retire = (): void => {
+  // Consecutive recheck ticks spent blocked on a live descendant; reset
+  // whenever a real delivery proves the seat is in ordinary use again.
+  let blockedTicks = 0
+  // The unconditional teardown: flush, dispose, and release the lock with no
+  // further question. This is what `release()` always does — host teardown,
+  // or this same `name` having already moved to a different session id (a
+  // rename) — and what the idle timer below falls through to once no live
+  // descendant remains. `release()` deliberately does NOT go through the
+  // deferring `retire()` below: host teardown must not hang a process exit on
+  // a runaway subagent, and a name superseded by a fresh identity is not the
+  // "went quiet" case this timer measures.
+  const hardRetire = (): void => {
     spec.residents.delete(name)
     const sessions = ctx.get('sessions')
     // The timer/release caller cannot await this drain, so its failure is
@@ -1033,14 +1115,37 @@ function retainResident(
       }).then(() => handle.dispose()))
     lock.release()
   }
+  // The idle-driven retire: a seat with a live continuable descendant does
+  // not retire — the idle clock only starts once every descendant is gone.
+  // A manager-less composition (`ctx.get('subagents')` absent) has never
+  // materialized a descendant, so it falls straight through to `hardRetire`,
+  // exactly reproducing the pre-existing behavior for every deployment that
+  // does not mount the subagent runtime at all.
+  const retire = (): void => {
+    if (ctx.get('subagents')?.hasLiveDescendants(handle.agent) ?? false) {
+      blockedTicks += 1
+      // Never a silent fence: a founder watching the log must be able to
+      // learn why this seat has not gone away without reading source.
+      const announcement = describeBlockedResident(name, handle.agent.session.id, blockedTicks)
+      if (announcement !== undefined) {
+        if (announcement.escalate) ctx.logger.error(announcement.message)
+        else ctx.logger.warn(announcement.message)
+      }
+      timer = setTimeout(retire, Math.min(idleMs, DESCENDANT_RECHECK_MS))
+      timer.unref()
+      return
+    }
+    hardRetire()
+  }
   const resident: ResidentSeat = {
     keepAlive(): void {
       if (timer !== undefined) clearTimeout(timer)
+      blockedTicks = 0
       arm()
     },
     release(): void {
       if (timer !== undefined) clearTimeout(timer)
-      retire()
+      hardRetire()
     },
   }
   const arm = (): void => {
@@ -1601,6 +1706,9 @@ export type RouteResult = { kind: 'done' } | { kind: 'pending' } | { kind: 'fail
  * One drain pass without the interval wrapper — the unit-test surface. The
  * optional observer fires once per routed lease at its settlement write, so a
  * consumer can learn what became of a specific message it just published.
+ * Also carries the idle-retire logging thresholds and their pure decision
+ * function, so a test can exercise the reannounce/escalate cadence directly
+ * instead of waiting on real recheck timers.
  * @param ctx - plugin context carrying the mailbox registry and core services.
  * @param spec - resolved serving parameters.
  * @param onSettled - observer keyed by the provider-assigned message id.
@@ -1624,6 +1732,9 @@ export const internals = {
       }
     }
   },
+  describeBlockedResident,
+  DESCENDANT_REANNOUNCE_TICKS,
+  DESCENDANT_ESCALATE_TICKS,
 }
 
 /**

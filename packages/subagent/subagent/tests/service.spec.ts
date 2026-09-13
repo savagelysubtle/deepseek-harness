@@ -144,6 +144,16 @@ describe('SubagentRuntime', () => {
     }) }).not.toThrow()
   })
 
+  it('reports no live descendants when no manager was bound, rather than throwing', async () => {
+    const { subagents } = await service()
+    // Without `ctx.agents` no continuation manager was ever constructed, so no
+    // Activation was ever materialized — the same honest `?? false` absence
+    // `interrupt` above uses, not a thrown error an idle-retire timer would
+    // have to guard against on every tick.
+    expect(() => { subagents.hasLiveDescendants(fakeParent()) }).not.toThrow()
+    expect(subagents.hasLiveDescendants(fakeParent())).toBe(false)
+  })
+
   it('rejects continuable operations when their runtime services are absent', async () => {
     const { subagents } = await service()
     await expect(subagents.startContinuable({

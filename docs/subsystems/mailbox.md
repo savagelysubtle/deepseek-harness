@@ -289,7 +289,7 @@ The bridge refused a claimed lease terminally at admission — registry health, 
 'mailbox/refused'(refusal: MailboxRefusal): void
 ```
 
-Source: [`packages/mailbox/bridge/src/index.ts:1561`](../../packages/mailbox/bridge/src/index.ts)
+Source: [`packages/mailbox/bridge/src/index.ts:1666`](../../packages/mailbox/bridge/src/index.ts)
 
 <a id="mailboxseat-tools-restricted--emit"></a>
 
@@ -333,5 +333,5 @@ Listener failures are logged and contained by Cordis dispatch.
 'mailbox/seat-tools-restricted'(restriction: SeatToolsRestricted): void
 ```
 
-Source: [`packages/mailbox/bridge/src/index.ts:1590`](../../packages/mailbox/bridge/src/index.ts)
+Source: [`packages/mailbox/bridge/src/index.ts:1695`](../../packages/mailbox/bridge/src/index.ts)
 <!-- END GENERATED cordis-surface -->

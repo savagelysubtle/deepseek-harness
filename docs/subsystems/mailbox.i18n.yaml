@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write docs/subsystems/mailbox.md
-mailbox.md: 55d845d72960172e3b87a2f7abbef59dae00689f
-mailbox.zh.md: 1a3daf416405a5857f566cc5f33053d744868459
+mailbox.md: 70f842fae1c4a642f3e61d455f7e92dd75c791b1
+mailbox.zh.md: a72ce219e1b5cdc25c5c4235a47dbacf803b533b

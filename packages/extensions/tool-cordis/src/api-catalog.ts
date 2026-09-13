@@ -1711,6 +1711,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         throws: ['{SubagentError} `UNAUTHORIZED` when the authority does not own the live target.'],
       },
       {
+        signature: 'hasLiveDescendants(root: Agent): boolean',
+        description: 'Whether `root` currently has any live continuable descendant Activation. Synchronous and process-local — backed only by the resident Activation map, never a persistence read or a durable-history projection — so a caller like an idle-retire timer can afford to call it on every tick. listDescendants answers a different, more expensive question (the durable tree, including already-settled children); this one exists because that question is the wrong one, and the wrong cost, for a timer callback. A manager-less composition (the `agents` service never mounted) has never materialized an Activation, so it truthfully reports no descendants rather than throwing — the same `?? false` honesty interrupt uses for the same absence.',
+        parameters: [{ name: 'root', description: 'the exact live Agent to test for live descendants.' }],
+        returns: 'whether `root` has at least one live continuable descendant.',
+      },
+      {
         signature: 'async reportFrom( child: Agent, content: ContentBlock[], options: SubagentReportOptions, ): Promise<MessageId>',
         description: 'Deliver selected content from one live continuable child to its durable direct parent. The child is the authority credential; callers cannot name a recipient. Reporting does not conclude the child\'s turn or Activation.',
         parameters: [{ name: 'child', description: 'exact live reporting child.' }, { name: 'content', description: 'selected model-facing content.' }, { name: 'options', description: 'parent scheduling and pre-acceptance cancellation.' }],
@@ -4489,7 +4495,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubagentRuntime',
-    declaration: 'export class SubagentRuntime extends Service {\n    constructor(ctx: Context);\n    async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart>;\n    async followup(parent: Agent, childId: SessionId, content: ContentBlock[], options: SubagentFollowupOptions): Promise<MessageId>;\n    interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): void;\n    async reportFrom(child: Agent, content: ContentBlock[], options: SubagentReportOptions): Promise<MessageId>;\n    registerContinuableSetup(contribution: ContinuableSetupContribution): () => void;\n    async drainContinuableDescendants(parents: readonly Agent[]): Promise<void>;\n    listChildren(parentSessionId: SessionId, signal?: AbortSignal): Promise<SubagentListEntry[]>;\n    listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<SubagentDescendantListEntry[]>;\n    registerProvider(provider: SubagentProvider): () => void;\n    getProvider(name: string): SubagentProvider | undefined;\n    list(): string[];\n    async start(name: string, request: SubagentStartRequest): Promise<SubagentRun>;\n}',
+    declaration: 'export class SubagentRuntime extends Service {\n    constructor(ctx: Context);\n    async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart>;\n    async followup(parent: Agent, childId: SessionId, content: ContentBlock[], options: SubagentFollowupOptions): Promise<MessageId>;\n    interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): void;\n    hasLiveDescendants(root: Agent): boolean;\n    async reportFrom(child: Agent, content: ContentBlock[], options: SubagentReportOptions): Promise<MessageId>;\n    registerContinuableSetup(contribution: ContinuableSetupContribution): () => void;\n    async drainContinuableDescendants(parents: readonly Agent[]): Promise<void>;\n    listChildren(parentSessionId: SessionId, signal?: AbortSignal): Promise<SubagentListEntry[]>;\n    listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<SubagentDescendantListEntry[]>;\n    registerProvider(provider: SubagentProvider): () => void;\n    getProvider(name: string): SubagentProvider | undefined;\n    list(): string[];\n    async start(name: string, request: SubagentStartRequest): Promise<SubagentRun>;\n}',
   },
   {
     name: 'SubagentStartRequest',
