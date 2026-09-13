@@ -1,0 +1,69 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  padding: 8px;
+  box-sizing: border-box;
+  overflow: auto;
+}
+
+.tree {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.empty {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 13px;
+  padding: 8px;
+}
+
+.rowWrapper {
+  display: flex;
+  flex-direction: column;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 8px;
+  padding: 4px 8px;
+  min-height: 28px;
+  box-sizing: border-box;
+}
+
+.statusSlot {
+  display: flex;
+  align-items: center;
+  flex: none;
+}
+
+.title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.statusLabel {
+  flex: none;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
