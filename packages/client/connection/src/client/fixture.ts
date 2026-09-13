@@ -2511,6 +2511,29 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         }
         return ok(request, { accepted: true as const })
       },
+      stopTree: (request) => {
+        const replay = replays.get(request.payload.sessionId)
+        if (replay !== undefined) {
+          clearTimeout(replay.timer)
+          replay.finish(true)
+        } else {
+          setRunning(request.payload.sessionId, false)
+        }
+        return ok(request, { ownTurnStopped: true, descendants: 'ok' as const })
+      },
+      stopAll: (request) => {
+        const roots = sessions.filter(summary => summary.origin !== 'subagent')
+        for (const root of roots) {
+          const replay = replays.get(root.sessionId)
+          if (replay !== undefined) {
+            clearTimeout(replay.timer)
+            replay.finish(true)
+          } else {
+            setRunning(root.sessionId, false)
+          }
+        }
+        return ok(request, { stoppedCount: roots.length, descendants: 'ok' as const })
+      },
     },
     subagents: {
       list: request => ok(request, { entries: [], parentAvailable: true }),
@@ -3161,6 +3184,8 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'session.attachment': return this.api.sessions.attachment(request)
       case 'session.updateQueue': return this.api.sessions.updateQueue(request)
       case 'session.cancel': return this.api.sessions.cancel(request)
+      case 'session.stopTree': return this.api.sessions.stopTree(request)
+      case 'session.stopAll': return this.api.sessions.stopAll(request)
       case 'subagent.list': return this.api.subagents.list(request)
       case 'subagent.history': return this.api.subagents.history(request)
       case 'subagent.prompt': return this.api.subagents.prompt(request, signal)

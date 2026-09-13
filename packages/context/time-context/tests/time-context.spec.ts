@@ -47,7 +47,7 @@ function sessionAgent(session: Session, id = 'agent'): Agent {
     followup: () => {},
     steer: () => {},
     inject: () => { throw new Error('time-context must append directly to the open step') },
-    cancel() {},
+    cancel() { return false },
     runMaintenance: task => task(new AbortController().signal),
     whenIdle: () => Promise.resolve(),
   }

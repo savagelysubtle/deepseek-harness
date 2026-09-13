@@ -38,7 +38,7 @@ import type {
   ApiProxy, ConfigurableProviderView, CredentialView, GoalRef, HistoryEntry, HostFrame,
   ModelCatalogFailure, ModelProviderGroup,
   ModelReasoning, MuxFrame, PromptContentPart, QuestionResponsePayload, SessionListMetadata, SessionProjectionsBlock, SessionSearchItem,
-  QueuedInboxItem, SessionSummary, SettingsNamespaceView, SubagentAddress, JobView, ToolEventView,
+  QueuedInboxItem, SessionSummary, SettingsNamespaceView, StopDescendantsResult, SubagentAddress, JobView, ToolEventView,
   WorkspaceId, WorkspaceView,
 } from './api/index.ts'
 import {
@@ -1175,6 +1175,32 @@ function changedWorkspaceView(workspaceId: string, value: unknown): WorkspaceVie
     sessionIds: [...record.sessionIds],
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
+  }
+}
+
+/**
+ * Drain every live continuable descendant beneath `roots` and fold a partial
+ * teardown failure into the caller-facing result shape instead of letting it
+ * read as a clean stop. `drainContinuableDescendants` never disposes the
+ * roots themselves — only strict descendants, child-first — so every root
+ * stays alive and resumable once this settles, and it throws exactly one
+ * joined `SubagentError` (not per-descendant results) when any branch failed
+ * to release. Shared by `session.stopTree` (one root) and `session.stopAll`
+ * (every live top-level root, drained in the one call the primitive requires
+ * to publish its admission cutoff across all roots before its first await).
+ * @param roots - exact live top-level Agents whose descendants must stop.
+ * @returns `'ok'` once every retained descendant released cleanly, or the
+ *   joined teardown-failure message when any did not.
+ */
+async function drainDescendantsResult(
+  ctx: Context,
+  roots: readonly Agent[],
+): Promise<StopDescendantsResult> {
+  try {
+    await ctx.subagents.drainContinuableDescendants(roots)
+    return 'ok'
+  } catch (error: unknown) {
+    return { failed: errorChain(error) }
   }
 }
 
@@ -2881,6 +2907,72 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         }
         agent.cancel({ kind: 'user' }, { keepInbox: true })
         return Promise.resolve(ok(request, { accepted: true as const }))
+      },
+
+      async stopTree(request) {
+        const { sessionId } = request.payload
+        const agent = ctx.agents.get(sessionId)
+        // Absent from the live registry is an accepted no-op — a stop racing
+        // natural completion, a repeated click, or an already-cold session
+        // must never read as an error the way `session.cancel` does.
+        if (agent === undefined) {
+          return ok(request, { ownTurnStopped: false, descendants: 'ok' as const })
+        }
+        let ownTurnStopped: boolean
+        if (hasSubagentOwner(agent.session, agent)) {
+          // `cancel` refuses subagent ownership outright; stopping a
+          // session-backed subagent's own turn goes through the interrupt
+          // primitive that already authorizes against its recorded parent.
+          const parentSessionId = agent.session.header.parentSession
+          if (parentSessionId === undefined) {
+            return err(request, {
+              code: 'internal',
+              message: `session "${sessionId}" is subagent-owned but its header records no parent session`,
+              details: {},
+            })
+          }
+          try {
+            ownTurnStopped = ctx.subagents.interrupt(sessionId, { kind: 'user', parentSessionId })
+          } catch (error: unknown) {
+            return err(request, {
+              code: 'internal',
+              message: `stopping the subagent-owned turn for session "${sessionId}" failed: ${errorChain(error)}`,
+              details: {},
+            })
+          }
+        } else {
+          ownTurnStopped = agent.cancel({ kind: 'user' }, { keepInbox: true })
+        }
+        // Always drain descendants, whichever branch stopped the node's own
+        // turn: the cascade this RPC exists to provide is the descendant
+        // teardown, not just the one node's cancel.
+        return ok(request, {
+          ownTurnStopped,
+          descendants: await drainDescendantsResult(ctx, [agent]),
+        })
+      },
+
+      async stopAll(request) {
+        // Session-backed subagents are never roots here: they stop as
+        // descendants of the top-level session that owns them, drained below.
+        const roots = ctx.sessions.list()
+          .filter(session => session.header.origin !== 'subagent')
+          .map(session => ctx.agents.get(session.id))
+          .filter((agent): agent is Agent => agent !== undefined)
+        // Cancel every root regardless of what it reports — the count below
+        // is about honest reporting, not about skipping the cancel call for
+        // a root this loop guesses is already idle.
+        let stoppedCount = 0
+        for (const agent of roots) {
+          if (agent.cancel({ kind: 'user' }, { keepInbox: true })) stoppedCount += 1
+        }
+        // One shared drain across every root: the primitive publishes its
+        // admission cutoff for all roots before its first await and merges
+        // converging teardowns, which N separate calls would not.
+        return ok(request, {
+          stoppedCount,
+          descendants: await drainDescendantsResult(ctx, roots),
+        })
       },
     },
 

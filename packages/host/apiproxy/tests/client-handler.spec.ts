@@ -61,6 +61,8 @@ function scriptedApi(overrides: {
       }),
       updateQueue: r => ok(r, { accepted: true as const }),
       cancel: r => ok(r, { accepted: true as const }),
+      stopTree: r => ok(r, { ownTurnStopped: true, descendants: 'ok' as const }),
+      stopAll: r => ok(r, { stoppedCount: 0, descendants: 'ok' as const }),
       ...overrides.sessions,
     },
     subagents: {

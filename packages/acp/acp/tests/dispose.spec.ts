@@ -106,7 +106,7 @@ describe('ACP connection ownership', () => {
         cancelObserved = true
         order.push('parent cancelled')
       }
-      cancel(...args)
+      return cancel(...args)
     })
 
     const disposal = harness.acpFiber.dispose()

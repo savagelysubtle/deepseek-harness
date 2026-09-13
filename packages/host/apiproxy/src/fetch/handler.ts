@@ -27,6 +27,8 @@ import {
   sessionRenameRequestSchema,
   sessionSearchRequestSchema,
   sessionSelectModelRequestSchema,
+  sessionStopAllRequestSchema,
+  sessionStopTreeRequestSchema,
   sessionUpdateQueueRequestSchema,
 } from '../api/sessions.schema.ts'
 import {
@@ -105,6 +107,8 @@ const UNARY_ROUTES: UnaryRoutes = {
   'session.attachment': { schema: sessionAttachmentRequestSchema, invoke: (api, r) => api.sessions.attachment(r) },
   'session.updateQueue': { schema: sessionUpdateQueueRequestSchema, invoke: (api, r) => api.sessions.updateQueue(r) },
   'session.cancel': { schema: sessionCancelRequestSchema, invoke: (api, r) => api.sessions.cancel(r) },
+  'session.stopTree': { schema: sessionStopTreeRequestSchema, invoke: (api, r) => api.sessions.stopTree(r) },
+  'session.stopAll': { schema: sessionStopAllRequestSchema, invoke: (api, r) => api.sessions.stopAll(r) },
   'subagent.list': { schema: subagentListRequestSchema, invoke: (api, r, signal) => api.subagents.list(r, signal) },
   'subagent.history': { schema: subagentHistoryRequestSchema, invoke: (api, r, signal) => api.subagents.history(r, signal) },
   'subagent.prompt': { schema: subagentPromptRequestSchema, invoke: (api, r, signal) => api.subagents.prompt(r, signal) },

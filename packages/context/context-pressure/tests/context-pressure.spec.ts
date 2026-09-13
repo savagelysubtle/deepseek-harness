@@ -79,7 +79,7 @@ function agent(session: Session): Agent {
     followup: () => {},
     steer: () => {},
     inject: () => { throw new Error('context-pressure must append directly to the open step') },
-    cancel() {},
+    cancel() { return false },
     runMaintenance: task => task(new AbortController().signal),
     whenIdle: () => Promise.resolve(),
   }

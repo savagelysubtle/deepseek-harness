@@ -95,7 +95,7 @@ async function bench(script: Script): Promise<{
       inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
       status: 'idle',
       ctx: agentCtx,
-      cancel: () => {},
+      cancel: () => false,
       runMaintenance: () => Promise.reject(new Error('not used')),
       send: () => {},
       followup: (message: UserMessage) => {
