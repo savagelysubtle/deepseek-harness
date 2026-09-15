@@ -320,6 +320,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [],
       },
       {
+        signature: 'org: OrgApi',
+        description: 'Read-only org registry and served-roster projection, with computed drift.',
+        parameters: [],
+      },
+      {
         signature: 'downloads: DownloadsApi',
         description: 'Host-only download surfaces (GET, no wire envelope); absent from IApiClient.',
         parameters: [],
@@ -3801,6 +3806,42 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'OneShotSubagentDescriptorData',
     declaration: 'export interface OneShotSubagentDescriptorData extends SubagentDescriptorBase {\n    readonly mode: \'one-shot\';\n    readonly label?: string;\n    readonly agentProvider?: string;\n    readonly agentModel?: string;\n}',
+  },
+  {
+    name: 'OrgApi',
+    declaration: 'export interface OrgApi {\n    get(request: RpcRequest<{}>): Promise<RpcResponse<{\n        profile: string;\n        registry: OrgRegistryResult;\n        mailboxBridge: OrgRosterResult;\n        toolMailbox: OrgRosterResult;\n        drift: OrgDriftResult;\n    }>>;\n}',
+  },
+  {
+    name: 'OrgDriftResult',
+    declaration: 'export type OrgDriftResult = {\n    readonly ok: true;\n    readonly rows: readonly OrgDriftRow[];\n} | {\n    readonly ok: false;\n    readonly reason: string;\n};',
+  },
+  {
+    name: 'OrgDriftRow',
+    declaration: 'export interface OrgDriftRow {\n    readonly seat: string;\n    readonly registered: boolean;\n    readonly servedByMailboxBridge: boolean;\n    readonly servedByToolMailbox: boolean;\n}',
+  },
+  {
+    name: 'OrgEdge',
+    declaration: 'export type OrgEdge = readonly [\n    from: string,\n    to: string\n];',
+  },
+  {
+    name: 'OrgRegistryResult',
+    declaration: 'export type OrgRegistryResult = {\n    readonly ok: true;\n    readonly registry: OrgRegistryView;\n} | {\n    readonly ok: false;\n    readonly reason: string;\n};',
+  },
+  {
+    name: 'OrgRegistryView',
+    declaration: 'export interface OrgRegistryView {\n    readonly baseDir: string;\n    readonly seats: Readonly<Record<string, OrgSeat>>;\n    readonly edges: readonly OrgEdge[];\n    readonly callUp: readonly string[];\n}',
+  },
+  {
+    name: 'OrgRosterResult',
+    declaration: 'export type OrgRosterResult = {\n    readonly ok: true;\n    readonly addresses: readonly string[];\n} | {\n    readonly ok: false;\n    readonly reason: string;\n};',
+  },
+  {
+    name: 'OrgSeat',
+    declaration: 'export interface OrgSeat {\n    readonly cwd: string;\n    readonly lead?: boolean;\n    readonly sessionId?: string;\n    readonly test?: boolean;\n    readonly tools?: OrgSeatTools;\n}',
+  },
+  {
+    name: 'OrgSeatTools',
+    declaration: 'export interface OrgSeatTools {\n    readonly allow?: readonly string[];\n    readonly deny?: readonly string[];\n}',
   },
   {
     name: 'PermissionSelect',

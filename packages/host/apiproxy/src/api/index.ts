@@ -19,6 +19,7 @@ import type { LlmApi } from './llm.ts'
 import type { DownloadsApi } from './downloads.ts'
 import type { MailboxApi } from './mailbox.ts'
 import type { WorktreeApi } from './worktree.ts'
+import type { OrgApi } from './org.ts'
 import type { ClientResponse, RpcReceipt } from './rpc.ts'
 
 /** Root interface of the unified API. New client-request domain = one new file pair + one field here + one map row. */
@@ -38,6 +39,8 @@ export interface ApiProxy {
   mailbox: MailboxApi
   /** Seat→worktree→branch registry visibility and management over the worktree seam. */
   worktree: WorktreeApi
+  /** Read-only org registry and served-roster projection, with computed drift. */
+  org: OrgApi
   /** Host-only download surfaces (GET, no wire envelope); absent from IApiClient. */
   downloads: DownloadsApi
   /**
@@ -65,6 +68,10 @@ export type { WorkspaceApi, WorkspaceId, WorkspaceView } from './workspace.ts'
 export type {
   WorktreeApi, WorktreeHandle, WorktreeRef, WorktreeRow, WorktreeSpawnInput,
 } from './worktree.ts'
+export type {
+  OrgApi, OrgDriftResult, OrgDriftRow, OrgEdge, OrgRegistryResult, OrgRegistryView,
+  OrgRosterResult, OrgSeat, OrgSeatTools,
+} from './org.ts'
 export type { SkillsApi, SkillEntry } from './skills.ts'
 export type { AgentPresetsApi, AgentPresetEntry } from './agent-presets.ts'
 export type { EventsApi, MuxFrame, HostFrame, QueuedInboxItem, ToolCallView, ToolEventView, ToolResultView } from './events.ts'

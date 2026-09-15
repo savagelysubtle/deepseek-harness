@@ -308,6 +308,16 @@ export class FakeApiClient implements IApiClient {
     remove: payload => this.record('worktree.remove', payload, Promise.resolve(ok({ removed: true as const }))),
   }
 
+  readonly org: IApiClient['org'] = {
+    get: payload => this.record('org.get', payload, Promise.resolve(ok({
+      profile: 'fake',
+      registry: { ok: true, registry: { baseDir: '/fake', seats: {}, edges: [], callUp: [] } },
+      mailboxBridge: { ok: true, addresses: [] },
+      toolMailbox: { ok: true, addresses: [] },
+      drift: { ok: true, rows: [] },
+    }))),
+  }
+
   /** When true, streams never fire onOpen (misbehaving-carrier material for the handshake timeout guard). */
   suppressStreamOpen = false
 

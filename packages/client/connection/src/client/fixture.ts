@@ -3089,6 +3089,32 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         return ok(request, { removed: true as const })
       },
     },
+    // A small, internally-consistent demo org: two seats, one edge, both
+    // served rosters agreeing with the registry — a clean drift report, so
+    // UI development sees what "nothing to report" looks like.
+    org: {
+      get: request => ok(request, {
+        // The real API always resolves cwd to an absolute path (see
+        // readOrgRegistryResult); the fixture mirrors that guarantee rather
+        // than demoing the pre-resolution shape a UI would never actually see.
+        profile: 'fixture',
+        registry: {
+          ok: true,
+          registry: {
+            baseDir: '/fixture/org',
+            seats: {
+              alfred: { cwd: '/fixture/org/deepseek-harness', lead: true },
+              batman: { cwd: '/fixture/org/deepseek-harness' },
+            },
+            edges: [['alfred', 'batman']],
+            callUp: [],
+          },
+        },
+        mailboxBridge: { ok: true, addresses: ['alfred', 'batman'] },
+        toolMailbox: { ok: true, addresses: ['alfred', 'batman'] },
+        drift: { ok: true, rows: [] },
+      }),
+    },
     respond(message: ClientResponse): Promise<RpcReceipt> {
       // Same routing discipline as the host: rpcId first, then the payload's
       // audit correlation; a settled or unknown id is not-pending.
@@ -3239,6 +3265,7 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'worktree.create': return this.api.worktree.create(request)
       case 'worktree.lock': return this.api.worktree.lock(request)
       case 'worktree.remove': return this.api.worktree.remove(request)
+      case 'org.get': return this.api.org.get(request)
       case 'skill.list': return this.api.skills.list(request)
       case 'agentPreset.list': return this.api.agentPresets.list(request)
       case 'agentPreset.select': return this.api.agentPresets.select(request)

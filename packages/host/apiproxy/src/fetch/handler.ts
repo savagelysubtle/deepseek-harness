@@ -71,6 +71,7 @@ import {
   worktreeCreateRequestSchema, worktreeListRequestSchema, worktreeLockRequestSchema,
   worktreeRemoveRequestSchema,
 } from '../api/worktree.schema.ts'
+import { orgGetRequestSchema } from '../api/org.schema.ts'
 import { llmDiscoverModelsRequestSchema, llmModelsRequestSchema, llmProvidersRequestSchema } from '../api/llm.schema.ts'
 import {
   subagentHistoryRequestSchema,
@@ -156,6 +157,7 @@ const UNARY_ROUTES: UnaryRoutes = {
   'worktree.create': { schema: worktreeCreateRequestSchema, invoke: (api, r) => api.worktree.create(r) },
   'worktree.lock': { schema: worktreeLockRequestSchema, invoke: (api, r) => api.worktree.lock(r) },
   'worktree.remove': { schema: worktreeRemoveRequestSchema, invoke: (api, r) => api.worktree.remove(r) },
+  'org.get': { schema: orgGetRequestSchema, invoke: (api, r) => api.org.get(r) },
 }
 
 /** Route lookup that narrows an arbitrary path segment to a map key (single cast point for the string→key refinement). */
