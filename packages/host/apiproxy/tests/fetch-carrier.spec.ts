@@ -114,6 +114,9 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
       async stopAll(request) {
         return { rpcId: request.rpcId, result: { ok: true, value: { stoppedCount: 0, descendants: 'ok' as const } } }
       },
+      async sendAll(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { sentCount: 0, result: 'ok' as const } } }
+      },
     },
     subagents: {
       async list(request) {

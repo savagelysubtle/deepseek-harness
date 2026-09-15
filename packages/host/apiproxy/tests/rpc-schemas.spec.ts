@@ -138,10 +138,11 @@ describe('sessions domain schemas', () => {
   it('validates ids, summaries, and the event passthrough envelope', () => {
     expect(sessionIdSchema.parse('s1')).toBe('s1')
     expect(() => sessionIdSchema.parse('')).toThrow()
-    expect(sessionSummarySchema.parse({ sessionId: 's1', updatedAt: 1, running: false, blank: true })).toMatchObject({ sessionId: 's1', blank: true })
-    expect(sessionSummarySchema.parse({ sessionId: 's1', updatedAt: 1, running: true, blank: false, parentSessionId: 'p', cwd: '/x' }).cwd).toBe('/x')
-    // blank is mandatory: a summary without it fails the parse.
-    expect(() => sessionSummarySchema.parse({ sessionId: 's1', updatedAt: 1, running: false })).toThrow()
+    expect(sessionSummarySchema.parse({ sessionId: 's1', updatedAt: 1, running: false, attached: true, blank: true })).toMatchObject({ sessionId: 's1', blank: true })
+    expect(sessionSummarySchema.parse({ sessionId: 's1', updatedAt: 1, running: true, attached: true, blank: false, parentSessionId: 'p', cwd: '/x' }).cwd).toBe('/x')
+    // blank and attached are each independently mandatory: a summary missing either fails the parse.
+    expect(() => sessionSummarySchema.parse({ sessionId: 's1', updatedAt: 1, running: false, attached: true })).toThrow()
+    expect(() => sessionSummarySchema.parse({ sessionId: 's1', updatedAt: 1, running: false, blank: false })).toThrow()
     const event = sessionEventSchema.parse({
       type: 'user/message',
       seq: 0,

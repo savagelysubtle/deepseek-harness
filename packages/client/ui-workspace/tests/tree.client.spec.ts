@@ -14,7 +14,7 @@ import { createWorkspaceViewStore } from '../src/client/stores.ts'
 const sid = (id: string) => id as SessionId
 const wid = (id: string) => id as WorkspaceId
 const summary = (id: string, updatedAt: number, cwd?: string): SessionSummary => ({
-  id: sid(id), displayTitle: id, running: false, blank: false,
+  id: sid(id), displayTitle: id, running: false, attached: true, blank: false,
   updatedAt, ...(cwd === undefined ? {} : { cwd }),
 })
 const list = (...items: SessionSummary[]): SessionListState => ({
@@ -41,7 +41,7 @@ describe('deriveGroups', () => {
     // second expansion state, hiding seats 6-18 (incl. restaffed seats) on
     // every fresh load. All accounted, visible sessions must render at once.
     const ids = ['blank-lead', ...Array.from({ length: 17 }, (_, i) => `seat-${String(i + 1).padStart(2, '0')}`)]
-    const blankLead: SessionSummary = { id: sid('blank-lead'), displayTitle: 'blank-lead', running: false, blank: true, updatedAt: 1, cwd: '/projects/project' }
+    const blankLead: SessionSummary = { id: sid('blank-lead'), displayTitle: 'blank-lead', running: false, attached: true, blank: true, updatedAt: 1, cwd: '/projects/project' }
     const sessions = [
       blankLead,
       ...ids.slice(1).map((id, i) => summary(id, 2 + i, '/projects/project')),

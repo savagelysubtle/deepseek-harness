@@ -15,13 +15,14 @@ const S2 = 'fk-m2' as SessionId
 type SummaryOver = Partial<{
   updatedAt: number
   running: boolean
+  attached: boolean
   blank: boolean
   parentSessionId: SessionId
   origin: 'subagent'
 }>
 
 function summary(sessionId: SessionId, over: SummaryOver = {}) {
-  return { sessionId, updatedAt: 100, running: false, blank: false, ...over }
+  return { sessionId, updatedAt: 100, running: false, attached: true, blank: false, ...over }
 }
 
 describe('instances', () => {
@@ -1206,5 +1207,30 @@ describe('background-job mirror', () => {
     // The notifier batches on a microtask; the frame itself is already applied.
     await Promise.resolve()
     expect(seen).toHaveBeenCalled()
+  })
+})
+
+describe('list-entry memoization', () => {
+  /**
+   * Regression for the stale-`attached` defect: the cached-entry reuse guard
+   * in buildListSnapshot() must compare every field SessionListEntry carries,
+   * or a fresh, correct `attached` gets computed and then thrown away in
+   * favor of the stale cached object whenever every OTHER field still
+   * matches - reintroducing the exact "confirmation promises a count the
+   * host cannot deliver" defect this attached field exists to close, this
+   * time through a stale cache instead of a wrong filter.
+   */
+  it('reflects an attached-only transition rather than reusing the stale cached entry', async () => {
+    const api = new FakeApiClient()
+    api.onList = () => Promise.resolve(ok({ items: [summary(S1, { attached: false })] as never[] }))
+    const manager = new SessionManager(api, fakeRemote())
+    await manager.refreshList()
+    expect(manager.getListSnapshot().items[0]?.attached).toBe(false)
+
+    // Every other field is unchanged from the first pull - only `attached`
+    // flips (the host attached a live agent with no turn started yet).
+    api.onList = () => Promise.resolve(ok({ items: [summary(S1, { attached: true })] as never[] }))
+    await manager.refreshList()
+    expect(manager.getListSnapshot().items[0]?.attached).toBe(true)
   })
 })

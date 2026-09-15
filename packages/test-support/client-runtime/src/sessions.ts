@@ -4,9 +4,9 @@ import type { AttachmentIdType } from '@deepseek-ai/dsh-attachment'
 import { createScope, scopeOf, SessionProvideChannel } from '@deepseek-ai/dsh-client-runtime/client'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import type {
-  AgentContext, ConversationSnapshot, ISessions, ObservableSnapshot, ProjectionsFace, SessionFace, SessionId,
-  SessionListState, SessionProvideDescriptor, SessionSearchResultItem, SessionSummary, SnapshotStore,
-  SubagentAddress,
+  AgentContext, ConversationSnapshot, ISessions, ObservableSnapshot, ProjectionsFace, PromptContentPart,
+  SendAllResult, SessionFace, SessionId, SessionListState, SessionProvideDescriptor, SessionSearchResultItem,
+  SessionSummary, SnapshotStore, StopDescendantsResult, SubagentAddress,
 } from '@deepseek-ai/dsh-client-runtime/client'
 // The double reports the wire schema's own search bound, like the production
 // service — a transport-varying limit would be a fiction no client can see.
@@ -185,7 +185,7 @@ export class TestSessions implements ISessions {
   /** Calls observed on the service-level face, newest last. */
   readonly calls: {
     method: 'open' | 'openSubagent' | 'setSubagentCatalogOpen' | 'refreshSubagents'
-      | 'clear' | 'search' | 'fork'
+      | 'clear' | 'search' | 'fork' | 'stopAll' | 'sendAll'
     args: unknown[]
   }[] = []
 
@@ -194,6 +194,12 @@ export class TestSessions implements ISessions {
 
   /** Replaceable search behavior (see {@link TestSessions.stubSearch}). */
   private searchStub: ((query: string, signal: AbortSignal) => { items: SessionSearchResultItem[]; hasMore: boolean }) | undefined
+
+  /** Replaceable stopAll behavior (see {@link TestSessions.stubStopAll}). */
+  private stopAllStub: (() => { stoppedCount: number; descendants: StopDescendantsResult }) | undefined
+
+  /** Replaceable sendAll behavior (see {@link TestSessions.stubSendAll}). */
+  private sendAllStub: ((content: PromptContentPart[]) => { sentCount: number; result: SendAllResult }) | undefined
 
   /**
    * @param stabilize - the owning runtime's act wrapper.
@@ -232,6 +238,10 @@ export class TestSessions implements ISessions {
       id,
       displayTitle: fixture.id,
       running: false,
+      // A fixture session defaults to attached (a live host Agent exists):
+      // that is the common case a feature test adds a session to exercise,
+      // and `fixture.summary` overrides it for a cold-row case explicitly.
+      attached: true,
       blank: false,
       updatedAt: this.records.size + 1,
       ...fixture.summary,
@@ -466,6 +476,22 @@ export class TestSessions implements ISessions {
   }
 
   /**
+   * Replace the stopAll outcome (the call is still recorded).
+   * @param impl - the outcome a scenario wants stopAll to answer.
+   */
+  stubStopAll(impl: () => { stoppedCount: number; descendants: StopDescendantsResult }): void {
+    this.stopAllStub = impl
+  }
+
+  /**
+   * Replace the sendAll outcome (the call is still recorded).
+   * @param impl - the outcome a scenario wants sendAll to answer.
+   */
+  stubSendAll(impl: (content: PromptContentPart[]) => { sentCount: number; result: SendAllResult }): void {
+    this.sendAllStub = impl
+  }
+
+  /**
    * Content search over the fixture corpus (recorded). The default answers an
    * empty page: content ranking is Host behavior, so a scenario that asserts
    * hits declares them through {@link TestSessions.stubSearch}.
@@ -487,6 +513,35 @@ export class TestSessions implements ISessions {
   fork(opts: { sessionId: SessionId; atSeq?: number; increaseTitle?: boolean }): Promise<SessionId> {
     this.calls.push({ method: 'fork', args: [opts] })
     return Promise.resolve(opts.sessionId)
+  }
+
+  /**
+   * Recorded stopAll stub: the default answers a clean no-op (see
+   * {@link TestSessions.stubStopAll} for scenarios asserting a real cascade
+   * or a partial-failure surface).
+   * @returns the stubbed or default outcome.
+   */
+  stopAll(): ReturnType<ISessions['stopAll']> {
+    this.calls.push({ method: 'stopAll', args: [] })
+    return Promise.resolve({
+      ok: true,
+      value: this.stopAllStub?.() ?? { stoppedCount: 0, descendants: 'ok' as const },
+    })
+  }
+
+  /**
+   * Recorded sendAll stub: the default answers a clean no-op (see
+   * {@link TestSessions.stubSendAll} for scenarios asserting a real
+   * broadcast or a partial-failure surface).
+   * @param content - prompt content broadcast to every live top-level session.
+   * @returns the stubbed or default outcome.
+   */
+  sendAll(content: PromptContentPart[]): ReturnType<ISessions['sendAll']> {
+    this.calls.push({ method: 'sendAll', args: [content] })
+    return Promise.resolve({
+      ok: true,
+      value: this.sendAllStub?.(content) ?? { sentCount: 0, result: 'ok' as const },
+    })
   }
 
   /**

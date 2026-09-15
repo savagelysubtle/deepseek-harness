@@ -120,9 +120,9 @@ describe('rendering through the ring', () => {
     renderRing(b.ctx, b.slots, {
       ids: [SID, 'child' as SessionId],
       byId: {
-        [SID]: { id: SID, displayTitle: 'root', running: false, blank: false, updatedAt: 0 },
+        [SID]: { id: SID, displayTitle: 'root', running: false, attached: true, blank: false, updatedAt: 0 },
         ['child' as SessionId]: {
-          id: 'child' as SessionId, displayTitle: 'Child agent', running: true,
+          id: 'child' as SessionId, displayTitle: 'Child agent', running: true, attached: true,
           blank: false, updatedAt: 0, origin: 'subagent', parentId: SID,
         },
       },

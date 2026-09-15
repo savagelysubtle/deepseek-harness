@@ -38,6 +38,7 @@ export interface RpcMethodMap {
   'session.cancel': SessionsApi['cancel']
   'session.stopTree': SessionsApi['stopTree']
   'session.stopAll': SessionsApi['stopAll']
+  'session.sendAll': SessionsApi['sendAll']
   'subagent.list': SubagentsApi['list']
   'subagent.history': SubagentsApi['history']
   'subagent.prompt': SubagentsApi['prompt']

@@ -74,6 +74,8 @@ export class FakeApiClient implements IApiClient {
     = () => Promise.resolve(ok({ ownTurnStopped: true, descendants: 'ok' as const }))
   onStopAll: (payload: unknown) => Promise<RpcResponse<{ stoppedCount: number; descendants: 'ok' }>>
     = () => Promise.resolve(ok({ stoppedCount: 0, descendants: 'ok' as const }))
+  onSendAll: (payload: unknown) => Promise<RpcResponse<{ sentCount: number; result: 'ok' }>>
+    = () => Promise.resolve(ok({ sentCount: 0, result: 'ok' as const }))
   onDescribe: (payload: unknown) => Promise<RpcResponse<{
     version: string
     cwd: string
@@ -127,6 +129,7 @@ export class FakeApiClient implements IApiClient {
     cancel: (payload: unknown) => this.record('session.cancel', payload, this.onCancel(payload)),
     stopTree: (payload: unknown) => this.record('session.stopTree', payload, this.onStopTree(payload)),
     stopAll: (payload: unknown) => this.record('session.stopAll', payload, this.onStopAll(payload)),
+    sendAll: (payload: unknown) => this.record('session.sendAll', payload, this.onSendAll(payload)),
   }
 
   readonly subagents: IApiClient['subagents'] = {

@@ -34,6 +34,7 @@ function summary(partial: Partial<SessionSummary> & { id: SessionId }): SessionS
   return {
     displayTitle: partial.id,
     running: false,
+    attached: true,
     updatedAt: 0,
     ...partial,
   } as SessionSummary

@@ -184,6 +184,17 @@ export type QueueAction =
  */
 export type StopDescendantsResult = 'ok' | { failed: string }
 
+/**
+ * Outcome of steering every live top-level session in one `session.sendAll`
+ * broadcast. `'ok'` means every targeted root accepted the steer. `{ failed }`
+ * carries every per-session steer failure joined into one message — surfaced
+ * here rather than folded into a bare success, since a broadcast control that
+ * reports "sent" while a seat never actually received the message is the one
+ * outcome this API must never produce (the same precedent `StopDescendantsResult`
+ * sets for `session.stopAll`: a partial outcome cannot type-check as success).
+ */
+export type SendAllResult = 'ok' | { failed: string }
+
 /** One Session list entry. */
 export interface SessionSummary {
   sessionId: SessionId
@@ -195,6 +206,17 @@ export interface SessionSummary {
   updatedAt: number
   /** Status of the attached agent; always false for cold (unattached) sessions. */
   running: boolean
+  /**
+   * Whether a live in-memory Agent currently backs this session — the exact
+   * fact `session.stopAll`/`session.sendAll` root selection reads to decide
+   * who is reachable. Deliberately NOT derivable from `running`: an attached
+   * session sitting idle between turns is `attached: true, running: false`,
+   * and a broadcast control's audience is "reachable", not "mid-turn" — a
+   * count that filtered on `running` would skip every seat idly awaiting its
+   * next instruction, which is most of a broadcast's actual audience. Always
+   * false for cold (persisted-only) sessions.
+   */
+  attached: boolean
   /**
    * Derived not-yet-real bit: true while no turn has run and no user rename
    * has pinned a title. A user-pinned title is an existence assertion — it is
@@ -441,6 +463,24 @@ export interface SessionsApi {
   stopAll(request: RpcRequest<{}>): Promise<RpcResponse<{
     stoppedCount: number
     descendants: StopDescendantsResult
+  }>>
+
+  /**
+   * Steers every live top-level session with the same content in one call
+   * (session-backed subagents are never targeted directly here — reaching
+   * one means steering its owning top-level session). Each root is steered
+   * immediately, mid-turn, through `Agent.steer` — the founder-specified
+   * behavior is to cut into whatever a seat is doing right now, never to
+   * queue silently behind it. `sentCount` counts only the roots that
+   * actually accepted the steer; a per-root `steer` failure (the agent
+   * disposing between root selection and delivery) is never dropped — every
+   * such failure is joined into `result: { failed }`, mirroring
+   * `StopDescendantsResult`'s precedent so a partial broadcast can never
+   * type-check as a clean send.
+   */
+  sendAll(request: RpcRequest<{ content: PromptContentPart[] }>): Promise<RpcResponse<{
+    sentCount: number
+    result: SendAllResult
   }>>
 
 }

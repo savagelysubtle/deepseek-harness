@@ -30,6 +30,7 @@ import {
   sessionRenameValueSchema,
   sessionSearchValueSchema,
   sessionSelectModelValueSchema,
+  sessionSendAllValueSchema,
   sessionStopAllValueSchema,
   sessionStopTreeValueSchema,
   sessionUpdateQueueValueSchema,
@@ -108,6 +109,7 @@ export interface IApiClient {
     cancel(payload: RequestPayload<'session.cancel'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'session.cancel'>>>
     stopTree(payload: RequestPayload<'session.stopTree'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'session.stopTree'>>>
     stopAll(payload: RequestPayload<'session.stopAll'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'session.stopAll'>>>
+    sendAll(payload: RequestPayload<'session.sendAll'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'session.sendAll'>>>
   }
   subagents: {
     list(payload: RequestPayload<'subagent.list'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'subagent.list'>>>
@@ -205,6 +207,7 @@ const UNARY_VALUE_SCHEMAS: { [K in keyof RpcMethodMap]: z.ZodType<Wire<ResponseV
   'session.cancel': sessionCancelValueSchema,
   'session.stopTree': sessionStopTreeValueSchema,
   'session.stopAll': sessionStopAllValueSchema,
+  'session.sendAll': sessionSendAllValueSchema,
   'subagent.list': subagentListValueSchema,
   'subagent.history': subagentHistoryValueSchema,
   'subagent.prompt': subagentPromptValueSchema,
@@ -460,6 +463,7 @@ export abstract class AbstractApiClient implements IApiClient {
     cancel: (payload, signal) => this.callUnary('session.cancel', payload, signal),
     stopTree: (payload, signal) => this.callUnary('session.stopTree', payload, signal),
     stopAll: (payload, signal) => this.callUnary('session.stopAll', payload, signal),
+    sendAll: (payload, signal) => this.callUnary('session.sendAll', payload, signal),
   }
 
   readonly subagents: IApiClient['subagents'] = {
