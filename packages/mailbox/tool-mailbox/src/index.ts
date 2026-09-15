@@ -82,6 +82,16 @@ export const Config: Schema<Config> = z.object({
  * flows into both tool bodies; the identity resolution it feeds runs inside
  * `execute`, which is the earliest point at which a missing or malformed name
  * is a live failure rather than an unused mount.
+ *
+ * A missing or empty `addresses` also disables `mailbox_send`'s
+ * known-recipient refusal (see `tools.ts`'s `unknownRecipientRefusal`): with
+ * no served roster to check against, every destination is admitted exactly
+ * as before this ticket. That gap must never be silent — a state that
+ * removes an enforced protection has to say so, in the moment, or an
+ * operator who un-configures `addresses` (accidentally or not) never learns
+ * the seat-to-seat door quietly went back to lax. Logged once here, at
+ * mount, not per send: the condition is a property of this mount, not of any
+ * one message.
  * @param ctx - registrant context carrying the tool and mailbox registries.
  * @param config - the deployment-supplied session name.
  */
@@ -90,6 +100,14 @@ export function apply(ctx: Context, config: Config): void {
     ...config.sessionName !== undefined ? { sessionName: config.sessionName } : {},
     ...config.addresses !== undefined ? { addresses: config.addresses } : {},
     ...config.orgRegistryPath !== undefined ? { orgRegistryPath: config.orgRegistryPath } : {},
+  }
+  if (identity.addresses === undefined || identity.addresses.length === 0) {
+    ctx.logger.warn(
+      'mailbox tools: mounted with no served roster (`addresses` is empty or absent) — mailbox_send\'s '
+      + 'known-recipient refusal is INACTIVE here, so a misspelled or unmounted destination will store and '
+      + 'park silently instead of being refused. Configure `addresses` with this deployment\'s served roster '
+      + '(the same list `mailbox-bridge` mounts with) to activate the check.',
+    )
   }
   ctx.tools.register(mailboxSendTool(ctx.mailbox, identity))
   ctx.tools.register(mailboxCheckInboxTool(ctx.mailbox, identity))

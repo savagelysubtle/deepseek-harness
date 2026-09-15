@@ -70,6 +70,26 @@ function call(ctx: Context, name: string, args: unknown = {}) {
   })
 }
 
+/**
+ * Call any registered tool through the REAL registry, as the agent whose
+ * derived session id resolves to `seat`. A served roster puts identity
+ * resolution into multi-seat mode (see `identity.ts`), which requires a
+ * matching agent id rather than the mount-time session name — this stands
+ * in for the many-seat host's own agent-loop plumbing. Module-scoped (not
+ * nested in one describe) because both mailbox_send and mailbox_await need
+ * it under the same seat identity to prove the BLOCKING-1 refusal handoff.
+ */
+function callAs(ctx: Context, seat: string, name: string, args: unknown) {
+  callCounter += 1
+  return ctx.tools.execute({
+    signal: testSignal,
+    callId: CallId(`call-${callCounter}`),
+    name,
+    arguments: args,
+    agent: { id: String(deriveNamedSessionId(seat)) } as never,
+  })
+}
+
 /** Read one address's rows straight out of the store the plugin opened. */
 interface StoredRow {
   from_address: string
@@ -178,6 +198,187 @@ describe('mailbox_send', () => {
     expect(result.isError).toBe(true)
     if (!result.isError) throw new Error('expected mailbox_send failure')
     expect(result.error.message).toContain('invalid mailbox address')
+    await ctx.fiber.dispose()
+  })
+})
+
+describe('mailbox_send — known recipient admission (SWD-140)', () => {
+  it('still delivers to a seat on the served roster exactly as before — the common case is unchanged', async () => {
+    const { ctx, dbPath } = await setup('batman', { addresses: ['batman', 'alfred'] })
+    const result = await callAs(ctx, 'batman', 'mailbox_send', { to: 'alfred', subject: 'patrol', body: 'meet at the cave' })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected mailbox_send success')
+    expect((result.value as { deliveryState: string }).deliveryState).toBe('pending')
+    expect(storedRows(dbPath, 'alfred')).toHaveLength(1)
+    await ctx.fiber.dispose()
+  })
+
+  it('refuses a destination outside the served roster BEFORE anything is stored, naming the problem', async () => {
+    const { ctx, dbPath } = await setup('batman', { addresses: ['batman', 'alfred'] })
+    const result = await callAs(ctx, 'batman', 'mailbox_send', { to: 'robin', subject: 'patrol', body: 'come help' })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected a graceful refusal, not a tool error')
+    const value = result.value as { deliveryState: string; refusalReason?: string }
+    expect(value.deliveryState).toBe('refused')
+    expect(value.refusalReason).toContain('"robin" is not a known seat')
+    expect(value.refusalReason).toContain('batman, alfred')
+    // The proof that matters: no row was ever written for the refused address.
+    expect(storedRows(dbPath, 'robin')).toHaveLength(0)
+    await ctx.fiber.dispose()
+  })
+
+  it('reaches the sender as a refusal, not as pending — the model must not mistake it for queued mail', async () => {
+    const { ctx } = await setup('batman', { addresses: ['batman', 'alfred'] })
+    const result = await callAs(ctx, 'batman', 'mailbox_send', { to: 'robin', subject: 's', body: 'b' })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected a graceful refusal')
+    expect((result.value as { deliveryState: string }).deliveryState).toBe('refused')
+    // Stringified rather than narrowed per-block: content is a ContentBlock
+    // union, and this only needs to prove the rendered text reads as a
+    // refusal, not extract a typed field.
+    const rendered = JSON.stringify(result.content)
+    expect(rendered).toContain('REFUSED')
+    expect(rendered).not.toContain('Stored for')
+    await ctx.fiber.dispose()
+  })
+
+  it('refuses a capitalisation-only mismatch — the exact shape of the incident this check exists to catch', async () => {
+    const { ctx, dbPath } = await setup('batman', { addresses: ['batman', 'robin'] })
+    const bad = await callAs(ctx, 'batman', 'mailbox_send', { to: 'Robin', subject: 'patrol', body: 'come help' })
+    expect(bad.isError).toBe(false)
+    if (bad.isError) throw new Error('expected a graceful refusal')
+    const badValue = bad.value as { deliveryState: string; refusalReason?: string }
+    expect(badValue.deliveryState).toBe('refused')
+    expect(badValue.refusalReason).toContain('"Robin" is not a known seat')
+    expect(badValue.refusalReason).toMatch(/capitalisation/i)
+    expect(storedRows(dbPath, 'Robin')).toHaveLength(0)
+    // The correctly-cased seat remains reachable — this is a strict match,
+    // not a ban on the underlying name.
+    const good = await callAs(ctx, 'batman', 'mailbox_send', { to: 'robin', subject: 'patrol', body: 'come help' })
+    expect(good.isError).toBe(false)
+    if (good.isError) throw new Error('expected success')
+    expect((good.value as { deliveryState: string }).deliveryState).toBe('pending')
+    await ctx.fiber.dispose()
+  })
+
+  it('does not check any roster when this process mounts none — the single-seat headless shape is unaffected', async () => {
+    // No `addresses` configured at all: the tool has no local roster to
+    // judge against — a single-seat process never mounts a bridge, so there
+    // is nothing here to compare a destination to. This documents the
+    // deliberate scope boundary rather than a gap nobody noticed; the mount
+    // still warns once about it (see the "mount-time visibility" describe
+    // block below).
+    const { ctx, dbPath } = await setup('batman')
+    const result = await call(ctx, 'mailbox_send', { to: 'anyone-at-all', subject: 's', body: 'b' })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected mailbox_send success')
+    expect((result.value as { deliveryState: string }).deliveryState).toBe('pending')
+    expect(storedRows(dbPath, 'anyone-at-all')).toHaveLength(1)
+    await ctx.fiber.dispose()
+  })
+
+  it('a send refused before storage ends a same-process mailbox_await IMMEDIATELY, not after burning the deadline', async () => {
+    // BLOCKING FIX proof: without recordPreStorageRefusal/takePreStorageRefusal,
+    // this traceId has no row anywhere the store could ever find, so the
+    // await loop would poll silently until AWAIT_MAX_DEADLINE_MS elapsed and
+    // report "untraceable" — a five-minute hang ending in a misleading
+    // answer, in place of the mail-parks-forever defect this ticket removes.
+    const { ctx } = await setup('batman', { addresses: ['batman', 'alfred'] })
+    const sent = await callAs(ctx, 'batman', 'mailbox_send', { to: 'robin', subject: 's', body: 'b' })
+    expect(sent.isError).toBe(false)
+    if (sent.isError) throw new Error('expected a graceful refusal')
+    const sentValue = sent.value as { deliveryState: string; traceId: string }
+    expect(sentValue.deliveryState).toBe('refused')
+
+    vi.useFakeTimers()
+    try {
+      const pending = callAs(ctx, 'batman', 'mailbox_await', { traceId: sentValue.traceId, deadlineMs: AWAIT_MAX_DEADLINE_MS })
+      // Zero real time advanced: an immediate refusal must resolve on its
+      // own promise chain, needing no poll-interval tick at all. Advancing
+      // by the full deadline would also "pass" a version that falls through
+      // to a timeout that happens to look similar; zero proves it never
+      // reached the poll-sleep at all.
+      await vi.advanceTimersByTimeAsync(0)
+      const result = await pending
+      expect(result.isError).toBe(false)
+      if (result.isError) throw new Error('expected a graceful await outcome')
+      const value = result.value as { outcome: string; refusalReason?: string; waitedMs: number }
+      expect(value.outcome).toBe('refused')
+      expect(value.refusalReason).toContain('"robin" is not a known seat')
+      expect(value.waitedMs).toBeLessThan(AWAIT_POLL_INTERVAL_MS)
+    } finally {
+      vi.useRealTimers()
+    }
+    await ctx.fiber.dispose()
+  })
+
+  it('never calls the underlying publish for a refused destination', async () => {
+    const publish = vi.fn(async () => 'should-not-be-called')
+    const send = mailboxSendTool(
+      { publish, lookupByTraceId: async () => [] } as unknown as MailboxRegistryShape,
+      { addresses: ['batman', 'alfred'] },
+    )
+    const args = { to: 'robin', subject: 's', body: 'b' }
+    const value = (await send.execute(args, {
+      signal: testSignal,
+      callId: CallId('call-refused'),
+      name: 'mailbox_send',
+      arguments: args,
+      agent: { id: String(deriveNamedSessionId('batman')) },
+      token: Symbol('token') as never,
+      rootCallId: CallId('call-refused'),
+      deferContext: () => {},
+    } as never)) as { deliveryState: string; refusalReason?: string; messageId: string }
+    expect(publish).not.toHaveBeenCalled()
+    expect(value.deliveryState).toBe('refused')
+    expect(value.refusalReason).toContain('not a known seat')
+  })
+})
+
+describe('mailbox tools mount — no-roster visibility (SWD-140 BLOCKING 3)', () => {
+  it('warns once at mount when addresses is absent — the disabled check must never be silent', async () => {
+    const dbPath = join(tempDir(), 'mailbox.db')
+    const ctx = new Context()
+    await ctx.plugin(InvariantRegistry)
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(MailboxRegistry, { defaultProvider: 'local' })
+    await ctx.plugin(MailboxLocal, { path: dbPath })
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    // No `addresses` at all: this is the single-seat headless shape, where
+    // the roster-gated refusal has nothing to check against.
+    await ctx.plugin(tool, { sessionName: 'batman' })
+    await ctx.plugin(invariant)
+    expect(warn).toHaveBeenCalledTimes(1)
+    const [message] = warn.mock.calls[0] as [string]
+    expect(message).toContain('known-recipient refusal is INACTIVE')
+    expect(message).toContain('addresses')
+    await ctx.fiber.dispose()
+  })
+
+  it('warns once at mount when addresses is an empty array — empty is absent, not "nobody yet"', async () => {
+    const dbPath = join(tempDir(), 'mailbox.db')
+    const ctx = new Context()
+    await ctx.plugin(InvariantRegistry)
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(MailboxRegistry, { defaultProvider: 'local' })
+    await ctx.plugin(MailboxLocal, { path: dbPath })
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    await ctx.plugin(tool, { sessionName: 'batman', addresses: [] })
+    await ctx.plugin(invariant)
+    expect(warn).toHaveBeenCalledTimes(1)
+    await ctx.fiber.dispose()
+  })
+
+  it('stays silent at mount when a served roster is configured — the common case logs nothing new', async () => {
+    const { ctx } = await setup('batman', { addresses: ['batman', 'alfred'] })
+    // setup() already completed the mount before this spy attaches, so this
+    // proves only that nothing warns AFTER mount for a healthy roster — the
+    // mount-time assertion lives in the two tests above, which spy first.
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    await callAs(ctx, 'batman', 'mailbox_send', { to: 'alfred', subject: 's', body: 'b' })
+    expect(warn).not.toHaveBeenCalled()
     await ctx.fiber.dispose()
   })
 })
