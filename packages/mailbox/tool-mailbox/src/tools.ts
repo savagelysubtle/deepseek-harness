@@ -86,14 +86,16 @@ export interface SendResult {
    */
   readonly traceId: string
   /**
-   * The send's delivery state, read from the store immediately after
-   * admission: `pending` — stored, delivery not yet confirmed (store row
-   * `pending` or `claimed`); `accepted` — the bridge claimed the row and
-   * settled it done; `refused` — the bridge settled it failed, with
-   * {@link refusalReason} carrying the recorded terminal reason. A read
-   * taken once, post-admission: `pending` here is a fact about this instant,
-   * never a delivery promise — `mailbox_await` on the traceId reports the
-   * row's later fate.
+   * The send's delivery state: `pending` — stored, delivery not yet
+   * confirmed (store row `pending` or `claimed`), read once post-admission
+   * and never a delivery promise — `mailbox_await` on the traceId reports
+   * the row's later fate; `accepted` — the bridge claimed the row and
+   * settled it done; `refused` — either the destination failed the
+   * known-recipient check BEFORE anything was stored (an address outside
+   * the served roster — a typo, a capitalisation slip, or a seat that has
+   * not mounted yet), or the bridge claimed the stored row and settled it
+   * failed. Both origins carry {@link refusalReason}, so the model reads one
+   * vocabulary regardless of which layer refused.
    */
   readonly deliveryState: 'pending' | 'accepted' | 'refused'
   /** Present only on `refused`: the terminal reason recorded on the row. */
@@ -287,6 +289,120 @@ function renderSendOutcome(value: SendResult): string {
 }
 
 /**
+ * Placeholder `messageId` for a send refused before storage: no provider
+ * ever minted a real id for it, and the refused-outcome render names a
+ * `messageId` unconditionally, so this stands in rather than leaving a
+ * blank the sender could mistake for a usable handle.
+ */
+const UNSENT_MESSAGE_ID = 'unsent'
+
+/**
+ * Refuse a destination the served roster does not carry, before anything is
+ * stored — the seat-to-seat door matching what `publishAndWake`
+ * (`@deepseek-ai/dsh-mailbox-bridge`) already enforces for outside callers
+ * against the identical roster: `identity.addresses` is documented as "the
+ * same roster the bridge is mounted with", so this reuses that existing
+ * signal rather than adding a new one. A message to a name no roster serves
+ * would otherwise store, get an id, and sit `pending` forever — nothing
+ * ever drains an address nobody claims for — which is indistinguishable
+ * from a seat that simply has not answered yet. Refusing loud, before the
+ * write, is what makes the difference visible.
+ *
+ * A many-seat host is the only place this roster exists locally: a
+ * single-seat headless process mounts no bridge at all (there is nothing to
+ * wake) and so carries no roster, and this no-ops for it. That is NOT the
+ * same situation `publishAndWake` is in when no bridge is mounted — that
+ * function throws loud and refuses every send, because a host composing the
+ * wire admission path is expected to have one mounted, and zero specs there
+ * is a broken deployment. A single-seat process never mounts a bridge AT
+ * ALL, by design (see the headless bundle's patch), so there is no broken
+ * expectation to fail loud about — extending a hard requirement onto a
+ * deployment shape that never had one is a bigger change than this ticket's
+ * scope. The gap this leaves is real, not excused, so it is made visible
+ * instead at mount time (see `index.ts`'s `apply`), rather than silently
+ * assumed equivalent to a door that behaves oppositely.
+ *
+ * Comparison is exact-string: the address grammar has no case folding, so a
+ * name that differs only in capitalisation is a DIFFERENT address here —
+ * the incident this check exists to catch, not a near-miss to forgive.
+ * @param to - the parsed destination address.
+ * @param addresses - the deployment's served roster, when this process mounts one.
+ * @returns the refusal reason, or undefined when the destination is known.
+ */
+function unknownRecipientRefusal(to: MailboxAddress, addresses: readonly string[] | undefined): string | undefined {
+  if (addresses === undefined || addresses.length === 0) return undefined
+  if (addresses.includes(to)) return undefined
+  return `"${to}" is not a known seat this deployment serves (${addresses.join(', ')}). `
+    + 'Check spelling and capitalisation against the org registry — a name outside the served '
+    + 'roster can never be delivered, whether it is a typo or a seat that has not mounted yet.'
+}
+
+/**
+ * Longest an in-process pre-storage refusal record is kept before it is
+ * treated as expired. Bounded by {@link AWAIT_MAX_DEADLINE_MS}: that is the
+ * longest a single `mailbox_await` call can hold a turn, so a wait that
+ * starts within this window of the refusal is guaranteed to still find the
+ * record. A wait that starts later already had the refusal reason handed
+ * back in the send's own result — this window is the safety net for a model
+ * that awaits anyway, not the primary way the reason reaches it.
+ */
+const PRE_STORAGE_REFUSAL_RETENTION_MS = 600_000
+
+/** One in-process record of a send refused before anything was stored. */
+interface PreStorageRefusal {
+  /** The reason text handed back on the send's own `SendResult`. */
+  readonly reason: string
+  /** Epoch milliseconds the refusal was recorded, for expiry. */
+  readonly refusedAt: number
+}
+
+/**
+ * In-process correlation from a traceId to the refusal reason recorded for
+ * it, keyed for `mailbox_await` to read back. A destination refused before
+ * storage never gets a row — nothing `pickSentRow`'s store read could ever
+ * find — so without this, an await on that exact traceId would poll for its
+ * full deadline and report "untraceable", not "refused": a five-minute hang
+ * ending in a misleading answer, in place of the parked-forever message this
+ * whole check exists to remove. Module-level rather than threaded through
+ * both tool builders: `mailbox_send` and `mailbox_await` are independent
+ * `defineTool` calls (see `index.ts`), and this is the one thing they must
+ * agree on without either holding a reference to the other.
+ */
+const preStorageRefusals = new Map<string, PreStorageRefusal>()
+
+/**
+ * Record a pre-storage refusal for `mailbox_await` to find, sweeping expired
+ * entries on the same pass so the map never grows unbounded from senders who
+ * never await their own refused traceId.
+ * @param traceId - the correlation id the refused send returned.
+ * @param reason - the refusal reason handed back on the send's own result.
+ */
+function recordPreStorageRefusal(traceId: string, reason: string): void {
+  const cutoff = Date.now() - PRE_STORAGE_REFUSAL_RETENTION_MS
+  for (const [id, entry] of preStorageRefusals) {
+    if (entry.refusedAt < cutoff) preStorageRefusals.delete(id)
+  }
+  preStorageRefusals.set(traceId, { reason, refusedAt: Date.now() })
+}
+
+/**
+ * Read back a pre-storage refusal, treating one past its retention window as
+ * absent (and pruning it) rather than trusting the sweep in {@link
+ * recordPreStorageRefusal} to have already caught it.
+ * @param traceId - the correlation id `mailbox_await` is holding on.
+ * @returns the recorded reason, or undefined when none is live for this id.
+ */
+function takePreStorageRefusal(traceId: string): string | undefined {
+  const entry = preStorageRefusals.get(traceId)
+  if (entry === undefined) return undefined
+  if (Date.now() - entry.refusedAt > PRE_STORAGE_REFUSAL_RETENTION_MS) {
+    preStorageRefusals.delete(traceId)
+    return undefined
+  }
+  return entry.reason
+}
+
+/**
  * Build the `mailbox_send` tool: publish one message whose sender is the
  * trusted session name. The registry's `publish` validates the destination
  * address grammar; the stamped `from` needs no validation because it never
@@ -372,6 +488,28 @@ export function mailboxSendTool(mailbox: MailboxRegistry, identity: IdentitySour
       // id, and it is what makes the send's later fate — delivered, or
       // refused with the recorded reason — retrievable for an await.
       const traceId = args.replyToTraceId ?? randomUUID()
+      // Known-recipient admission BEFORE the write: a name no roster serves
+      // must never reach the store at all, or it becomes indistinguishable
+      // pending mail that nothing will ever drain. See
+      // {@link unknownRecipientRefusal} for why this is the roster and not
+      // the org registry, and why it no-ops without one.
+      const unknownRecipient = unknownRecipientRefusal(to, identity.addresses)
+      if (unknownRecipient !== undefined) {
+        // Recorded so a same-process mailbox_await on THIS traceId reports
+        // the refusal immediately instead of polling out its full deadline
+        // against a row that will never exist — see {@link
+        // recordPreStorageRefusal}.
+        recordPreStorageRefusal(traceId, unknownRecipient)
+        const result: SendResult = {
+          messageId: UNSENT_MESSAGE_ID,
+          to,
+          from,
+          traceId,
+          deliveryState: 'refused',
+          refusalReason: unknownRecipient,
+        }
+        return result
+      }
       const messageId = await mailbox.publish({
         to,
         from,
@@ -625,18 +763,22 @@ async function detectArrivals(
 }
 
 /**
- * Build the `refused` outcome: the send's row is terminally failed, so no
- * reply can ever come and the known reason ends the wait immediately.
- * @param sent - the refused row.
+ * Build the `refused` outcome: no reply can ever come, so the known reason
+ * ends the wait immediately. Takes the reason directly rather than a row,
+ * because a refusal now has two possible origins — a stored row the bridge
+ * settled failed, or a pre-storage known-recipient refusal that never
+ * became a row at all (see {@link takePreStorageRefusal}) — and this is the
+ * one shape both collapse to before the model sees either.
+ * @param reason - the refusal reason to report.
  * @param waitedMs - wall-clock the wait held before the refusal was read.
  * @returns the canonical refused result.
  */
-function refusedResult(sent: MailboxTraceEntry, waitedMs: number): MailboxAwaitResult {
+function refusedResult(reason: string, waitedMs: number): MailboxAwaitResult {
   return {
     outcome: 'refused',
     messages: [],
     count: 0,
-    refusalReason: sent.failureReason ?? 'refused: the recipient\'s row is terminally failed but recorded no reason',
+    refusalReason: reason,
     waitedMs,
   }
 }
@@ -764,14 +906,29 @@ export function mailboxAwaitTool(mailbox: MailboxRegistry, identity: IdentitySou
       const startedAt = Date.now()
       const deadline = startedAt + clampAwaitDeadlineMs(args.deadlineMs)
       for (;;) {
-        // Refusal first: a terminally failed send means no reply can ever
-        // come, so the known outcome ends the wait immediately — even when
-        // unrelated mail is queued behind it, which stays pending for the
-        // next drain.
+        // Pre-storage refusal first: a destination refused before storage
+        // (see mailboxSendTool's known-recipient check) never becomes a row,
+        // so the store read below could never find it and this wait would
+        // otherwise poll out its full deadline and report "untraceable" —
+        // the exact defect this ticket exists to remove, wearing a five
+        // -minute hang instead of a silent park.
+        if (args.traceId !== undefined) {
+          const preStorage = takePreStorageRefusal(args.traceId)
+          if (preStorage !== undefined) return refusedResult(preStorage, Date.now() - startedAt)
+        }
+        // Then the stored row: a terminally failed send means no reply can
+        // ever come, so the known outcome ends the wait immediately — even
+        // when unrelated mail is queued behind it, which stays pending for
+        // the next drain.
         const sent = args.traceId !== undefined
           ? await pickSentRow(mailbox, args.traceId, own, exec.signal)
           : undefined
-        if (sent?.state === 'failed') return refusedResult(sent, Date.now() - startedAt)
+        if (sent?.state === 'failed') {
+          return refusedResult(
+            sent.failureReason ?? 'refused: the recipient\'s row is terminally failed but recorded no reason',
+            Date.now() - startedAt,
+          )
+        }
         // Then read-detection: a reply the bridge already claimed, steered
         // as a turn, and settled done is invisible to the claim below, and
         // any reply faster than this seat's model round trip loses that race
