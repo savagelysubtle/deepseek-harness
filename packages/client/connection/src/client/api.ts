@@ -18,6 +18,8 @@ export type {
   CredentialsApi, CredentialView, ConfigurableProviderView, DiscoveredModelView, LlmApi,
   SubagentsApi, SubagentAddress, SubagentCatalog, SubagentListEntry, SubagentPromptReceipt,
   JobView, SendAllResult, StopDescendantsResult,
+  OrgApi, OrgDriftResult, OrgDriftRow, OrgEdge, OrgRegistryResult, OrgRegistryView,
+  OrgRosterResult, OrgSeat, OrgSeatTools,
 } from '@deepseek-ai/dsh-host-apiproxy/api'
 export type { ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools/presentation'
 export type {

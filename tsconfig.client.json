@@ -87,6 +87,7 @@
     { "path": "./packages/client/ui-trajectory" },
     { "path": "./packages/client/ui-agents" },
     { "path": "./packages/client/ui-org-controls" },
+    { "path": "./packages/client/ui-org-board" },
     { "path": "./packages/session-query/session-log-export" },
     { "path": "./packages/client/ui-theme" },
     { "path": "./packages/client/ui-settings" },

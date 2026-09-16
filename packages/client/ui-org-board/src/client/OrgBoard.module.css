@@ -1,0 +1,317 @@
+/* Footer-trigger chrome mirrors OrgControls.module.css (ui-org-controls is
+   the model this package follows); the rest is the modal body: status
+   banners, the drift summary, the React Flow canvas, and the seat detail
+   panel. React Flow's own structural classes live in xyflow-base.module.css
+   (imported once from OrgBoard.tsx) — this file only styles content INSIDE
+   our custom node/edge and the surrounding chrome. */
+
+.root {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+}
+
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.trigger:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.rail .trigger {
+  justify-content: center;
+  width: 36px;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.label {
+  white-space: nowrap;
+}
+
+/* Doubled class beats Modal's own .dialog regardless of stylesheet order
+   (same trick DirectoryBrowser.module.css uses for a wide dialog). */
+.dialog.dialog {
+  width: min(1180px, 100%);
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.refreshRow {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+
+.profileLine {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+}
+
+.banner {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.banner[data-variant='error'] {
+  color: var(--dsw-alias-status-danger, #e5484d);
+  background: color-mix(in srgb, var(--dsw-alias-status-danger, #e5484d) 10%, var(--dsw-alias-bg-layer-1));
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.driftGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+@media (max-width: 720px) {
+  .driftGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.driftColumn {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.driftColumnTitle {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.driftList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.driftItem {
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary);
+  word-break: break-word;
+}
+
+.driftEmpty {
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.layoutRow {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+  min-width: 0;
+}
+
+@media (max-width: 720px) {
+  .layoutRow {
+    flex-direction: column;
+  }
+}
+
+.canvasWrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 460px;
+  border: 1px solid var(--dsw-alias-border-primary, #3a3a3a);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.canvasEmpty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 13px;
+  text-align: center;
+  padding: 16px;
+}
+
+.detailPanel {
+  flex: none;
+  width: 260px;
+  min-width: 220px;
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-border-primary, #3a3a3a);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-1);
+  overflow-y: auto;
+  /* This sheet also paints a layer-2 (elevated) surface -- .node, the seat
+     card -- so its scrollbar thumb takes the l2 elevation tokens (see
+     ui-theme styles/scrollbar.css for the rebinding contract). */
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+
+@media (max-width: 720px) {
+  .detailPanel {
+    width: 100%;
+  }
+}
+
+.detailHint {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+}
+
+.detailName {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+  word-break: break-word;
+}
+
+.detailRow {
+  margin: 0 0 10px;
+}
+
+.detailLabel {
+  margin: 0 0 2px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.detailValue {
+  margin: 0;
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary);
+  word-break: break-word;
+}
+
+.detailList {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary);
+}
+
+/* Custom seat node: React Flow gives the wrapping .react-flow__node absolute
+   positioning/pointer-events (xyflow-base.module.css); everything visual is
+   ours. */
+.node {
+  box-sizing: border-box;
+  width: 168px;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-primary, #3a3a3a);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-2);
+  cursor: pointer;
+}
+
+.nodeSelected {
+  border-color: var(--dsw-alias-label-primary);
+  box-shadow: 0 0 0 1px var(--dsw-alias-label-primary);
+}
+
+.nodeUnserved {
+  border-color: var(--dsw-alias-status-danger, #e5484d);
+}
+
+.nodeName {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+  word-break: break-word;
+}
+
+.badgeRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.badgeLead {
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 16%, transparent);
+  color: var(--dsw-alias-label-primary);
+}
+
+.badgeTest {
+  background: color-mix(in srgb, var(--dsw-alias-label-tertiary) 24%, transparent);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.badgeUnserved {
+  background: color-mix(in srgb, var(--dsw-alias-status-danger, #e5484d) 18%, transparent);
+  color: var(--dsw-alias-status-danger, #e5484d);
+}
+
+.badgeCallUp {
+  background: color-mix(in srgb, #3367d9 18%, transparent);
+  color: #3367d9;
+}
+
+.handle {
+  width: 1px;
+  height: 1px;
+  min-width: 1px;
+  min-height: 1px;
+  border: none;
+  background: transparent;
+  opacity: 0;
+}
