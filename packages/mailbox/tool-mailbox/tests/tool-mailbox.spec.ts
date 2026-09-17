@@ -59,6 +59,21 @@ async function setup(
   return { ctx, dbPath }
 }
 
+/**
+ * Write a minimal valid org registry listing the given seats, and return its
+ * path. Every test that exercises registry-backed recipient admission passes
+ * this explicitly: the production default is the operator's real
+ * `$DSH_HOME/org/registry.yml`, and a unit test must never read the machine
+ * it happens to run on.
+ */
+function writeSeatRegistry(seats: readonly string[]): string {
+  const dir = tempDir()
+  const path = join(dir, 'registry.yml')
+  const lines = seats.map(name => `  ${name}: { cwd: . }`)
+  writeFileSync(path, `baseDir: ${dir}\nseats:\n${lines.join('\n')}\nedges: []\n`, 'utf8')
+  return path
+}
+
 /** Execute one registered tool through the real registry pipeline. */
 function call(ctx: Context, name: string, args: unknown = {}) {
   callCounter += 1
@@ -261,14 +276,45 @@ describe('mailbox_send — known recipient admission (SWD-140)', () => {
     await ctx.fiber.dispose()
   })
 
-  it('does not check any roster when this process mounts none — the single-seat headless shape is unaffected', async () => {
-    // No `addresses` configured at all: the tool has no local roster to
-    // judge against — a single-seat process never mounts a bridge, so there
-    // is nothing here to compare a destination to. This documents the
-    // deliberate scope boundary rather than a gap nobody noticed; the mount
-    // still warns once about it (see the "mount-time visibility" describe
-    // block below).
-    const { ctx, dbPath } = await setup('batman')
+  it('falls back to the org registry when this process mounts no roster — an unknown name is still refused', async () => {
+    // No `addresses` configured at all: a single-seat process never mounts a
+    // bridge, so there is no served roster to judge against. That does NOT
+    // leave the door open — admission switches to the org registry, which is
+    // the source of truth for which seat names exist at all.
+    const registryPath = writeSeatRegistry(['batman', 'alfred'])
+    const { ctx, dbPath } = await setup('batman', { orgRegistryPath: registryPath })
+    const result = await call(ctx, 'mailbox_send', { to: 'anyone-at-all', subject: 's', body: 'b' })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected a graceful refusal, not a tool error')
+    expect((result.value as { deliveryState: string }).deliveryState).toBe('refused')
+    expect((result.value as { refusalReason: string }).refusalReason).toContain('not a seat in the org registry')
+    // Refused BEFORE the write: nothing may be left pending for a name that
+    // cannot exist, which is the whole point of refusing early.
+    expect(storedRows(dbPath, 'anyone-at-all')).toHaveLength(0)
+    await ctx.fiber.dispose()
+  })
+
+  it('admits a real seat with no roster mounted — a single-seat sender may mail anyone the registry knows', async () => {
+    // The case the registry fallback must NOT break: this process serves
+    // nobody and cannot itself deliver to `alfred`, but `alfred` is a real
+    // seat and another process's bridge drains it. Refusing here would take
+    // seat-to-seat mail away from every single-seat deployment.
+    const registryPath = writeSeatRegistry(['batman', 'alfred'])
+    const { ctx, dbPath } = await setup('batman', { orgRegistryPath: registryPath })
+    const result = await call(ctx, 'mailbox_send', { to: 'alfred', subject: 's', body: 'b' })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected mailbox_send success')
+    expect((result.value as { deliveryState: string }).deliveryState).toBe('pending')
+    expect(storedRows(dbPath, 'alfred')).toHaveLength(1)
+    await ctx.fiber.dispose()
+  })
+
+  it('admits when the org registry cannot be read — a local file fault must not become a mail outage', async () => {
+    // The check can only prove a name is unknown when it has the list to
+    // prove it against. With no readable registry it admits, exactly as it
+    // did before the fallback existed, rather than refusing every outbound
+    // message because of an unrelated file problem.
+    const { ctx, dbPath } = await setup('batman', { orgRegistryPath: join(tempDir(), 'absent.yml') })
     const result = await call(ctx, 'mailbox_send', { to: 'anyone-at-all', subject: 's', body: 'b' })
     expect(result.isError).toBe(false)
     if (result.isError) throw new Error('expected mailbox_send success')
@@ -335,8 +381,8 @@ describe('mailbox_send — known recipient admission (SWD-140)', () => {
   })
 })
 
-describe('mailbox tools mount — no-roster visibility (SWD-140 BLOCKING 3)', () => {
-  it('warns once at mount when addresses is absent — the disabled check must never be silent', async () => {
+describe('mailbox tools mount — which check is in force (SWD-140 BLOCKING 3)', () => {
+  it('states once at mount which check is in force when addresses is absent — never silent about it', async () => {
     const dbPath = join(tempDir(), 'mailbox.db')
     const ctx = new Context()
     await ctx.plugin(InvariantRegistry)
@@ -344,19 +390,24 @@ describe('mailbox tools mount — no-roster visibility (SWD-140 BLOCKING 3)', ()
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(MailboxRegistry, { defaultProvider: 'local' })
     await ctx.plugin(MailboxLocal, { path: dbPath })
+    // Info, not warn: a single-seat deployment having no served roster is
+    // the correct shape, not a fault — but it must still be stated, so the
+    // weaker registry-backed check is never mistaken for no check at all.
+    const info = vi.spyOn(ctx.logger, 'info').mockImplementation(() => {})
     const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
     // No `addresses` at all: this is the single-seat headless shape, where
     // the roster-gated refusal has nothing to check against.
     await ctx.plugin(tool, { sessionName: 'batman' })
     await ctx.plugin(invariant)
-    expect(warn).toHaveBeenCalledTimes(1)
-    const [message] = warn.mock.calls[0] as [string]
-    expect(message).toContain('known-recipient refusal is INACTIVE')
+    expect(info).toHaveBeenCalledTimes(1)
+    expect(warn).not.toHaveBeenCalled()
+    const [message] = info.mock.calls[0] as [string]
+    expect(message).toContain('admits recipients against the org registry')
     expect(message).toContain('addresses')
     await ctx.fiber.dispose()
   })
 
-  it('warns once at mount when addresses is an empty array — empty is absent, not "nobody yet"', async () => {
+  it('states it once at mount when addresses is an empty array — empty is absent, not "nobody yet"', async () => {
     const dbPath = join(tempDir(), 'mailbox.db')
     const ctx = new Context()
     await ctx.plugin(InvariantRegistry)
@@ -364,10 +415,10 @@ describe('mailbox tools mount — no-roster visibility (SWD-140 BLOCKING 3)', ()
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(MailboxRegistry, { defaultProvider: 'local' })
     await ctx.plugin(MailboxLocal, { path: dbPath })
-    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    const info = vi.spyOn(ctx.logger, 'info').mockImplementation(() => {})
     await ctx.plugin(tool, { sessionName: 'batman', addresses: [] })
     await ctx.plugin(invariant)
-    expect(warn).toHaveBeenCalledTimes(1)
+    expect(info).toHaveBeenCalledTimes(1)
     await ctx.fiber.dispose()
   })
 
