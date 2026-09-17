@@ -1,6 +1,6 @@
 /** Registry lifecycle, duplicate rejection, default resolution, and delegation. */
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { MailboxLeaseRef, MailboxMessageId } from '../src/types.ts'
 import type { MailboxProvider } from '../src/provider.ts'
@@ -156,6 +156,50 @@ describe('default-provider resolution', () => {
     registry.registerProvider(fakeProvider('p'))
     await expect(registry.claim({ addresses: ['ok', 'bad address'] as never[], limit: 1, staleClaimMs: 1_000 }))
       .rejects.toThrow('invalid mailbox address')
+  })
+})
+
+describe('declareRoster (SWD-118 roster-drift alarm, condition A)', () => {
+  it('does not warn when a lone mount declares its roster', async () => {
+    const { ctx, registry } = await setup()
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    registry.declareRoster('mailbox-bridge', ['alice', 'bob'])
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('does not warn when two mounts declare byte-identical rosters', async () => {
+    const { ctx, registry } = await setup()
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    registry.declareRoster('mailbox-bridge', ['alice', 'bob'])
+    registry.declareRoster('tool-mailbox', ['bob', 'alice'])
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('warns once, naming both mount ids and the specific seats each side lacks, when two mounts disagree', async () => {
+    const { ctx, registry } = await setup()
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    registry.declareRoster('mailbox-bridge', ['alice', 'ghost'])
+    registry.declareRoster('tool-mailbox', ['alice', 'batman'])
+    expect(warn).toHaveBeenCalledTimes(1)
+    const message = warn.mock.calls[0]?.[0] as string
+    expect(message).toContain('"mailbox-bridge"')
+    expect(message).toContain('"tool-mailbox"')
+    expect(message).toContain('ghost')
+    expect(message).toContain('batman')
+  })
+
+  it('never throws on disagreement — the alarm is a warning, not a refusal', async () => {
+    const { registry } = await setup()
+    registry.declareRoster('mailbox-bridge', ['alice'])
+    expect(() => { registry.declareRoster('tool-mailbox', ['bob']) }).not.toThrow()
+  })
+
+  it('accumulates repeated declarations under the SAME mount id as a union, not a disagreement with itself', async () => {
+    const { ctx, registry } = await setup()
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    registry.declareRoster('mailbox-bridge', ['alice'])
+    registry.declareRoster('mailbox-bridge', ['bob'])
+    expect(warn).not.toHaveBeenCalled()
   })
 })
 

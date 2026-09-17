@@ -254,9 +254,29 @@ async lookupByTraceId(traceId: string, signal?: AbortSignal): Promise<readonly M
  * @returns one entry per matching row, earliest admission first.
  */
 async lookupInboundSince(address: MailboxAddress, sinceMs: number, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]>
+
+/**
+ * SWD-118 roster-drift alarm, condition (A): declare the addresses one
+ * mount serves under `mountId`, then warn — never throw — if the result
+ * disagrees with any roster already declared under a DIFFERENT mount id.
+ * The two mounts that call this today (`mailbox-bridge`, `tool-mailbox`)
+ * are expected to serve byte-identical rosters; nothing enforced that
+ * before this ticket, and a one-sided address meant mail to that seat
+ * silently half-worked with no error and no bounce.
+ *
+ * Declarations under the SAME mount id accumulate as a union rather than
+ * overwrite, so more than one mount instance sharing an id (e.g. two
+ * `mailbox-bridge` mounts each serving a subset) is judged as one served
+ * roster, not a disagreement with itself. The comparison runs once per
+ * call, against every OTHER declared roster, so the alarm fires at mount
+ * time as each side registers — never on a hot path.
+ * @param mountId - the declaring mount's identity (its plugin `name`).
+ * @param addresses - the bare addresses that mount serves.
+ */
+declareRoster(mountId: string, addresses: readonly string[]): void
 ```
 
-Source: [`packages/mailbox/mailbox/src/index.ts:60`](../../packages/mailbox/mailbox/src/index.ts)
+Source: [`packages/mailbox/mailbox/src/index.ts:65`](../../packages/mailbox/mailbox/src/index.ts)
 
 <a id="mailbox-events"></a>
 
@@ -289,7 +309,7 @@ The bridge refused a claimed lease terminally at admission — registry health, 
 'mailbox/refused'(refusal: MailboxRefusal): void
 ```
 
-Source: [`packages/mailbox/bridge/src/index.ts:1777`](../../packages/mailbox/bridge/src/index.ts)
+Source: [`packages/mailbox/bridge/src/index.ts:1780`](../../packages/mailbox/bridge/src/index.ts)
 
 <a id="mailboxseat-tools-restricted--emit"></a>
 
@@ -333,5 +353,5 @@ Listener failures are logged and contained by Cordis dispatch.
 'mailbox/seat-tools-restricted'(restriction: SeatToolsRestricted): void
 ```
 
-Source: [`packages/mailbox/bridge/src/index.ts:1806`](../../packages/mailbox/bridge/src/index.ts)
+Source: [`packages/mailbox/bridge/src/index.ts:1809`](../../packages/mailbox/bridge/src/index.ts)
 <!-- END GENERATED cordis-surface -->

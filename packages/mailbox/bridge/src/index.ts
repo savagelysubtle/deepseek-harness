@@ -100,10 +100,13 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import {
   findOrgRegistryRoute,
   loadOrgRegistry,
+  loadRegistrySeatNames,
   orgRegistryAllows,
   parseMailboxAddress,
   resolveSeatCwd,
   resolveSeatSessionId,
+  unknownServedSeats,
+  unknownServedSeatsWarning,
 } from '@deepseek-ai/dsh-mailbox'
 import type { OrgRegistry, OrgRegistrySeat } from '@deepseek-ai/dsh-mailbox'
 import type { MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxMessageId } from '@deepseek-ai/dsh-mailbox'
@@ -1808,6 +1811,50 @@ declare module '@deepseek-ai/cordis' {
 }
 
 /**
+ * SWD-118 mount-time roster-drift alarm. Declares this bridge's served
+ * roster to the shared `ctx.mailbox` registry — condition (A): this roster
+ * disagreeing with another mount's (`tool-mailbox`'s) — and checks it
+ * against the org registry — condition (B): a served name the registry
+ * does not know. Runs once at mount, independent of whether any lease is
+ * waiting to drain: the routing pipeline only loads the registry when a
+ * lease needs judging (`judgmentRegistry`), and a quiet mount with no mail
+ * waiting must still be checked.
+ *
+ * Warns, never throws: nothing here may block mount or refuse mail, per the
+ * founder's standing rule that no fence may remove the operator's ability
+ * to drive the system. A registry that is simply ABSENT is the legitimate
+ * no-registry world {@link judgmentRegistry} already distinguishes: nothing
+ * is knowable as a seat, so condition (B) no-ops rather than alarming. A
+ * registry that EXISTS but will not load is different, and the alarm
+ * itself must never become a silent failure — that case warns explicitly
+ * that condition (B) could not be checked, instead of quietly passing as
+ * "nothing is wrong."
+ * @param ctx - plugin context carrying the shared mailbox registry.
+ * @param spec - resolved serving parameters.
+ */
+async function checkRosterDrift(ctx: Context, spec: BridgeSpec): Promise<void> {
+  try {
+    ctx.mailbox.declareRoster('mailbox-bridge', spec.addresses)
+    const outcome = await loadRegistrySeatNames(spec.orgRegistryPath)
+    if (outcome.kind === 'missing') return
+    if (outcome.kind === 'unavailable') {
+      ctx.logger.warn(
+        `mailbox-bridge: cannot check served addresses against the org registry at "${spec.orgRegistryPath}" `
+        + `for roster drift — it exists but would not load: ${outcome.error.message}. Fix the registry and `
+        + 'restart to re-run this check; treat this as unresolved, not as "nothing is wrong."',
+      )
+      return
+    }
+    const unknown = unknownServedSeats(spec.addresses, outcome.seatNames)
+    if (unknown.length > 0) ctx.logger.warn(unknownServedSeatsWarning('mailbox-bridge', unknown))
+  } catch (error) {
+    // The alarm itself must never crash the mount; an unexpected failure
+    // here is reported the same way any other roster-drift finding would be.
+    ctx.logger.warn(`mailbox-bridge: roster-drift check failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+/**
  * Lifecycle result of routing one claimed lease, observed at its settlement
  * write. `failed` carries the reason the settlement recorded.
  */
@@ -1846,6 +1893,7 @@ export const internals = {
   describeBlockedResident,
   DESCENDANT_REANNOUNCE_TICKS,
   DESCENDANT_ESCALATE_TICKS,
+  checkRosterDrift,
 }
 
 /**
@@ -1888,6 +1936,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     for (const resident of spec.residents.values()) resident.release()
     spec.residents.clear()
   }, 'mailbox-bridge.poll')
+  // SWD-118 roster-drift alarm: warns loudly, never throws — see
+  // `checkRosterDrift`'s own contract. Deliberately LAST: the poll cycle is
+  // already live and torn down by the effect above before this runs, so a
+  // stalled registry read (a hung or slow filesystem, not merely a thrown
+  // error) can never delay the bridge's actual job of serving mail.
+  await internals.checkRosterDrift(ctx, spec)
 }
 
 /** What the wire reports about one woken message. */

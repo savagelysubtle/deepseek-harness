@@ -34,6 +34,10 @@ Every delivered turn carries the merged [`mailbox` message source](../mailbox/sr
 
 The interval timer never pins the host event loop (`unref`): deployments that exist only to serve mail hold themselves up through other handles. Structural failures after mount clear the timer and throw rather than ticking silently forever.
 
+## Roster-drift alarm (SWD-118)
+
+At mount, once — before the first drain, independent of whether any mail is waiting — this bridge declares its `addresses` to the shared `ctx.mailbox` registry ([`declareRoster`](../mailbox/README.md#roster-drift-alarm)) and checks them against the org registry. Two conditions warn loudly and never throw, refuse the mount, or block mail: this bridge's roster disagreeing with `tool-mailbox`'s, and this bridge serving a name the org registry does not know. A registry that is simply absent is the legitimate no-registry world and no-ops; a registry that exists but will not load warns that the check could not run, rather than silently passing as "nothing is wrong." See the [mailbox package's roster-drift alarm](../mailbox/README.md#roster-drift-alarm) for the full contract, including what is deliberately NOT alarmed on.
+
 ## Wire admission
 
 Non-dsh callers reach the same drain through the host API's `mailbox.publish` ([the apiproxy](../../host/apiproxy/README.md)), which wraps the exported [`publishAndWake`](./src/index.ts): loud roster validation against every mounted bridge's addresses, one store write through the default provider, one immediate routing pass, and a `delivered`/`queued` disposition taken from what this wake's settlements observed. Terminal routing failures reject with the recorded reason instead of a false-fast acknowledgment.
