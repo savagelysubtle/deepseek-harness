@@ -167,12 +167,32 @@ interface HopCount {
   utcDay: string
 }
 
-/** One resident seat: its agent handle plus the residency's release path. */
+/** One resident seat: its agent handle plus the residency's release paths. */
 export interface ResidentSeat {
-  /** Dispose the agent and release the per-name lock (idle expiry or replacement). */
+  /**
+   * Dispose the agent and release its per-session lock immediately, with no
+   * deferral for live background work. This is host teardown's own path (see
+   * `apply`'s effect disposer): a process that is exiting cannot hang on a
+   * runaway subagent, so it bypasses {@link ResidentSeat.supersede}'s drain
+   * entirely — the one deliberate exception to the founder's "nothing here
+   * kills background work" ruling.
+   */
   release(): void
   /** Reset the idle timer after a delivery keeps the seat in use. */
   keepAlive(): void
+  /**
+   * This resident's name has just been claimed by a fresh resident (a seat
+   * rename: the same name now routes to a different session). Per the
+   * founder's ruling, nothing here stops, cancels, or drains this resident's
+   * background work: it stays alive — unreachable under `name` from this
+   * point on, since the caller has already overwritten (or is about to
+   * overwrite) the map entry — until it has no live continuable descendant
+   * left, then disposes itself and releases its OWN per-session lock (never
+   * the new resident's; locks are keyed by session id, not by name, so the
+   * two never contend). A resident with no live descendant at the moment its
+   * name is claimed disposes immediately — the common case is unchanged.
+   */
+  supersede(): void
 }
 
 
@@ -1038,13 +1058,23 @@ const DESCENDANT_REANNOUNCE_TICKS = 20
 const DESCENDANT_ESCALATE_TICKS = 120
 
 /**
- * Decide whether one blocked idle-retire recheck should log, and how. Pulled
- * out of {@link retainResident} as a pure function so the reannounce and
+ * Decide whether one blocked recheck should log, and how — shared by the
+ * idle-retire path and the rename-supersede path (see {@link retainResident}
+ * and {@link ResidentSeat.supersede}) so a founder reading the log sees one
+ * consistent cadence for "why is this still running" regardless of which
+ * path produced it. Pulled out as a pure function so the reannounce and
  * escalate thresholds are unit-testable without waiting on real timers.
- * @param name - the seat's address (its session name).
+ * @param name - the seat's address (its session name). For `reason:
+ *   'superseded'` this is the name the resident USED TO answer to, not one it
+ *   can still be reached under.
  * @param sessionId - the resident agent's durable session id.
- * @param blockedTicks - consecutive recheck ticks this seat has spent blocked
- *   on a live continuable descendant, counting the current one.
+ * @param blockedTicks - consecutive recheck ticks this resident has spent
+ *   blocked on a live continuable descendant, counting the current one.
+ * @param reason - `'idle'` (the resident's own idle timer elapsed) or
+ *   `'superseded'` (its name was just claimed by a different session while it
+ *   still had live descendants) — the two wordings a founder needs to tell
+ *   apart "this seat is unusually busy" from "this is an old conversation
+ *   finishing up after a rename." Defaults to `'idle'` for existing callers.
  * @returns the log level and message for this tick, or `undefined` when this
  *   tick reannounces nothing.
  */
@@ -1052,16 +1082,64 @@ function describeBlockedResident(
   name: string,
   sessionId: SessionId,
   blockedTicks: number,
+  reason: 'idle' | 'superseded' = 'idle',
 ): { readonly escalate: boolean; readonly message: string } | undefined {
   if (blockedTicks !== 1 && blockedTicks % DESCENDANT_REANNOUNCE_TICKS !== 0) return undefined
   const escalate = blockedTicks >= DESCENDANT_ESCALATE_TICKS
-  const message = `mailbox-bridge: seat "${name}" (${sessionId}) is staying resident past its idle window — `
-    + 'live background subagents are still running, so it is being kept open rather than retired'
-    + (escalate
-      ? '; this has now run far longer than one idle window is meant to mean — '
-        + 'check its background work if this seat should not still be running'
-      : '')
+  const message = reason === 'superseded'
+    ? `mailbox-bridge: seat "${name}"'s previous conversation (${sessionId}) is being kept alive after the name moved to a new session — `
+      + 'live background subagents are still running on it, so it has not been disposed yet'
+      + (escalate
+        ? '; this has now run far longer than one idle window is meant to mean — '
+          + 'check its background work if this conversation should not still be running'
+        : '')
+    : `mailbox-bridge: seat "${name}" (${sessionId}) is staying resident past its idle window — `
+      + 'live background subagents are still running, so it is being kept open rather than retired'
+      + (escalate
+        ? '; this has now run far longer than one idle window is meant to mean — '
+          + 'check its background work if this seat should not still be running'
+        : '')
   return { escalate, message }
+}
+
+/**
+ * Flush the resident's session, dispose its agent, and release its own
+ * per-session lock — the disposal tail shared by every teardown path
+ * (idle retirement, `release()`'s immediate bypass, and supersession).
+ * Neither caller can await this (a fired timer and a synchronous `release()`
+ * call are both void contexts), so a flush failure is logged rather than
+ * swallowed; disposal still runs regardless, so the lock never waits on a
+ * dead resident.
+ * @param ctx - plugin context carrying the session store service.
+ * @param name - the seat name this resident was retained under, for the log.
+ * @param handle - the resident agent handle being torn down.
+ * @param lock - the resident's own per-session lock.
+ */
+function flushAndDispose(ctx: Context, name: string, handle: AgentHandle, lock: NamedSessionLock): void {
+  const sessions = ctx.get('sessions')
+  void (sessions === undefined
+    ? handle.dispose()
+    : sessions.flush(handle.agent.session).catch((error: unknown) => {
+      ctx.logger.warn(`mailbox-bridge: final flush for retiring resident "${name}" (${handle.agent.session.id}) failed: ${String(error)}`)
+    }).then(() => handle.dispose()))
+  lock.release()
+}
+
+/**
+ * Log one blocked-recheck announcement at the right level, or do nothing —
+ * shared by the idle-retire and supersede recheck loops below so the
+ * warn/error dispatch lives in exactly one place.
+ * @param ctx - plugin context carrying the logger.
+ * @param announcement - {@link describeBlockedResident}'s verdict for this
+ *   tick, or `undefined` when this tick reannounces nothing.
+ */
+function logBlockedAnnouncement(
+  ctx: Context,
+  announcement: { readonly escalate: boolean; readonly message: string } | undefined,
+): void {
+  if (announcement === undefined) return
+  if (announcement.escalate) ctx.logger.error(announcement.message)
+  else ctx.logger.warn(announcement.message)
 }
 
 /**
@@ -1073,6 +1151,13 @@ function describeBlockedResident(
  * founder's ruling applies: nothing here stops, cancels, or drains that
  * descendant (that would silently orphan or kill work the seat's own
  * conversation may still depend on), so the timer defers instead of retiring.
+ *
+ * A prior resident already registered under `name` (this same seat, renamed
+ * to a fresh session id) is superseded, not released: see
+ * {@link ResidentSeat.supersede}'s own doc for the founder's ruling this
+ * carries out. The old resident is never reachable under `name` again — this
+ * function always takes over the map slot regardless of what the previous
+ * resident is still doing — so its own disposal proceeds independently.
  * @param ctx - plugin context carrying the session store service.
  * @param spec - resolved serving parameters carrying the residency map.
  * @param name - the seat's address (its session name).
@@ -1088,32 +1173,30 @@ function retainResident(
   lock: NamedSessionLock,
   idleMs: number,
 ): void {
+  // The name belongs to THIS resident from here on; whatever the previous
+  // occupant is still finishing runs its own independent course (see
+  // `supersede()` below) and never touches this map entry again.
   const previous = spec.residents.get(name)
-  previous?.release()
+  previous?.supersede()
   let timer: ReturnType<typeof setTimeout> | undefined
   // Consecutive recheck ticks spent blocked on a live descendant; reset
-  // whenever a real delivery proves the seat is in ordinary use again.
+  // whenever a real delivery proves the seat is in ordinary use again (idle
+  // path), or when this resident is itself superseded and starts a fresh
+  // count for the new reason (see `supersede()`).
   let blockedTicks = 0
-  // The unconditional teardown: flush, dispose, and release the lock with no
-  // further question. This is what `release()` always does — host teardown,
-  // or this same `name` having already moved to a different session id (a
-  // rename) — and what the idle timer below falls through to once no live
-  // descendant remains. `release()` deliberately does NOT go through the
-  // deferring `retire()` below: host teardown must not hang a process exit on
-  // a runaway subagent, and a name superseded by a fresh identity is not the
-  // "went quiet" case this timer measures.
+  // The unconditional teardown for THIS resident's own current occupancy of
+  // `spec.residents`: flush, dispose, release the lock, and only then drop
+  // the map entry — guarded by identity so a resident that has since been
+  // superseded (its map slot handed to a fresh generation) can never delete
+  // whatever a later resident put there. `release()` calls this directly and
+  // unconditionally: host teardown must not hang a process exit on a runaway
+  // subagent. `retire()` below falls through to it once no live descendant
+  // remains. This is NOT the rename case any more — a name reassigned to a
+  // fresh session goes through `supersede()`, which shares the flush/dispose/
+  // release tail (`flushAndDispose`) but deliberately never touches the map.
   const hardRetire = (): void => {
-    spec.residents.delete(name)
-    const sessions = ctx.get('sessions')
-    // The timer/release caller cannot await this drain, so its failure is
-    // logged rather than swallowed; disposal still runs so the lock never
-    // waits on a dead resident.
-    void (sessions === undefined
-      ? handle.dispose()
-      : sessions.flush(handle.agent.session).catch((error: unknown) => {
-        ctx.logger.warn(`mailbox-bridge: final flush for retiring resident "${name}" (${handle.agent.session.id}) failed: ${String(error)}`)
-      }).then(() => handle.dispose()))
-    lock.release()
+    if (spec.residents.get(name) === resident) spec.residents.delete(name)
+    flushAndDispose(ctx, name, handle, lock)
   }
   // The idle-driven retire: a seat with a live continuable descendant does
   // not retire — the idle clock only starts once every descendant is gone.
@@ -1126,16 +1209,32 @@ function retainResident(
       blockedTicks += 1
       // Never a silent fence: a founder watching the log must be able to
       // learn why this seat has not gone away without reading source.
-      const announcement = describeBlockedResident(name, handle.agent.session.id, blockedTicks)
-      if (announcement !== undefined) {
-        if (announcement.escalate) ctx.logger.error(announcement.message)
-        else ctx.logger.warn(announcement.message)
-      }
+      logBlockedAnnouncement(ctx, describeBlockedResident(name, handle.agent.session.id, blockedTicks, 'idle'))
       timer = setTimeout(retire, Math.min(idleMs, DESCENDANT_RECHECK_MS))
       timer.unref()
       return
     }
     hardRetire()
+  }
+  // The supersede-driven drain: reruns the exact same live-descendant check
+  // and recheck cadence as `retire()` above (same constants, same
+  // `describeBlockedResident` cadence, same `logBlockedAnnouncement`), but
+  // its terminal action is `flushAndDispose` directly rather than
+  // `hardRetire` — this resident is no longer `spec.residents.get(name)` by
+  // the time anyone could look, so it must never touch that entry. Reuses
+  // this same closure's `timer`/`blockedTicks` rather than allocating fresh
+  // ones: once `supersede()` runs, nothing else in this closure (`arm`,
+  // `retire`, `keepAlive`) is ever invoked again, so there is no shared-state
+  // hazard in taking them over.
+  const retireSuperseded = (): void => {
+    if (ctx.get('subagents')?.hasLiveDescendants(handle.agent) ?? false) {
+      blockedTicks += 1
+      logBlockedAnnouncement(ctx, describeBlockedResident(name, handle.agent.session.id, blockedTicks, 'superseded'))
+      timer = setTimeout(retireSuperseded, Math.min(idleMs, DESCENDANT_RECHECK_MS))
+      timer.unref()
+      return
+    }
+    flushAndDispose(ctx, name, handle, lock)
   }
   const resident: ResidentSeat = {
     keepAlive(): void {
@@ -1146,6 +1245,18 @@ function retainResident(
     release(): void {
       if (timer !== undefined) clearTimeout(timer)
       hardRetire()
+    },
+    supersede(): void {
+      // Cancel whatever this resident's own machinery still has pending —
+      // its idle-arm wait, or an in-progress idle-retire recheck — before
+      // starting the independent supersede drain below. Without this, a
+      // stale `retire()` tick could still fire later and call `hardRetire`,
+      // which would delete the NEW resident's entry out from under it (by
+      // name, not by identity) even though `hardRetire`'s own identity guard
+      // exists precisely to stop that.
+      if (timer !== undefined) clearTimeout(timer)
+      blockedTicks = 0
+      retireSuperseded()
     },
   }
   const arm = (): void => {

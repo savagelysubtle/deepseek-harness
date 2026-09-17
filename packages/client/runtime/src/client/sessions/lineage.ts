@@ -19,6 +19,13 @@ export interface SessionListEntry {
   title?: string
   updatedAt: number
   running: boolean
+  /**
+   * Live-agent bit mirrored from the summary (host wire passthrough): true
+   * whenever `session.stopAll`/`session.sendAll` root selection would reach
+   * this session. Independent of `running` — an attached session idling
+   * between turns is exactly a broadcast control's intended audience.
+   */
+  attached: boolean
   /** Empty-log bit mirrored from the summary; lists hide blank sessions (filtering stays with the consumer). */
   blank: boolean
   parentSessionId?: SessionId

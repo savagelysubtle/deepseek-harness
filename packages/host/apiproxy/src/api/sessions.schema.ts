@@ -12,8 +12,8 @@ import type { RequestPayload, ResponseValue } from './rpc-map.ts'
 import type { Wire } from './rpc.schema.ts'
 import type {
   HistoryEntry, ModelCatalogFailure, ModelCatalogModel, ModelProviderGroup, ModelReasoning,
-  ModelReasoningEffort, ModelSelection, SessionListMetadata, SessionProjectionsBlock, SessionSearchItem, SessionSummary,
-  StopDescendantsResult,
+  ModelReasoningEffort, ModelSelection, SendAllResult, SessionListMetadata, SessionProjectionsBlock,
+  SessionSearchItem, SessionSummary, StopDescendantsResult,
 } from './sessions.ts'
 import type { ToolEventView } from './events.ts'
 import type { AttachmentIdType, ImageAttachmentLimits, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -55,6 +55,7 @@ export const sessionSummarySchema = z.object({
   sessionId: sessionIdSchema,
   updatedAt: z.number(),
   running: z.boolean(),
+  attached: z.boolean(),
   blank: z.boolean(),
   parentSessionId: sessionIdSchema.optional(),
   origin: z.literal('subagent').optional(),
@@ -389,3 +390,20 @@ export const sessionStopAllValueSchema = z.object({
   stoppedCount: z.number().int().nonnegative(),
   descendants: stopDescendantsResultSchema,
 }) satisfies z.ZodType<Wire<ResponseValue<'session.stopAll'>>>
+
+/** session.sendAll steer-broadcast outcome (see {@link SendAllResult}). */
+export const sendAllResultSchema = z.union([
+  z.literal('ok'),
+  z.object({ failed: z.string() }),
+]) satisfies z.ZodType<Wire<SendAllResult>>
+
+/** session.sendAll request payload: the content steered into every live top-level session. */
+export const sessionSendAllRequestSchema = z.object({
+  content: z.array(promptContentPartSchema),
+}) satisfies z.ZodType<Wire<RequestPayload<'session.sendAll'>>>
+
+/** session.sendAll response value. */
+export const sessionSendAllValueSchema = z.object({
+  sentCount: z.number().int().nonnegative(),
+  result: sendAllResultSchema,
+}) satisfies z.ZodType<Wire<ResponseValue<'session.sendAll'>>>

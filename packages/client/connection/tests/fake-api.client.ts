@@ -74,6 +74,8 @@ export class FakeApiClient implements IApiClient {
     = () => Promise.resolve(ok({ ownTurnStopped: true, descendants: 'ok' as const }))
   onStopAll: (payload: unknown) => Promise<RpcResponse<{ stoppedCount: number; descendants: 'ok' }>>
     = () => Promise.resolve(ok({ stoppedCount: 0, descendants: 'ok' as const }))
+  onSendAll: (payload: unknown) => Promise<RpcResponse<{ sentCount: number; result: 'ok' }>>
+    = () => Promise.resolve(ok({ sentCount: 0, result: 'ok' as const }))
   onDescribe: (payload: unknown) => Promise<RpcResponse<{
     version: string
     cwd: string
@@ -127,6 +129,7 @@ export class FakeApiClient implements IApiClient {
     cancel: (payload: unknown) => this.record('session.cancel', payload, this.onCancel(payload)),
     stopTree: (payload: unknown) => this.record('session.stopTree', payload, this.onStopTree(payload)),
     stopAll: (payload: unknown) => this.record('session.stopAll', payload, this.onStopAll(payload)),
+    sendAll: (payload: unknown) => this.record('session.sendAll', payload, this.onSendAll(payload)),
   }
 
   readonly subagents: IApiClient['subagents'] = {
@@ -250,6 +253,16 @@ export class FakeApiClient implements IApiClient {
     }))),
     lock: payload => this.record('worktree.lock', payload, Promise.resolve(ok({ locked: true as const }))),
     remove: payload => this.record('worktree.remove', payload, Promise.resolve(ok({ removed: true as const }))),
+  }
+
+  readonly org: IApiClient['org'] = {
+    get: payload => this.record('org.get', payload, Promise.resolve(ok({
+      profile: 'fake',
+      registry: { ok: true, registry: { baseDir: '/fake', seats: {}, edges: [], callUp: [] } },
+      mailboxBridge: { ok: true, addresses: [] },
+      toolMailbox: { ok: true, addresses: [] },
+      drift: { ok: true, rows: [] },
+    }))),
   }
 
   /** When true, streams never fire onOpen (misbehaving-carrier material for the handshake timeout guard). */

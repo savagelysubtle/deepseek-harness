@@ -1529,6 +1529,9 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
     slotInject: '',
     declaredBy: 'an entry in \'sidebar\' (client-ui-sidebar), so it exists while that entry is mounted',
     occupants: [
+      'client-ui-org-board OrgBoardControl id \'org-board\'',
+      'client-ui-org-controls StopAllControl id \'stop-all\'',
+      'client-ui-org-controls SendAllControl id \'send-all\'',
       'client-ui-cordis CordisPanel id \'cordis-panel\'',
     ],
     replaceRisk: 'none',

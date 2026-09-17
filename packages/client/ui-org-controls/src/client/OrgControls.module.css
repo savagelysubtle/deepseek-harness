@@ -1,0 +1,133 @@
+/* Shared footer-trigger and result-banner chrome for the Stop All and Send
+   All controls; each registers its own list entry into sidebar.footer.action
+   and gets one of these per the shell's .footerActions flex row.
+   Send All's composer used to live in its own SendAllControl.module.css,
+   split out only because the confirm step's .preview surface scrolled on a
+   base-l1 background while this file's .banner sits on the elevated l2 rung
+   — the scrollbar-styles gate scopes elevation rebinds per FILE, so the two
+   unrelated surfaces sharing a file would have needed a rebind neither
+   actually required. Removing the confirm step removed .preview along with
+   it, so .composer (no overflow rule, never flagged as scrolling) moved
+   back here and that file is gone. */
+
+.root {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+}
+
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.trigger:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.trigger:disabled {
+  color: var(--dsw-alias-label-tertiary);
+  cursor: not-allowed;
+}
+
+.rail .trigger {
+  justify-content: center;
+  width: 36px;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.label {
+  white-space: nowrap;
+}
+
+.banner {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 1;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: max-content;
+  max-width: 320px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  line-height: 1.4;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.24);
+}
+
+.banner[data-variant='partial'],
+.banner[data-variant='error'] {
+  color: var(--dsw-alias-status-danger, #e5484d);
+}
+
+.dismiss {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.dismiss:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/*
+ * Visible disabled-reason caption: a hover title/aria-label alone does not
+ * satisfy "say so on screen" - nothing is on screen until the pointer finds
+ * it. Floats below the trigger (the banner already claims the space above)
+ * so it never disturbs the footer row's own layout.
+ */
+.disabledReason {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 1;
+  width: max-content;
+  max-width: 200px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 1.3;
+  pointer-events: none;
+}
+
+.composer {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 120px;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-primary, #3a3a3a);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: 14px;
+  resize: vertical;
+}

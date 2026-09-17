@@ -95,6 +95,7 @@ export class ApiProxyService extends Service implements ApiProxy {
   readonly credentials: ApiProxy['credentials']
   readonly mailbox: ApiProxy['mailbox']
   readonly worktree: ApiProxy['worktree']
+  readonly org: ApiProxy['org']
   readonly llm: ApiProxy['llm']
   readonly events: ApiProxy['events']
   readonly downloads: ApiProxy['downloads']
@@ -125,6 +126,7 @@ export class ApiProxyService extends Service implements ApiProxy {
     this.credentials = api.credentials
     this.mailbox = api.mailbox
     this.worktree = api.worktree
+    this.org = api.org
     this.llm = api.llm
     this.events = api.events
     this.downloads = api.downloads

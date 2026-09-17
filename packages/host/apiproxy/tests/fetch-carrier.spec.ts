@@ -114,6 +114,9 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
       async stopAll(request) {
         return { rpcId: request.rpcId, result: { ok: true, value: { stoppedCount: 0, descendants: 'ok' as const } } }
       },
+      async sendAll(request) {
+        return { rpcId: request.rpcId, result: { ok: true, value: { sentCount: 0, result: 'ok' as const } } }
+      },
     },
     subagents: {
       async list(request) {
@@ -308,6 +311,23 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
       },
       async remove(request) {
         return { rpcId: request.rpcId, result: { ok: true, value: { removed: true } } }
+      },
+    },
+    org: {
+      async get(request) {
+        return {
+          rpcId: request.rpcId,
+          result: {
+            ok: true,
+            value: {
+              profile: 'scripted',
+              registry: { ok: true, registry: { baseDir: '/org', seats: {}, edges: [], callUp: [] } },
+              mailboxBridge: { ok: true, addresses: [] },
+              toolMailbox: { ok: true, addresses: [] },
+              drift: { ok: true, rows: [] },
+            },
+          },
+        }
       },
     },
     events: {

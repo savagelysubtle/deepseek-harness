@@ -14,7 +14,7 @@ afterEach(cleanup)
 
 const sid = (id: string) => id as SessionId
 const summary = (id: string, overrides: Partial<SessionSummary> = {}): SessionSummary => ({
-  id: sid(id), displayTitle: id, running: false, blank: false, updatedAt: 0, ...overrides,
+  id: sid(id), displayTitle: id, running: false, attached: true, blank: false, updatedAt: 0, ...overrides,
 })
 
 /** Minimal mustache-style interpolation, matching the shape the real locale

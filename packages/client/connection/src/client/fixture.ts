@@ -32,7 +32,7 @@ import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 import type { CommandDescriptor, CommandExecution, CommandResult } from '@deepseek-ai/dsh-commands/types'
 import { deriveEventMessage, foldSurface } from '@deepseek-ai/dsh-session/surface'
 import type {
-  ApiProxy, ClientRequest, ClientResponse, HistoryEntry, HostFrame, MuxFrame, RpcReceipt,
+  ApiProxy, ClientRequest, ClientResponse, HistoryEntry, HostFrame, MuxFrame, PromptContentPart, RpcReceipt,
   ModelProviderGroup, ModelSelection, RpcRequest, RpcResponse, RpcResult, ServerRequest, ServerResponse, SessionSummary,
   ToolCallView, ToolEventView, ToolResultView, WorkspaceId, WorkspaceView,
 } from './api.ts'
@@ -1513,9 +1513,9 @@ export function createFixtureFaces(options: FixtureOptions = {}): FixtureWorld {
 function createFixtureWorld(options: FixtureOptions): FixtureWorld {
   // The resident fixture sessions all carry history, so none of them is blank.
   const sessions: SessionSummary[] = options.empty ? [] : [
-    { sessionId: sid('fx-alpha'), updatedAt: Date.now(), running: true, blank: false, cwd: '/tmp/fixture' },
-    { sessionId: sid('fx-beta'), updatedAt: Date.now() - 60_000, running: false, blank: false, parentSessionId: sid('fx-alpha'), cwd: '/tmp/fixture' },
-    { sessionId: sid('fx-gamma'), updatedAt: Date.now() - 120_000, running: false, blank: false, cwd: '/tmp/fixture' },
+    { sessionId: sid('fx-alpha'), updatedAt: Date.now(), running: true, attached: true, blank: false, cwd: '/tmp/fixture' },
+    { sessionId: sid('fx-beta'), updatedAt: Date.now() - 60_000, running: false, attached: true, blank: false, parentSessionId: sid('fx-alpha'), cwd: '/tmp/fixture' },
+    { sessionId: sid('fx-gamma'), updatedAt: Date.now() - 120_000, running: false, attached: true, blank: false, cwd: '/tmp/fixture' },
   ]
   const logs = new Map<SessionId, SessionEvent[]>([[sid('fx-alpha'), buildAlphaLog()]])
   const modelSelections = new Map<SessionId, ModelSelection>(sessions.map(session => [
@@ -2181,6 +2181,30 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
     replays.set(id, { timer: setTimeout(tick, 80), finish })
   }
 
+  /**
+   * Promote wire prompt content to durable ContentBlock[], minting a fixture
+   * attachment record for every image part. Shared by `prompt` and `sendAll`
+   * so a broadcast reaches every session through the same admission path a
+   * single prompt does.
+   */
+  const toDurableContent = (content: readonly PromptContentPart[]): ContentBlock[] => content.map((block) => {
+    if (block.type === 'text') return block
+    const attachment: ImageAttachmentRef = {
+      attachmentId: `fixture:${randomUuid()}` as AttachmentIdType,
+      mediaType: block.mediaType,
+      bytes: Math.max(
+        1,
+        Math.floor(block.data.length * 3 / 4)
+        - (block.data.endsWith('==') ? 2 : block.data.endsWith('=') ? 1 : 0),
+      ),
+      width: 160,
+      height: 90,
+      ...block.name === undefined ? {} : { name: block.name },
+    }
+    attachments.set(String(attachment.attachmentId), { attachment, data: block.data })
+    return { type: 'image', attachment }
+  })
+
   const api: ApiProxy = {
     sessions: {
       list: request => ok(request, { items: [...sessions].sort((a, b) => b.updatedAt - a.updatedAt) }),
@@ -2269,7 +2293,7 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
           }
         }
         const created: SessionSummary = {
-          sessionId: requestedId ?? sid(`fx-${nextSession++}`), updatedAt: Date.now(), running: false, blank: true, cwd,
+          sessionId: requestedId ?? sid(`fx-${nextSession++}`), updatedAt: Date.now(), running: false, attached: true, blank: true, cwd,
         }
         sessions.push(created)
         modelSelections.set(created.sessionId, { provider: 'deepseek-official', model: 'deepseek-v4-flash' })
@@ -2344,7 +2368,7 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         let cut = boundary.seq + 1
         while (cut < log.length && log[cut]?.type !== 'turn/start') cut++
         const child: SessionSummary = {
-          sessionId: sid(`fx-${nextSession++}`), updatedAt: Date.now(), running: false, blank: false,
+          sessionId: sid(`fx-${nextSession++}`), updatedAt: Date.now(), running: false, attached: true, blank: false,
           parentSessionId: sessionId,
           ...source.cwd === undefined ? {} : { cwd: source.cwd },
         }
@@ -2533,6 +2557,14 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
           }
         }
         return ok(request, { stoppedCount: roots.length, descendants: 'ok' as const })
+      },
+      sendAll: (request) => {
+        const roots = sessions.filter(summary => summary.origin !== 'subagent')
+        const durable = toDurableContent(request.payload.content)
+        for (const root of roots) {
+          append(root.sessionId, { type: 'user/message', surfaceOp: 'append', data: userMessage(durable) })
+        }
+        return ok(request, { sentCount: roots.length, result: 'ok' as const })
       },
     },
     subagents: {
@@ -3057,6 +3089,32 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         return ok(request, { removed: true as const })
       },
     },
+    // A small, internally-consistent demo org: two seats, one edge, both
+    // served rosters agreeing with the registry — a clean drift report, so
+    // UI development sees what "nothing to report" looks like.
+    org: {
+      get: request => ok(request, {
+        // The real API always resolves cwd to an absolute path (see
+        // readOrgRegistryResult); the fixture mirrors that guarantee rather
+        // than demoing the pre-resolution shape a UI would never actually see.
+        profile: 'fixture',
+        registry: {
+          ok: true,
+          registry: {
+            baseDir: '/fixture/org',
+            seats: {
+              alfred: { cwd: '/fixture/org/deepseek-harness', lead: true },
+              batman: { cwd: '/fixture/org/deepseek-harness' },
+            },
+            edges: [['alfred', 'batman']],
+            callUp: [],
+          },
+        },
+        mailboxBridge: { ok: true, addresses: ['alfred', 'batman'] },
+        toolMailbox: { ok: true, addresses: ['alfred', 'batman'] },
+        drift: { ok: true, rows: [] },
+      }),
+    },
     respond(message: ClientResponse): Promise<RpcReceipt> {
       // Same routing discipline as the host: rpcId first, then the payload's
       // audit correlation; a settled or unknown id is not-pending.
@@ -3186,6 +3244,7 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'session.cancel': return this.api.sessions.cancel(request)
       case 'session.stopTree': return this.api.sessions.stopTree(request)
       case 'session.stopAll': return this.api.sessions.stopAll(request)
+      case 'session.sendAll': return this.api.sessions.sendAll(request)
       case 'subagent.list': return this.api.subagents.list(request)
       case 'subagent.history': return this.api.subagents.history(request)
       case 'subagent.prompt': return this.api.subagents.prompt(request, signal)
@@ -3206,6 +3265,7 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'worktree.create': return this.api.worktree.create(request)
       case 'worktree.lock': return this.api.worktree.lock(request)
       case 'worktree.remove': return this.api.worktree.remove(request)
+      case 'org.get': return this.api.org.get(request)
       case 'skill.list': return this.api.skills.list(request)
       case 'agentPreset.list': return this.api.agentPresets.list(request)
       case 'agentPreset.select': return this.api.agentPresets.select(request)

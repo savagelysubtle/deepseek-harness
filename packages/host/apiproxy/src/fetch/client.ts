@@ -30,6 +30,7 @@ import {
   sessionRenameValueSchema,
   sessionSearchValueSchema,
   sessionSelectModelValueSchema,
+  sessionSendAllValueSchema,
   sessionStopAllValueSchema,
   sessionStopTreeValueSchema,
   sessionUpdateQueueValueSchema,
@@ -69,6 +70,7 @@ import {
   worktreeCreateValueSchema, worktreeListValueSchema, worktreeLockValueSchema,
   worktreeRemoveValueSchema,
 } from '../api/worktree.schema.ts'
+import { orgGetValueSchema } from '../api/org.schema.ts'
 import {
   subagentHistoryValueSchema,
   subagentInterruptValueSchema,
@@ -108,6 +110,7 @@ export interface IApiClient {
     cancel(payload: RequestPayload<'session.cancel'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'session.cancel'>>>
     stopTree(payload: RequestPayload<'session.stopTree'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'session.stopTree'>>>
     stopAll(payload: RequestPayload<'session.stopAll'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'session.stopAll'>>>
+    sendAll(payload: RequestPayload<'session.sendAll'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'session.sendAll'>>>
   }
   subagents: {
     list(payload: RequestPayload<'subagent.list'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'subagent.list'>>>
@@ -182,6 +185,10 @@ export interface IApiClient {
     lock(payload: RequestPayload<'worktree.lock'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'worktree.lock'>>>
     remove(payload: RequestPayload<'worktree.remove'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'worktree.remove'>>>
   }
+  /** Read-only org registry and served-roster projection, with computed drift. */
+  org: {
+    get(payload: RequestPayload<'org.get'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'org.get'>>>
+  }
   /** client-response passthrough (rpcId is a backfill of the server-request's id — never minted here). */
   respond(message: ClientResponse, signal?: AbortSignal): Promise<RpcReceipt>
 }
@@ -205,6 +212,7 @@ const UNARY_VALUE_SCHEMAS: { [K in keyof RpcMethodMap]: z.ZodType<Wire<ResponseV
   'session.cancel': sessionCancelValueSchema,
   'session.stopTree': sessionStopTreeValueSchema,
   'session.stopAll': sessionStopAllValueSchema,
+  'session.sendAll': sessionSendAllValueSchema,
   'subagent.list': subagentListValueSchema,
   'subagent.history': subagentHistoryValueSchema,
   'subagent.prompt': subagentPromptValueSchema,
@@ -250,6 +258,7 @@ const UNARY_VALUE_SCHEMAS: { [K in keyof RpcMethodMap]: z.ZodType<Wire<ResponseV
   'worktree.create': worktreeCreateValueSchema,
   'worktree.lock': worktreeLockValueSchema,
   'worktree.remove': worktreeRemoveValueSchema,
+  'org.get': orgGetValueSchema,
 }
 
 /** Default timeout for bounded unary calls (rpc-compare 2026-07-19: a hung host must not leave callers pending forever). */
@@ -460,6 +469,7 @@ export abstract class AbstractApiClient implements IApiClient {
     cancel: (payload, signal) => this.callUnary('session.cancel', payload, signal),
     stopTree: (payload, signal) => this.callUnary('session.stopTree', payload, signal),
     stopAll: (payload, signal) => this.callUnary('session.stopAll', payload, signal),
+    sendAll: (payload, signal) => this.callUnary('session.sendAll', payload, signal),
   }
 
   readonly subagents: IApiClient['subagents'] = {
@@ -547,6 +557,10 @@ export abstract class AbstractApiClient implements IApiClient {
     create: (payload, signal) => this.callUnary('worktree.create', payload, signal),
     lock: (payload, signal) => this.callUnary('worktree.lock', payload, signal),
     remove: (payload, signal) => this.callUnary('worktree.remove', payload, signal),
+  }
+
+  readonly org: IApiClient['org'] = {
+    get: (payload, signal) => this.callUnary('org.get', payload, signal),
   }
 
   readonly events: IApiClient['events'] = {
