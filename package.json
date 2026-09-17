@@ -70,6 +70,7 @@
     "verify-public-repository-links": "tsx scripts/verify-public-repository-links.ts",
     "verify-doc-refs": "tsx scripts/verify-doc-refs.ts",
     "verify-package-paths": "tsx scripts/verify-package-paths.ts",
+    "verify-client-test-naming": "tsx scripts/verify-client-test-naming.ts",
     "verify-dsh-package-licenses": "tsx scripts/verify-dsh-package-licenses.ts",
     "verify-config-source-ownership": "tsx scripts/verify-config-source-ownership.ts",
     "verify-package-invariants": "tsx scripts/verify-package-invariants.ts",
