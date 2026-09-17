@@ -26,21 +26,11 @@
     # reaches nobody. That is not theoretical: the SWD-118 roster-drift alarm and
     # the tool-mailbox no-roster warning were both verified firing into silence on
     # 2026-09-17, and the telemetry exporter is DISABLED by default (and points off
-    # this machine), so it is not a substitute. The explicit threshold below is
-    # load-bearing -- see the comment on it.
+    # this machine), so it is not a substitute. No threshold is set here: the
+    # exporter default keeps error, warn and info and drops only debug (see
+    # LoggerLevel in vendor/cordis/src/logger.ts, local modification 19).
     - id: logger-console
       name: '@deepseek-ai/cordis-plugin-logger-console'
-      config:
-        # `levels.default` is a THRESHOLD, and the vendored level enum is
-        # ERROR=0, INFO=1, WARN=2, DEBUG=3 -- warn sits ABOVE info, and the
-        # dispatch drops anything above the threshold. So the built-in default
-        # (INFO=1) exports `error` and `info` but SILENTLY DISCARDS every
-        # `warn`, which is the exact opposite of what an operator expects and
-        # was verified here on 2026-09-17: an `info` and a `warn` emitted from
-        # the same context in the same instant, and only the `info` arrived.
-        # WARN=2 keeps error, info and warn, and still drops debug.
-        levels:
-          default: 2
 
     - id: llm
       name: '@deepseek-ai/dsh-llm'
