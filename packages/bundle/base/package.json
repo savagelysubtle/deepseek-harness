@@ -40,6 +40,7 @@
   },
   "dependencies": {
     "@deepseek-ai/cordis-plugin-hmr": "workspace:^",
+    "@deepseek-ai/cordis-plugin-logger-console": "workspace:^",
     "@deepseek-ai/cordis-plugin-timer": "workspace:^",
     "@deepseek-ai/dsh-agent": "workspace:^",
     "@deepseek-ai/dsh-agent-default-model": "workspace:^",

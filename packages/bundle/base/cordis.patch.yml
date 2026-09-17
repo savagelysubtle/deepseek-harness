@@ -21,6 +21,16 @@
       config:
         root: ['.']
 
+    # Without this row the logger has exactly ONE exporter -- an in-memory ring
+    # buffer nothing reads -- so every operator-facing `logger.warn` on the host
+    # reaches nobody. That is not theoretical: the SWD-118 roster-drift alarm and
+    # the tool-mailbox no-roster warning were both verified firing into silence on
+    # 2026-09-17, and the telemetry exporter is DISABLED by default (and points off
+    # this machine), so it is not a substitute. Defaults export INFO and below,
+    # which includes `warn` and `error`.
+    - id: logger-console
+      name: '@deepseek-ai/cordis-plugin-logger-console'
+
     - id: llm
       name: '@deepseek-ai/dsh-llm'
 
