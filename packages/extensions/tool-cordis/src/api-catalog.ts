@@ -955,6 +955,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [{ name: 'address', description: 'the recipient address to scan; grammar-checked here so a malformed address fails at the seam edge.' }, { name: 'sinceMs', description: 'epoch-milliseconds floor (inclusive) on the row\'s admission time.' }, { name: 'signal', description: 'caller cancellation owning the scan.' }],
         returns: 'one entry per matching row, earliest admission first.',
       },
+      {
+        signature: 'declareRoster(mountId: string, addresses: readonly string[]): void',
+        description: 'SWD-118 roster-drift alarm, condition (A): declare the addresses one mount serves under `mountId`, then warn — never throw — if the result disagrees with any roster already declared under a DIFFERENT mount id. The two mounts that call this today (`mailbox-bridge`, `tool-mailbox`) are expected to serve byte-identical rosters; nothing enforced that before this ticket, and a one-sided address meant mail to that seat silently half-worked with no error and no bounce.\n\nDeclarations under the SAME mount id accumulate as a union rather than overwrite, so more than one mount instance sharing an id (e.g. two `mailbox-bridge` mounts each serving a subset) is judged as one served roster, not a disagreement with itself. The comparison runs once per call, against every OTHER declared roster, so the alarm fires at mount time as each side registers — never on a hot path.',
+        parameters: [{ name: 'mountId', description: 'the declaring mount\'s identity (its plugin `name`).' }, { name: 'addresses', description: 'the bare addresses that mount serves.' }],
+      },
     ],
   },
   {

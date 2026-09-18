@@ -15,6 +15,7 @@ The mailbox capability seam: durable, cross-process agent messaging with publish
 | `claim(filter, signal?)` | Default-provider claim after validating every filter address. |
 | `settle(leaseRef, outcome, signal?)` | Default-provider settlement of one lease. |
 | `lookupByTraceId(traceId, signal?)` | Default-provider pure read of every stored message carrying a traceId (`{ id, from, to, sentAt }` per entry) — the direction evidence a consumer needs to recognize a reply; claims and settles nothing. |
+| `declareRoster(mountId, addresses)` | SWD-118 roster-drift alarm, condition (A): declares one mount's served roster and warns — never throws — if it disagrees with a roster already declared under a different mount id, naming both mount ids and the specific seats each side is missing. See [Roster-drift alarm](#roster-drift-alarm). |
 
 ## Contracts
 
@@ -29,6 +30,17 @@ The mailbox capability seam: durable, cross-process agent messaging with publish
 | Field | Type | Default | Semantics |
 |---|---|---|---|
 | `defaultProvider` | string? | absent | Provider name for the no-argument conveniences. Blank names fail schema validation at mount; unknown names fail loud at first resolved call. |
+
+## Roster-drift alarm
+
+Seat identity is maintained BY HAND in three places: the org registry (`~/.dsh/org/registry.yml`) and the served `addresses` of both `mailbox-bridge` and `tool-mailbox`. Nothing checked that they agree until this ticket; when they diverged in the past, mail to the missing seat was silently swallowed — no error, no bounce. Exactly two conditions alarm, at mount time, by founder ruling — both warn loudly and never throw, refuse a mount, or block mail:
+
+- **(A) the two served rosters disagree with each other** — `MailboxRegistry.declareRoster` above, called once by each mount.
+- **(B) a roster serves a name the org registry does not know** — judged by each mount alone (it already holds both its own roster and the registry it was configured with); see the `roster` module's [`unknownServedSeats`](./src/roster.ts) and [`loadRegistrySeatNames`](./src/roster.ts).
+
+**Deliberately NOT alarmed on:** a seat the registry lists that no roster serves. That gap is normal and, on the production deployment, deliberate — `test: true` seats and any intentionally unserved seat are never meant to receive mail. Alarming there would be noise from day one.
+
+A registry that is simply ABSENT is the legitimate no-registry world (the down-host CLI bootstrap case): nothing is knowable as a seat, so condition (B) no-ops rather than alarming. A registry that EXISTS but will not load is different, and the alarm itself must never become a silent failure: that case warns explicitly that condition (B) could not be checked, instead of quietly passing as "nothing is wrong."
 
 ## Extension points
 

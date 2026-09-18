@@ -21,6 +21,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
+import { loadRegistrySeatNames, unknownServedSeats, unknownServedSeatsWarning } from '@deepseek-ai/dsh-mailbox'
+import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import type { IdentitySources } from './identity.ts'
 import { mailboxAwaitTool, mailboxCheckInboxTool, mailboxDirectoryTool, mailboxSendTool } from './tools.ts'
 
@@ -78,6 +80,50 @@ export const Config: Schema<Config> = z.object({
 })
 
 /**
+ * SWD-118 mount-time roster-drift alarm — see `@deepseek-ai/dsh-mailbox`'s
+ * roster module for the two conditions it judges. Declares this mount's
+ * served roster to the shared `ctx.mailbox` registry (condition A: this
+ * roster disagreeing with another mount's, e.g. `mailbox-bridge`'s) and
+ * checks it against the org registry (condition B: a served name the
+ * registry does not know). Runs once at mount, and only when `addresses` is
+ * configured — a single-seat headless run serves no roster to declare, so
+ * declaring an empty one would read as every OTHER mount's roster disagreeing
+ * with it.
+ *
+ * Warns, never throws: a wrong or unreadable registry must never block this
+ * mount. A registry that is simply ABSENT is the legitimate no-registry
+ * world (a deployment without an org graph): nothing is knowable as a seat,
+ * so condition (B) no-ops rather than alarming. A registry that EXISTS but
+ * will not load is different, and the alarm itself must never become a
+ * silent failure — that case warns explicitly that condition (B) could not
+ * be checked, instead of quietly passing as "nothing is wrong."
+ * @param ctx - plugin context carrying the shared mailbox registry.
+ * @param addresses - the served roster this mount declares.
+ * @param orgRegistryPath - the registry path this mount was configured with, or the harness-home default.
+ */
+export async function checkRosterDrift(ctx: Context, addresses: readonly string[], orgRegistryPath: string): Promise<void> {
+  try {
+    ctx.mailbox.declareRoster('tool-mailbox', addresses)
+    const outcome = await loadRegistrySeatNames(orgRegistryPath)
+    if (outcome.kind === 'missing') return
+    if (outcome.kind === 'unavailable') {
+      ctx.logger.warn(
+        `mailbox tools: cannot check served addresses against the org registry at "${orgRegistryPath}" for `
+        + `roster drift — it exists but would not load: ${outcome.error.message}. Fix the registry and restart `
+        + 'to re-run this check; treat this as unresolved, not as "nothing is wrong."',
+      )
+      return
+    }
+    const unknown = unknownServedSeats(addresses, outcome.seatNames)
+    if (unknown.length > 0) ctx.logger.warn(unknownServedSeatsWarning('tool-mailbox', unknown))
+  } catch (error) {
+    // The alarm itself must never crash the mount; an unexpected failure
+    // here is reported the same way any other roster-drift finding would be.
+    ctx.logger.warn(`mailbox tools: roster-drift check failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+/**
  * Mount the mailbox tools on the tool registry. The trusted session name
  * flows into both tool bodies; the identity resolution it feeds runs inside
  * `execute`, which is the earliest point at which a missing or malformed name
@@ -93,7 +139,7 @@ export const Config: Schema<Config> = z.object({
  * @param ctx - registrant context carrying the tool and mailbox registries.
  * @param config - the deployment-supplied session name.
  */
-export function apply(ctx: Context, config: Config): void {
+export async function apply(ctx: Context, config: Config): Promise<void> {
   const identity: IdentitySources = {
     ...config.sessionName !== undefined ? { sessionName: config.sessionName } : {},
     ...config.addresses !== undefined ? { addresses: config.addresses } : {},
@@ -119,4 +165,14 @@ export function apply(ctx: Context, config: Config): void {
     ...config.addresses !== undefined ? { addresses: config.addresses } : {},
     ...config.orgRegistryPath !== undefined ? { orgRegistryPath: config.orgRegistryPath } : {},
   }))
+  if (identity.addresses !== undefined && identity.addresses.length > 0) {
+    // SWD-118 roster-drift alarm: warns loudly, never throws (see
+    // `checkRosterDrift`'s own contract). Deliberately LAST, after every
+    // tool above is already registered: a stalled registry read (a hung or
+    // slow filesystem, not merely a thrown error) can never delay this
+    // mount's actual job of making the mailbox tools callable. Runs only
+    // when this deployment actually serves a roster, matching the warning
+    // branch above.
+    await checkRosterDrift(ctx, identity.addresses, config.orgRegistryPath ?? dshHomePath('org', 'registry.yml'))
+  }
 }

@@ -6,6 +6,10 @@ The four model-facing mailbox tools — `mailbox_send`, `mailbox_check_inbox`, `
 
 Requires a loaded mailbox Service Provider (e.g. `@deepseek-ai/dsh-mailbox-local`) registered as the registry's `defaultProvider`; the plugin stays pending until its injected services exist.
 
+## Roster-drift alarm (SWD-118)
+
+When `addresses` is configured (the multi-seat host), this mount declares its served roster to the shared `ctx.mailbox` registry ([`declareRoster`](../mailbox/README.md#roster-drift-alarm)) and checks it against the org registry at mount, once. Two conditions warn loudly and never throw, refuse the mount, or block a tool call: this roster disagreeing with `mailbox-bridge`'s, and this roster serving a name the org registry does not know. A single-seat headless run (no `addresses`) serves no roster and neither declares nor is checked. See the [mailbox package's roster-drift alarm](../mailbox/README.md#roster-drift-alarm) for the full contract, including what is deliberately NOT alarmed on.
+
 ## Tools
 
 ### `mailbox_send`
