@@ -171,8 +171,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     // tool above is already registered: a stalled registry read (a hung or
     // slow filesystem, not merely a thrown error) can never delay this
     // mount's actual job of making the mailbox tools callable. Runs only
-    // when this deployment actually serves a roster, matching the warning
-    // branch above.
+    // when this deployment actually serves a roster -- the exact inverse of
+    // the branch above, which reports that a deployment serving no roster
+    // admits recipients against the org registry instead. Between them every
+    // mount says on the log which of the two checks it is running.
     await checkRosterDrift(ctx, identity.addresses, config.orgRegistryPath ?? dshHomePath('org', 'registry.yml'))
   }
 }
