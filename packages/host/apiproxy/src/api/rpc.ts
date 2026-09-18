@@ -129,11 +129,23 @@ export interface RpcErrorDetailsMap {
   'org-registry-conflict': { expectedToken: string; actualToken: string }
   /**
    * An `org.write` was refused because the proposed document failed
-   * validation, or the current file could not be read for the concurrency
-   * check; the message is the parser's (or filesystem's) own text, reused
-   * verbatim rather than re-worded.
+   * validation; the message is `parseOrgRegistry`'s own text, reused
+   * verbatim rather than re-worded. This means "fix your content" — the same
+   * document will fail again unchanged. Contrast `org-registry-write-failed`
+   * below, which means the opposite: retry the same document.
    */
   'org-registry-rejected': {}
+  /**
+   * An `org.write`'s document passed validation but the write itself failed
+   * for a reason unrelated to document content: the current file could not
+   * be read for the concurrency check, no free backup filename could be
+   * found, or the atomic temp-write/fsync/rename failed. This means "retry
+   * the same document" — never "fix your content", which is what
+   * `org-registry-rejected` means instead. Kept distinct so a caller can act
+   * correctly on the refusal rather than treating every non-conflict failure
+   * as one undifferentiated word.
+   */
+  'org-registry-write-failed': {}
   'internal': {}
 }
 

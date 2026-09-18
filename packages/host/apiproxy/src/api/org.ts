@@ -195,9 +195,16 @@ export interface OrgApi {
    * that change silently — as an `org-registry-conflict` error naming both
    * tokens. Refuses an invalid document (unknown edge endpoint, malformed
    * seat, etc.) as an `org-registry-rejected` error carrying the parser's
-   * own message; nothing is written in that case either. Out of scope: the
-   * served-seat rosters a profile's patch layer mounts — this method only
-   * ever touches the registry file itself, never `cordis.patch.yml`.
+   * own message; nothing is written in that case either — this means "fix
+   * your content", the same document will fail again unchanged. A write
+   * whose document was valid but that failed for an unrelated reason (the
+   * current file could not be read, no free backup filename was found, or
+   * the atomic write/rename itself failed) refuses as
+   * `org-registry-write-failed` instead — this means "retry the same
+   * document", the opposite instruction, which is why the two are never
+   * folded into one code. Out of scope: the served-seat rosters a profile's
+   * patch layer mounts — this method only ever touches the registry file
+   * itself, never `cordis.patch.yml`.
    */
   write(request: RpcRequest<{
     document: OrgRegistryDocument

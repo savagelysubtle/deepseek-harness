@@ -89,8 +89,8 @@ import type { SettingsDescriptor, SettingsNamespace, SettingsPathOp } from '@dee
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { publishAndWake, GUEST_SENDER_PREFIX } from '@deepseek-ai/dsh-mailbox-bridge'
 import {
-  loadOrgRegistryWithToken, OrgRegistryConflictError, parseMailboxAddress, resolveSeatCwd,
-  writeOrgRegistry,
+  loadOrgRegistryWithToken, OrgRegistryConflictError, OrgRegistryWriteError, parseMailboxAddress,
+  resolveSeatCwd, writeOrgRegistry,
 } from '@deepseek-ai/dsh-mailbox'
 import type { OrgRegistry } from '@deepseek-ai/dsh-mailbox'
 // The refusal-notice addresser derives the sender's session id the same way
@@ -3603,6 +3603,19 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
               code: 'org-registry-conflict',
               message: error.message,
               details: { expectedToken: error.expectedToken, actualToken: error.actualToken },
+            })
+          }
+          // OrgRegistryWriteError is the write primitive's own distinction
+          // between "retry the same document" (I/O trouble unrelated to
+          // content) and everything else here, a plain Error from the
+          // parser meaning "fix your content" — collapsing the two into one
+          // code is exactly the kind of state-doesn't-match-reality defect
+          // this API exists to not repeat.
+          if (error instanceof OrgRegistryWriteError) {
+            return err(request, {
+              code: 'org-registry-write-failed',
+              message: error.message,
+              details: {},
             })
           }
           return err(request, {

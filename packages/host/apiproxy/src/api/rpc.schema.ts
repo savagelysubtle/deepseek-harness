@@ -89,6 +89,7 @@ export const rpcErrorSchema: z.ZodType<RpcError> = z.discriminatedUnion('code', 
   }) }),
   z.object({ code: z.literal('org-registry-conflict'), message: z.string(), details: z.object({ expectedToken: z.string(), actualToken: z.string() }) }),
   z.object({ code: z.literal('org-registry-rejected'), message: z.string(), details: z.object({}) }),
+  z.object({ code: z.literal('org-registry-write-failed'), message: z.string(), details: z.object({}) }),
   z.object({ code: z.literal('internal'), message: z.string(), details: z.object({}) }),
 ]) as unknown as z.ZodType<RpcError>
 

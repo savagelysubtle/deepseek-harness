@@ -15,7 +15,8 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto'
-import { open, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { open, readFile, rename, rm } from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
@@ -255,6 +256,72 @@ export class OrgRegistryConflictError extends Error {
 }
 
 /**
+ * The write failed for a reason that has nothing to do with the proposed
+ * document's content: the current file could not be read for the
+ * concurrency check, no free backup filename could be found, the temp file
+ * could not be opened/written/fsynced, or the final rename failed. This is
+ * retry-the-same-write territory — a permissions change, a full volume, a
+ * transient disk fault — never "fix your content and try again", which is
+ * what a plain validation `Error` thrown by {@link parseOrgRegistry} means
+ * instead, and never "re-read and retry", which is what
+ * {@link OrgRegistryConflictError} means. A caller that cannot tell these
+ * three apart cannot act correctly on a refusal, which is exactly the class
+ * of defect this write API exists to not repeat.
+ */
+export class OrgRegistryWriteError extends Error {
+  /**
+   * @param path - the registry file path the write was attempted against.
+   * @param reason - what step failed, for the message text.
+   * @param cause - the underlying error.
+   */
+  constructor(path: string, reason: string, cause: unknown) {
+    super(`org registry at "${path}" ${reason}: ${cause instanceof Error ? cause.message : String(cause)}`, { cause })
+    this.name = 'OrgRegistryWriteError'
+  }
+}
+
+/** Bound on disambiguating suffixes {@link backupOrgRegistryBytes} tries before giving up loudly. */
+const MAX_BACKUP_FILENAME_ATTEMPTS = 100
+
+/**
+ * Write a timestamped backup of the registry's previous bytes, next to the
+ * file, without ever silently destroying an existing backup. The timestamp
+ * alone is only millisecond-granular, so two writes landing in the same
+ * millisecond would otherwise collide on the same filename; each attempt
+ * opens with `wx` (exclusive create, fails on an existing path) so a
+ * collision can never resolve as a quiet overwrite — it always either finds
+ * a genuinely free name or throws.
+ * @param expanded - the registry file's expanded, absolute path.
+ * @param currentBytes - the previous content to preserve.
+ * @returns the backup file's path.
+ * @throws {OrgRegistryWriteError} when the backup cannot be written, or no free filename is found within the attempt bound.
+ */
+async function backupOrgRegistryBytes(expanded: string, currentBytes: Buffer): Promise<string> {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const base = `${expanded}.bak-${stamp}`
+  for (let attempt = 0; attempt < MAX_BACKUP_FILENAME_ATTEMPTS; attempt++) {
+    const candidate = attempt === 0 ? base : `${base}-${String(attempt)}`
+    let handle: FileHandle | undefined
+    try {
+      handle = await open(candidate, 'wx')
+      await handle.writeFile(currentBytes)
+      await handle.sync()
+      return candidate
+    } catch (error: unknown) {
+      if (error instanceof Error && 'code' in error && error.code === 'EEXIST') continue
+      throw new OrgRegistryWriteError(expanded, 'could not write a backup of its previous content', error)
+    } finally {
+      await handle?.close()
+    }
+  }
+  throw new OrgRegistryWriteError(
+    expanded,
+    `could not find a free backup filename after ${String(MAX_BACKUP_FILENAME_ATTEMPTS)} same-millisecond attempts`,
+    new Error('backup filename space exhausted'),
+  )
+}
+
+/**
  * Replace the whole registry document, refusing when the file has changed
  * since `expectedToken` was read, or when the proposed document fails
  * validation. Never writes a registry that cannot be read back: the
@@ -276,7 +343,11 @@ export class OrgRegistryConflictError extends Error {
  * @param options - host-specific resolution options.
  * @returns the newly written registry, parsed, and its new content token.
  * @throws {OrgRegistryConflictError} when the file's current token does not match `expectedToken`.
- * @throws when the current file cannot be read, the proposed document fails validation, or the write itself fails.
+ * @throws {OrgRegistryWriteError} when the current file cannot be read for the concurrency
+ *   check, the backup cannot be written, or the atomic write/rename itself fails —
+ *   retry-the-same-write territory, never "fix your content."
+ * @throws a plain `Error` (from {@link parseOrgRegistry}) when the proposed document fails
+ *   validation — "fix your content", never a reason to retry unchanged.
  */
 export async function writeOrgRegistry(
   path: string,
@@ -290,18 +361,21 @@ export async function writeOrgRegistry(
   try {
     currentBytes = await readFile(expanded)
   } catch (error: unknown) {
-    throw new Error(`org registry at "${expanded}" could not be read for the concurrency check: ${error instanceof Error ? error.message : String(error)}`)
+    throw new OrgRegistryWriteError(expanded, 'could not be read for the concurrency check', error)
   }
   const actualToken = hashOrgRegistryBytes(currentBytes)
   if (actualToken !== expectedToken) throw new OrgRegistryConflictError(expanded, expectedToken, actualToken)
 
   const proposedText = stringifyYaml(document, { indentSeq: false })
   // Validate against the exact parser every reader uses; a document that
-  // fails here is refused before anything on disk is touched.
+  // fails here is refused before anything on disk is touched. Left as
+  // parseOrgRegistry's own plain Error (never wrapped in
+  // OrgRegistryWriteError): this is the "fix your content" branch, and a
+  // caller must be able to tell it apart from the I/O failures below, which
+  // mean "retry the same document."
   const registry = parseOrgRegistry(proposedText, options)
 
-  const backupPath = `${expanded}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`
-  await writeFile(backupPath, currentBytes)
+  await backupOrgRegistryBytes(expanded, currentBytes)
 
   const tempPath = `${expanded}.${randomBytes(6).toString('hex')}.tmp`
   try {
@@ -314,8 +388,13 @@ export async function writeOrgRegistry(
     }
     await rename(tempPath, expanded)
   } catch (error: unknown) {
-    await rm(tempPath, { force: true })
-    throw error
+    // Cleanup is best-effort only: if `rm` itself throws, that failure must
+    // never replace `error` in what the caller sees — the caller needs to
+    // learn why the WRITE failed, not why the temp-file cleanup afterward
+    // also failed. A leftover `.tmp` file is a nuisance; a swallowed real
+    // failure is the exact defect this whole write API exists to remove.
+    await rm(tempPath, { force: true }).catch(() => undefined)
+    throw new OrgRegistryWriteError(expanded, 'could not be written atomically', error)
   }
 
   return { registry, token: hashOrgRegistryBytes(Buffer.from(proposedText, 'utf8')) }

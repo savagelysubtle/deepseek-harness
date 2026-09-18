@@ -469,4 +469,23 @@ describe('org.write', () => {
     if (backupName === undefined) throw new Error('unreachable')
     expect(readFileSync(join(registryDir, backupName))).toEqual(originalBytes)
   })
+
+  it('refuses org-registry-write-failed — a distinct code from org-registry-rejected — for an I/O failure unrelated to the document', async () => {
+    const registryDir = tempDir('dsh-org-registry-')
+    const registryPath = writeRegistry(registryDir, { alfred: {} })
+    const app = api(await floor(), { orgRegistryPath: registryPath, orgProfileDir: tempDir('dsh-org-profile-') })
+    const before = expectOk(await app.org.get(request()))
+    if (!before.registry.ok) throw new Error('unreachable')
+
+    // The file vanishes between the caller's read and its write — nothing to
+    // do with the proposed document, which is perfectly valid. A caller
+    // seeing this code knows to retry the SAME document, the opposite
+    // instruction from org-registry-rejected.
+    rmSync(registryPath, { force: true })
+    const validDocument: OrgRegistryDocument = { baseDir: registryDir, seats: { alfred: { cwd: '.' } }, edges: [], callUp: [] }
+    const error = expectErr(await app.org.write(requestWith({ document: validDocument, expectedToken: before.registry.token })))
+    expect(error.code).toBe('org-registry-write-failed')
+    expect(error.code).not.toBe('org-registry-rejected')
+    expect(error.message).toContain('could not be read for the concurrency check')
+  })
 })

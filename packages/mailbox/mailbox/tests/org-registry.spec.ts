@@ -8,7 +8,7 @@
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { parse as parseYaml, parseDocument, stringify as stringifyYaml } from 'yaml'
 import {
   findOrgRegistryRoute,
@@ -17,6 +17,7 @@ import {
   loadOrgRegistryWithToken,
   orgRegistryAllows,
   OrgRegistryConflictError,
+  OrgRegistryWriteError,
   parseMailboxAddress,
   parseOrgRegistry,
   isSeatIdentityPinned,
@@ -24,6 +25,43 @@ import {
   resolveSeatSessionId,
   writeOrgRegistry,
 } from '../src/index.ts'
+
+// Controls for the node:fs/promises mock below, used only by the defect-fix
+// tests in 'loadOrgRegistryWithToken and writeOrgRegistry' that must inject a
+// filesystem failure no real temp-dir setup can trigger deterministically
+// (an EEXIST on every backup attempt; a rename failure whose cleanup also
+// fails). Every other test in this file uses the real filesystem untouched —
+// the mock below delegates to the real implementation unless a control flag
+// is set, and every test that sets one resets it in a `finally`.
+const fsControl = vi.hoisted(() => ({
+  forceBackupEexist: false,
+  forceRenameFailure: false,
+  forceRmFailure: false,
+}))
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  return {
+    ...actual,
+    async open(...args: Parameters<typeof actual.open>): ReturnType<typeof actual.open> {
+      const [path, flags] = args
+      if (fsControl.forceBackupEexist && flags === 'wx' && typeof path === 'string' && path.includes('.bak-')) {
+        const error = new Error(`EEXIST: file already exists, open '${path}'`) as NodeJS.ErrnoException
+        error.code = 'EEXIST'
+        throw error
+      }
+      return actual.open(...args)
+    },
+    async rename(...args: Parameters<typeof actual.rename>): ReturnType<typeof actual.rename> {
+      if (fsControl.forceRenameFailure) throw new Error('simulated rename failure: disk full')
+      return actual.rename(...args)
+    },
+    async rm(...args: Parameters<typeof actual.rm>): ReturnType<typeof actual.rm> {
+      if (fsControl.forceRmFailure) throw new Error('simulated cleanup failure: permission denied')
+      return actual.rm(...args)
+    },
+  }
+})
 
 const VALID = `
 baseDir: /projects
@@ -430,5 +468,113 @@ describe('loadOrgRegistryWithToken and writeOrgRegistry', () => {
     await writeOrgRegistry(path, nextDocument, token)
     const written = readFileSync(path, 'utf8')
     expect(written).toBe(stringifyYaml(nextDocument, { indentSeq: false }))
+  })
+
+  it('throws OrgRegistryWriteError — never a plain validation Error, never OrgRegistryConflictError — for an I/O failure unrelated to document content', async () => {
+    const dir = tempRegistryDir()
+    const path = seedRegistry(dir, { alfred: {} })
+    const { token } = await loadOrgRegistryWithToken(path)
+    // The file vanishes between the caller's read and its write — nothing to
+    // do with the proposed document, which is perfectly valid.
+    rmSync(path)
+    const validDocument = { baseDir: dir, seats: { alfred: { cwd: '.' } }, edges: [], callUp: [] }
+    let caught: unknown
+    try {
+      await writeOrgRegistry(path, validDocument, token)
+    } catch (error: unknown) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(OrgRegistryWriteError)
+    expect(caught).not.toBeInstanceOf(OrgRegistryConflictError)
+    expect((caught as Error).message).toContain('could not be read for the concurrency check')
+    // A caller distinguishing on instanceof/code must be told "retry this
+    // same document," never "fix your content" — the document was fine.
+  })
+
+  it('never silently destroys a previous backup when two writes land in the same millisecond timestamp — it disambiguates instead', async () => {
+    const dir = tempRegistryDir()
+    const path = seedRegistry(dir, { alfred: {} })
+    const originalBytes = readFileSync(path)
+    const { token: token1 } = await loadOrgRegistryWithToken(path)
+
+    const isoSpy = vi.spyOn(Date.prototype, 'toISOString').mockReturnValue('2026-01-01T00:00:00.000Z')
+    try {
+      const docA = { baseDir: dir, seats: { alfred: { cwd: '.' }, batman: { cwd: '.' } }, edges: [], callUp: [] }
+      const first = await writeOrgRegistry(path, docA, token1)
+      const afterFirstBytes = readFileSync(path)
+
+      const docB = { baseDir: dir, seats: { alfred: { cwd: '.' }, batman: { cwd: '.' }, robin: { cwd: '.' } }, edges: [], callUp: [] }
+      await writeOrgRegistry(path, docB, first.token)
+
+      const backups = readdirSync(dir).filter(name => name.startsWith('registry.yml.bak-'))
+      // Two writes, two backups — never one overwriting the other, even
+      // though both computed the identical millisecond-granular timestamp.
+      expect(backups).toHaveLength(2)
+      expect(new Set(backups).size).toBe(2)
+
+      const withoutSuffix = backups.find(name => !name.endsWith('-1'))
+      const withSuffix = backups.find(name => name.endsWith('-1'))
+      if (withoutSuffix === undefined || withSuffix === undefined) throw new Error('unreachable')
+      // The first write's backup preserves the ORIGINAL content untouched...
+      expect(readFileSync(join(dir, withoutSuffix))).toEqual(originalBytes)
+      // ...and the second write's backup preserves what was on disk just
+      // before IT ran (the first write's output), not a clobbered original.
+      expect(readFileSync(join(dir, withSuffix))).toEqual(afterFirstBytes)
+    } finally {
+      isoSpy.mockRestore()
+    }
+  })
+
+  it('throws OrgRegistryWriteError loudly, never proceeding without a backup, when no free backup filename can be found', async () => {
+    const dir = tempRegistryDir()
+    const path = seedRegistry(dir, { alfred: {} })
+    const originalBytes = readFileSync(path)
+    const { token } = await loadOrgRegistryWithToken(path)
+    const nextDocument = { baseDir: dir, seats: { alfred: { cwd: '.' }, batman: { cwd: '.' } }, edges: [], callUp: [] }
+
+    fsControl.forceBackupEexist = true
+    let caught: unknown
+    try {
+      await writeOrgRegistry(path, nextDocument, token)
+    } catch (error: unknown) {
+      caught = error
+    } finally {
+      fsControl.forceBackupEexist = false
+    }
+    expect(caught).toBeInstanceOf(OrgRegistryWriteError)
+    expect((caught as Error).message).toMatch(/could not find a free backup filename/)
+    // Refused loudly before ever reaching the atomic write — the source file
+    // is exactly as it was, no partial or backup-less write landed.
+    expect(readFileSync(path)).toEqual(originalBytes)
+    expect(readdirSync(dir)).toEqual(['registry.yml'])
+  })
+
+  it('never lets a cleanup failure after a failed atomic write mask the original write error', async () => {
+    const dir = tempRegistryDir()
+    const path = seedRegistry(dir, { alfred: {} })
+    const { token } = await loadOrgRegistryWithToken(path)
+    const nextDocument = { baseDir: dir, seats: { alfred: { cwd: '.' }, batman: { cwd: '.' } }, edges: [], callUp: [] }
+
+    fsControl.forceRenameFailure = true
+    fsControl.forceRmFailure = true
+    try {
+      let caught: unknown
+      try {
+        await writeOrgRegistry(path, nextDocument, token)
+      } catch (error: unknown) {
+        caught = error
+      }
+      expect(caught).toBeInstanceOf(OrgRegistryWriteError)
+      const message = (caught as Error).message
+      // The rename failure — the actual reason the write failed — must be
+      // what the caller sees...
+      expect(message).toContain('simulated rename failure')
+      // ...never masked by the unrelated failure of the best-effort temp-file
+      // cleanup that ran afterward.
+      expect(message).not.toContain('simulated cleanup failure')
+    } finally {
+      fsControl.forceRenameFailure = false
+      fsControl.forceRmFailure = false
+    }
   })
 })
