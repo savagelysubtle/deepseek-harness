@@ -105,7 +105,15 @@ export function unservedByName(unserved: readonly OrgDriftRow[] | undefined): Ma
   return new Map((unserved ?? []).map(row => [row.seat, row]))
 }
 
-/** Seat names in a registry, in the registry's own key order. */
+/**
+ * Seat names in a registry, in the registry's own key order.
+ *
+ * Key order is deliberate: the board's layout is alphabetical by name, but the
+ * registry's own order is what every drift comparison is reported against, so
+ * this never re-sorts.
+ * @param registry - the registry view whose seats to name.
+ * @returns seat names, in the registry's key order.
+ */
 export function seatNamesOf(registry: OrgRegistryView): string[] {
   return Object.keys(registry.seats)
 }
