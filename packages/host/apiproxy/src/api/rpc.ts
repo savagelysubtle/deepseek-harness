@@ -118,6 +118,22 @@ export interface RpcErrorDetailsMap {
     ref?: string
     seamCode?: string
   }
+  /**
+   * An `org.write` carried an `expectedToken` the registry file has already
+   * moved past: another writer — most often the founder's own hand edit —
+   * landed first. The details carry both tokens so a client can re-read and
+   * retry rather than treat the write as malformed (same shape-of-intent as
+   * `settings-conflict`, keyed on a content hash instead of a revision
+   * number — see org.ts on why).
+   */
+  'org-registry-conflict': { expectedToken: string; actualToken: string }
+  /**
+   * An `org.write` was refused because the proposed document failed
+   * validation, or the current file could not be read for the concurrency
+   * check; the message is the parser's (or filesystem's) own text, reused
+   * verbatim rather than re-worded.
+   */
+  'org-registry-rejected': {}
   'internal': {}
 }
 

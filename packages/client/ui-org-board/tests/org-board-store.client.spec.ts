@@ -35,6 +35,7 @@ const VALUE: ResponseValue<'org.get'> = {
     registry: {
       baseDir: '/org', seats: { alfred: { cwd: '/org/a', lead: true } }, edges: [], callUp: [],
     },
+    token: 'token-1',
   },
   mailboxBridge: { ok: true, addresses: ['alfred'] },
   toolMailbox: { ok: true, addresses: ['alfred'] },
@@ -43,13 +44,13 @@ const VALUE: ResponseValue<'org.get'> = {
 
 describe('OrgBoardController', () => {
   it('starts idle with no value and no error', () => {
-    const controller = new OrgBoardController({ org: { get: vi.fn() } })
+    const controller = new OrgBoardController({ org: { get: vi.fn(), write: vi.fn() } })
     expect(controller.store.getSnapshot()).toEqual({ status: 'idle', error: null, value: null })
   })
 
   it('publishes the full value on a successful read', async () => {
     const get = vi.fn().mockResolvedValue(ok(VALUE))
-    const controller = new OrgBoardController({ org: { get } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
     await controller.load()
     expect(get).toHaveBeenCalledWith({})
     expect(controller.store.getSnapshot()).toEqual({ status: 'ready', error: null, value: VALUE })
@@ -57,28 +58,28 @@ describe('OrgBoardController', () => {
 
   it('publishes its own error state on an outer RPC failure, never a ready-but-empty shape', async () => {
     const get = vi.fn().mockResolvedValue(failed('connection lost'))
-    const controller = new OrgBoardController({ org: { get } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
     await controller.load()
     expect(controller.store.getSnapshot()).toEqual({ status: 'error', error: 'connection lost', value: null })
   })
 
   it('catches a thrown transport error the same way as a business error', async () => {
     const get = vi.fn().mockRejectedValue(new Error('socket closed'))
-    const controller = new OrgBoardController({ org: { get } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
     await controller.load()
     expect(controller.store.getSnapshot()).toEqual({ status: 'error', error: 'socket closed', value: null })
   })
 
   it('stringifies a non-Error throw', async () => {
     const get = vi.fn().mockRejectedValue('boom')
-    const controller = new OrgBoardController({ org: { get } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
     await controller.load()
     expect(controller.store.getSnapshot().error).toBe('boom')
   })
 
   it('sets status to loading synchronously before the promise settles', () => {
     const get = vi.fn(() => new Promise<OrgGetResponse>(() => {}))
-    const controller = new OrgBoardController({ org: { get } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
     void controller.load()
     expect(controller.store.getSnapshot().status).toBe('loading')
   })
@@ -88,7 +89,7 @@ describe('OrgBoardController', () => {
     const get = vi.fn()
       .mockImplementationOnce(() => new Promise<OrgGetResponse>((resolve) => { resolveFirst = resolve }))
       .mockResolvedValueOnce(ok(VALUE))
-    const controller = new OrgBoardController({ org: { get } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
 
     const first = controller.load()
     await controller.load()
@@ -102,7 +103,7 @@ describe('OrgBoardController', () => {
   it('dispose stops an in-flight response from publishing', async () => {
     let resolve: (value: OrgGetResponse) => void = () => {}
     const get = vi.fn(() => new Promise<OrgGetResponse>((r) => { resolve = r }))
-    const controller = new OrgBoardController({ org: { get } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
     const pending = controller.load()
     controller.dispose()
     resolve(ok(VALUE))
@@ -113,7 +114,7 @@ describe('OrgBoardController', () => {
   it('dispose after an outer-failure in-flight response also suppresses the publish', async () => {
     let reject: (error: unknown) => void = () => {}
     const get = vi.fn(() => new Promise<OrgGetResponse>((_resolve, r) => { reject = r }))
-    const controller = new OrgBoardController({ org: { get } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
     const pending = controller.load()
     controller.dispose()
     reject(new Error('too late'))
@@ -125,7 +126,7 @@ describe('OrgBoardController', () => {
 describe('refreshOrgBoardIfLoaded', () => {
   it('is a no-op before the modal has ever loaded (idle stays idle, no request issued)', () => {
     const get = vi.fn()
-    const controller = new OrgBoardController({ org: { get } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
     refreshOrgBoardIfLoaded(controller)
     expect(get).not.toHaveBeenCalled()
     expect(controller.store.getSnapshot().status).toBe('idle')
@@ -135,7 +136,7 @@ describe('refreshOrgBoardIfLoaded', () => {
     const get = vi.fn()
       .mockResolvedValueOnce(ok(VALUE))
       .mockResolvedValueOnce(ok({ ...VALUE, profile: 'post-reconnect' }))
-    const controller = new OrgBoardController({ org: { get } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
     await controller.load()
     expect(controller.store.getSnapshot().value?.profile).toBe('web-stable')
 
@@ -154,7 +155,7 @@ describe('refreshOrgBoardIfLoaded', () => {
     const get = vi.fn()
       .mockResolvedValueOnce(failed('connection lost'))
       .mockResolvedValueOnce(ok(VALUE))
-    const controller = new OrgBoardController({ org: { get } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
     await controller.load()
     expect(controller.store.getSnapshot().status).toBe('error')
 

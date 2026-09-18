@@ -311,10 +311,14 @@ export class FakeApiClient implements IApiClient {
   readonly org: IApiClient['org'] = {
     get: payload => this.record('org.get', payload, Promise.resolve(ok({
       profile: 'fake',
-      registry: { ok: true, registry: { baseDir: '/fake', seats: {}, edges: [], callUp: [] } },
+      registry: { ok: true, registry: { baseDir: '/fake', seats: {}, edges: [], callUp: [] }, token: 'fake-token-1' },
       mailboxBridge: { ok: true, addresses: [] },
       toolMailbox: { ok: true, addresses: [] },
       drift: { ok: true, rows: [] },
+    }))),
+    write: payload => this.record('org.write', payload, Promise.resolve(ok({
+      registry: { baseDir: '/fake', seats: {}, edges: [], callUp: [] },
+      token: 'fake-token-2',
     }))),
   }
 

@@ -86,6 +86,7 @@ export interface RpcMethodMap {
   'worktree.lock': WorktreeApi['lock']
   'worktree.remove': WorktreeApi['remove']
   'org.get': OrgApi['get']
+  'org.write': OrgApi['write']
 }
 
 /** Business request payload of method K (reaches through the RpcRequest narrow form to payload). */

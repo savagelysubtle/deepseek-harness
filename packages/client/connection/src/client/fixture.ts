@@ -36,7 +36,9 @@ import type {
   ModelProviderGroup, ModelSelection, RpcRequest, RpcResponse, RpcResult, ServerRequest, ServerResponse, SessionSummary,
   ToolCallView, ToolEventView, ToolResultView, WorkspaceId, WorkspaceView,
 } from './api.ts'
-import type { RequestPayload, ResponseValue, RpcMethodMap, WorktreeRow } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type {
+  OrgRegistryDocument, RequestPayload, ResponseValue, RpcMethodMap, WorktreeRow,
+} from '@deepseek-ai/dsh-host-apiproxy/api'
 import { AbstractApiClient, RpcId, SESSION_SEARCH_RESULT_LIMIT } from './api.ts'
 import { randomUuid } from './random-uuid.ts'
 import type { ClientConnectionRpc } from '../rpc.ts'
@@ -1569,6 +1571,24 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
   const worktreeRows = new Map<string, WorktreeRow>()
   let nextWorktreeSlug = 1
 
+  // Mutable demo org registry + its content token, so org.write can
+  // round-trip through org.get like the real API. The token here is a
+  // fixture-only opaque counter, never a real sha256 — this file must stay
+  // Node-free (see the module header) — but it changes on every successful
+  // write exactly as the real guard's content hash would, so a stale-token
+  // conflict is demoable too.
+  let orgRegistryDocument: OrgRegistryDocument = {
+    baseDir: '/fixture/org',
+    seats: {
+      alfred: { cwd: '/fixture/org/deepseek-harness', lead: true },
+      batman: { cwd: '/fixture/org/deepseek-harness' },
+    },
+    edges: [['alfred', 'batman']],
+    callUp: [],
+  }
+  let orgRegistryToken = 'fixture-token-1'
+  let nextOrgRegistryToken = 2
+
   // In-memory browse tree behind the fixture's `browse` picker capability —
   // deterministic content mirroring the design mock so assembled Web tests
   // and snapshots can walk it. Leaves are materialized lazily: a child listed
@@ -3095,25 +3115,33 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
     org: {
       get: request => ok(request, {
         // The real API always resolves cwd to an absolute path (see
-        // readOrgRegistryResult); the fixture mirrors that guarantee rather
-        // than demoing the pre-resolution shape a UI would never actually see.
+        // readOrgRegistryResult); the fixture's demo data is already
+        // absolute, so it mirrors that guarantee without a resolution step.
         profile: 'fixture',
-        registry: {
-          ok: true,
-          registry: {
-            baseDir: '/fixture/org',
-            seats: {
-              alfred: { cwd: '/fixture/org/deepseek-harness', lead: true },
-              batman: { cwd: '/fixture/org/deepseek-harness' },
-            },
-            edges: [['alfred', 'batman']],
-            callUp: [],
-          },
-        },
+        registry: { ok: true, registry: orgRegistryDocument, token: orgRegistryToken },
         mailboxBridge: { ok: true, addresses: ['alfred', 'batman'] },
         toolMailbox: { ok: true, addresses: ['alfred', 'batman'] },
         drift: { ok: true, rows: [] },
       }),
+      // Whole-document replace, guarded by the same content-token shape the
+      // real API uses (org-registry-conflict / org-registry-rejected in
+      // rpc.ts) — backed by an in-memory counter rather than a file's
+      // sha256, since this fixture never touches the filesystem. No
+      // validation beyond the request's own type: a real semantic check
+      // (unknown edge endpoint, etc.) belongs to the host, not this demo.
+      write: (request) => {
+        const { document, expectedToken } = request.payload
+        if (expectedToken !== orgRegistryToken) {
+          return err(request, {
+            code: 'org-registry-conflict',
+            message: `fixture org registry changed since it was read (expected token ${expectedToken}, now ${orgRegistryToken}); re-read and retry`,
+            details: { expectedToken, actualToken: orgRegistryToken },
+          })
+        }
+        orgRegistryDocument = document
+        orgRegistryToken = `fixture-token-${String(nextOrgRegistryToken++)}`
+        return ok(request, { registry: orgRegistryDocument, token: orgRegistryToken })
+      },
     },
     respond(message: ClientResponse): Promise<RpcReceipt> {
       // Same routing discipline as the host: rpcId first, then the payload's
@@ -3266,6 +3294,7 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'worktree.lock': return this.api.worktree.lock(request)
       case 'worktree.remove': return this.api.worktree.remove(request)
       case 'org.get': return this.api.org.get(request)
+      case 'org.write': return this.api.org.write(request)
       case 'skill.list': return this.api.skills.list(request)
       case 'agentPreset.list': return this.api.agentPresets.list(request)
       case 'agentPreset.select': return this.api.agentPresets.select(request)

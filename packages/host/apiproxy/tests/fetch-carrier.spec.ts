@@ -321,11 +321,20 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
             ok: true,
             value: {
               profile: 'scripted',
-              registry: { ok: true, registry: { baseDir: '/org', seats: {}, edges: [], callUp: [] } },
+              registry: { ok: true, registry: { baseDir: '/org', seats: {}, edges: [], callUp: [] }, token: 'scripted-token' },
               mailboxBridge: { ok: true, addresses: [] },
               toolMailbox: { ok: true, addresses: [] },
               drift: { ok: true, rows: [] },
             },
+          },
+        }
+      },
+      async write(request) {
+        return {
+          rpcId: request.rpcId,
+          result: {
+            ok: true,
+            value: { registry: { baseDir: '/org', seats: {}, edges: [], callUp: [] }, token: 'scripted-token-2' },
           },
         }
       },

@@ -3814,7 +3814,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'OrgApi',
-    declaration: 'export interface OrgApi {\n    get(request: RpcRequest<{}>): Promise<RpcResponse<{\n        profile: string;\n        registry: OrgRegistryResult;\n        mailboxBridge: OrgRosterResult;\n        toolMailbox: OrgRosterResult;\n        drift: OrgDriftResult;\n    }>>;\n}',
+    declaration: 'export interface OrgApi {\n    get(request: RpcRequest<{}>): Promise<RpcResponse<{\n        profile: string;\n        registry: OrgRegistryResult;\n        mailboxBridge: OrgRosterResult;\n        toolMailbox: OrgRosterResult;\n        drift: OrgDriftResult;\n    }>>;\n    write(request: RpcRequest<{\n        document: OrgRegistryDocument;\n        expectedToken: string;\n    }>): Promise<RpcResponse<{\n        registry: OrgRegistryView;\n        token: string;\n    }>>;\n}',
   },
   {
     name: 'OrgDriftResult',
@@ -3829,8 +3829,16 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type OrgEdge = readonly [\n    from: string,\n    to: string\n];',
   },
   {
+    name: 'OrgRegistryDocument',
+    declaration: 'export interface OrgRegistryDocument {\n    readonly baseDir: string;\n    readonly seats: Readonly<Record<string, OrgRegistryDocumentSeat>>;\n    readonly edges: readonly OrgEdge[];\n    readonly callUp: readonly string[];\n}',
+  },
+  {
+    name: 'OrgRegistryDocumentSeat',
+    declaration: 'export interface OrgRegistryDocumentSeat {\n    readonly cwd: string;\n    readonly lead?: boolean;\n    readonly sessionId?: string;\n    readonly test?: boolean;\n    readonly tools?: OrgSeatTools;\n}',
+  },
+  {
     name: 'OrgRegistryResult',
-    declaration: 'export type OrgRegistryResult = {\n    readonly ok: true;\n    readonly registry: OrgRegistryView;\n} | {\n    readonly ok: false;\n    readonly reason: string;\n};',
+    declaration: 'export type OrgRegistryResult = {\n    readonly ok: true;\n    readonly registry: OrgRegistryView;\n    readonly token: string;\n} | {\n    readonly ok: false;\n    readonly reason: string;\n};',
   },
   {
     name: 'OrgRegistryView',

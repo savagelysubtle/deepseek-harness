@@ -89,6 +89,7 @@ const BASE_VALUE: ResponseValue<'org.get'> = {
       edges: [['alfred', 'batman']],
       callUp: ['alfred'],
     },
+    token: 'token-1',
   },
   mailboxBridge: { ok: true, addresses: ['alfred', 'batman', 'robin'] },
   toolMailbox: { ok: true, addresses: ['alfred', 'batman', 'robin'] },
@@ -196,7 +197,7 @@ describe('OrgBoard', () => {
   it('a registry with zero seats shows an explicit empty message, not a bare canvas', () => {
     const state = ready({
       ...BASE_VALUE,
-      registry: { ok: true, registry: { baseDir: '/org', seats: {}, edges: [], callUp: [] } },
+      registry: { ok: true, registry: { baseDir: '/org', seats: {}, edges: [], callUp: [] }, token: 'token-2' },
       drift: { ok: true, rows: [] },
     })
     render(<OrgBoard state={state} t={translate} />)

@@ -43,7 +43,7 @@ import type {
   ModelReasoning, MuxFrame, PromptContentPart, QuestionResponsePayload, SessionListMetadata, SessionProjectionsBlock, SessionSearchItem,
   QueuedInboxItem, SessionSummary, SettingsNamespaceView, StopDescendantsResult, SubagentAddress, JobView, ToolEventView,
   WorkspaceId, WorkspaceView,
-  OrgDriftResult, OrgDriftRow, OrgRegistryResult, OrgRosterResult,
+  OrgDriftResult, OrgDriftRow, OrgRegistryResult, OrgRegistryView, OrgRosterResult,
 } from './api/index.ts'
 import {
   DEFAULT_SESSION_LOG_COMPRESSION_LEVEL,
@@ -88,7 +88,11 @@ import { SettingsConflictError, settingsNamespace } from '@deepseek-ai/dsh-setti
 import type { SettingsDescriptor, SettingsNamespace, SettingsPathOp } from '@deepseek-ai/dsh-settings'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { publishAndWake, GUEST_SENDER_PREFIX } from '@deepseek-ai/dsh-mailbox-bridge'
-import { loadOrgRegistry, parseMailboxAddress, resolveSeatCwd } from '@deepseek-ai/dsh-mailbox'
+import {
+  loadOrgRegistryWithToken, OrgRegistryConflictError, parseMailboxAddress, resolveSeatCwd,
+  writeOrgRegistry,
+} from '@deepseek-ai/dsh-mailbox'
+import type { OrgRegistry } from '@deepseek-ai/dsh-mailbox'
 // The refusal-notice addresser derives the sender's session id the same way
 // the bridge routes a seat: the address IS the session name.
 import { deriveNamedSessionId } from '@deepseek-ai/dsh-named-sessions'
@@ -413,26 +417,37 @@ function worktreeRefusal(
 }
 
 /**
+ * Resolve every seat's `cwd` to an absolute path for the OrgApi's read/write
+ * views (see the org.ts module header: "already resolved to an absolute
+ * path"). The loader/writer both leave `cwd` exactly as authored — absolute,
+ * or relative to `baseDir` — which is their own contract (a write must
+ * round-trip the founder's relative paths unchanged); this is what turns
+ * that into the one guarantee every OrgApi caller gets instead, so neither
+ * `org.get` nor `org.write`'s response makes a UI re-derive `baseDir` itself.
+ * @param registry - the parsed registry, cwd unresolved.
+ * @returns the same registry with every seat's cwd resolved absolute.
+ */
+function resolvedOrgRegistryView(registry: OrgRegistry): OrgRegistryView {
+  const seats = Object.fromEntries(
+    Object.entries(registry.seats).map(([name, seat]) => [
+      name,
+      { ...seat, cwd: resolveSeatCwd(registry, name) },
+    ]),
+  )
+  return { ...registry, seats }
+}
+
+/**
  * Read and validate the org registry at `path`, or report a named reason it
  * could not be produced (see {@link OrgRegistryResult}) — never an empty
  * roster standing in for "could not read this".
  * @param path - absolute org registry path.
- * @returns the parsed registry, or the failure reason naming the path.
+ * @returns the parsed registry and its content token, or the failure reason naming the path.
  */
 async function readOrgRegistryResult(path: string): Promise<OrgRegistryResult> {
   try {
-    const registry = await loadOrgRegistry(path)
-    // The loader leaves cwd exactly as written — absolute, or relative to
-    // baseDir (its own contract). Callers of this API get one guarantee
-    // instead: every cwd reported here is already absolute, so a later
-    // consumer (the org board UI) never has to re-derive baseDir itself.
-    const seats = Object.fromEntries(
-      Object.entries(registry.seats).map(([name, seat]) => [
-        name,
-        { ...seat, cwd: resolveSeatCwd(registry, name) },
-      ]),
-    )
-    return { ok: true, registry: { ...registry, seats } }
+    const { registry, token } = await loadOrgRegistryWithToken(path)
+    return { ok: true, registry: resolvedOrgRegistryView(registry), token }
   } catch (error: unknown) {
     return {
       ok: false,
@@ -3569,6 +3584,34 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           : { ok: false as const, reason: patches.reason }
         const drift = computeOrgDrift(registry, mailboxBridge, toolMailbox)
         return ok(request, { profile: orgProfileName, registry, mailboxBridge, toolMailbox, drift })
+      },
+
+      // Whole-document replace, guarded by a content token rather than a
+      // revision counter (see org.ts on write and hashOrgRegistryBytes in
+      // @deepseek-ai/dsh-mailbox on why): a hand edit never bumps a counter,
+      // so a counter-based guard would let this call silently overwrite the
+      // founder's own change. Never touches the served-roster mounts — those
+      // are a later slice's scope (see the module header).
+      async write(request) {
+        const { document, expectedToken } = request.payload
+        let written: { registry: OrgRegistry; token: string }
+        try {
+          written = await writeOrgRegistry(orgRegistryPath, document, expectedToken)
+        } catch (error: unknown) {
+          if (error instanceof OrgRegistryConflictError) {
+            return err(request, {
+              code: 'org-registry-conflict',
+              message: error.message,
+              details: { expectedToken: error.expectedToken, actualToken: error.actualToken },
+            })
+          }
+          return err(request, {
+            code: 'org-registry-rejected',
+            message: error instanceof Error ? error.message : String(error),
+            details: {},
+          })
+        }
+        return ok(request, { registry: resolvedOrgRegistryView(written.registry), token: written.token })
       },
     },
 

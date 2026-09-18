@@ -14,10 +14,11 @@
  * @module @deepseek-ai/dsh-mailbox/org-registry
  */
 
-import { readFile } from 'node:fs/promises'
+import { createHash, randomBytes } from 'node:crypto'
+import { open, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { parse as parseYaml } from 'yaml'
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { MAILBOX_SEGMENT_PATTERN_SOURCE } from './address.ts'
 
 const SEGMENT_PATTERN = new RegExp(MAILBOX_SEGMENT_PATTERN_SOURCE)
@@ -191,6 +192,133 @@ export async function loadOrgRegistry(path: string, options: OrgRegistryParseOpt
   const expanded = expandTilde(path, options.home ?? homedir())
   const text = await readFile(expanded, 'utf8')
   return parseOrgRegistry(text, options)
+}
+
+/**
+ * Compute the optimistic-concurrency token for a registry file's exact
+ * bytes: sha256 hex of what is (or is about to be) on disk. The write guard
+ * keys on file CONTENT, not a stored revision counter — the founder edits
+ * this file by hand, and a hand edit never bumps a counter, so a
+ * counter-based guard would let a write silently clobber him. Exported so a
+ * caller already holding the bytes (a write's own new content, say) never
+ * has to re-read the file just to learn its token.
+ * @param bytes - the file's raw bytes, exactly as read or about to be written.
+ * @returns the sha256 hex digest.
+ */
+export function hashOrgRegistryBytes(bytes: Uint8Array): string {
+  return createHash('sha256').update(bytes).digest('hex')
+}
+
+/**
+ * Read, validate, and hash one registry file in a single pass — the read
+ * side of the optimistic-concurrency guard {@link writeOrgRegistry} enforces.
+ * A caller planning a write reads with this (never {@link loadOrgRegistry})
+ * so the token it later sends back is provably the hash of the exact bytes
+ * it validated against.
+ * @param path - the registry file path; a leading `~` expands against the user's home.
+ * @param options - host-specific resolution options.
+ * @returns the validated registry and its content token.
+ * @throws when the file is unreadable or its content fails validation.
+ */
+export async function loadOrgRegistryWithToken(
+  path: string, options: OrgRegistryParseOptions = {},
+): Promise<{ registry: OrgRegistry; token: string }> {
+  const expanded = expandTilde(path, options.home ?? homedir())
+  const bytes = await readFile(expanded)
+  return { registry: parseOrgRegistry(bytes.toString('utf8'), options), token: hashOrgRegistryBytes(bytes) }
+}
+
+/**
+ * A write refused because the registry file changed since its token was
+ * read: another writer — most often the founder's own hand edit — landed
+ * first. The caller must re-read and re-apply rather than treat the write as
+ * malformed; see {@link hashOrgRegistryBytes} on why the guard keys on
+ * content rather than a revision counter.
+ */
+export class OrgRegistryConflictError extends Error {
+  /** The token the write expected (the caller's last-read hash). */
+  readonly expectedToken: string
+  /** The token the file actually holds right now. */
+  readonly actualToken: string
+
+  /**
+   * @param path - the registry file path whose write was refused.
+   * @param expectedToken - the token the caller sent.
+   * @param actualToken - the token now on disk.
+   */
+  constructor(path: string, expectedToken: string, actualToken: string) {
+    super(`org registry at "${path}" changed since it was read (expected token ${expectedToken}, now ${actualToken}); re-read and retry`)
+    this.name = 'OrgRegistryConflictError'
+    this.expectedToken = expectedToken
+    this.actualToken = actualToken
+  }
+}
+
+/**
+ * Replace the whole registry document, refusing when the file has changed
+ * since `expectedToken` was read, or when the proposed document fails
+ * validation. Never writes a registry that cannot be read back: the
+ * proposed document is serialized and run through {@link parseOrgRegistry} —
+ * the SAME parser every reader uses — before anything on disk is touched.
+ *
+ * Serialization uses `indentSeq: false`: a round-trip of the real registry's
+ * shape is byte-identical only with that option set (see the fixture
+ * round-trip test in this package's tests) — without it, the whole `edges`
+ * block reformats on the very first write.
+ *
+ * The write itself is atomic — a temp file in the same directory, fsync,
+ * then rename over the target — so a crash mid-write can never leave a
+ * truncated registry, and the file's previous content is preserved as a
+ * timestamped sibling backup before the rename.
+ * @param path - the registry file path; a leading `~` expands against the user's home.
+ * @param document - the complete proposed registry document (the `baseDir`/`seats`/`edges`/`callUp` shape a hand-edited file has).
+ * @param expectedToken - the token the caller last read (from {@link loadOrgRegistryWithToken}).
+ * @param options - host-specific resolution options.
+ * @returns the newly written registry, parsed, and its new content token.
+ * @throws {OrgRegistryConflictError} when the file's current token does not match `expectedToken`.
+ * @throws when the current file cannot be read, the proposed document fails validation, or the write itself fails.
+ */
+export async function writeOrgRegistry(
+  path: string,
+  document: object,
+  expectedToken: string,
+  options: OrgRegistryParseOptions = {},
+): Promise<{ registry: OrgRegistry; token: string }> {
+  const expanded = expandTilde(path, options.home ?? homedir())
+
+  let currentBytes: Buffer
+  try {
+    currentBytes = await readFile(expanded)
+  } catch (error: unknown) {
+    throw new Error(`org registry at "${expanded}" could not be read for the concurrency check: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  const actualToken = hashOrgRegistryBytes(currentBytes)
+  if (actualToken !== expectedToken) throw new OrgRegistryConflictError(expanded, expectedToken, actualToken)
+
+  const proposedText = stringifyYaml(document, { indentSeq: false })
+  // Validate against the exact parser every reader uses; a document that
+  // fails here is refused before anything on disk is touched.
+  const registry = parseOrgRegistry(proposedText, options)
+
+  const backupPath = `${expanded}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`
+  await writeFile(backupPath, currentBytes)
+
+  const tempPath = `${expanded}.${randomBytes(6).toString('hex')}.tmp`
+  try {
+    const handle = await open(tempPath, 'w')
+    try {
+      await handle.writeFile(proposedText, 'utf8')
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+    await rename(tempPath, expanded)
+  } catch (error: unknown) {
+    await rm(tempPath, { force: true })
+    throw error
+  }
+
+  return { registry, token: hashOrgRegistryBytes(Buffer.from(proposedText, 'utf8')) }
 }
 
 /**

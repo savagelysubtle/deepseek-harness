@@ -4,8 +4,8 @@ import { z } from 'zod'
 import type { RequestPayload, ResponseValue } from './rpc-map.ts'
 import type { Wire } from './rpc.schema.ts'
 import type {
-  OrgDriftResult, OrgDriftRow, OrgEdge, OrgRegistryResult, OrgRegistryView, OrgRosterResult,
-  OrgSeat, OrgSeatTools,
+  OrgDriftResult, OrgDriftRow, OrgEdge, OrgRegistryDocument, OrgRegistryDocumentSeat,
+  OrgRegistryResult, OrgRegistryView, OrgRosterResult, OrgSeat, OrgSeatTools,
 } from './org.ts'
 
 /** OrgSeatTools of a registry seat's `tools` field. */
@@ -36,9 +36,26 @@ export const orgRegistryViewSchema = z.object({
 
 /** OrgRegistryResult: the registry read, or a named failure reason (see {@link OrgRegistryResult}). */
 export const orgRegistryResultSchema = z.discriminatedUnion('ok', [
-  z.object({ ok: z.literal(true), registry: orgRegistryViewSchema }),
+  z.object({ ok: z.literal(true), registry: orgRegistryViewSchema, token: z.string() }),
   z.object({ ok: z.literal(false), reason: z.string() }),
 ]) satisfies z.ZodType<Wire<OrgRegistryResult>>
+
+/** OrgRegistryDocumentSeat: one seat as submitted to org.write (cwd unresolved; see {@link OrgRegistryDocumentSeat}). */
+export const orgRegistryDocumentSeatSchema = z.object({
+  cwd: z.string(),
+  lead: z.boolean().optional(),
+  sessionId: z.string().optional(),
+  test: z.boolean().optional(),
+  tools: orgSeatToolsSchema.optional(),
+}) satisfies z.ZodType<Wire<OrgRegistryDocumentSeat>>
+
+/** OrgRegistryDocument: the whole-document write payload org.write accepts (see {@link OrgRegistryDocument}). */
+export const orgRegistryDocumentSchema = z.object({
+  baseDir: z.string(),
+  seats: z.record(z.string(), orgRegistryDocumentSeatSchema),
+  edges: z.array(orgEdgeSchema),
+  callUp: z.array(z.string()),
+}) satisfies z.ZodType<Wire<OrgRegistryDocument>>
 
 /** OrgRosterResult: one served-address roster, or a named failure reason (see {@link OrgRosterResult}). */
 export const orgRosterResultSchema = z.discriminatedUnion('ok', [
@@ -71,3 +88,15 @@ export const orgGetValueSchema = z.object({
   toolMailbox: orgRosterResultSchema,
   drift: orgDriftResultSchema,
 }) satisfies z.ZodType<Wire<ResponseValue<'org.get'>>>
+
+/** org.write request payload: the whole proposed document plus the token it was built against. */
+export const orgWriteRequestSchema = z.object({
+  document: orgRegistryDocumentSchema,
+  expectedToken: z.string(),
+}) satisfies z.ZodType<Wire<RequestPayload<'org.write'>>>
+
+/** org.write response value: the newly written registry and its new content token. */
+export const orgWriteValueSchema = z.object({
+  registry: orgRegistryViewSchema,
+  token: z.string(),
+}) satisfies z.ZodType<Wire<ResponseValue<'org.write'>>>

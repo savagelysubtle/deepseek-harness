@@ -1,15 +1,28 @@
-/** Org registry: parse validation, topology queries, route finding, and cwd resolution. */
+/**
+ * Org registry: parse validation, topology queries, route finding, cwd
+ * resolution, and the write-side primitives (content hashing, atomic
+ * whole-document replace with optimistic concurrency, and the YAML
+ * round-trip stability the write depends on).
+ */
 
-import { describe, expect, it } from 'vitest'
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
+import { parse as parseYaml, parseDocument, stringify as stringifyYaml } from 'yaml'
 import {
   findOrgRegistryRoute,
   formatMailboxAddress,
+  hashOrgRegistryBytes,
+  loadOrgRegistryWithToken,
   orgRegistryAllows,
+  OrgRegistryConflictError,
   parseMailboxAddress,
   parseOrgRegistry,
   isSeatIdentityPinned,
   resolveSeatCwd,
   resolveSeatSessionId,
+  writeOrgRegistry,
 } from '../src/index.ts'
 
 const VALID = `
@@ -217,5 +230,205 @@ describe('resolveSeatCwd', () => {
 
   it('throws on an unknown seat', () => {
     expect(() => resolveSeatCwd(registry, 'ghost')).toThrow('no seat "ghost"')
+  })
+})
+
+// A realistic multi-seat, multi-edge registry in the EXACT shape
+// `indentSeq: false` produces (top-level sequence items align with their own
+// key, not indented under it — verified empirically against this repo's
+// installed `yaml` version before writing this fixture). This is written by
+// hand rather than generated, so the test can actually fail the way a real
+// regression would: if a future edit drops `indentSeq: false` from the write
+// path, re-stringifying this fixture reformats the whole `edges`/`callUp`
+// blocks and the byte-identical assertion below catches it.
+const ROUND_TRIP_FIXTURE = `baseDir: /home/steve/dsh/org
+seats:
+  alfred:
+    cwd: deepseek-harness
+    lead: true
+  batman:
+    cwd: deepseek-harness
+  robin:
+    cwd: deepseek-harness
+    sessionId: named-robin
+  tt-ping:
+    cwd: deepseek-harness
+    test: true
+  yoda:
+    cwd: deepseek-harness
+    lead: true
+    tools:
+      allow:
+      - bash
+      - read
+edges:
+- - alfred
+  - batman
+- - alfred
+  - robin
+- - yoda
+  - tt-ping
+callUp:
+- alfred
+- yoda
+`
+
+describe('YAML round-trip stability (indentSeq: false)', () => {
+  // The established fact writeOrgRegistry relies on: reading the real
+  // registry's shape and re-stringifying it is byte-identical ONLY with
+  // `indentSeq: false`. Without it the whole edges/callUp block reformats —
+  // pure whitespace churn on every single write. This is the regression
+  // guard the brief asked for: it can never silently regress unnoticed.
+  it('reproduces the fixture exactly via parse + stringify(..., { indentSeq: false })', () => {
+    expect(stringifyYaml(parseYaml(ROUND_TRIP_FIXTURE), { indentSeq: false })).toBe(ROUND_TRIP_FIXTURE)
+  })
+
+  it('reproduces the fixture exactly via parseDocument(...).toString({ indentSeq: false })', () => {
+    expect(parseDocument(ROUND_TRIP_FIXTURE).toString({ indentSeq: false })).toBe(ROUND_TRIP_FIXTURE)
+  })
+
+  it('is NOT byte-identical without the option — proves the option is load-bearing, not incidental', () => {
+    expect(stringifyYaml(parseYaml(ROUND_TRIP_FIXTURE))).not.toBe(ROUND_TRIP_FIXTURE)
+  })
+})
+
+describe('hashOrgRegistryBytes', () => {
+  it('computes sha256 hex of the exact bytes given (pinned vectors)', () => {
+    expect(hashOrgRegistryBytes(Buffer.from(''))).toBe(
+      'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    )
+    expect(hashOrgRegistryBytes(Buffer.from('abc'))).toBe(
+      'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+    )
+  })
+
+  it('changes when the bytes change and repeats for identical bytes', () => {
+    const a = hashOrgRegistryBytes(Buffer.from('one'))
+    const b = hashOrgRegistryBytes(Buffer.from('two'))
+    const aAgain = hashOrgRegistryBytes(Buffer.from('one'))
+    expect(a).not.toBe(b)
+    expect(a).toBe(aAgain)
+  })
+})
+
+describe('loadOrgRegistryWithToken and writeOrgRegistry', () => {
+  let dirs: string[] = []
+
+  afterEach(() => {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
+    dirs = []
+  })
+
+  function tempRegistryDir(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-org-registry-write-'))
+    dirs.push(dir)
+    return dir
+  }
+
+  /** A minimal valid registry document, written under `dir` with default fields for `seats`. */
+  function seedRegistry(dir: string, seats: Record<string, { cwd?: string }> = { solo: {} }): string {
+    const path = join(dir, 'registry.yml')
+    const document = {
+      baseDir: dir,
+      seats: Object.fromEntries(Object.entries(seats).map(([name, seat]) => [name, { cwd: seat.cwd ?? '.' }])),
+      edges: [],
+      callUp: [],
+    }
+    writeFileSync(path, stringifyYaml(document, { indentSeq: false }))
+    return path
+  }
+
+  it('reads, validates, and hashes a real file in one pass, matching hashOrgRegistryBytes of its raw bytes', async () => {
+    const dir = tempRegistryDir()
+    const path = seedRegistry(dir, { alfred: {} })
+    const { registry, token } = await loadOrgRegistryWithToken(path)
+    expect(Object.keys(registry.seats)).toEqual(['alfred'])
+    expect(token).toBe(hashOrgRegistryBytes(readFileSync(path)))
+  })
+
+  it('writes a valid document and returns a new token that differs from the one it replaced', async () => {
+    const dir = tempRegistryDir()
+    const path = seedRegistry(dir, { alfred: {} })
+    const before = await loadOrgRegistryWithToken(path)
+    const nextDocument = {
+      baseDir: dir,
+      seats: { alfred: { cwd: '.' }, batman: { cwd: '.' } },
+      edges: [['alfred', 'batman']],
+      callUp: [],
+    }
+    const result = await writeOrgRegistry(path, nextDocument, before.token)
+    expect(result.token).not.toBe(before.token)
+    expect(Object.keys(result.registry.seats).sort()).toEqual(['alfred', 'batman'])
+    // The file on disk actually changed, and re-reading it agrees with the write's own report.
+    const after = await loadOrgRegistryWithToken(path)
+    expect(after.token).toBe(result.token)
+    expect(Object.keys(after.registry.seats).sort()).toEqual(['alfred', 'batman'])
+  })
+
+  it('refuses with OrgRegistryConflictError when expectedToken no longer matches the file, and writes nothing', async () => {
+    const dir = tempRegistryDir()
+    const path = seedRegistry(dir, { alfred: {} })
+    const originalBytes = readFileSync(path)
+    const staleToken = 'not-the-real-token'
+    const nextDocument = { baseDir: dir, seats: { alfred: { cwd: '.' } }, edges: [], callUp: [] }
+    let caught: unknown
+    try {
+      await writeOrgRegistry(path, nextDocument, staleToken)
+    } catch (error: unknown) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(OrgRegistryConflictError)
+    const conflict = caught as InstanceType<typeof OrgRegistryConflictError>
+    expect(conflict.expectedToken).toBe(staleToken)
+    expect(conflict.actualToken).toBe(hashOrgRegistryBytes(originalBytes))
+    // Never touched — same bytes, no temp file, no backup.
+    expect(readFileSync(path)).toEqual(originalBytes)
+    expect(readdirSync(dir)).toEqual(['registry.yml'])
+  })
+
+  it('refuses an invalid document (reusing the parser\'s own message) and writes nothing', async () => {
+    const dir = tempRegistryDir()
+    const path = seedRegistry(dir, { alfred: {} })
+    const originalBytes = readFileSync(path)
+    const { token } = await loadOrgRegistryWithToken(path)
+    const invalidDocument = {
+      baseDir: dir,
+      seats: { alfred: { cwd: '.' } },
+      edges: [['alfred', 'ghost']],
+      callUp: [],
+    }
+    await expect(writeOrgRegistry(path, invalidDocument, token)).rejects.toThrow('unknown seat "ghost"')
+    expect(readFileSync(path)).toEqual(originalBytes)
+    expect(readdirSync(dir)).toEqual(['registry.yml'])
+  })
+
+  it('takes a timestamped backup of the previous content before replacing it', async () => {
+    const dir = tempRegistryDir()
+    const path = seedRegistry(dir, { alfred: {} })
+    const originalBytes = readFileSync(path)
+    const { token } = await loadOrgRegistryWithToken(path)
+    const nextDocument = { baseDir: dir, seats: { alfred: { cwd: '.' }, batman: { cwd: '.' } }, edges: [], callUp: [] }
+    await writeOrgRegistry(path, nextDocument, token)
+    const entries = readdirSync(dir)
+    const backups = entries.filter(name => name.startsWith('registry.yml.bak-'))
+    expect(backups).toHaveLength(1)
+    const backupName = backups[0]
+    if (backupName === undefined) throw new Error('unreachable')
+    expect(readFileSync(join(dir, backupName))).toEqual(originalBytes)
+  })
+
+  it('serializes the written document with indentSeq: false (matches the fixture round-trip shape)', async () => {
+    const dir = tempRegistryDir()
+    const path = seedRegistry(dir, { alfred: {} })
+    const { token } = await loadOrgRegistryWithToken(path)
+    const nextDocument = {
+      baseDir: dir,
+      seats: { alfred: { cwd: '.' }, batman: { cwd: '.' } },
+      edges: [['alfred', 'batman']],
+      callUp: ['alfred'],
+    }
+    await writeOrgRegistry(path, nextDocument, token)
+    const written = readFileSync(path, 'utf8')
+    expect(written).toBe(stringifyYaml(nextDocument, { indentSeq: false }))
   })
 })

@@ -1,14 +1,20 @@
 /**
- * org.get: the read-only registry + served-roster projection and its
- * computed drift. Each of the three sources (registry, mailbox-bridge
- * roster, tool-mailbox roster) fails independently and must surface a named
- * reason rather than an empty result; drift additionally requires all three
- * to have succeeded. Fixtures are real files under a temp directory —
- * org.get reads the filesystem directly, so there is nothing to fake below
- * the RPC boundary.
+ * org.get and org.write: the registry + served-roster read projection and
+ * its computed drift, plus the registry's one host-side write primitive.
+ * Each of org.get's three sources (registry, mailbox-bridge roster,
+ * tool-mailbox roster) fails independently and must surface a named reason
+ * rather than an empty result; drift additionally requires all three to have
+ * succeeded. org.write is guarded by a content token (never a revision
+ * counter — see org.ts) and validates through the same parser org.get reads
+ * with before writing a byte. Fixtures are real files under a temp
+ * directory — both methods touch the filesystem directly, so there is
+ * nothing to fake below the RPC boundary.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import {
+  mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -17,7 +23,7 @@ import AgentRegistry from '@deepseek-ai/dsh-agent'
 import SessionStore from '@deepseek-ai/dsh-session'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import { stringify as stringifyYaml } from 'yaml'
-import type { ApiProxy } from '../src/api/index.ts'
+import type { ApiProxy, OrgRegistryDocument } from '../src/api/index.ts'
 import type { RpcRequest, RpcResponse } from '../src/api/rpc.ts'
 import { RpcId } from '../src/api/rpc.ts'
 import { createApiProxy, type ApiProxyDefaults } from '../src/api-proxy.ts'
@@ -57,10 +63,20 @@ function request(): RpcRequest<{}> {
   return { rpcId: RpcId(`org-${String(nextRpc++)}`), payload: {} }
 }
 
+function requestWith<P>(payload: P): RpcRequest<P> {
+  return { rpcId: RpcId(`org-${String(nextRpc++)}`), payload }
+}
+
 function expectOk<T>(response: RpcResponse<T>): T {
   expect(response.result.ok).toBe(true)
   if (!response.result.ok) throw new Error('unreachable')
   return response.result.value
+}
+
+function expectErr<T>(response: RpcResponse<T>): { code: string; message: string; details: unknown } {
+  expect(response.result.ok).toBe(false)
+  if (response.result.ok) throw new Error('unreachable')
+  return response.result.error
 }
 
 /** Minimal valid registry YAML: baseDir plus a seats map, edges/callUp omitted unless given. */
@@ -344,5 +360,113 @@ describe('org.get', () => {
     expect(value.mailboxBridge.reason).toContain('recognised shape')
     expect(value.mailboxBridge.reason).not.toContain('no mount with id')
     expect(value.toolMailbox).toEqual({ ok: true, addresses: ['a'] })
+  })
+
+  it('reports a content token equal to sha256 of the file\'s exact bytes — never a revision counter', async () => {
+    const registryDir = tempDir('dsh-org-registry-')
+    const profileDir = tempDir('dsh-org-profile-')
+    const registryPath = writeRegistry(registryDir, { a: {} })
+    writeProfile(profileDir, [
+      { id: 'mailbox-bridge', addresses: ['a'] },
+      { id: 'tool-mailbox', addresses: ['a'] },
+    ])
+    const value = expectOk(await api(await floor(), { orgRegistryPath: registryPath, orgProfileDir: profileDir }).org.get(request()))
+    expect(value.registry.ok).toBe(true)
+    if (!value.registry.ok) throw new Error('unreachable')
+    const expectedToken = createHash('sha256').update(readFileSync(registryPath)).digest('hex')
+    expect(value.registry.token).toBe(expectedToken)
+    // A second read of the SAME unchanged bytes reports the same token —
+    // proving it is a function of content, not a monotonic counter that
+    // would advance on every read.
+    const again = expectOk(await api(await floor(), { orgRegistryPath: registryPath, orgProfileDir: profileDir }).org.get(request()))
+    if (!again.registry.ok) throw new Error('unreachable')
+    expect(again.registry.token).toBe(expectedToken)
+  })
+})
+
+describe('org.write', () => {
+  it('replaces the whole document and returns a new token that differs from the one it replaced', async () => {
+    const registryDir = tempDir('dsh-org-registry-')
+    const registryPath = writeRegistry(registryDir, { alfred: {} })
+    const app = api(await floor(), { orgRegistryPath: registryPath, orgProfileDir: tempDir('dsh-org-profile-') })
+    const before = expectOk(await app.org.get(request()))
+    if (!before.registry.ok) throw new Error('unreachable')
+
+    const nextDocument: OrgRegistryDocument = {
+      baseDir: registryDir,
+      seats: { alfred: { cwd: '.' }, batman: { cwd: '.' } },
+      edges: [['alfred', 'batman']],
+      callUp: ['alfred'],
+    }
+    const written = expectOk(await app.org.write(requestWith({ document: nextDocument, expectedToken: before.registry.token })))
+    expect(written.token).not.toBe(before.registry.token)
+    expect(Object.keys(written.registry.seats).sort()).toEqual(['alfred', 'batman'])
+    expect(written.registry.edges).toEqual([['alfred', 'batman']])
+    expect(written.registry.callUp).toEqual(['alfred'])
+    // Every seat's cwd is resolved absolute, same guarantee org.get makes.
+    expect(isAbsolute(written.registry.seats['batman']?.cwd ?? '')).toBe(true)
+
+    // A follow-up org.get sees exactly what was written.
+    const after = expectOk(await app.org.get(request()))
+    if (!after.registry.ok) throw new Error('unreachable')
+    expect(after.registry.token).toBe(written.token)
+    expect(Object.keys(after.registry.registry.seats).sort()).toEqual(['alfred', 'batman'])
+  })
+
+  it('refuses org-registry-conflict when expectedToken no longer matches the file, naming both tokens, and writes nothing', async () => {
+    const registryDir = tempDir('dsh-org-registry-')
+    const registryPath = writeRegistry(registryDir, { alfred: {} })
+    const app = api(await floor(), { orgRegistryPath: registryPath, orgProfileDir: tempDir('dsh-org-profile-') })
+    const originalBytes = readFileSync(registryPath)
+    const staleToken = 'stale-token-not-the-real-hash'
+
+    const nextDocument: OrgRegistryDocument = { baseDir: registryDir, seats: { alfred: { cwd: '.' } }, edges: [], callUp: [] }
+    const error = expectErr(await app.org.write(requestWith({ document: nextDocument, expectedToken: staleToken })))
+    expect(error.code).toBe('org-registry-conflict')
+    expect(error.message).toContain('changed since it was read')
+    expect(error.details).toEqual({
+      expectedToken: staleToken,
+      actualToken: createHash('sha256').update(originalBytes).digest('hex'),
+    })
+    // Never touched.
+    expect(readFileSync(registryPath)).toEqual(originalBytes)
+  })
+
+  it('refuses org-registry-rejected for an invalid document, reusing the parser\'s own message, and writes nothing', async () => {
+    const registryDir = tempDir('dsh-org-registry-')
+    const registryPath = writeRegistry(registryDir, { alfred: {} })
+    const app = api(await floor(), { orgRegistryPath: registryPath, orgProfileDir: tempDir('dsh-org-profile-') })
+    const before = expectOk(await app.org.get(request()))
+    if (!before.registry.ok) throw new Error('unreachable')
+    const originalBytes = readFileSync(registryPath)
+
+    const invalidDocument: OrgRegistryDocument = {
+      baseDir: registryDir,
+      seats: { alfred: { cwd: '.' } },
+      edges: [['alfred', 'ghost']],
+      callUp: [],
+    }
+    const error = expectErr(await app.org.write(requestWith({ document: invalidDocument, expectedToken: before.registry.token })))
+    expect(error.code).toBe('org-registry-rejected')
+    expect(error.message).toContain('unknown seat "ghost"')
+    expect(readFileSync(registryPath)).toEqual(originalBytes)
+  })
+
+  it('takes a timestamped backup of the previous content next to the file before a successful write', async () => {
+    const registryDir = tempDir('dsh-org-registry-')
+    const registryPath = writeRegistry(registryDir, { alfred: {} })
+    const app = api(await floor(), { orgRegistryPath: registryPath, orgProfileDir: tempDir('dsh-org-profile-') })
+    const originalBytes = readFileSync(registryPath)
+    const before = expectOk(await app.org.get(request()))
+    if (!before.registry.ok) throw new Error('unreachable')
+
+    const nextDocument: OrgRegistryDocument = { baseDir: registryDir, seats: { alfred: { cwd: '.' }, batman: { cwd: '.' } }, edges: [], callUp: [] }
+    expectOk(await app.org.write(requestWith({ document: nextDocument, expectedToken: before.registry.token })))
+
+    const backups = readdirSync(registryDir).filter(name => name.startsWith('registry.yml.bak-'))
+    expect(backups).toHaveLength(1)
+    const backupName = backups[0]
+    if (backupName === undefined) throw new Error('unreachable')
+    expect(readFileSync(join(registryDir, backupName))).toEqual(originalBytes)
   })
 })
