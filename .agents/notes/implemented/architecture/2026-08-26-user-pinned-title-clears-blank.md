@@ -2,7 +2,7 @@
 
 Status: implemented
 
-[English](2026-08-26-user-pinned-title-clears-blank.md) | [中文](2026-08-26-user-pinned-title-clears-blank.zh.md)
+English | [中文](2026-08-26-user-pinned-title-clears-blank.zh.md)
 
 ## Problem
 

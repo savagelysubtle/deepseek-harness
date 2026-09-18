@@ -6,7 +6,7 @@
 
 ## Decision
 
-The named-session primitives — grammar validation, id derivation (`named-` + 32-hex SHA-256 token), the per-name lock with stale-pid takeover, and the id-to-lock path algebra — moved verbatim out of `packages/bundle/headless/src/named-session.ts` into the new utility package `@deepseek-ai/dsh-named-sessions`. The id/lock relation invariant moved with them; headless now carries a justified-empty invariant companion. Headless depends on the new package and its behavior is unchanged: same derived ids, same lock artifact at `headless/locks/<token>.lock`, same failure messages.
+The named-session primitives — grammar validation, id derivation (`named-` + 32-hex SHA-256 token), the per-name lock with stale-pid takeover, and the id-to-lock path algebra — moved verbatim out of the headless bundle's own `src/named-session.ts` into the new utility package `@deepseek-ai/dsh-named-sessions`. The id/lock relation invariant moved with them; headless now carries a justified-empty invariant companion. Headless depends on the new package and its behavior is unchanged: same derived ids, same lock artifact at `headless/locks/<token>.lock`, same failure messages.
 
 ## Why extract now
 

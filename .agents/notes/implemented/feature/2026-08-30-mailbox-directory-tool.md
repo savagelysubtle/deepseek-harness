@@ -2,7 +2,7 @@
 
 Status: implemented
 
-[English](2026-08-30-mailbox-directory-tool.zh.md) | 中文
+English | [中文](2026-08-30-mailbox-directory-tool.zh.md)
 
 ## Problem
 

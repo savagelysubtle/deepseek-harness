@@ -2,7 +2,7 @@
 
 Status: implemented
 
-[English](2026-08-31-worktree-consumer-integration.md) | [中文](2026-08-31-worktree-consumer-integration.zh.md)
+[English](2026-08-31-worktree-consumer-integration.md) | 中文
 
 ## Problem
 
