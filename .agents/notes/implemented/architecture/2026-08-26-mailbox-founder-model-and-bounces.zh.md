@@ -1,8 +1,8 @@
-[English](2026-08-26-mailbox-founder-model-and-bounces.md) | 中文
-
 # Agent Note：邮箱创始人模型——一切皆 steer、发送方标记 blocking、每次丢弃都退信
 
 Status: implemented
+
+[English](2026-08-26-mailbox-founder-model-and-bounces.md) | 中文
 
 ## 问题
 

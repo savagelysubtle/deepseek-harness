@@ -37,6 +37,8 @@ The allocator scans its range lowest-first, skipping ports it has already handed
 The `probeHost` default is `127.0.0.1`: harness consumers bind loopback, and a loopback probe detects exactly the holders those consumers will conflict with. Choose `0.0.0.0` only for a consumer that binds all interfaces — it over-detects (it skips ports a loopback bind could still use), which is the safe direction.
 
 ```ts
+import { PortAllocator } from '@deepseek-ai/dsh-port-allocator'
+
 const allocator = new PortAllocator({ min: 3100, max: 3199, maxAttempts: 5 })
 const port = await allocator.allocate()      // verified bindable, reserved
 // ... hand `port` to the session's dev server ...
@@ -48,6 +50,12 @@ allocator.release(port)                      // session ended
 `sessionEnv()` copies the caller's base env into a fresh object, stamps the allocated port into `portVar`, and — when a session id is supplied — stamps it into `sessionVar` and appends it after `suffixSeparator` to the base value of each configured `suffixVars` entry (session-scoped tmp dirs, cache paths). A suffix variable absent from the base env stays absent: isolation never invents values. The module holds no reference to `process.env` and never mutates the caller's `baseEnv`.
 
 ```ts
+import { EnvIsolator } from '@deepseek-ai/dsh-port-allocator'
+
+declare const baseEnv: Readonly<Record<string, string>>
+declare const port: number
+declare const session: { readonly id: string }
+
 const isolator = new EnvIsolator({
   portVar: 'PORT',
   sessionVar: 'DSH_SESSION_ID',

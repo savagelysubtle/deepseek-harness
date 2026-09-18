@@ -7,7 +7,6 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import z from '@deepseek-ai/schemastery'
 import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
 // Type-only: loads the plugin-merged `compaction/end` session event folded below.
 import type {} from '@deepseek-ai/dsh-compaction/types'
@@ -16,28 +15,21 @@ import type { ContentBlock, LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, UserMessage } from '@deepseek-ai/dsh-session'
 // Type-only: resolves the tokenMeter service declaration read through `ctx`.
 import type {} from '@deepseek-ai/dsh-token-meter'
-import { DEFAULT_THRESHOLDS, resolveSpec, resolveWindowThresholds } from './config.ts'
-import type { Config as PressureConfig } from './config.ts'
+import { Config, resolveSpec, resolveWindowThresholds } from './config.ts'
 import { PLUGIN_SOURCE_NAME, parseWarningText, renderWarningText } from './warning.ts'
 
-/** Plugin configuration contract; the validated schema value is {@link Config}. */
-export type Config = PressureConfig
+/**
+ * Plugin configuration contract and its Schemastery validation, both declared
+ * in `./config.ts` beside the thresholds they govern and re-exported here as
+ * this plugin's public surface.
+ */
+export { Config }
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = PLUGIN_SOURCE_NAME
 
 /** Services providing routed-model metadata, replay measurement, and pre-step processing. */
 export const inject = ['llm', 'tokenMeter', 'agents']
-
-/**
- * Schemastery validation for {@link PressureConfig}. The array default is
- * declared here because Schemastery otherwise resolves an omitted array to
- * `[]`, which `Config.thresholds` defines as the explicit disable switch; the
- * documented default must stay distinguishable from it.
- */
-export const Config: z<PressureConfig> = z.object({
-  thresholds: z.array(z.number()).default([...DEFAULT_THRESHOLDS]),
-})
 
 /** Warned-threshold bookkeeping for one session, folded from the durable log. */
 interface PressureFoldState {
@@ -119,7 +111,7 @@ function foldPressureState(
  * @param config - pressure thresholds validated through {@link resolveSpec} at load.
  * @throws TypeError when `config.thresholds` violates its contract.
  */
-export function apply(ctx: Context, config: PressureConfig): void {
+export function apply(ctx: Context, config: Config): void {
   const spec = resolveSpec(config)
   const folds = new WeakMap<Session, PressureFoldState>()
   const warnedCapacityTargets = new Set<string>()

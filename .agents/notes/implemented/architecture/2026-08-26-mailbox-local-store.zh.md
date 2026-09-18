@@ -1,8 +1,8 @@
-[English](2026-08-26-mailbox-local-store.md) | 中文
-
 # Agent Note：邮箱本地存储——SQLite 租约语义
 
 Status: implemented
+
+[English](2026-08-26-mailbox-local-store.md) | 中文
 
 ## 问题
 

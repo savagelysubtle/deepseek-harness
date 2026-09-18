@@ -316,11 +316,16 @@ const UNSENT_MESSAGE_ID = 'unsent'
  * wire admission path is expected to have one mounted, and zero specs there
  * is a broken deployment. A single-seat process never mounts a bridge AT
  * ALL, by design (see the headless bundle's patch), so there is no broken
- * expectation to fail loud about — extending a hard requirement onto a
- * deployment shape that never had one is a bigger change than this ticket's
- * scope. The gap this leaves is real, not excused, so it is made visible
- * instead at mount time (see `index.ts`'s `apply`), rather than silently
- * assumed equivalent to a door that behaves oppositely.
+ * expectation to fail loud about.
+ *
+ * A rosterless deployment is NOT left unguarded, though: the caller falls
+ * back to {@link registryRecipientRefusal}, which checks the destination
+ * against the org registry instead. That catches the misspelled or
+ * non-existent seat — the common incident — while still admitting mail to a
+ * real seat this process cannot itself deliver to, which is the normal and
+ * correct case for a single-seat sender writing into the shared store. It
+ * deliberately does NOT catch "the seat exists but nothing serves it": only
+ * a served roster knows that, and the roster-drift alarm is what reports it.
  *
  * Comparison is exact-string: the address grammar has no case folding, so a
  * name that differs only in capitalisation is a DIFFERENT address here —
@@ -335,6 +340,40 @@ function unknownRecipientRefusal(to: MailboxAddress, addresses: readonly string[
   return `"${to}" is not a known seat this deployment serves (${addresses.join(', ')}). `
     + 'Check spelling and capitalisation against the org registry — a name outside the served '
     + 'roster can never be delivered, whether it is a typo or a seat that has not mounted yet.'
+}
+
+/**
+ * Recipient admission for a deployment that mounts no served roster (the
+ * single-seat headless shape). The org registry is the source of truth for
+ * which seat names exist, so a destination absent from it can never be
+ * delivered by anyone and is refused before the write, exactly as an
+ * unserved name is on a many-seat host.
+ *
+ * An unreadable or missing registry does NOT refuse. This check can only
+ * prove a name is unknown when it has the list to prove it against; refusing
+ * on a failed read would turn a local file problem into an outage of every
+ * outbound message. The send proceeds as it did before this check existed,
+ * and the mount already reported which check is in force.
+ *
+ * Comparison is exact-string, matching {@link unknownRecipientRefusal}: the
+ * address grammar has no case folding, so a name differing only in
+ * capitalisation is a different address and is the incident to catch.
+ * @param to - the parsed destination address.
+ * @param registryPath - absolute path of the org registry to check against.
+ * @returns the refusal reason, or undefined when the destination is known
+ *   or the registry could not be read.
+ */
+async function registryRecipientRefusal(to: MailboxAddress, registryPath: string): Promise<string | undefined> {
+  let registry: Awaited<ReturnType<typeof loadOrgRegistry>>
+  try {
+    registry = await loadOrgRegistry(registryPath)
+  } catch {
+    return undefined
+  }
+  if (Object.hasOwn(registry.seats, to)) return undefined
+  return `"${to}" is not a seat in the org registry at "${registryPath}". `
+    + 'Check spelling and capitalisation against the registry — a name that is not a seat can never be '
+    + 'delivered to, so this message was refused before it was stored rather than left pending forever.'
 }
 
 /**
@@ -491,9 +530,12 @@ export function mailboxSendTool(mailbox: MailboxRegistry, identity: IdentitySour
       // Known-recipient admission BEFORE the write: a name no roster serves
       // must never reach the store at all, or it becomes indistinguishable
       // pending mail that nothing will ever drain. See
-      // {@link unknownRecipientRefusal} for why this is the roster and not
-      // the org registry, and why it no-ops without one.
-      const unknownRecipient = unknownRecipientRefusal(to, identity.addresses)
+      // {@link unknownRecipientRefusal} for why a served roster is the
+      // stronger check where one exists, and {@link registryRecipientRefusal}
+      // for what guards a deployment that mounts none.
+      const unknownRecipient = identity.addresses !== undefined && identity.addresses.length > 0
+        ? unknownRecipientRefusal(to, identity.addresses)
+        : await registryRecipientRefusal(to, identity.orgRegistryPath ?? dshHomePath('org', 'registry.yml'))
       if (unknownRecipient !== undefined) {
         // Recorded so a same-process mailbox_await on THIS traceId reports
         // the refusal immediately instead of polling out its full deadline

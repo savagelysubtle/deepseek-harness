@@ -82,8 +82,13 @@ interface Agent {
    * active activity, cancellation is a no-op and does not arm later work.
    * @param cause - the stable caller intent carried by the active operation signal.
    * @param options - cancellation options; `keepInbox` preserves pending work.
+   * @returns whether a live turn or maintenance task was actually aborted by
+   *   this call. `false` means the agent was already idle: the inbox clear
+   *   (when `keepInbox` is unset) still ran, but nothing active was cut off.
+   *   This does not report whether the inbox was cleared — only whether
+   *   active work was stopped.
    */
-  cancel(cause: AgentCancelCause, options?: CancelOptions): void
+  cancel(cause: AgentCancelCause, options?: CancelOptions): boolean
 
   /**
    * Resolve after the current whole-agent activity reaches quiescence. This

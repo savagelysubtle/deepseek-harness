@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-26-user-pinned-title-clears-blank.md
-2026-08-26-user-pinned-title-clears-blank.md: 8bdfc60bc58bfd917387ab5ef1e28ccf505790db
+2026-08-26-user-pinned-title-clears-blank.md: 39d561e3f27188a69ff7fa7865f3b80e69197937
 2026-08-26-user-pinned-title-clears-blank.zh.md: 293733de8a5413e8f0cafa260b524c67a8e44854

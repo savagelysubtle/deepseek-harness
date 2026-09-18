@@ -83,15 +83,13 @@ export const Config: Schema<Config> = z.object({
  * `execute`, which is the earliest point at which a missing or malformed name
  * is a live failure rather than an unused mount.
  *
- * A missing or empty `addresses` also disables `mailbox_send`'s
- * known-recipient refusal (see `tools.ts`'s `unknownRecipientRefusal`): with
- * no served roster to check against, every destination is admitted exactly
- * as before this ticket. That gap must never be silent — a state that
- * removes an enforced protection has to say so, in the moment, or an
- * operator who un-configures `addresses` (accidentally or not) never learns
- * the seat-to-seat door quietly went back to lax. Logged once here, at
- * mount, not per send: the condition is a property of this mount, not of any
- * one message.
+ * A missing or empty `addresses` switches `mailbox_send`'s known-recipient
+ * admission from the served roster to the org registry (see `tools.ts`'s
+ * `unknownRecipientRefusal` and `registryRecipientRefusal`). Which check is
+ * in force is a property of the mount, not of any one message, so it is
+ * stated once here rather than per send — and it is stated even when nothing
+ * is wrong, because "the weaker check is running" and "no check ran at all"
+ * must never look identical to an operator reading the log.
  * @param ctx - registrant context carrying the tool and mailbox registries.
  * @param config - the deployment-supplied session name.
  */
@@ -102,11 +100,16 @@ export function apply(ctx: Context, config: Config): void {
     ...config.orgRegistryPath !== undefined ? { orgRegistryPath: config.orgRegistryPath } : {},
   }
   if (identity.addresses === undefined || identity.addresses.length === 0) {
-    ctx.logger.warn(
-      'mailbox tools: mounted with no served roster (`addresses` is empty or absent) — mailbox_send\'s '
-      + 'known-recipient refusal is INACTIVE here, so a misspelled or unmounted destination will store and '
-      + 'park silently instead of being refused. Configure `addresses` with this deployment\'s served roster '
-      + '(the same list `mailbox-bridge` mounts with) to activate the check.',
+    // Info, not warn: this is the correct and expected shape for a
+    // single-seat deployment, which never mounts a bridge and so has no
+    // served roster to check against. The line exists so the weaker check is
+    // never mistaken for no check.
+    ctx.logger.info(
+      'mailbox tools: mounted with no served roster (`addresses` is empty or absent), which is normal for a '
+      + 'single-seat deployment — mailbox_send admits recipients against the org registry instead, refusing '
+      + 'a name that is not a seat. It cannot tell that a real seat is currently unserved; configure '
+      + '`addresses` with this deployment\'s served roster (the same list `mailbox-bridge` mounts with) to '
+      + 'get that stronger check.',
     )
   }
   ctx.tools.register(mailboxSendTool(ctx.mailbox, identity))
