@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write packages/util/port-allocator/README.md
-README.md: 9988194d7d6282edcf5146cfea14d932fc6276da
-README.zh.md: 0397db2e6383c92de656e5bb4f3ad06ba4075100
+README.md: 04208597db5c4d7ea44f6fd9f45c9fc6bb883081
+README.zh.md: 5878881facfe3e80e0c320c718c1e1972a544758
