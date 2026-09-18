@@ -340,6 +340,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'Merges provider skill catalogs; tool-skill renders the session-prefix catalog and loads complete skill bodies.',
   },
   {
+    key: 'worktrees',
+    pkg: 'worktree',
+    title: 'Git worktree provider registry',
+    mode: 'core',
+    consumers: ['host-apiproxy'],
+    note: 'Registers worktree providers and owns the fenced create/remove lifecycle over a resolved repo root, worktrees root and main ref, with an optional on-disk row registry. Classified core rather than seam because the one shipped provider (local git) lives in this same package and mounts onto the service beside it; a second provider package would make this a seam.',
+  },
+  {
     key: 'agents',
     pkg: 'agent',
     title: 'Agent service',
