@@ -1425,7 +1425,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/mailbox/bridge/src/index.ts:200`](../packages/mailbox/bridge/src/index.ts)
+Source: [`packages/mailbox/bridge/src/index.ts:203`](../packages/mailbox/bridge/src/index.ts)
 
 <a id="deepseek-aidsh-mailbox-local"></a>
 
@@ -2813,7 +2813,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/mailbox/tool-mailbox/src/index.ts:47`](../packages/mailbox/tool-mailbox/src/index.ts)
+Source: [`packages/mailbox/tool-mailbox/src/index.ts:49`](../packages/mailbox/tool-mailbox/src/index.ts)
 
 <a id="deepseek-aidsh-tool-pwsh"></a>
 
