@@ -1,17 +1,21 @@
 /**
  * Zero-dependency atomic file replacement and writer coordination.
  * `writeFileAtomic` writes a random-suffix sibling with exclusive create and
- * the caller's permission bits, then renames it over the target, so readers
- * observe either the old or the new complete content and a replaced file ends
- * up with exactly the stated mode. `withFileLock` serializes cross-process
- * writers of one file through a `wx`-created `<file>.lock` sibling, so a
- * read-modify-write cycle can never resurrect a state another writer just
- * replaced; readers stay lock-free because the rename commit is atomic.
+ * the caller's permission bits, flushes it to disk, then renames it over the
+ * target and flushes the containing directory too, so readers observe either
+ * the old or the new complete content, a replaced file ends up with exactly
+ * the stated mode, and an unclean shutdown right after a reported success
+ * cannot leave the target present but empty or truncated. `withFileLock`
+ * serializes cross-process writers of one file through a `wx`-created
+ * `<file>.lock` sibling, so a read-modify-write cycle can never resurrect a
+ * state another writer just replaced; readers stay lock-free because the
+ * rename commit is atomic.
  * @module @deepseek-ai/dsh-atomic-write
  */
 
 import { randomBytes } from 'node:crypto'
-import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, open, rename, rm, writeFile } from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 /**
@@ -33,34 +37,92 @@ export interface WriteFileAtomicOptions {
 }
 
 /**
- * Replace `filename` with `content` in one atomic step, creating parent
- * directories. The content is first written to a random-suffix sibling opened
- * with exclusive create (`wx`): the open refuses to follow a symlink planted
- * at the temp path, and the fresh inode carries `options.mode` through the
- * rename, so replacing a wider-permission file narrows it without a chmod
- * race. The rename also replaces a symlinked target itself instead of writing
- * through to its referent, and the same-directory sibling keeps the rename on
- * one filesystem. On any failure the temp file is removed and the failure
- * rethrown. Crash durability (fsync) is out of scope.
+ * Error codes meaning "this platform or filesystem cannot fsync a directory
+ * at all", not a real I/O fault: Windows and FreeBSD do not support flushing
+ * a directory handle (commonly surfaced as `EPERM`/`ENOSYS`/`ENOTSUP`), and
+ * some POSIX layers refuse it outright — a read-only lower layer under an
+ * overlay filesystem (as Docker's overlay2 storage driver produces) reports
+ * `EINVAL` for a directory fsync it cannot honor. None of these mean the
+ * write failed; they mean this one durability step cannot be performed here.
+ */
+const DIRECTORY_FLUSH_UNSUPPORTED_CODES = new Set(['ENOSYS', 'EINVAL', 'EPERM', 'ENOTSUP', 'EOPNOTSUPP'])
+
+function isDirectoryFlushUnsupported(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  return code !== undefined && DIRECTORY_FLUSH_UNSUPPORTED_CODES.has(code)
+}
+
+/**
+ * Flush a directory's own metadata — the rename that just landed inside it —
+ * to disk, so the rename survives an unclean shutdown as durably as the file
+ * content does. Best-effort: when the platform or filesystem cannot fsync a
+ * directory at all, that is not a write failure (see
+ * {@link DIRECTORY_FLUSH_UNSUPPORTED_CODES}) and is swallowed after the
+ * handle is closed. Any other failure (permission revoked mid-write, disk
+ * full, a hardware fault) is a real fault and is rethrown rather than
+ * silently discarded.
+ * @param directory - the directory whose entries were just changed by a rename.
+ */
+async function flushDirectory(directory: string): Promise<void> {
+  let handle: FileHandle | undefined
+  try {
+    handle = await open(directory, 'r')
+    await handle.sync()
+  } catch (error) {
+    if (!isDirectoryFlushUnsupported(error)) throw error
+  } finally {
+    await handle?.close()
+  }
+}
+
+/**
+ * Replace `filename` with `content` in one atomic, crash-durable step,
+ * creating parent directories. The content is first written to a
+ * random-suffix sibling opened with exclusive create (`wx`): the open
+ * refuses to follow a symlink planted at the temp path, and the fresh inode
+ * carries `options.mode` through the rename, so replacing a
+ * wider-permission file narrows it without a chmod race. That temp file is
+ * flushed to disk and closed before the rename, the rename replaces a
+ * symlinked target itself instead of writing through to its referent, the
+ * same-directory sibling keeps the rename on one filesystem, and the
+ * containing directory is flushed after the rename so the rename itself
+ * survives an unclean shutdown too (best-effort where the platform cannot
+ * fsync a directory at all — see {@link flushDirectory}). On any failure
+ * before the rename commits, the temp file is removed and the original
+ * failure is rethrown — a cleanup failure during that removal is never
+ * allowed to replace the real error the caller needs to see.
  * @param filename - final path receiving the content.
  * @param content - complete next file content.
  * @param options - permission bits for the replacement inode.
  */
 export async function writeFileAtomic(filename: string, content: string, options: WriteFileAtomicOptions): Promise<void> {
-  await mkdir(dirname(filename), {
+  const directory = dirname(filename)
+  await mkdir(directory, {
     recursive: true,
     ...options.dirMode === undefined ? {} : { mode: options.dirMode },
   })
-  // TODO(settings-atomic-durability): Use a replacement that fsyncs the file
-  // and parent directory and preserves owner-only permissions on Windows.
+  // TODO(settings-atomic-durability): preserve owner-only permissions on
+  // Windows (POSIX mode bits are inert there); see fs-local's win32.ts DACL
+  // handling for a reference approach. Out of scope here.
   const temp = `${filename}.${randomBytes(6).toString('hex')}.tmp`
+  let handle: FileHandle | undefined
   try {
-    await writeFile(temp, content, { mode: options.mode, flag: 'wx' })
+    handle = await open(temp, 'wx', options.mode)
+    await handle.writeFile(content, { encoding: 'utf8' })
+    await handle.sync()
+    await handle.close()
+    handle = undefined
     await rename(temp, filename)
   } catch (error) {
-    await rm(temp, { force: true })
+    if (handle) await handle.close().catch(() => undefined)
+    // Best-effort only: if `rm` itself throws, that failure must never
+    // replace `error` in what the caller sees. A leftover `.tmp` file is a
+    // nuisance; a swallowed real failure is the exact defect this helper
+    // exists to remove.
+    await rm(temp, { force: true }).catch(() => undefined)
     throw error
   }
+  await flushDirectory(directory)
 }
 
 /** Whether an exclusive create failed because the path already exists. */

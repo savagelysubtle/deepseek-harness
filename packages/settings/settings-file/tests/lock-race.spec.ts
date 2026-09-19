@@ -31,12 +31,36 @@ vi.mock('node:fs/promises', async (importOriginal) => {
         state.failDocumentCreate = false
         throw Object.assign(new Error('ENOSPC: injected document create failure'), { code: 'ENOSPC' })
       }
-      if (state.failTempWrite && String(path).endsWith('.tmp')) {
-        state.failTempWrite = false
-        throw Object.assign(new Error('ENOSPC: injected writeFile failure'), { code: 'ENOSPC' })
-      }
       return (actual.writeFile as (path: unknown, ...args: never[]) => Promise<void>)(path, ...rest)
     }) as typeof actual.writeFile,
+    // writeFileAtomic now fsyncs its temp file (SWD-142), which means it
+    // writes through a FileHandle (`open` + `handle.writeFile` +
+    // `handle.sync`) rather than the top-level `writeFile` mocked above.
+    // Inject the temp-write failure at that level instead: open the real
+    // handle, then hand back a proxy whose `writeFile` throws, so the
+    // injected failure still lands mid temp-file write and the
+    // cleanup/lock-release path under test still runs against a real,
+    // on-disk (now-orphaned) temp file.
+    open: async (...args: Parameters<typeof actual.open>): ReturnType<typeof actual.open> => {
+      const [path] = args
+      const handle = await actual.open(...args)
+      if (!state.failTempWrite || !String(path).endsWith('.tmp')) return handle
+      state.failTempWrite = false
+      return new Proxy(handle, {
+        get(target, prop, receiver) {
+          if (prop === 'writeFile') {
+            return async (): Promise<never> => {
+              throw Object.assign(new Error('ENOSPC: injected writeFile failure'), { code: 'ENOSPC' })
+            }
+          }
+          // `Reflect.get` is typed `any`; narrow it before use so the proxy
+          // stays type-safe and the lint baseline does not move.
+          const value: unknown = Reflect.get(target, prop, receiver)
+          if (typeof value !== 'function') return value
+          return (value as (this: unknown, ...args: never[]) => unknown).bind(target)
+        },
+      })
+    },
   }
 })
 
