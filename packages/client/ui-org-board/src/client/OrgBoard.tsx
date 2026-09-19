@@ -437,6 +437,14 @@ export function OrgBoard({
                 ? <div className={css.canvasEmpty}>{t('graph.empty')}</div>
                 : (
                   <ReactFlow
+                    // Remount when the seat set changes so the view re-fits.
+                    // `fitView` alone only fits on mount, so an added seat
+                    // landed outside the canvas with nothing to bring it back
+                    // -- the save had worked and the board looked like it had
+                    // done nothing, which is the failure this board exists to
+                    // expose. Keyed on the seat names because that is exactly
+                    // what changes the layout's extent.
+                    key={seatNames.join('\u0000')}
                     nodes={nodes}
                     edges={edges}
                     nodeTypes={NODE_TYPES}

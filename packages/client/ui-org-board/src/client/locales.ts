@@ -1,4 +1,4 @@
-/** `orgBoard` namespace dictionaries: the read-only org board footer control and its modal. */
+/** `orgBoard` namespace dictionaries: the org board footer control and its modal. */
 
 /** Dictionary namespace owned by this plugin. */
 export const NS = 'orgBoard'
@@ -63,7 +63,7 @@ export type OrgBoardKey =
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
-    /** The read-only org board footer control and modal copy. */
+    /** The org board footer control and modal copy. */
     'orgBoard': OrgBoardKey
   }
 }
@@ -71,7 +71,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 /** Simplified Chinese dictionary (the key-set source of truth). */
 export const zh: Record<OrgBoardKey, string> = {
   'trigger': '组织架构图',
-  'modal.title': '组织架构图（只读）',
+  'modal.title': '组织架构图',
   'profile.label': '数据来源 Profile：{profile}',
   'loading': '正在加载组织信息……',
   'refresh': '刷新',
@@ -130,7 +130,7 @@ export const zh: Record<OrgBoardKey, string> = {
 /** English dictionary. */
 export const en: Record<OrgBoardKey, string> = {
   'trigger': 'Org Board',
-  'modal.title': 'Org Board (read-only)',
+  'modal.title': 'Org Board',
   'profile.label': 'Profile: {profile}',
   'loading': 'Loading organisation…',
   'refresh': 'Refresh',

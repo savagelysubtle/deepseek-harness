@@ -1,8 +1,9 @@
 /**
- * Deterministic grid layout: the registry carries no seat positions, and this
- * slice is read-only (no drag-to-arrange persistence to build toward), so
- * seats are placed in a fixed alphabetical grid rather than pulling in an
- * auto-layout dependency for one slice's worth of graph.
+ * Deterministic grid layout: the registry carries no seat positions, and
+ * dragging seats around is deliberately not offered -- there is nowhere to
+ * persist an arrangement, so it would be lost on every reload. Seats are
+ * placed in a fixed alphabetical grid rather than pulling in an auto-layout
+ * dependency for one board's worth of graph.
  */
 
 /** Node columns before wrapping to the next row. */
