@@ -68,6 +68,10 @@
 }
 
 .banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   padding: 10px 12px;
   border-radius: 10px;
   background: var(--dsw-alias-bg-layer-1);
@@ -81,6 +85,18 @@
   background: color-mix(in srgb, var(--dsw-alias-status-danger, #e5484d) 10%, var(--dsw-alias-bg-layer-1));
 }
 
+/* The 'conflict' write notice is informational -- a reload already corrected
+   the view -- so it gets its own, less alarming color rather than sharing
+   the error/refusal red used by invalid/rejected/write-failed. */
+.banner[data-variant='warning'] {
+  color: var(--dsw-alias-status-warning, #f5a623);
+  background: color-mix(in srgb, var(--dsw-alias-status-warning, #f5a623) 10%, var(--dsw-alias-bg-layer-1));
+}
+
+.noticeRetry {
+  flex: none;
+}
+
 .section {
   display: flex;
   flex-direction: column;
@@ -92,6 +108,47 @@
   font-size: 13px;
   font-weight: 600;
   color: var(--dsw-alias-label-primary);
+}
+
+.sectionHeaderRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.addSeatForm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.addSeatField {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 160px;
+}
+
+.addSeatInput {
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--dsw-alias-border-primary, #3a3a3a);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+}
+
+.addSeatError {
+  margin: 0;
+  flex: 1 1 100%;
+  color: var(--dsw-alias-status-danger, #e5484d);
+  font-size: 12px;
 }
 
 .driftGrid {
@@ -215,8 +272,38 @@
   word-break: break-word;
 }
 
+.detailHeaderRow {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.detailHeaderRow .detailName {
+  margin: 0;
+}
+
 .detailRow {
   margin: 0 0 10px;
+}
+
+.toolsField {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 8px;
+}
+
+.toolsInput {
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--dsw-alias-border-primary, #3a3a3a);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .detailLabel {
@@ -306,12 +393,24 @@
   color: #3367d9;
 }
 
+/* nodesConnectable is now true (SWD-134 slice 4 step 4) so a handle must be
+   an actually visible, clickable target for connectOnClick -- a 1px
+   zero-opacity dot (this class's shape before this slice) would make
+   dragging/clicking a mail-permission line between two seats effectively
+   impossible. */
 .handle {
-  width: 1px;
-  height: 1px;
-  min-width: 1px;
-  min-height: 1px;
-  border: none;
-  background: transparent;
-  opacity: 0;
+  width: 8px;
+  height: 8px;
+  min-width: 8px;
+  min-height: 8px;
+  border: 1px solid var(--dsw-alias-border-primary, #3a3a3a);
+  border-radius: 50%;
+  background: var(--dsw-alias-bg-layer-1);
+  opacity: 0.6;
+  cursor: crosshair;
+}
+
+.handle:hover {
+  opacity: 1;
+  background: var(--dsw-alias-label-primary);
 }

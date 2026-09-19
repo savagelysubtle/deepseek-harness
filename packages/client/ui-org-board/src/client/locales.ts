@@ -38,6 +38,28 @@ export type OrgBoardKey =
   | 'detail.tools.allow'
   | 'detail.tools.deny'
   | 'detail.tools.none'
+  | 'action.cancel'
+  | 'action.add'
+  | 'action.remove'
+  | 'action.save'
+  | 'write.notice.invalid'
+  | 'write.notice.conflict'
+  | 'write.notice.rejected'
+  | 'write.notice.writeFailed'
+  | 'write.notice.retry'
+  | 'addSeat.trigger'
+  | 'addSeat.name.label'
+  | 'addSeat.cwd.label'
+  | 'addSeat.validation.required'
+  | 'seat.remove.trigger'
+  | 'seat.remove.title'
+  | 'seat.remove.cascade'
+  | 'seat.remove.cascade.none'
+  | 'seat.remove.cascadeCallUp'
+  | 'seat.remove.acknowledge'
+  | 'edge.remove.title'
+  | 'edge.remove.description'
+  | 'edge.remove.acknowledge'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -81,6 +103,28 @@ export const zh: Record<OrgBoardKey, string> = {
   'detail.tools.allow': '允许的工具',
   'detail.tools.deny': '禁止的工具',
   'detail.tools.none': '无工具限制',
+  'action.cancel': '取消',
+  'action.add': '添加',
+  'action.remove': '移除',
+  'action.save': '保存',
+  'write.notice.invalid': '{reason} —— 未发送。',
+  'write.notice.conflict': '自您加载以来，注册表已发生变化——可能是手动编辑。现已显示最新版本，如仍需要该改动，请重新执行一次。',
+  'write.notice.rejected': '该改动被拒绝：{reason}。未写入任何内容——请修正后重试。',
+  'write.notice.writeFailed': '保存未能完成（磁盘或连接问题，并非您的输入有误）。未发生任何改动——请重试。',
+  'write.notice.retry': '重试',
+  'addSeat.trigger': '添加席位',
+  'addSeat.name.label': '席位名称',
+  'addSeat.cwd.label': '工作目录',
+  'addSeat.validation.required': '席位名称和工作目录均为必填项。',
+  'seat.remove.trigger': '移除席位',
+  'seat.remove.title': '移除席位',
+  'seat.remove.cascade': '移除 {seat} 还将移除 {count} 条邮件权限连线：{edges}。',
+  'seat.remove.cascade.none': '无',
+  'seat.remove.cascadeCallUp': '{seat} 还将从可致信任何席位名单中移除。',
+  'seat.remove.acknowledge': '我知悉此操作将移除该席位及上述连线。',
+  'edge.remove.title': '移除邮件权限连线',
+  'edge.remove.description': '移除 {from} 与 {to} 之间的邮件权限连线？',
+  'edge.remove.acknowledge': '我知悉此邮件权限连线将被移除。',
 }
 
 /** English dictionary. */
@@ -118,4 +162,26 @@ export const en: Record<OrgBoardKey, string> = {
   'detail.tools.allow': 'Allowed tools',
   'detail.tools.deny': 'Denied tools',
   'detail.tools.none': 'No tool restrictions',
+  'action.cancel': 'Cancel',
+  'action.add': 'Add',
+  'action.remove': 'Remove',
+  'action.save': 'Save',
+  'write.notice.invalid': '{reason} — nothing was sent.',
+  'write.notice.conflict': 'The registry changed since you loaded it — probably a hand edit. Showing the latest version now. Redo your change if you still want it.',
+  'write.notice.rejected': 'That change was refused: {reason}. Nothing was written — fix it and try again.',
+  'write.notice.writeFailed': 'The save didn’t go through (a disk or connection problem, not your input). Nothing changed — try again.',
+  'write.notice.retry': 'Retry',
+  'addSeat.trigger': 'Add seat',
+  'addSeat.name.label': 'Seat name',
+  'addSeat.cwd.label': 'Working directory',
+  'addSeat.validation.required': 'Seat name and working directory are both required.',
+  'seat.remove.trigger': 'Remove seat',
+  'seat.remove.title': 'Remove seat',
+  'seat.remove.cascade': 'Removing {seat} will also remove {count} mail-permission line(s): {edges}.',
+  'seat.remove.cascade.none': 'none',
+  'seat.remove.cascadeCallUp': '{seat} will also be removed from the may-mail-anyone list.',
+  'seat.remove.acknowledge': 'I understand this removes the seat and the line(s) named above.',
+  'edge.remove.title': 'Remove mail-permission line',
+  'edge.remove.description': 'Remove the mail-permission line between {from} and {to}?',
+  'edge.remove.acknowledge': 'I understand this mail-permission line will be removed.',
 }

@@ -20,9 +20,12 @@ export type OrgBoardControlProps =
 
 /**
  * Render the Org Board trigger and its modal.
- * @param props - runtime share, `useOrgBoard`/`load`, and the bound `t`.
+ * @param props - runtime share, `useOrgBoard`/`load`, the five edit verbs
+ * forwarded to the board, and the bound `t`.
  */
-export function OrgBoardControl({ wide, useOrgBoard, load, t }: OrgBoardControlProps) {
+export function OrgBoardControl({
+  wide, useOrgBoard, load, addSeat, removeSeat, addEdge, removeEdge, setSeatTools, t,
+}: OrgBoardControlProps) {
   const [open, setOpen] = useState(false)
   const state = useOrgBoard(snapshot => snapshot)
 
@@ -64,7 +67,15 @@ export function OrgBoardControl({ wide, useOrgBoard, load, t }: OrgBoardControlP
             {t('refresh')}
           </Button>
         </div>
-        <OrgBoard state={state} t={t} />
+        <OrgBoard
+          state={state}
+          t={t}
+          addSeat={addSeat}
+          removeSeat={removeSeat}
+          addEdge={addEdge}
+          removeEdge={removeEdge}
+          setSeatTools={setSeatTools}
+        />
       </Modal>
     </div>
   )
