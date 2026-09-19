@@ -3838,7 +3838,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'OrgRegistryResult',
-    declaration: 'export type OrgRegistryResult = {\n    readonly ok: true;\n    readonly registry: OrgRegistryView;\n    readonly token: string;\n} | {\n    readonly ok: false;\n    readonly reason: string;\n};',
+    declaration: 'export type OrgRegistryResult = {\n    readonly ok: true;\n    readonly registry: OrgRegistryView;\n    readonly document: OrgRegistryDocument;\n    readonly token: string;\n} | {\n    readonly ok: false;\n    readonly reason: string;\n};',
   },
   {
     name: 'OrgRegistryView',
