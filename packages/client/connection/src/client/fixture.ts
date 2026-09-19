@@ -33,7 +33,7 @@ import type { CommandDescriptor, CommandExecution, CommandResult } from '@deepse
 import { deriveEventMessage, foldSurface } from '@deepseek-ai/dsh-session/surface'
 import type {
   ApiProxy, ClientRequest, ClientResponse, HistoryEntry, HostFrame, MuxFrame, PromptContentPart, RpcReceipt,
-  ModelProviderGroup, ModelSelection, RpcRequest, RpcResponse, RpcResult, ServerRequest, ServerResponse, SessionSummary,
+  ModelProviderGroup, ModelSelection, OrgRegistryView, RpcRequest, RpcResponse, RpcResult, ServerRequest, ServerResponse, SessionSummary,
   ToolCallView, ToolEventView, ToolResultView, WorkspaceId, WorkspaceView,
 } from './api.ts'
 import type {
@@ -1589,6 +1589,37 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
   let orgRegistryToken = 'fixture-token-1'
   let nextOrgRegistryToken = 2
 
+  /**
+   * Fresh `registry`/`document` copies of the current demo state for
+   * `org.get`. The two fields exist for different purposes on the real API
+   * (`registry` resolved for display, `document` unresolved for `org.write`
+   * — see {@link OrgRegistryDocument}'s doc comment), and even though the
+   * fixture's demo seats are already absolute (so one object could satisfy
+   * both shapes), returning the SAME object reference for both would let a
+   * caller that mutates one (e.g. through `registry`) silently corrupt the
+   * other. Each call returns its own independent copy — including each
+   * seat's own object — so `registry` and `document` never alias each
+   * other or the live `orgRegistryDocument` state.
+   */
+  const orgRegistrySnapshot = (): { registry: OrgRegistryView; document: OrgRegistryDocument } => {
+    const cloneSeats = <S>(seats: Readonly<Record<string, S>>): Record<string, S> =>
+      Object.fromEntries(Object.entries(seats).map(([name, seat]) => [name, { ...seat }]))
+    return {
+      registry: {
+        baseDir: orgRegistryDocument.baseDir,
+        seats: cloneSeats(orgRegistryDocument.seats),
+        edges: [...orgRegistryDocument.edges],
+        callUp: [...orgRegistryDocument.callUp],
+      },
+      document: {
+        baseDir: orgRegistryDocument.baseDir,
+        seats: cloneSeats(orgRegistryDocument.seats),
+        edges: [...orgRegistryDocument.edges],
+        callUp: [...orgRegistryDocument.callUp],
+      },
+    }
+  }
+
   // In-memory browse tree behind the fixture's `browse` picker capability —
   // deterministic content mirroring the design mock so assembled Web tests
   // and snapshots can walk it. Leaves are materialized lazily: a child listed
@@ -3118,7 +3149,7 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         // readOrgRegistryResult); the fixture's demo data is already
         // absolute, so it mirrors that guarantee without a resolution step.
         profile: 'fixture',
-        registry: { ok: true, registry: orgRegistryDocument, token: orgRegistryToken },
+        registry: { ok: true, ...orgRegistrySnapshot(), token: orgRegistryToken },
         mailboxBridge: { ok: true, addresses: ['alfred', 'batman'] },
         toolMailbox: { ok: true, addresses: ['alfred', 'batman'] },
         drift: { ok: true, rows: [] },

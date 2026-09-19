@@ -35,6 +35,11 @@ const VALUE: ResponseValue<'org.get'> = {
     registry: {
       baseDir: '/org', seats: { alfred: { cwd: '/org/a', lead: true } }, edges: [], callUp: [],
     },
+    // The unresolved twin of `registry`: seat cwds exactly as authored. Edits
+    // are built from this, never from the resolved view above.
+    document: {
+      baseDir: '/org', seats: { alfred: { cwd: '/org/a', lead: true } }, edges: [], callUp: [],
+    },
     token: 'token-1',
   },
   mailboxBridge: { ok: true, addresses: ['alfred'] },

@@ -31,8 +31,8 @@ export type {
   CredentialsApi, CredentialView, ConfigurableProviderView, DiscoveredModelView, LlmApi,
   SendAllResult, StopDescendantsResult,
   ResponseValue,
-  OrgApi, OrgDriftResult, OrgDriftRow, OrgEdge, OrgRegistryResult, OrgRegistryView,
-  OrgRosterResult, OrgSeat, OrgSeatTools,
+  OrgApi, OrgDriftResult, OrgDriftRow, OrgEdge, OrgRegistryDocument, OrgRegistryDocumentSeat,
+  OrgRegistryResult, OrgRegistryView, OrgRosterResult, OrgSeat, OrgSeatTools,
 } from './api.ts'
 export {
   RpcId,

@@ -42,8 +42,8 @@ export type {
   SubagentAddress, SubagentCatalog, JobView, ToolCallView, ToolEventView, ToolResultView,
   WorkspaceId, WorkspaceView,
   ResponseValue,
-  OrgApi, OrgDriftResult, OrgDriftRow, OrgEdge, OrgRegistryResult, OrgRegistryView,
-  OrgRosterResult, OrgSeat, OrgSeatTools,
+  OrgApi, OrgDriftResult, OrgDriftRow, OrgEdge, OrgRegistryDocument, OrgRegistryDocumentSeat,
+  OrgRegistryResult, OrgRegistryView, OrgRosterResult, OrgSeat, OrgSeatTools,
 } from '@deepseek-ai/dsh-client-connection/client'
 export type {} from '@deepseek-ai/dsh-api-gateway/client'
 export type {} from '@deepseek-ai/dsh-cordis-host-runner/remote'

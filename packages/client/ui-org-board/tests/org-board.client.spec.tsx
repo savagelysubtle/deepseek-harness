@@ -89,6 +89,23 @@ const BASE_VALUE: ResponseValue<'org.get'> = {
       edges: [['alfred', 'batman']],
       callUp: ['alfred'],
     },
+    // The unresolved twin: cwds RELATIVE, exactly as a hand-edited file carries
+    // them, against the resolved absolute paths above. Deliberately different
+    // values -- an edit built from the resolved view would rewrite every one of
+    // these to absolute, so a fixture where both shapes matched would hide the
+    // very mistake these two fields exist to prevent.
+    document: {
+      baseDir: '/org',
+      seats: {
+        alfred: { cwd: 'deepseek-harness', lead: true, sessionId: 'sess-alfred' },
+        batman: {
+          cwd: 'deepseek-harness', test: true, tools: { allow: ['bash'], deny: ['web'] },
+        },
+        robin: { cwd: 'deepseek-harness' },
+      },
+      edges: [['alfred', 'batman']],
+      callUp: ['alfred'],
+    },
     token: 'token-1',
   },
   mailboxBridge: { ok: true, addresses: ['alfred', 'batman', 'robin'] },
@@ -197,7 +214,12 @@ describe('OrgBoard', () => {
   it('a registry with zero seats shows an explicit empty message, not a bare canvas', () => {
     const state = ready({
       ...BASE_VALUE,
-      registry: { ok: true, registry: { baseDir: '/org', seats: {}, edges: [], callUp: [] }, token: 'token-2' },
+      registry: {
+        ok: true,
+        registry: { baseDir: '/org', seats: {}, edges: [], callUp: [] },
+        document: { baseDir: '/org', seats: {}, edges: [], callUp: [] },
+        token: 'token-2',
+      },
       drift: { ok: true, rows: [] },
     })
     render(<OrgBoard state={state} t={translate} />)
