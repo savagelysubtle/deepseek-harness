@@ -34,12 +34,6 @@ export const orgRegistryViewSchema = z.object({
   callUp: z.array(z.string()),
 }) satisfies z.ZodType<Wire<OrgRegistryView>>
 
-/** OrgRegistryResult: the registry read, or a named failure reason (see {@link OrgRegistryResult}). */
-export const orgRegistryResultSchema = z.discriminatedUnion('ok', [
-  z.object({ ok: z.literal(true), registry: orgRegistryViewSchema, token: z.string() }),
-  z.object({ ok: z.literal(false), reason: z.string() }),
-]) satisfies z.ZodType<Wire<OrgRegistryResult>>
-
 /** OrgRegistryDocumentSeat: one seat as submitted to org.write (cwd unresolved; see {@link OrgRegistryDocumentSeat}). */
 export const orgRegistryDocumentSeatSchema = z.object({
   cwd: z.string(),
@@ -56,6 +50,26 @@ export const orgRegistryDocumentSchema = z.object({
   edges: z.array(orgEdgeSchema),
   callUp: z.array(z.string()),
 }) satisfies z.ZodType<Wire<OrgRegistryDocument>>
+
+/**
+ * OrgRegistryResult: the registry read, or a named failure reason (see
+ * {@link OrgRegistryResult}). The ok branch carries BOTH `registry` and
+ * `document` — declared above so this schema can reference
+ * `orgRegistryDocumentSchema`. Including `document` here is load-bearing,
+ * not cosmetic: the real wire client parses every response through this
+ * schema, and Zod silently STRIPS unknown keys from an object schema — a
+ * `document` the server sends but this schema omits would vanish before the
+ * client ever saw it.
+ */
+export const orgRegistryResultSchema = z.discriminatedUnion('ok', [
+  z.object({
+    ok: z.literal(true),
+    registry: orgRegistryViewSchema,
+    document: orgRegistryDocumentSchema,
+    token: z.string(),
+  }),
+  z.object({ ok: z.literal(false), reason: z.string() }),
+]) satisfies z.ZodType<Wire<OrgRegistryResult>>
 
 /** OrgRosterResult: one served-address roster, or a named failure reason (see {@link OrgRosterResult}). */
 export const orgRosterResultSchema = z.discriminatedUnion('ok', [

@@ -43,7 +43,7 @@ import type {
   ModelReasoning, MuxFrame, PromptContentPart, QuestionResponsePayload, SessionListMetadata, SessionProjectionsBlock, SessionSearchItem,
   QueuedInboxItem, SessionSummary, SettingsNamespaceView, StopDescendantsResult, SubagentAddress, JobView, ToolEventView,
   WorkspaceId, WorkspaceView,
-  OrgDriftResult, OrgDriftRow, OrgRegistryResult, OrgRegistryView, OrgRosterResult,
+  OrgDriftResult, OrgDriftRow, OrgRegistryDocument, OrgRegistryResult, OrgRegistryView, OrgRosterResult,
 } from './api/index.ts'
 import {
   DEFAULT_SESSION_LOG_COMPRESSION_LEVEL,
@@ -438,16 +438,43 @@ function resolvedOrgRegistryView(registry: OrgRegistry): OrgRegistryView {
 }
 
 /**
+ * The SAME parsed registry, in the unresolved document shape `org.write`
+ * requires (see the org.ts module header and {@link OrgRegistryResult}'s doc
+ * comment on why `org.get` returns both shapes). `loadOrgRegistryWithToken`
+ * already leaves every seat's `cwd` exactly as authored — absolute, or
+ * relative to `baseDir` — so this is a plain reshape, never a resolve: the
+ * mailbox-side `OrgRegistry`/`OrgRegistrySeat` fields (`baseDir`, `seats`,
+ * `edges`, `callUp`; per-seat `cwd`/`lead`/`sessionId`/`test`/`tools`) are
+ * structurally identical to `OrgRegistryDocument`/`OrgRegistryDocumentSeat`
+ * field-for-field, so TypeScript accepts this object literal without a cast.
+ * @param registry - the parsed registry, cwd unresolved.
+ * @returns the same registry reshaped to the `org.write` document contract.
+ */
+function orgRegistryDocumentOf(registry: OrgRegistry): OrgRegistryDocument {
+  return {
+    baseDir: registry.baseDir,
+    seats: registry.seats,
+    edges: registry.edges,
+    callUp: registry.callUp,
+  }
+}
+
+/**
  * Read and validate the org registry at `path`, or report a named reason it
  * could not be produced (see {@link OrgRegistryResult}) — never an empty
  * roster standing in for "could not read this".
  * @param path - absolute org registry path.
- * @returns the parsed registry and its content token, or the failure reason naming the path.
+ * @returns the parsed registry (resolved view and unresolved document) and its content token, or the failure reason naming the path.
  */
 async function readOrgRegistryResult(path: string): Promise<OrgRegistryResult> {
   try {
     const { registry, token } = await loadOrgRegistryWithToken(path)
-    return { ok: true, registry: resolvedOrgRegistryView(registry), token }
+    return {
+      ok: true,
+      registry: resolvedOrgRegistryView(registry),
+      document: orgRegistryDocumentOf(registry),
+      token,
+    }
   } catch (error: unknown) {
     return {
       ok: false,

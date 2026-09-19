@@ -212,6 +212,50 @@ describe('org.get', () => {
     expect(alfred.cwd).toBe(join(registryDir, 'deepseek-harness'))
   })
 
+  it('returns an unresolved document alongside the resolved view, so a relative seat cwd survives the read-edit-write round trip', async () => {
+    // The trap this closes: a client that read the RESOLVED view, edited it,
+    // and submitted that back to org.write would silently rewrite every
+    // seat's relative cwd to absolute — including seats never touched. The
+    // document field exists so a caller never has to build a write payload
+    // from the resolved shape at all.
+    const registryDir = tempDir('dsh-org-registry-')
+    const profileDir = tempDir('dsh-org-profile-')
+    // Relative to baseDir, exactly as the founder hand-writes it — never
+    // '.', which would hide a reshape that silently never ran behind
+    // resolve(baseDir, '.') === baseDir.
+    const registryPath = writeRegistry(registryDir, { alfred: { cwd: 'deepseek-harness' } })
+    writeProfile(profileDir, [
+      { id: 'mailbox-bridge', addresses: ['alfred'] },
+      { id: 'tool-mailbox', addresses: ['alfred'] },
+    ])
+    const app = api(await floor(), { orgRegistryPath: registryPath, orgProfileDir: profileDir })
+    const value = expectOk(await app.org.get(request()))
+    expect(value.registry.ok).toBe(true)
+    if (!value.registry.ok) throw new Error('unreachable')
+
+    // The resolved view: absolute, for display.
+    const resolvedAlfred = value.registry.registry.seats['alfred']
+    if (resolvedAlfred === undefined) throw new Error('unreachable')
+    expect(isAbsolute(resolvedAlfred.cwd)).toBe(true)
+    expect(resolvedAlfred.cwd).toBe(join(registryDir, 'deepseek-harness'))
+
+    // The unresolved document: exactly the relative string as authored, for editing.
+    const documentAlfred = value.registry.document.seats['alfred']
+    if (documentAlfred === undefined) throw new Error('unreachable')
+    expect(documentAlfred.cwd).toBe('deepseek-harness')
+    expect(value.registry.document.baseDir).toBe(registryDir)
+
+    // The returned token is the SAME one a subsequent org.write accepts —
+    // submitting the document straight back, untouched, must succeed and
+    // must resolve the untouched seat's cwd fresh from the same relative
+    // string rather than from an already-absolute one baked in by the read.
+    const written = expectOk(await app.org.write(requestWith({
+      document: value.registry.document,
+      expectedToken: value.registry.token,
+    })))
+    expect(written.registry.seats['alfred']?.cwd).toBe(join(registryDir, 'deepseek-harness'))
+  })
+
   it('reports the profile name the served rosters were read from, defaulting to web-stable', async () => {
     const registryDir = tempDir('dsh-org-registry-')
     const profileDir = tempDir('dsh-org-profile-')

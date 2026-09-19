@@ -68,9 +68,31 @@ export interface OrgRegistryView {
  * Send it back as `write`'s `expectedToken` so a write built on this read is
  * refused if the file changed underneath it, rather than silently clobbering
  * whatever changed it.
+ *
+ * BOTH `registry` and `document` are the same read, in two different shapes,
+ * for two different purposes — do NOT "simplify" this back into one field:
+ *   - `registry` (`OrgRegistryView`) has every seat `cwd` RESOLVED to an
+ *     absolute path. It exists to DISPLAY — a UI never has to know or
+ *     re-derive `baseDir` to show where a seat runs.
+ *   - `document` (`OrgRegistryDocument`) has every seat `cwd` UNRESOLVED —
+ *     absolute, or relative-to-`baseDir`, exactly as the file was hand-authored.
+ *     It exists to EDIT: `org.write` requires this exact unresolved shape,
+ *     and it round-trips through the real YAML parser. If an editor instead
+ *     read the resolved `registry`, mutated it, and submitted THAT to
+ *     `org.write`, every seat's relative `cwd` would be silently rewritten to
+ *     absolute — including seats the caller never touched — corrupting the
+ *     founder's hand-edited file on the very first save (see
+ *     {@link OrgRegistryDocumentSeat}'s doc comment for the same danger from
+ *     the write side). `document` is what makes it possible for a caller to
+ *     edit without ever holding a resolved path.
  */
 export type OrgRegistryResult =
-  | { readonly ok: true; readonly registry: OrgRegistryView; readonly token: string }
+  | {
+    readonly ok: true
+    readonly registry: OrgRegistryView
+    readonly document: OrgRegistryDocument
+    readonly token: string
+  }
   | { readonly ok: false; readonly reason: string }
 
 /**
