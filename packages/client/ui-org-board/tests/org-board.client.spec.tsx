@@ -70,7 +70,7 @@ function translate(key: LocaleKeysOf<'orgBoard'>, params?: Record<string, unknow
 }
 
 function ready(value: ResponseValue<'org.get'>): OrgBoardState {
-  return { status: 'ready', error: null, value }
+  return { status: 'ready', error: null, value, write: { pending: false, notice: null } }
 }
 
 const BASE_VALUE: ResponseValue<'org.get'> = {
@@ -121,7 +121,7 @@ const BASE_VALUE: ResponseValue<'org.get'> = {
 
 describe('OrgBoard', () => {
   it('renders only the top-level failure banner on an outer RPC error, nothing else', () => {
-    const state: OrgBoardState = { status: 'error', error: 'connection lost', value: null }
+    const state: OrgBoardState = { status: 'error', error: 'connection lost', value: null, write: { pending: false, notice: null } }
     render(<OrgBoard state={state} t={translate} />)
     expect(screen.getByRole('alert').textContent).toBe('Org board unavailable: connection lost')
     expect(screen.queryByText(/Profile:/)).toBeNull()
@@ -129,19 +129,19 @@ describe('OrgBoard', () => {
   })
 
   it('still renders the failure banner (with an empty reason, never a crash) if error is somehow null on an error status', () => {
-    const state: OrgBoardState = { status: 'error', error: null, value: null }
+    const state: OrgBoardState = { status: 'error', error: null, value: null, write: { pending: false, notice: null } }
     render(<OrgBoard state={state} t={translate} />)
     expect(screen.getByRole('alert').textContent).toBe('Org board unavailable: ')
   })
 
   it('shows a loading message before any response has landed (idle)', () => {
-    const state: OrgBoardState = { status: 'idle', error: null, value: null }
+    const state: OrgBoardState = { status: 'idle', error: null, value: null, write: { pending: false, notice: null } }
     render(<OrgBoard state={state} t={translate} />)
     expect(screen.getByText('Loading organisation…')).toBeTruthy()
   })
 
   it('shows a loading message while loading with no prior value', () => {
-    const state: OrgBoardState = { status: 'loading', error: null, value: null }
+    const state: OrgBoardState = { status: 'loading', error: null, value: null, write: { pending: false, notice: null } }
     render(<OrgBoard state={state} t={translate} />)
     expect(screen.getByText('Loading organisation…')).toBeTruthy()
   })

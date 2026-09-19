@@ -31,7 +31,9 @@ function translate(key: LocaleKeysOf<'orgBoard'>, params?: Record<string, unknow
   })
 }
 
-const IDLE_STATE: OrgBoardState = { status: 'idle', error: null, value: null }
+const IDLE_STATE: OrgBoardState = {
+  status: 'idle', error: null, value: null, write: { pending: false, notice: null },
+}
 
 /** GlobalStandardProps stubs OrgBoardControl never reads (org.get, not sessions/workspaces). */
 const useSessions = (() => {
@@ -44,6 +46,15 @@ const useWorkspaces = (() => {
 function renderControl(overrides: { wide?: boolean; state?: OrgBoardState } = {}) {
   const { wide = true, state = IDLE_STATE } = overrides
   const load = vi.fn<OrgBoardControlProps['load']>().mockResolvedValue(undefined)
+  // OrgBoardControl itself only reads `load` (this slice is still read-only
+  // UI-wise — step 4 wires the write verbs into visible controls), but its
+  // props type pulls in the whole OrgBoardFace, so every verb must be
+  // supplied here regardless of whether the component reads it.
+  const addSeat = vi.fn<OrgBoardControlProps['addSeat']>().mockResolvedValue(undefined)
+  const removeSeat = vi.fn<OrgBoardControlProps['removeSeat']>().mockResolvedValue(undefined)
+  const addEdge = vi.fn<OrgBoardControlProps['addEdge']>().mockResolvedValue(undefined)
+  const removeEdge = vi.fn<OrgBoardControlProps['removeEdge']>().mockResolvedValue(undefined)
+  const setSeatTools = vi.fn<OrgBoardControlProps['setSeatTools']>().mockResolvedValue(undefined)
   const useOrgBoard = (<S,>(selector: (snapshot: OrgBoardState) => S): S => selector(state)) as OrgBoardControlProps['useOrgBoard']
   return {
     load,
@@ -53,6 +64,11 @@ function renderControl(overrides: { wide?: boolean; state?: OrgBoardState } = {}
       useWorkspaces={useWorkspaces}
       useOrgBoard={useOrgBoard}
       load={load}
+      addSeat={addSeat}
+      removeSeat={removeSeat}
+      addEdge={addEdge}
+      removeEdge={removeEdge}
+      setSeatTools={setSeatTools}
       t={translate}
     />),
   }
@@ -89,6 +105,7 @@ describe('OrgBoardControl', () => {
         status: 'error',
         error: 'connection lost',
         value: null,
+        write: { pending: false, notice: null },
       },
     })
     fireEvent.click(screen.getByRole('button', { name: 'Org Board' }))
