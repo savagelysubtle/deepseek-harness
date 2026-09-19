@@ -3,8 +3,8 @@
 // List data never enters zustand; React connects via subscribe/getListSnapshot.
 
 import type {
-  IApiClient, HostFrame, MuxFrame, RpcError, RpcRequest, RpcResult, SessionId,
-  SessionSummary, SubagentAddress, SubagentCatalog, JobView, WorkspaceId,
+  IApiClient, HostFrame, MuxFrame, PromptContentPart, RpcError, RpcRequest, RpcResult, SendAllResult,
+  SessionId, SessionSummary, StopDescendantsResult, SubagentAddress, SubagentCatalog, JobView, WorkspaceId,
 } from '@deepseek-ai/dsh-api-remotes/client'
 // Value import from the inline-safe wire layer (not the connection plugin):
 // plugin-to-plugin value imports are a bundle purity error.
@@ -544,7 +544,7 @@ export class SessionManager {
       const { result } = await this.api.sessions.create(payload)
       if (result.ok) {
         this.recordMutation({ kind: 'upsert', summary: {
-          sessionId: result.value.sessionId, updatedAt: Date.now(), running: false, blank: true,
+          sessionId: result.value.sessionId, updatedAt: Date.now(), running: false, attached: true, blank: true,
           ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
           ...(result.value.agentPreset !== undefined ? { agentPreset: result.value.agentPreset } : {}),
         } })
@@ -558,6 +558,7 @@ export class SessionManager {
             sessionId: publishedSessionId,
             updatedAt: Date.now(),
             running: false,
+            attached: true,
             blank: true,
           } })
         }
@@ -591,13 +592,47 @@ export class SessionManager {
         : workspaceAttachSessionId(result.error)
       if (childId !== undefined) {
         this.recordMutation({ kind: 'upsert', summary: {
-          sessionId: childId, updatedAt: Date.now(), running: false, blank: false,
+          sessionId: childId, updatedAt: Date.now(), running: false, attached: true, blank: false,
           parentSessionId: opts.sessionId,
           ...(source?.cwd !== undefined ? { cwd: source.cwd } : {}),
         } })
       }
       return result
     } catch (error) {
+      return transportError(error)
+    }
+  }
+
+  /**
+   * Contract session.stopAll: stop every live top-level session's own turn
+   * and drain every root's descendant forest in one shared host call. Purely
+   * a control-plane call — running/idle state settles through the normal
+   * event/frame path, never through a mutation here — so a caller that wants
+   * to know whether the cascade fully succeeded must read `descendants`
+   * itself rather than trust a folded success.
+   * @returns the host result or a folded transport error.
+   */
+  async stopAll(): Promise<RpcResult<{ stoppedCount: number; descendants: StopDescendantsResult }>> {
+    try {
+      return (await this.api.sessions.stopAll({})).result
+    } catch (error: unknown) {
+      return transportError(error)
+    }
+  }
+
+  /**
+   * Contract session.sendAll: steer every live top-level session with the
+   * same content in one host call. Steering cuts in immediately, mid-turn —
+   * the founder-specified behavior for this broadcast — so, like stopAll,
+   * this never mutates the list snapshot; the caller reads `result` for
+   * whether every root actually received it.
+   * @param content - prompt content broadcast to every live top-level session.
+   * @returns the host result or a folded transport error.
+   */
+  async sendAll(content: PromptContentPart[]): Promise<RpcResult<{ sentCount: number; result: SendAllResult }>> {
+    try {
+      return (await this.api.sessions.sendAll({ content })).result
+    } catch (error: unknown) {
       return transportError(error)
     }
   }
@@ -619,7 +654,7 @@ export class SessionManager {
    */
   noteAgentPreset(sessionId: SessionId, agentPreset: string): void {
     this.recordMutation({ kind: 'upsert', summary: {
-      sessionId, updatedAt: Date.now(), running: false, blank: true, agentPreset,
+      sessionId, updatedAt: Date.now(), running: false, attached: true, blank: true, agentPreset,
     } })
   }
 
@@ -797,7 +832,7 @@ export class SessionManager {
     switch (frame.type) {
       case 'host/session-added': {
         this.mergeSummary({
-          sessionId: frame.sessionId, updatedAt: Date.now(), running: false, blank: frame.blank,
+          sessionId: frame.sessionId, updatedAt: Date.now(), running: false, attached: true, blank: frame.blank,
           ...(frame.parentSessionId !== undefined ? { parentSessionId: frame.parentSessionId } : {}),
           ...(frame.origin !== undefined ? { origin: frame.origin } : {}),
           ...(frame.cwd !== undefined ? { cwd: frame.cwd } : {}),
@@ -1043,6 +1078,7 @@ export class SessionManager {
       const prev = this.entryCache.get(entry.sessionId)
       if (
         prev !== undefined && prev.updatedAt === entry.updatedAt && prev.running === entry.running
+        && prev.attached === entry.attached
         && prev.blank === entry.blank && prev.agentPreset === entry.agentPreset
         && prev.parentSessionId === entry.parentSessionId && prev.cwd === entry.cwd
         && prev.origin === entry.origin && prev.title === entry.title && prev.depth === entry.depth

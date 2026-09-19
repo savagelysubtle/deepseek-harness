@@ -37,6 +37,8 @@ import {
 `probeHost` 默认为 `127.0.0.1`：harness 消费方绑定 loopback，loopback 探测恰好能发现这些消费方会冲突的占用者。只有当消费方绑定全部接口时才选择 `0.0.0.0`——它会过度检测（跳过 loopback 绑定仍可使用的端口），这是安全的方向。
 
 ```ts
+import { PortAllocator } from '@deepseek-ai/dsh-port-allocator'
+
 const allocator = new PortAllocator({ min: 3100, max: 3199, maxAttempts: 5 })
 const port = await allocator.allocate()      // verified bindable, reserved
 // ... hand `port` to the session's dev server ...
@@ -48,6 +50,12 @@ allocator.release(port)                      // session ended
 `sessionEnv()` 将调用方的基础环境复制到全新对象中，把已分配端口写入 `portVar`，并在提供会话 id 时将其写入 `sessionVar`、追加到每个已配置 `suffixVars` 条目的基础值之后（以 `suffixSeparator` 分隔），用于会话私有的临时目录、缓存路径等。基础环境中不存在的后缀变量在结果中保持缺失：隔离从不凭空创造值。本模块不持有对 `process.env` 的引用，也从不修改调用方的 `baseEnv`。
 
 ```ts
+import { EnvIsolator } from '@deepseek-ai/dsh-port-allocator'
+
+declare const baseEnv: Readonly<Record<string, string>>
+declare const port: number
+declare const session: { readonly id: string }
+
 const isolator = new EnvIsolator({
   portVar: 'PORT',
   sessionVar: 'DSH_SESSION_ID',

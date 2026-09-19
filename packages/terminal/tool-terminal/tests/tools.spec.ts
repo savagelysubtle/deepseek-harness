@@ -22,7 +22,7 @@ function fakeAgent(ctx: Context, rawId: string): Agent {
     status: 'idle',
     ctx: scope.ctx,
     send: () => {},
-    followup: () => {}, steer: () => {}, inject: () => {}, cancel() {},
+    followup: () => {}, steer: () => {}, inject: () => {}, cancel() { return false },
     runMaintenance: job => job(new AbortController().signal),
     whenIdle: () => Promise.resolve(),
   }

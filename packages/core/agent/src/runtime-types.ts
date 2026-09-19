@@ -60,6 +60,16 @@ export type RequestErrorAction = { kind: 'retry' } | undefined
 /** Why a session lifecycle began; seeded creates are `startup`, while persisted loads are `resume`. */
 export type SessionStartSource = 'startup' | 'resume' | 'clear' | 'compact'
 
+/**
+ * Which live stream a loop-guard detector tripped on: `reasoning` covers
+ * both reasoning and ordinary output text (a model stuck repeating itself,
+ * even with drift — see `dsh-agent-loop`'s `ReasoningDriftDetector`);
+ * `tool-call` is the same tool re-issued with identical arguments AND an
+ * identical result (`ToolRepeatDetector`), as opposed to a legitimate
+ * retry/poll where the observed world keeps changing.
+ */
+export type LoopAbortChannel = 'reasoning' | 'tool-call'
+
 /** Public live-agent handle. */
 export interface Agent {
   /** The single identity shared with {@link session}. */
@@ -81,8 +91,13 @@ export interface Agent {
    * active activity, cancellation is a no-op and does not arm later work.
    * @param cause - the stable caller intent carried by the active operation signal.
    * @param options - cancellation options; `keepInbox` preserves pending work.
+   * @returns whether a live turn or maintenance task was actually aborted by
+   *   this call. `false` means the agent was already idle: the inbox clear
+   *   (when `keepInbox` is unset) still ran, but nothing active was cut off.
+   *   This does not report whether the inbox was cleared — only whether
+   *   active work was stopped.
    */
-  cancel(cause: AgentCancelCause, options?: CancelOptions): void
+  cancel(cause: AgentCancelCause, options?: CancelOptions): boolean
 
   /**
    * Resolve after the current whole-agent activity reaches quiescence. This
@@ -288,5 +303,24 @@ declare module '@deepseek-ai/cordis' {
      * @mode emit
      */
     'agent/error'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; error: unknown }): void
+    /**
+     * A drift-tolerant loop-guard detector tripped: the model was stuck
+     * repeating itself in reasoning/output text (drift-tolerant, so an exact
+     * repeat is not required), or re-issuing the same tool call against an
+     * unchanging world. The loop always aborts the turn when this fires —
+     * `dsh-agent-loop` throws before this dispatch returns, so the paired
+     * `turn/end` carries `{ kind: 'error', error: { code: 'LOOP_ABORTED' } }` —
+     * this event exists so a human or listener gets the named reason and the
+     * offending fragment without parsing the error chain.
+     * @param payload.agent - the agent whose turn was aborted.
+     * @param payload.turn - the turn the abort occurred in.
+     * @param payload.step - the step the abort occurred in.
+     * @param payload.channel - which stream tripped the guard.
+     * @param payload.reason - short, human-readable, named reason.
+     * @param payload.fragment - the repeated text or tool call quoted back for a human to inspect; length-bounded.
+     * Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.
+     * @mode emit
+     */
+    'agent/loop-aborted'(this: Scoped<Agent>, payload: { agent: Agent; turn: number; step: number; channel: LoopAbortChannel; reason: string; fragment: string }): void
   }
 }

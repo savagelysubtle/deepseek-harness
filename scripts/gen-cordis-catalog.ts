@@ -108,6 +108,7 @@ export const SERVICE_PAGE: Record<string, string> = {
   web: 'web.md',
   workflowEngine: 'workflow.md',
   workspaceRegistry: 'workspace.md',
+  worktrees: 'worktree.md',
 }
 
 /**
@@ -186,6 +187,7 @@ export const EVENT_SCOPE_PAGE: Record<string, string> = {
   'session-telemetry': 'session-telemetry.md',
   'tools': 'tools.md',
   'workflow': 'workflow.md',
+  'worktree': 'worktree.md',
 }
 
 /**
@@ -251,6 +253,7 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   MessageFeedbackDeleteResult: 'feedback.md',
   MessageFeedbackDeleteValue: 'feedback.md',
   MailboxRefusal: 'mailbox.md',
+  SeatToolsRestricted: 'mailbox.md',
   MessageFeedbackFailure: 'feedback.md',
   MessageFeedbackItem: 'feedback.md',
   MessageFeedbackListRequest: 'feedback.md',
@@ -278,6 +281,7 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   SessionEvent: 'session.md',
   SessionId: 'core.md',
   SessionStartSource: 'core.md',
+  LoopAbortChannel: 'core.md',
   SessionLogSnapshot: 'session-query.md',
   SessionSurfaceSnapshot: 'session-query.md',
   ApprovalOutcome: 'approval.md',
@@ -492,6 +496,11 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   TypertPackageRecord: 'invariants.md',
   TypertSchemaFilter: 'invariants.md',
   TypertSchemaRecord: 'invariants.md',
+  WorktreeProvider: 'worktree.md',
+  WorktreeRow: 'worktree.md',
+  WorktreeSlug: 'worktree.md',
+  WorktreeSpawnRequest: 'worktree.md',
+  WorktreeSpawnResult: 'worktree.md',
 }
 
 /** TypeScript lib and pinned framework types with no repository-owned data page. */
@@ -598,6 +607,7 @@ export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
   WorkflowAgentEndInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
   WorkflowAgentInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
   WorkflowResultInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
+  WorktreeEventPayload: 'event payload contract is owned by packages/worktree/worktree/src/types.ts',
 }
 
 /** Repository data policy consumed by the Cordis catalog projector. */

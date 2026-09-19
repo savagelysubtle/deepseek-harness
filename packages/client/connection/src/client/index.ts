@@ -29,6 +29,10 @@ export type {
   GoalsApi, GoalRef,
   SettingsApi, SettingsNamespaceView, SettingsPathOpView, SettingsSecretView,
   CredentialsApi, CredentialView, ConfigurableProviderView, DiscoveredModelView, LlmApi,
+  SendAllResult, StopDescendantsResult,
+  ResponseValue,
+  OrgApi, OrgDriftResult, OrgDriftRow, OrgEdge, OrgRegistryResult, OrgRegistryView,
+  OrgRosterResult, OrgSeat, OrgSeatTools,
 } from './api.ts'
 export {
   RpcId,

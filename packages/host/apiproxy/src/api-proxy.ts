@@ -4,9 +4,12 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { mkdir, stat } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { mkdir, readFile, stat } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import { parse as parseYaml } from 'yaml'
+import { PROFILE_PATCH_FILENAME, resolveProfileDir } from '@deepseek-ai/dsh-app-boot'
+import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, ModelSelection, ModelSelectionRef, AgentOptions, AgentStatus } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
@@ -38,8 +41,9 @@ import type {
   ApiProxy, ConfigurableProviderView, CredentialView, GoalRef, HistoryEntry, HostFrame,
   ModelCatalogFailure, ModelProviderGroup,
   ModelReasoning, MuxFrame, PromptContentPart, QuestionResponsePayload, SessionListMetadata, SessionProjectionsBlock, SessionSearchItem,
-  QueuedInboxItem, SessionSummary, SettingsNamespaceView, SubagentAddress, JobView, ToolEventView,
+  QueuedInboxItem, SessionSummary, SettingsNamespaceView, StopDescendantsResult, SubagentAddress, JobView, ToolEventView,
   WorkspaceId, WorkspaceView,
+  OrgDriftResult, OrgDriftRow, OrgRegistryResult, OrgRosterResult,
 } from './api/index.ts'
 import {
   DEFAULT_SESSION_LOG_COMPRESSION_LEVEL,
@@ -84,7 +88,7 @@ import { SettingsConflictError, settingsNamespace } from '@deepseek-ai/dsh-setti
 import type { SettingsDescriptor, SettingsNamespace, SettingsPathOp } from '@deepseek-ai/dsh-settings'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { publishAndWake, GUEST_SENDER_PREFIX } from '@deepseek-ai/dsh-mailbox-bridge'
-import { parseMailboxAddress } from '@deepseek-ai/dsh-mailbox'
+import { loadOrgRegistry, parseMailboxAddress, resolveSeatCwd } from '@deepseek-ai/dsh-mailbox'
 // The refusal-notice addresser derives the sender's session id the same way
 // the bridge routes a seat: the address IS the session name.
 import { deriveNamedSessionId } from '@deepseek-ai/dsh-named-sessions'
@@ -131,6 +135,18 @@ const SESSION_SEARCH_PROVIDER_CALL_LIMIT = 100
 const COLD_SUMMARY_BATCH_SIZE = 16
 /** Default maximum artifact size eligible for one cold blankness read. */
 export const DEFAULT_COLD_BLANK_PROBE_MAX_BYTES = 1024
+
+/**
+ * The profile `org.get` reads its two served-roster mounts from, when
+ * `ApiProxyDefaults.orgProfileDir` names no override. This deployment runs
+ * one profile (`web-stable`); a future deployment with a different served
+ * profile injects `orgProfileDir` rather than changing this constant.
+ */
+export const DEFAULT_ORG_PROFILE_NAME = 'web-stable'
+
+/** The `id` a profile patch mounts the mailbox-bridge and tool-mailbox served rosters under. */
+const ORG_MAILBOX_BRIDGE_MOUNT_ID = 'mailbox-bridge'
+const ORG_TOOL_MAILBOX_MOUNT_ID = 'tool-mailbox'
 
 /** Conversation message event types (the pagination counting unit). */
 const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
@@ -397,6 +413,145 @@ function worktreeRefusal(
 }
 
 /**
+ * Read and validate the org registry at `path`, or report a named reason it
+ * could not be produced (see {@link OrgRegistryResult}) — never an empty
+ * roster standing in for "could not read this".
+ * @param path - absolute org registry path.
+ * @returns the parsed registry, or the failure reason naming the path.
+ */
+async function readOrgRegistryResult(path: string): Promise<OrgRegistryResult> {
+  try {
+    const registry = await loadOrgRegistry(path)
+    // The loader leaves cwd exactly as written — absolute, or relative to
+    // baseDir (its own contract). Callers of this API get one guarantee
+    // instead: every cwd reported here is already absolute, so a later
+    // consumer (the org board UI) never has to re-derive baseDir itself.
+    const seats = Object.fromEntries(
+      Object.entries(registry.seats).map(([name, seat]) => [
+        name,
+        { ...seat, cwd: resolveSeatCwd(registry, name) },
+      ]),
+    )
+    return { ok: true, registry: { ...registry, seats } }
+  } catch (error: unknown) {
+    return {
+      ok: false,
+      reason: `org registry at "${path}" could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
+}
+
+/**
+ * Read and parse the profile patch file beneath `profileDir`. Shared by both
+ * served-roster reads so a broken patch file reports the SAME reason for
+ * both mounts, rather than reading (and possibly failing to parse) the file
+ * twice with two independently-worded errors.
+ * @param profileDir - absolute directory of the profile to read.
+ * @returns the parsed patch document, or a named read/parse failure.
+ */
+async function readOrgProfilePatches(
+  profileDir: string,
+): Promise<{ ok: true; patches: unknown } | { ok: false; reason: string }> {
+  const path = join(profileDir, PROFILE_PATCH_FILENAME)
+  let text: string
+  try {
+    text = await readFile(path, 'utf8')
+  } catch (error: unknown) {
+    return {
+      ok: false,
+      reason: `profile patch file "${path}" could not be read: ${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
+  let patches: unknown
+  try {
+    patches = parseYaml(text)
+  } catch (error: unknown) {
+    return {
+      ok: false,
+      reason: `profile patch file "${path}" is not valid YAML: ${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
+  return { ok: true, patches }
+}
+
+/**
+ * Extract one mount's `config.addresses` from a parsed `cordis.patch.yml`
+ * document: the top-level patch list's `insert` entries, matched by `id`.
+ * Reads the entry's OWN declared config rather than simulating cordis's full
+ * patch-application semantics (an id-targeted override elsewhere in the
+ * list could in principle further patch the same entry's config) — out of
+ * scope for a read-only reporter, and every mount this deployment serves is
+ * declared whole in one `insert`.
+ * @param patches - the parsed top-level patch list (or any other parsed YAML value).
+ * @param mountId - the mount `id` to locate (`mailbox-bridge` or `tool-mailbox`).
+ * @returns the mount's served addresses, or a named reason none could be read.
+ */
+function findOrgMountAddresses(patches: unknown, mountId: string): OrgRosterResult {
+  if (!Array.isArray(patches)) {
+    return { ok: false, reason: 'profile patch file does not contain a top-level list' }
+  }
+  for (const patch of patches) {
+    if (typeof patch !== 'object' || patch === null) continue
+    const insert = (patch as Record<string, unknown>).insert
+    if (!Array.isArray(insert)) continue
+    for (const entry of insert) {
+      if (typeof entry !== 'object' || entry === null) continue
+      if ((entry as Record<string, unknown>).id !== mountId) continue
+      const config = (entry as Record<string, unknown>).config
+      const addresses = typeof config === 'object' && config !== null
+        ? (config as Record<string, unknown>).addresses
+        : undefined
+      if (!Array.isArray(addresses) || addresses.some(address => typeof address !== 'string')) {
+        return { ok: false, reason: `profile mount "${mountId}" config.addresses is not a list of strings` }
+      }
+      return { ok: true, addresses: addresses as string[] }
+    }
+  }
+  return { ok: false, reason: `profile patch file has no mount of the recognised shape with id "${mountId}"` }
+}
+
+/**
+ * Compute the drift between the registry and the two served rosters: one row
+ * per name that is NOT registered-and-served-by-both (see {@link OrgDriftRow}).
+ * Requires all three sources to have succeeded — a diff is meaningless with a
+ * missing side — so a failure of any one fails the whole report, naming
+ * which side(s) were missing rather than answering a falsely empty (clean)
+ * drift report.
+ * @param registry - the registry read result.
+ * @param mailboxBridge - the mailbox-bridge served-roster read result.
+ * @param toolMailbox - the tool-mailbox served-roster read result.
+ * @returns the computed drift rows, or a named reason the diff could not run.
+ */
+function computeOrgDrift(
+  registry: OrgRegistryResult,
+  mailboxBridge: OrgRosterResult,
+  toolMailbox: OrgRosterResult,
+): OrgDriftResult {
+  if (!registry.ok || !mailboxBridge.ok || !toolMailbox.ok) {
+    const missing: string[] = [
+      ...registry.ok ? [] : ['registry'],
+      ...mailboxBridge.ok ? [] : ['mailbox-bridge roster'],
+      ...toolMailbox.ok ? [] : ['tool-mailbox roster'],
+    ]
+    return { ok: false, reason: `drift cannot be computed: ${missing.join(', ')} could not be read` }
+  }
+  const registeredNames = new Set(Object.keys(registry.registry.seats))
+  const bridgeAddresses = new Set(mailboxBridge.addresses)
+  const toolAddresses = new Set(toolMailbox.addresses)
+  const everyName = new Set<string>([...registeredNames, ...bridgeAddresses, ...toolAddresses])
+  const rows: OrgDriftRow[] = []
+  for (const seat of everyName) {
+    const registered = registeredNames.has(seat)
+    const servedByMailboxBridge = bridgeAddresses.has(seat)
+    const servedByToolMailbox = toolAddresses.has(seat)
+    if (registered && servedByMailboxBridge && servedByToolMailbox) continue
+    rows.push({ seat, registered, servedByMailboxBridge, servedByToolMailbox })
+  }
+  rows.sort((a, b) => a.seat.localeCompare(b.seat))
+  return { ok: true, rows }
+}
+
+/**
  * The RPC refusal a preset failure becomes, or undefined when the failure is
  * about something else.
  *
@@ -624,13 +779,20 @@ function sessionListFields(header: SessionHeader, events: readonly SessionEvent[
   }
 }
 
-/** SessionSummary projection for attached (in-memory) sessions. */
-function summarize(session: Session, running: boolean): SessionSummary {
+/**
+ * SessionSummary projection for attached (in-memory) sessions. `attached` is
+ * a separate parameter from `running` on purpose: this function's own caller
+ * computes both from the same `ctx.agents.get` lookup, and a session can be
+ * attached (a live Agent exists) while idle between turns — the exact state
+ * `session.sendAll` targets and a bare `running` bit cannot express.
+ */
+function summarize(session: Session, running: boolean, attached: boolean): SessionSummary {
   const metadata = sessionListMetadata(session.events)
   return {
     sessionId: session.id,
     updatedAt: sessionListUpdatedAt(session.header, metadata),
     running,
+    attached,
     blank: metadata.blank,
     ...sessionListFields(session.header, session.events),
   }
@@ -690,6 +852,7 @@ async function summarizeCold(
     sessionId: meta.id,
     updatedAt: sessionListUpdatedAt(meta, probed ?? metadata),
     running: false,
+    attached: false,
     blank: metadata?.blank === false ? false : probed?.blank ?? false,
     // Header-only: reading the log for a blank-window preset switch would
     // defeat the same index read, and attaching the session replaces this row
@@ -741,6 +904,30 @@ export interface ApiProxyDefaults {
    * falls back to platform detection ({@link canOpenNativePath}).
    */
   canOpenPath?: () => boolean
+  /**
+   * Absolute org registry path `org.get` reads; defaults to
+   * `dshHomePath('org', 'registry.yml')`. Injectable for tests so a fixture
+   * registry never depends on the real Harness home.
+   */
+  orgRegistryPath?: string
+  /**
+   * Name of the profile `org.get` reports as the source of its served
+   * rosters (the `profile` field on the response); defaults to
+   * `DEFAULT_ORG_PROFILE_NAME`. The active profile is not recoverable at
+   * runtime anywhere in this host today, so this is the disclosed half of
+   * that same hardcoded assumption — callers see exactly what was read
+   * rather than inferring it from silence. Injectable for tests and for the
+   * day a real profile-discovery mechanism exists to supply it.
+   */
+  orgProfileName?: string
+  /**
+   * Absolute directory of the profile `org.get` reads its two served-roster
+   * mounts from (a `cordis.patch.yml` is read beneath it); defaults to
+   * `resolveProfileDir(orgProfileName ?? DEFAULT_ORG_PROFILE_NAME)`.
+   * Injectable for tests so a fixture profile never depends on the real
+   * Harness home.
+   */
+  orgProfileDir?: string
 }
 
 /** The tool/call payload fields the presenter path reads. */
@@ -1179,6 +1366,32 @@ function changedWorkspaceView(workspaceId: string, value: unknown): WorkspaceVie
 }
 
 /**
+ * Drain every live continuable descendant beneath `roots` and fold a partial
+ * teardown failure into the caller-facing result shape instead of letting it
+ * read as a clean stop. `drainContinuableDescendants` never disposes the
+ * roots themselves — only strict descendants, child-first — so every root
+ * stays alive and resumable once this settles, and it throws exactly one
+ * joined `SubagentError` (not per-descendant results) when any branch failed
+ * to release. Shared by `session.stopTree` (one root) and `session.stopAll`
+ * (every live top-level root, drained in the one call the primitive requires
+ * to publish its admission cutoff across all roots before its first await).
+ * @param roots - exact live top-level Agents whose descendants must stop.
+ * @returns `'ok'` once every retained descendant released cleanly, or the
+ *   joined teardown-failure message when any did not.
+ */
+async function drainDescendantsResult(
+  ctx: Context,
+  roots: readonly Agent[],
+): Promise<StopDescendantsResult> {
+  try {
+    await ctx.subagents.drainContinuableDescendants(roots)
+    return 'ok'
+  } catch (error: unknown) {
+    return { failed: errorChain(error) }
+  }
+}
+
+/**
  * Implement ApiProxy over a composed host context.
  * @param ctx - a context with the Host spine and Workspace registry mounted.
  * @param defaults - host routing and project-directory defaults.
@@ -1189,6 +1402,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     ?? DEFAULT_SESSION_LOG_COMPRESSION_LEVEL
   const coldBlankProbeMaxBytes = defaults.coldBlankProbeMaxBytes
     ?? DEFAULT_COLD_BLANK_PROBE_MAX_BYTES
+  const orgRegistryPath = defaults.orgRegistryPath ?? dshHomePath('org', 'registry.yml')
+  const orgProfileName = defaults.orgProfileName ?? DEFAULT_ORG_PROFILE_NAME
+  const orgProfileDir = defaults.orgProfileDir ?? resolveProfileDir(orgProfileName)
   /** The seed model each create/resume declares; re-read so it never goes stale. */
   const agentOptions = (): AgentOptions => {
     const { provider, model } = defaults.defaultModelSelection()
@@ -1430,6 +1646,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       try {
         const inspected = await inspectServable(sessionId)
         followTailer.start(sessionId, inspected.meta, inspected.events)
+        await attachHeadlessSessionToWorkspace(sessionId, inspected.meta)
       } catch {
         // Not a session this host can serve (another project's bucket, or a
         // log mid-creation). The next tick re-tries at no cost.
@@ -1712,6 +1929,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     if (owner !== undefined) {
       const inspected = await inspectServable(sessionId)
       followTailer.start(sessionId, inspected.meta, inspected.events)
+      await attachHeadlessSessionToWorkspace(sessionId, inspected.meta)
       return { kind: 'detached', header: inspected.meta, events: inspected.events }
     }
     // Defensive and idempotent: the tailer also self-stops once ITS OWN
@@ -1911,6 +2129,49 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   }
 
   /**
+   * Attach a headless-owned session to its workspace the moment this host
+   * learns of it, instead of leaving it ungrouped until the next time the
+   * WorkspaceRegistry service opens (host restart).
+   *
+   * A `dsh --profile headless [--session-name ...]` run is an independent
+   * process that never calls `session.create` — nothing else ever gives it
+   * the eager `ensureWorkspace`/`attachSession` pair a UI-created session
+   * gets. The two call sites below (the follow-tail sweep and a cold
+   * `history()` read) are the only places this host discovers such a session
+   * at all, so they are "creation" from this host's point of view.
+   *
+   * Reuses `ensureWorkspace` and `Workspace#attachSession` — the same
+   * idempotent primitives `session.create` already uses — so there is one
+   * attach code path, not two. Both are safe to call repeatedly and safe to
+   * race against the restart-time `attachKnownSessions` reconciliation: an
+   * existing workspace is resolved rather than recreated, and an already
+   * accounted session is left alone.
+   * @param sessionId - the discovered session's identity.
+   * @param header - its persisted header, read for the cwd to attach by.
+   */
+  async function attachHeadlessSessionToWorkspace(sessionId: SessionId, header: SessionHeader): Promise<void> {
+    const workspaceRegistry = ctx.get('workspaceRegistry')
+    if (workspaceRegistry === undefined) return // this deployment composes no Workspace surface
+    if (header.cwd === undefined) {
+      ctx.logger.error(
+        `follow-tail: session "${sessionId}" cannot be attached to a workspace: its stored header carries no cwd`,
+      )
+      return
+    }
+    try {
+      const { workspace } = await ensureWorkspace(header.cwd)
+      await workspace.attachSession(sessionId)
+    } catch (error: unknown) {
+      // Never a silent skip: an unresolvable cwd or a write failure here
+      // means the session stays ungrouped, which is exactly the defect this
+      // function exists to close, so it must be visible rather than swallowed.
+      ctx.logger.error(
+        `follow-tail: session "${sessionId}" (cwd "${header.cwd}") could not be attached to its workspace: ${String(error)}`,
+      )
+    }
+  }
+
+  /**
    * Build the session.list baseline shared by listing and search visibility.
    * Attached sessions come from memory; servable cold sessions merge from
    * persistence, and the final order is newest-first.
@@ -1921,7 +2182,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       const agent = ctx.agents.get(session.id)
       const projections = listProjectionsFor(ctx, session.header, session)
       return {
-        ...summarize(session, agent?.status === 'running'),
+        ...summarize(session, agent?.status === 'running', agent !== undefined),
         ...projections === undefined ? {} : { projections },
       }
     }
@@ -2837,6 +3098,119 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         agent.cancel({ kind: 'user' }, { keepInbox: true })
         return Promise.resolve(ok(request, { accepted: true as const }))
       },
+
+      async stopTree(request) {
+        const { sessionId } = request.payload
+        const agent = ctx.agents.get(sessionId)
+        // Absent from the live registry is an accepted no-op — a stop racing
+        // natural completion, a repeated click, or an already-cold session
+        // must never read as an error the way `session.cancel` does.
+        if (agent === undefined) {
+          return ok(request, { ownTurnStopped: false, descendants: 'ok' as const })
+        }
+        let ownTurnStopped: boolean
+        if (hasSubagentOwner(agent.session, agent)) {
+          // `cancel` refuses subagent ownership outright; stopping a
+          // session-backed subagent's own turn goes through the interrupt
+          // primitive that already authorizes against its recorded parent.
+          const parentSessionId = agent.session.header.parentSession
+          if (parentSessionId === undefined) {
+            return err(request, {
+              code: 'internal',
+              message: `session "${sessionId}" is subagent-owned but its header records no parent session`,
+              details: {},
+            })
+          }
+          try {
+            ownTurnStopped = ctx.subagents.interrupt(sessionId, { kind: 'user', parentSessionId })
+          } catch (error: unknown) {
+            return err(request, {
+              code: 'internal',
+              message: `stopping the subagent-owned turn for session "${sessionId}" failed: ${errorChain(error)}`,
+              details: {},
+            })
+          }
+        } else {
+          ownTurnStopped = agent.cancel({ kind: 'user' }, { keepInbox: true })
+        }
+        // Always drain descendants, whichever branch stopped the node's own
+        // turn: the cascade this RPC exists to provide is the descendant
+        // teardown, not just the one node's cancel.
+        return ok(request, {
+          ownTurnStopped,
+          descendants: await drainDescendantsResult(ctx, [agent]),
+        })
+      },
+
+      async stopAll(request) {
+        // Session-backed subagents are never roots here: they stop as
+        // descendants of the top-level session that owns them, drained below.
+        const roots = ctx.sessions.list()
+          .filter(session => session.header.origin !== 'subagent')
+          .map(session => ctx.agents.get(session.id))
+          .filter((agent): agent is Agent => agent !== undefined)
+        // Cancel every root regardless of what it reports — the count below
+        // is about honest reporting, not about skipping the cancel call for
+        // a root this loop guesses is already idle.
+        let stoppedCount = 0
+        for (const agent of roots) {
+          if (agent.cancel({ kind: 'user' }, { keepInbox: true })) stoppedCount += 1
+        }
+        // One shared drain across every root: the primitive publishes its
+        // admission cutoff for all roots before its first await and merges
+        // converging teardowns, which N separate calls would not.
+        return ok(request, {
+          stoppedCount,
+          descendants: await drainDescendantsResult(ctx, roots),
+        })
+      },
+
+      async sendAll(request) {
+        // Same root selection as stopAll: session-backed subagents are never
+        // targeted directly here — reaching one means steering the
+        // top-level session that owns it.
+        const roots = ctx.sessions.list()
+          .filter(session => session.header.origin !== 'subagent')
+          .map(session => ctx.agents.get(session.id))
+          .filter((agent): agent is Agent => agent !== undefined)
+        let durable: ContentBlock[]
+        try {
+          durable = await durablePromptContent(ctx, request.payload.content)
+        } catch (error: unknown) {
+          if (error instanceof AttachmentError) {
+            return err(request, {
+              code: 'attachment-error',
+              message: error.message,
+              details: { reason: error.code },
+            })
+          }
+          return err(request, {
+            code: 'internal',
+            message: `sendAll content admission failed: ${errorChain(error)}`,
+            details: {},
+          })
+        }
+        // Steer every root independently: one throw (an agent disposing
+        // between root selection and delivery) must never stop the
+        // broadcast from reaching every other seat, and must never be
+        // silently folded into a bare success either — a partial send that
+        // reports "sent" is exactly the defect this epic exists to remove.
+        let sentCount = 0
+        const failures: string[] = []
+        for (const agent of roots) {
+          const source: MessageSource = { kind: 'user', rpcId: request.rpcId }
+          try {
+            agent.steer(createUserMessage({ content: durable, source }))
+            sentCount += 1
+          } catch (error: unknown) {
+            failures.push(`${agent.id}: ${errorChain(error)}`)
+          }
+        }
+        return ok(request, {
+          sentCount,
+          result: failures.length === 0 ? 'ok' as const : { failed: failures.join('; ') },
+        })
+      },
     },
 
     subagents: {
@@ -3174,6 +3548,27 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         } catch (error: unknown) {
           return err(request, worktreeRefusal(error, { op: 'worktree.remove', ref }))
         }
+      },
+    },
+
+    // Read-only projection: every field is a fresh, independent read (see
+    // the org.ts module header). No mutation, no caching — the drift report
+    // this exists to serve is only trustworthy computed from what the files
+    // say right now.
+    org: {
+      async get(request) {
+        const [registry, patches] = await Promise.all([
+          readOrgRegistryResult(orgRegistryPath),
+          readOrgProfilePatches(orgProfileDir),
+        ])
+        const mailboxBridge = patches.ok
+          ? findOrgMountAddresses(patches.patches, ORG_MAILBOX_BRIDGE_MOUNT_ID)
+          : { ok: false as const, reason: patches.reason }
+        const toolMailbox = patches.ok
+          ? findOrgMountAddresses(patches.patches, ORG_TOOL_MAILBOX_MOUNT_ID)
+          : { ok: false as const, reason: patches.reason }
+        const drift = computeOrgDrift(registry, mailboxBridge, toolMailbox)
+        return ok(request, { profile: orgProfileName, registry, mailboxBridge, toolMailbox, drift })
       },
     },
 

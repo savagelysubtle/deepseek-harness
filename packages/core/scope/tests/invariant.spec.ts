@@ -68,6 +68,7 @@ describe('scoped-dispatch invariants', () => {
       ],
       'agent/turn-stopping': [{ agent, turn: 1, signal }],
       'agent/error': [{ agent, turn: 1, step: 0, error: new Error('x') }],
+      'agent/loop-aborted': [{ agent, turn: 1, step: 1, channel: 'reasoning', reason: 'r', fragment: 'f' }],
     } satisfies { [K in AgentEventName]: EventArgs<K> }
     const rows: Array<[string, unknown[]]> = [
       ...Object.entries(agentRows),

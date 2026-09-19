@@ -147,17 +147,19 @@ describe('workspace browser rows', () => {
     expect(onOpen).toHaveBeenCalledWith(node.id)
   })
 
+  /** Render one session row over the default node, varying only what a test cares about. */
+  const renderRow = (over: Partial<SessionNode>) => render(
+    <SessionNodeItem
+      node={{
+        id: sid('s1'), title: 'One', blank: false, running: false,
+        runningSubagentCount: 0, completed: false, updatedAt: 0, ...over,
+      }}
+      currentId={undefined} now={0} onOpen={vi.fn()}
+      onRename={vi.fn()} onFork={vi.fn()} onArchive={vi.fn()} t={t}
+    />,
+  )
+
   it('shows the green done dot only on a finished, unviewed session (live activity wins the slot)', () => {
-    const renderRow = (over: Partial<SessionNode>) => render(
-      <SessionNodeItem
-        node={{
-          id: sid('s1'), title: 'One', blank: false, running: false,
-          runningSubagentCount: 0, completed: false, updatedAt: 0, ...over,
-        }}
-        currentId={undefined} now={0} onOpen={vi.fn()}
-        onRename={vi.fn()} onFork={vi.fn()} onArchive={vi.fn()} t={t}
-      />,
-    )
     const stateDot = (view: ReturnType<typeof renderRow>) =>
       view.container.querySelector('[data-state]')
     // No completion reminder, not running: no state dot at all.
@@ -177,6 +179,31 @@ describe('workspace browser rows', () => {
     const delegated = renderRow({ completed: true, runningSubagentCount: 1 })
     expect(delegated.container.querySelector('[data-state="ongoing"]')).not.toBeNull()
     expect(delegated.container.querySelector('[data-state="done"]')).toBeNull()
+  })
+
+  it('SWD-120: renders a stop, a crash, and an error with distinct dot colors and screen-reader text', () => {
+
+    const stopped = renderRow({ endStatus: 'stopped' })
+    expect(stopped.container.querySelector('[data-state="done"]')).not.toBeNull()
+    expect(stopped.container.textContent).toContain('已停止')
+    stopped.unmount()
+
+    const interrupted = renderRow({ endStatus: 'interrupted' })
+    expect(interrupted.container.querySelector('[data-state="warning"]')).not.toBeNull()
+    expect(interrupted.container.textContent).toContain('已中断')
+    // A crash must never render the same text a deliberate stop does.
+    expect(interrupted.container.textContent).not.toContain('已停止')
+    interrupted.unmount()
+
+    const errored = renderRow({ endStatus: 'error' })
+    expect(errored.container.querySelector('[data-state="error"]')).not.toBeNull()
+    expect(errored.container.textContent).toContain('运行失败')
+    errored.unmount()
+
+    // Absent endStatus keeps today's completed/idle rendering unchanged.
+    const stillCompleted = renderRow({ completed: true })
+    expect(stillCompleted.container.querySelector('[data-state="done"]')).not.toBeNull()
+    expect(stillCompleted.container.textContent).toContain('已完成')
   })
 
   it('shows descendant activity without describing an idle parent as running', () => {

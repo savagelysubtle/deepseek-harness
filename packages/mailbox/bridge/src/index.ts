@@ -79,6 +79,17 @@ import z from '@deepseek-ai/schemastery'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentHandle, AgentSetup, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
+// Type-only: the bridge does not depend on the tools package at runtime, but
+// this augments `Context` with `.tools` so `agentCtx.tools` type-checks
+// inside the setup callbacks below — the same bare type-only import idiom
+// used by the API proxy, agent-loop, agent-tool-presentation, and mcp-client.
+import type {} from '@deepseek-ai/dsh-tools'
+// Type-only, same idiom: augments `Context` with `.subagents` so the
+// idle-retire check below (`ctx.get('subagents')?.hasLiveDescendants(...)`)
+// type-checks. A composition without the subagent runtime mounted resolves
+// this to `undefined` at runtime, which the `?? false` fallback treats as
+// "no descendants" — never a missing-service crash.
+import type {} from '@deepseek-ai/dsh-subagent'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import {
   acquireSessionLock,
@@ -89,20 +100,25 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import {
   findOrgRegistryRoute,
   loadOrgRegistry,
+  loadRegistrySeatNames,
   orgRegistryAllows,
   parseMailboxAddress,
   resolveSeatCwd,
   resolveSeatSessionId,
+  unknownServedSeats,
+  unknownServedSeatsWarning,
 } from '@deepseek-ai/dsh-mailbox'
 import type { OrgRegistry, OrgRegistrySeat } from '@deepseek-ai/dsh-mailbox'
 import type { MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxMessageId } from '@deepseek-ai/dsh-mailbox'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
-import { admittedOutcome, refusalUserMessage, relayUserMessage } from './delivery.ts'
+import { admittedOutcome, refusalUserMessage, relayUserMessage, seatToolRestrictionUserMessage } from './delivery.ts'
 import type { SenderClass } from './delivery.ts'
+import { applySeatToolRestriction } from './seat-tool-restriction.ts'
+import type { SeatToolRestrictionOutcome, SeatToolRestrictionRule } from './seat-tool-restriction.ts'
 
-export { admittedOutcome, HEADLESS_BACKLOG_LIMIT, HEADLESS_BACKLOG_STALE_CLAIM_MS, messageEnvelope, refusalSource, refusalText, refusalUserMessage, relaySource, relayText, relayUserMessage } from './delivery.ts'
-export type { SenderClass } from './delivery.ts'
+export { admittedOutcome, HEADLESS_BACKLOG_LIMIT, HEADLESS_BACKLOG_STALE_CLAIM_MS, messageEnvelope, refusalSource, refusalText, refusalUserMessage, relaySource, relayText, relayUserMessage, seatToolRestrictionSource, seatToolRestrictionText, seatToolRestrictionUserMessage } from './delivery.ts'
+export type { SenderClass, SeatToolRestrictionNoticeSource } from './delivery.ts'
 
 /** Default pause between drain cycles. */
 export const DEFAULT_POLL_INTERVAL_MS = 5_000
@@ -136,8 +152,8 @@ export const DEFAULT_DEPTH_WINDOW_MS = 60_000
 /** Default window within which a substantially identical repeat is suppressed. */
 export const DEFAULT_REPEAT_WINDOW_MS = 300_000
 
-/** Default maximum admitted deliveries one `traceId` chain may carry. */
-export const DEFAULT_MAX_HOPS_PER_TRACE = 8
+/** Default maximum admitted deliveries one `traceId` chain may carry per UTC day. */
+export const DEFAULT_MAX_HOPS_PER_TRACE = 50
 
 /**
  * Recent admission fingerprints remembered per sender→recipient pair for
@@ -146,12 +162,40 @@ export const DEFAULT_MAX_HOPS_PER_TRACE = 8
  * messages in one window the depth cap is the backstop.
  */
 const RECENT_FINGERPRINTS_PER_PAIR = 8
-/** One resident seat: its agent handle plus the residency's release path. */
+/** Admitted-delivery count for one trace chain, stamped with its UTC day. */
+interface HopCount {
+  /** Admissions recorded on the chain so far today. */
+  count: number
+  /** UTC calendar day (`YYYY-MM-DD`) the count was last recorded on. */
+  utcDay: string
+}
+
+/** One resident seat: its agent handle plus the residency's release paths. */
 export interface ResidentSeat {
-  /** Dispose the agent and release the per-name lock (idle expiry or replacement). */
+  /**
+   * Dispose the agent and release its per-session lock immediately, with no
+   * deferral for live background work. This is host teardown's own path (see
+   * `apply`'s effect disposer): a process that is exiting cannot hang on a
+   * runaway subagent, so it bypasses {@link ResidentSeat.supersede}'s drain
+   * entirely — the one deliberate exception to the founder's "nothing here
+   * kills background work" ruling.
+   */
   release(): void
   /** Reset the idle timer after a delivery keeps the seat in use. */
   keepAlive(): void
+  /**
+   * This resident's name has just been claimed by a fresh resident (a seat
+   * rename: the same name now routes to a different session). Per the
+   * founder's ruling, nothing here stops, cancels, or drains this resident's
+   * background work: it stays alive — unreachable under `name` from this
+   * point on, since the caller has already overwritten (or is about to
+   * overwrite) the map entry — until it has no live continuable descendant
+   * left, then disposes itself and releases its OWN per-session lock (never
+   * the new resident's; locks are keyed by session id, not by name, so the
+   * two never contend). A resident with no live descendant at the moment its
+   * name is claimed disposes immediately — the common case is unchanged.
+   */
+  supersede(): void
 }
 
 
@@ -248,15 +292,16 @@ export interface Config {
    */
   readonly repeatWindowMs?: number
   /**
-   * Maximum admitted deliveries one `traceId` chain may carry before further
-   * mail on that trace is refused. The trace id is the correlation field
-   * that rides the message producer → delivery → bounce (the routing-failure
-   * bounce path preserves it), so a relayed chain terminates instead of
-   * hopping forever. The counter is per mounted bridge and counts hops as
-   * they are ADMITTED — a queued burst on one trace is judged per hop, not
-   * by the backlog ahead of it — and resets on host restart. Conversation
-   * mail that does not thread a trace id is bounded by the depth and repeat
-   * guards instead.
+   * Maximum admitted deliveries one `traceId` chain may carry per UTC day
+   * before further mail on that trace is refused. The trace id is the
+   * correlation field that rides the message producer → delivery → bounce
+   * (the routing-failure bounce path preserves it), so a relayed chain
+   * terminates instead of hopping forever. The counter is per mounted
+   * bridge and counts hops as they are ADMITTED — a queued burst on one
+   * trace is judged per hop, not by the backlog ahead of it — and resets
+   * at 00:00 UTC and on host restart, so a chronic but legitimate relay
+   * thread never locks permanently. Conversation mail that does not thread
+   * a trace id is bounded by the depth and repeat guards instead.
    */
   readonly maxHopsPerTrace?: number
   /**
@@ -444,7 +489,7 @@ const MAX_TRACED_CHAINS = 1024
 export class LoopGuards {
   private readonly depth = new Map<string, number[]>()
   private readonly repeats = new Map<string, StoredFingerprint[]>()
-  private readonly hops = new Map<string, number>()
+  private readonly hops = new Map<string, HopCount>()
 
   /**
    * @param limits - the resolved guard limits this instance enforces.
@@ -474,7 +519,7 @@ export class LoopGuards {
     if (depth !== undefined) return depth
     const repeat = this.repeatRefusal(lease, at, fingerprintOf(lease, rendered))
     if (repeat !== undefined) return repeat
-    return this.hopRefusal(lease)
+    return this.hopRefusal(lease, at)
   }
 
   /**
@@ -501,10 +546,13 @@ export class LoopGuards {
     const { traceId } = lease.message
     if (traceId === undefined) return
     // Refresh-on-touch LRU: re-recording a chain moves it to the newest
-    // slot, so eviction takes the least recently used chain.
-    const carried = this.hops.get(traceId) ?? 0
+    // slot, so eviction takes the least recently used chain. The count
+    // restarts when the stored UTC day is not today.
+    const today = utcDayOf(at)
+    const stored = this.hops.get(traceId)
+    const count = stored !== undefined && stored.utcDay === today ? stored.count + 1 : 1
     this.hops.delete(traceId)
-    this.hops.set(traceId, carried + 1)
+    this.hops.set(traceId, { count, utcDay: today })
     while (this.hops.size > this.limits.maxTracedChains) {
       // The loop condition guarantees at least one entry; Map iteration
       // order is insertion order, so the first key is the oldest touch.
@@ -548,19 +596,33 @@ export class LoopGuards {
 
   /**
    * The hop counter: how many deliveries this bridge has already admitted
-   * on the lease's trace chain. A message without a trace id starts no
-   * chain and is not hop-counted; the depth and repeat guards bound it
-   * instead.
+   * on the lease's trace chain TODAY (UTC). A message without a trace id
+   * starts no chain and is not hop-counted; the depth and repeat guards
+   * bound it instead. The count carries a UTC date stamp and reads as zero
+   * once the day has turned, so a chronic but legitimate relay thread is
+   * bounded per day, never permanently.
    * @param lease - the claimed lease under judgment.
+   * @param at - judgment time, epoch milliseconds.
    * @returns the refusal reason, or undefined when under the cap.
    */
-  private hopRefusal(lease: MailboxLease): string | undefined {
+  private hopRefusal(lease: MailboxLease, at: number): string | undefined {
     const { traceId } = lease.message
     if (traceId === undefined) return undefined
-    const carried = this.hops.get(traceId) ?? 0
+    const stored = this.hops.get(traceId)
+    const carried = stored !== undefined && stored.utcDay === utcDayOf(at) ? stored.count : 0
     if (carried < this.limits.maxHopsPerTrace) return undefined
-    return `hop-limit-exceeded: trace "${traceId}" already carried ${carried} admitted hops (cap ${this.limits.maxHopsPerTrace})`
+    return `hop-limit-exceeded: trace "${traceId}" already carried ${carried} admitted hops today (cap ${this.limits.maxHopsPerTrace}, resets daily at 00:00 UTC)`
   }
+}
+
+/**
+ * The UTC calendar day an epoch-millisecond instant falls on, the granularity
+ * the hop counter resets at.
+ * @param at - instant, epoch milliseconds.
+ * @returns `YYYY-MM-DD` in UTC.
+ */
+function utcDayOf(at: number): string {
+  return new Date(at).toISOString().slice(0, 10)
 }
 
 /**
@@ -612,15 +674,36 @@ function pairKey(lease: MailboxLease): string {
  * admission is immediate; the caller settles.
  * @param agent - the live agent addressed by the lease.
  * @param message - the rendered delivery turn.
+ * @returns `{delivered: true}` once either channel admits the message.
+ *   `{delivered: false, reason}` only when BOTH refuse — most notably when
+ *   the agent has been torn down in the exact window between the caller's
+ *   registry lookup and this call (host-owned disposal racing admission:
+ *   the registry can still hand back an entry for a session mid-disposal),
+ *   but the shape covers any cause the fallback itself reports, carrying
+ *   its actual message rather than assuming why. Either way there is
+ *   nothing left to queue into. The caller settles this as a terminal
+ *   routing failure via {@link failTerminal}, exactly like any other
+ *   post-admission delivery failure — never a silent drop.
  */
-function deliverToLive(agent: Agent, message: UserMessage): void {
+function deliverToLive(
+  agent: Agent,
+  message: UserMessage,
+): { delivered: true } | { delivered: false; reason: string } {
   try {
     agent.steer(message)
   } catch {
-    // A boundary refused the interruption between admission and steer;
-    // an ordinary queued turn still admits the message this cycle.
-    agent.followup(message)
+    // A boundary refused the interruption between admission and steer; an
+    // ordinary queued turn still admits the message this cycle -- unless
+    // the fallback itself now refuses (most notably: the agent has since
+    // been disposed in this same window), in which case delivery has
+    // genuinely failed and there is nothing left to queue into.
+    try {
+      agent.followup(message)
+    } catch (error) {
+      return { delivered: false, reason: error instanceof Error ? error.message : String(error) }
+    }
   }
+  return { delivered: true }
 }
 
 /**
@@ -747,7 +830,7 @@ async function injectRefusalNotice(ctx: Context, spec: BridgeSpec, lease: Mailbo
       // own path.
       return
     }
-    handle = await resumeTarget(ctx, sessionId)
+    handle = await resumeTarget(ctx, spec, sessionId, from)
     // Resume only — no followup, no steer: the dormant sender is rebuilt,
     // receives the durable node, and is released without ever driving a turn.
     handle.agent.session.append('user/message', refusalUserMessage(lease, reason), { surfaceOp: 'append' })
@@ -857,7 +940,19 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
   // human input and mail converge on one agent with no fence in between.
   const live = ctx.agents.get(sessionId)
   if (live !== undefined) {
-    deliverToLive(live, relayUserMessage(lease, senderClass))
+    const outcome = deliverToLive(live, relayUserMessage(lease, senderClass))
+    if (!outcome.delivered) {
+      // The registry still held this session, but delivery itself refused on
+      // both channels -- most commonly because the agent had already been
+      // torn down by the time delivery reached it (host-owned disposal racing
+      // this lookup). A real, terminal delivery failure, not a silent drop.
+      // This is post-admission, so it is recorded the same way any other
+      // routing failure is, not as an admission refusal (see `refuse` above):
+      // settle failed and bounce, exactly per the module's own "a drop is
+      // never silent, and never mysterious."
+      await failTerminal(ctx, lease, outcome.reason)
+      return { kind: 'failed', reason: outcome.reason }
+    }
     await mailbox.settle(lease.leaseRef, admittedOutcome(lease))
     // Guard memory records the admission only now that it actually happened:
     // a lease settled `pending` below is re-claimed and re-judged, and must
@@ -889,8 +984,8 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
     }
     const persisted = (await persistence.list()).some(header => header.id === sessionId)
     const handle = persisted
-      ? await resumeTarget(ctx, sessionId)
-      : await createTarget(ctx, sessionId, await seatCwd(spec, name))
+      ? await resumeTarget(ctx, spec, sessionId, name)
+      : await createTarget(ctx, spec, sessionId, await seatCwd(spec, name), name)
     // A freshly resident agent takes the delivery as an ordinary FIFO turn;
     // steering a cold resume would skip reconstructing prior context.
     handle.agent.followup(relayUserMessage(lease, senderClass))
@@ -914,15 +1009,158 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
     return { kind: 'done' }
   } catch (error) {
     lock.release()
+    // A muted recipient never got composed at all (see `SeatMutedToolsError`
+    // and `composeSeatAgent`) — this is the ONE place both `resumeTarget` and
+    // `createTarget` funnel through, and the only place with the claimed
+    // lease in scope to route the failure through the real refusal path
+    // instead of the drain loop's generic bounce. The warn and the bus event
+    // fire here, describing WHY the refusal happened, before `refuse` itself
+    // settles the row, warns again with the generic admission-refusal
+    // framing, reports `mailbox/refused`, and notices the SENDER.
+    if (error instanceof SeatMutedToolsError) {
+      ctx.logger.warn(`mailbox-bridge: seat "${error.seatName}" tool restriction leaves it with NO tools at all — it cannot report this itself; refusing mail to it instead of composing it`)
+      emitSeatToolsRestricted(ctx, error.seatName, error.outcome)
+      return refuse(ctx, spec, lease, `seat-tools-muted: seat "${name}"'s configured tool restriction leaves it with no tools at all and cannot receive mail`)
+    }
     throw error
   }
+}
+
+/**
+ * Upper bound on how often the idle-retire timer rechecks a blocked seat for
+ * live continuable descendants, once it has any. Recheck is a synchronous
+ * in-memory scan (see `SubagentRuntime.hasLiveDescendants`), so it costs
+ * nothing to run far more often than `idleMs` itself: bounding it below
+ * `idleMs` (`Math.min`) is what keeps a real deployment's 10-minute default
+ * from leaving a finished seat pinned open for up to 10 more minutes before
+ * anyone notices its last descendant actually settled.
+ */
+const DESCENDANT_RECHECK_MS = 30_000
+
+/**
+ * Recheck ticks between repeated "still held open" log lines once a seat is
+ * blocked on live descendants. The first tick always logs (a fence must
+ * never be silent at the moment it starts); after that, logging every tick
+ * would turn one long-running background task into one log line per recheck
+ * interval. Expressed in ticks rather than wall-clock time so the same
+ * constant means "N rechecks of being blocked" whether `idleMs` is a real
+ * deployment's 10 minutes or a test's few milliseconds.
+ */
+const DESCENDANT_REANNOUNCE_TICKS = 20
+
+/**
+ * Blocked ticks past which a still-held seat's log escalates from `warn` to
+ * `error` and its wording changes from routine to unusual. A seat held open
+ * by legitimate background work is expected and must not read as an
+ * incident; a seat still held after this many rechecks (roughly an hour, at
+ * the recheck cap above) is unusual enough that a founder watching the log
+ * should be able to tell the difference without reading source — this is the
+ * legibility the module owes for choosing never to time out or kill the
+ * underlying work itself.
+ */
+const DESCENDANT_ESCALATE_TICKS = 120
+
+/**
+ * Decide whether one blocked recheck should log, and how — shared by the
+ * idle-retire path and the rename-supersede path (see {@link retainResident}
+ * and {@link ResidentSeat.supersede}) so a founder reading the log sees one
+ * consistent cadence for "why is this still running" regardless of which
+ * path produced it. Pulled out as a pure function so the reannounce and
+ * escalate thresholds are unit-testable without waiting on real timers.
+ * @param name - the seat's address (its session name). For `reason:
+ *   'superseded'` this is the name the resident USED TO answer to, not one it
+ *   can still be reached under.
+ * @param sessionId - the resident agent's durable session id.
+ * @param blockedTicks - consecutive recheck ticks this resident has spent
+ *   blocked on a live continuable descendant, counting the current one.
+ * @param reason - `'idle'` (the resident's own idle timer elapsed) or
+ *   `'superseded'` (its name was just claimed by a different session while it
+ *   still had live descendants) — the two wordings a founder needs to tell
+ *   apart "this seat is unusually busy" from "this is an old conversation
+ *   finishing up after a rename." Defaults to `'idle'` for existing callers.
+ * @returns the log level and message for this tick, or `undefined` when this
+ *   tick reannounces nothing.
+ */
+function describeBlockedResident(
+  name: string,
+  sessionId: SessionId,
+  blockedTicks: number,
+  reason: 'idle' | 'superseded' = 'idle',
+): { readonly escalate: boolean; readonly message: string } | undefined {
+  if (blockedTicks !== 1 && blockedTicks % DESCENDANT_REANNOUNCE_TICKS !== 0) return undefined
+  const escalate = blockedTicks >= DESCENDANT_ESCALATE_TICKS
+  const message = reason === 'superseded'
+    ? `mailbox-bridge: seat "${name}"'s previous conversation (${sessionId}) is being kept alive after the name moved to a new session — `
+      + 'live background subagents are still running on it, so it has not been disposed yet'
+      + (escalate
+        ? '; this has now run far longer than one idle window is meant to mean — '
+          + 'check its background work if this conversation should not still be running'
+        : '')
+    : `mailbox-bridge: seat "${name}" (${sessionId}) is staying resident past its idle window — `
+      + 'live background subagents are still running, so it is being kept open rather than retired'
+      + (escalate
+        ? '; this has now run far longer than one idle window is meant to mean — '
+          + 'check its background work if this seat should not still be running'
+        : '')
+  return { escalate, message }
+}
+
+/**
+ * Flush the resident's session, dispose its agent, and release its own
+ * per-session lock — the disposal tail shared by every teardown path
+ * (idle retirement, `release()`'s immediate bypass, and supersession).
+ * Neither caller can await this (a fired timer and a synchronous `release()`
+ * call are both void contexts), so a flush failure is logged rather than
+ * swallowed; disposal still runs regardless, so the lock never waits on a
+ * dead resident.
+ * @param ctx - plugin context carrying the session store service.
+ * @param name - the seat name this resident was retained under, for the log.
+ * @param handle - the resident agent handle being torn down.
+ * @param lock - the resident's own per-session lock.
+ */
+function flushAndDispose(ctx: Context, name: string, handle: AgentHandle, lock: NamedSessionLock): void {
+  const sessions = ctx.get('sessions')
+  void (sessions === undefined
+    ? handle.dispose()
+    : sessions.flush(handle.agent.session).catch((error: unknown) => {
+      ctx.logger.warn(`mailbox-bridge: final flush for retiring resident "${name}" (${handle.agent.session.id}) failed: ${String(error)}`)
+    }).then(() => handle.dispose()))
+  lock.release()
+}
+
+/**
+ * Log one blocked-recheck announcement at the right level, or do nothing —
+ * shared by the idle-retire and supersede recheck loops below so the
+ * warn/error dispatch lives in exactly one place.
+ * @param ctx - plugin context carrying the logger.
+ * @param announcement - {@link describeBlockedResident}'s verdict for this
+ *   tick, or `undefined` when this tick reannounces nothing.
+ */
+function logBlockedAnnouncement(
+  ctx: Context,
+  announcement: { readonly escalate: boolean; readonly message: string } | undefined,
+): void {
+  if (announcement === undefined) return
+  if (announcement.escalate) ctx.logger.error(announcement.message)
+  else ctx.logger.warn(announcement.message)
 }
 
 /**
  * Keep one woken agent resident under this bridge's pen: the per-name lock
  * stays held (stray headless runs refuse cleanly), the agent stays registered
  * so the operator's composer and later mail steer it in place, and an idle
- * timer flushes, disposes the agent, and releases the lock after `idleMs`.
+ * timer flushes, disposes the agent, and releases the lock after `idleMs` —
+ * unless the seat still has a live continuable descendant, in which case the
+ * founder's ruling applies: nothing here stops, cancels, or drains that
+ * descendant (that would silently orphan or kill work the seat's own
+ * conversation may still depend on), so the timer defers instead of retiring.
+ *
+ * A prior resident already registered under `name` (this same seat, renamed
+ * to a fresh session id) is superseded, not released: see
+ * {@link ResidentSeat.supersede}'s own doc for the founder's ruling this
+ * carries out. The old resident is never reachable under `name` again — this
+ * function always takes over the map slot regardless of what the previous
+ * resident is still doing — so its own disposal proceeds independently.
  * @param ctx - plugin context carrying the session store service.
  * @param spec - resolved serving parameters carrying the residency map.
  * @param name - the seat's address (its session name).
@@ -938,30 +1176,90 @@ function retainResident(
   lock: NamedSessionLock,
   idleMs: number,
 ): void {
+  // The name belongs to THIS resident from here on; whatever the previous
+  // occupant is still finishing runs its own independent course (see
+  // `supersede()` below) and never touches this map entry again.
   const previous = spec.residents.get(name)
-  previous?.release()
+  previous?.supersede()
   let timer: ReturnType<typeof setTimeout> | undefined
+  // Consecutive recheck ticks spent blocked on a live descendant; reset
+  // whenever a real delivery proves the seat is in ordinary use again (idle
+  // path), or when this resident is itself superseded and starts a fresh
+  // count for the new reason (see `supersede()`).
+  let blockedTicks = 0
+  // The unconditional teardown for THIS resident's own current occupancy of
+  // `spec.residents`: flush, dispose, release the lock, and only then drop
+  // the map entry — guarded by identity so a resident that has since been
+  // superseded (its map slot handed to a fresh generation) can never delete
+  // whatever a later resident put there. `release()` calls this directly and
+  // unconditionally: host teardown must not hang a process exit on a runaway
+  // subagent. `retire()` below falls through to it once no live descendant
+  // remains. This is NOT the rename case any more — a name reassigned to a
+  // fresh session goes through `supersede()`, which shares the flush/dispose/
+  // release tail (`flushAndDispose`) but deliberately never touches the map.
+  const hardRetire = (): void => {
+    if (spec.residents.get(name) === resident) spec.residents.delete(name)
+    flushAndDispose(ctx, name, handle, lock)
+  }
+  // The idle-driven retire: a seat with a live continuable descendant does
+  // not retire — the idle clock only starts once every descendant is gone.
+  // A manager-less composition (`ctx.get('subagents')` absent) has never
+  // materialized a descendant, so it falls straight through to `hardRetire`,
+  // exactly reproducing the pre-existing behavior for every deployment that
+  // does not mount the subagent runtime at all.
   const retire = (): void => {
-    spec.residents.delete(name)
-    const sessions = ctx.get('sessions')
-    // The timer/release caller cannot await this drain, so its failure is
-    // logged rather than swallowed; disposal still runs so the lock never
-    // waits on a dead resident.
-    void (sessions === undefined
-      ? handle.dispose()
-      : sessions.flush(handle.agent.session).catch((error: unknown) => {
-        ctx.logger.warn(`mailbox-bridge: final flush for retiring resident "${name}" (${handle.agent.session.id}) failed: ${String(error)}`)
-      }).then(() => handle.dispose()))
-    lock.release()
+    if (ctx.get('subagents')?.hasLiveDescendants(handle.agent) ?? false) {
+      blockedTicks += 1
+      // Never a silent fence: a founder watching the log must be able to
+      // learn why this seat has not gone away without reading source.
+      logBlockedAnnouncement(ctx, describeBlockedResident(name, handle.agent.session.id, blockedTicks, 'idle'))
+      timer = setTimeout(retire, Math.min(idleMs, DESCENDANT_RECHECK_MS))
+      timer.unref()
+      return
+    }
+    hardRetire()
+  }
+  // The supersede-driven drain: reruns the exact same live-descendant check
+  // and recheck cadence as `retire()` above (same constants, same
+  // `describeBlockedResident` cadence, same `logBlockedAnnouncement`), but
+  // its terminal action is `flushAndDispose` directly rather than
+  // `hardRetire` — this resident is no longer `spec.residents.get(name)` by
+  // the time anyone could look, so it must never touch that entry. Reuses
+  // this same closure's `timer`/`blockedTicks` rather than allocating fresh
+  // ones: once `supersede()` runs, nothing else in this closure (`arm`,
+  // `retire`, `keepAlive`) is ever invoked again, so there is no shared-state
+  // hazard in taking them over.
+  const retireSuperseded = (): void => {
+    if (ctx.get('subagents')?.hasLiveDescendants(handle.agent) ?? false) {
+      blockedTicks += 1
+      logBlockedAnnouncement(ctx, describeBlockedResident(name, handle.agent.session.id, blockedTicks, 'superseded'))
+      timer = setTimeout(retireSuperseded, Math.min(idleMs, DESCENDANT_RECHECK_MS))
+      timer.unref()
+      return
+    }
+    flushAndDispose(ctx, name, handle, lock)
   }
   const resident: ResidentSeat = {
     keepAlive(): void {
       if (timer !== undefined) clearTimeout(timer)
+      blockedTicks = 0
       arm()
     },
     release(): void {
       if (timer !== undefined) clearTimeout(timer)
-      retire()
+      hardRetire()
+    },
+    supersede(): void {
+      // Cancel whatever this resident's own machinery still has pending —
+      // its idle-arm wait, or an in-progress idle-retire recheck — before
+      // starting the independent supersede drain below. Without this, a
+      // stale `retire()` tick could still fire later and call `hardRetire`,
+      // which would delete the NEW resident's entry out from under it (by
+      // name, not by identity) even though `hardRetire`'s own identity guard
+      // exists precisely to stop that.
+      if (timer !== undefined) clearTimeout(timer)
+      blockedTicks = 0
+      retireSuperseded()
     },
   }
   const arm = (): void => {
@@ -1076,6 +1374,33 @@ async function seatCwd(spec: BridgeSpec, name: string): Promise<string> {
     )
   }
   return resolveSeatCwd(registry, name)
+}
+
+/**
+ * Resolve one seat's configured tool restriction from the org registry.
+ *
+ * A registry that will not load, or a name unknown to the roster, carries no
+ * restriction: unlike {@link seatCwd} this never throws and never provisions
+ * anything, it only widens or narrows a set of tools, so the safe default on
+ * either doubt is unrestricted — the same "applies to nobody by default"
+ * contract an absent `tools` field on a known seat already carries. Mirrors
+ * {@link seatSessionId}'s shape: same two parameters, same registry read.
+ * @param spec - resolved serving parameters carrying the registry path.
+ * @param name - the seat name (which is also its address).
+ * @returns the seat's configured rule, or undefined for no restriction.
+ */
+async function seatToolsRule(spec: BridgeSpec, name: string): Promise<SeatToolRestrictionRule | undefined> {
+  let registry: OrgRegistry
+  try {
+    registry = await cachedRegistry(spec.orgRegistryPath)
+  } catch {
+    // A registry that will not load cannot know any seat's restriction, and
+    // this is never the caller that should refuse for it — the registry
+    // health check upstream (`judgmentRegistry` in `deliverLease`) already
+    // owns that decision.
+    return undefined
+  }
+  return seatEntry(registry, name)?.tools
 }
 
 /**
@@ -1208,52 +1533,178 @@ async function senderClassFor(spec: BridgeSpec, from: string): Promise<SenderCla
 /**
  * Create the first session for a seat that has never run — the basic
  * wake-up: mail alone provisions the seat, no hire script required.
+ *
+ * Also installs the seat's configured tool restriction, when it has one: the
+ * rule is resolved from the registry before `setup` is defined (mirroring how
+ * the model selection above it is resolved), then applied inside `setup`
+ * against the real tool registry `setup` exposes — the same out-parameter
+ * idiom the model-selection install two lines above already uses, since
+ * `applySeatToolRestriction`'s outcome is only known once `setup` runs. A
+ * seat with no configured rule leaves the box empty and nothing changes for
+ * it: this wiring applies to nobody by default.
  * @param ctx - plugin context carrying the agent registry and default model.
+ * @param spec - resolved serving parameters carrying the registry path.
  * @param sessionId - the derived durable session id to create.
  * @param cwd - the seat's own project directory, from the org registry.
+ * @param name - the seat name (which is also its address), for its tool rule and attribution.
+ * @throws {@link SeatMutedToolsError} when the resolved tool rule leaves the
+ *   seat with no tools at all — caught in `deliverLease`, never here.
  */
 async function createTarget(
   ctx: Context,
+  spec: BridgeSpec,
   sessionId: ReturnType<typeof deriveNamedSessionId>,
   cwd: string,
+  name: string,
 ): Promise<AgentHandle> {
-  const defaultModel = ctx.get('agentDefaultModel')
-  if (defaultModel === undefined) {
-    throw new Error('mailbox-bridge: wake requires the default model-selection service')
-  }
-  const selection = defaultModel.currentSelection()
-  const agentOptions = { provider: selection.provider, model: selection.model }
-  const setup: AgentSetup = (agentCtx): void => {
-    const selected: ModelSelectionRef = { current: selection, assembled: undefined }
-    installModelSelection(agentCtx, selected)
-  }
   // The SEAT's directory, never `process.cwd()`. The host's cwd is wherever it
   // was launched from — systemd sets none, so it resolves to the home directory
   // — and the UI groups sessions by cwd. A seat provisioned with the host's cwd
   // is filed under a workspace nobody opens: the session is live and correct and
   // simply cannot be found. That is the "ghost session" class.
-  return ctx.agents.create({ sessionId, meta: { cwd }, agentOptions, setup })
+  return composeSeatAgent(ctx, spec, name, 'wake', (agentOptions, setup) =>
+    ctx.agents.create({ sessionId, meta: { cwd }, agentOptions, setup }))
 }
 
 /**
  * Cold-resume the dormant agent owning `sessionId`, composing the same model
  * selection path the host's direct runner uses. Missing model wiring fails
  * loud here rather than delivering a silently de-tuned turn.
+ *
+ * Also installs the seat's configured tool restriction on every resume, same
+ * as {@link createTarget} — a seat's tools must stay restricted across a cold
+ * resume, not only at its first creation, and this is the one path every
+ * resume goes through regardless of which caller resumed it (the drain's own
+ * wake, or a refusal notice resuming a dormant sender).
  * @param ctx - plugin context carrying the agent registry and default model.
+ * @param spec - resolved serving parameters carrying the registry path.
  * @param sessionId - the derived durable session id to resume.
+ * @param name - the seat name (which is also its address), for its tool rule and attribution.
+ * @throws {@link SeatMutedToolsError} when the resolved tool rule leaves the
+ *   seat with no tools at all. `deliverLease` catches it for the drain's own
+ *   wake path; `injectRefusalNotice`'s call (resuming a dormant SENDER to
+ *   notice it) already wraps this in a best-effort catch-all, so a sender
+ *   that happens to be muted itself degrades to "notice not logged" rather
+ *   than a second refusal.
  */
-async function resumeTarget(ctx: Context, sessionId: ReturnType<typeof deriveNamedSessionId>): Promise<AgentHandle> {
+async function resumeTarget(
+  ctx: Context,
+  spec: BridgeSpec,
+  sessionId: ReturnType<typeof deriveNamedSessionId>,
+  name: string,
+): Promise<AgentHandle> {
+  return composeSeatAgent(ctx, spec, name, 'cold-resume', (agentOptions, setup) =>
+    ctx.agents.resume({ resumeSessionId: sessionId, agentOptions, setup }))
+}
+
+/**
+ * Thrown from inside a seat's `setup` callback ({@link composeSeatAgent})
+ * when its configured tool restriction would leave it with NO tools at all —
+ * `applySeatToolRestriction`'s `remaining` comes back empty. Deliberately a
+ * THROW rather than a silently-returned muted outcome: `AgentSetup`'s own
+ * contract (see `@deepseek-ai/dsh-agent`) rolls the whole creation/resume
+ * back without ever publishing the session or agent id when setup throws, so
+ * this is what makes "the agent is never created or resumed" true at the
+ * actual registry-publish boundary, not just true by convention. A seat this
+ * narrow cannot call `mailbox_send` to report its own condition, so it must
+ * never exist in composed form at all — the mail addressed to it is refused
+ * at its source instead (see the `catch` in {@link deliverLease}, the only
+ * place this is caught, where the claimed lease is in scope to route through
+ * `refuse()`).
+ */
+class SeatMutedToolsError extends Error {
+  constructor(
+    readonly seatName: string,
+    readonly outcome: SeatToolRestrictionOutcome,
+  ) {
+    super(`seat "${seatName}": configured tool restriction leaves it with no tools at all`)
+    this.name = 'SeatMutedToolsError'
+  }
+}
+
+/**
+ * Emit the live signal for one seat tool-restriction outcome: the durable
+ * append (or, for a muted outcome, the refusal `deliverLease` performs
+ * instead) is the outlet that survives a reload, and this is the one a
+ * listener watching right now can observe. Kept as its own function because
+ * both the ordinary post-composition path and the muted/aborted path in
+ * `deliverLease` need to raise the identical event shape, and this is the
+ * one place that decides what "identical" means.
+ * @param ctx - plugin context carrying the mailbox registry.
+ * @param seatName - the seat the restriction was computed for.
+ * @param outcome - the effective rule, missing names, and surviving tool set.
+ */
+function emitSeatToolsRestricted(ctx: Context, seatName: string, outcome: SeatToolRestrictionOutcome): void {
+  ctx.emit('mailbox/seat-tools-restricted', {
+    seatName,
+    muted: outcome.remaining.length === 0,
+    degraded: outcome.missing.length > 0,
+    missing: outcome.missing,
+    remaining: outcome.remaining,
+  })
+}
+
+/**
+ * The one composition path both {@link createTarget} and {@link resumeTarget}
+ * run through, so a seat is composed identically however it came to be awake.
+ * Only the minting call differs between them, which is what `mint` carries.
+ *
+ * Kept as one function deliberately: the two callers previously held byte-identical
+ * bodies, and a seat that was restricted on first creation but not on cold resume
+ * — or noticed on one path and silently not the other — is exactly the kind of
+ * half-applied fence this whole feature exists to avoid.
+ *
+ * A muted outcome aborts composition entirely: `setup` throws
+ * {@link SeatMutedToolsError} instead of recording the outcome for the
+ * post-mint notice, so `mint()` rejects and no agent or session is ever
+ * published for this seat. That rejection is deliberately NOT caught here —
+ * only `deliverLease` (the caller with the claimed lease in scope) can turn
+ * it into a refusal, so it propagates through {@link createTarget} and
+ * {@link resumeTarget} unmodified.
+ * @param ctx - plugin context carrying the agent registry and default model.
+ * @param spec - resolved serving parameters carrying the registry path.
+ * @param name - the seat name (which is also its address), for its tool rule and attribution.
+ * @param requirement - names the caller in the missing-model error, so a failure says which path needed it.
+ * @param mint - creates or resumes the agent with the composed options.
+ * @throws {@link SeatMutedToolsError} when the seat's configured tool
+ *   restriction leaves it with no tools at all.
+ */
+async function composeSeatAgent(
+  ctx: Context,
+  spec: BridgeSpec,
+  name: string,
+  requirement: string,
+  mint: (agentOptions: { provider: string; model: string }, setup: AgentSetup) => Promise<AgentHandle>,
+): Promise<AgentHandle> {
   const defaultModel = ctx.get('agentDefaultModel')
   if (defaultModel === undefined) {
-    throw new Error('mailbox-bridge: cold-resume requires the default model-selection service')
+    throw new Error(`mailbox-bridge: ${requirement} requires the default model-selection service`)
   }
   const selection = defaultModel.currentSelection()
-  const agentOptions = { provider: selection.provider, model: selection.model }
+  const rule = await seatToolsRule(spec, name)
+  let restriction: SeatToolRestrictionOutcome | undefined
   const setup: AgentSetup = (agentCtx): void => {
     const selected: ModelSelectionRef = { current: selection, assembled: undefined }
     installModelSelection(agentCtx, selected)
+    const outcome = applySeatToolRestriction(agentCtx, name, rule)
+    if (outcome !== undefined && outcome.remaining.length === 0) {
+      // Thrown, not recorded: see the class doc for why this has to abort
+      // the mint rather than let a muted seat finish composing.
+      throw new SeatMutedToolsError(name, outcome)
+    }
+    restriction = outcome
   }
-  return ctx.agents.resume({ resumeSessionId: sessionId, agentOptions, setup })
+  const handle = await mint({ provider: selection.provider, model: selection.model }, setup)
+  // Setup composes, it never drives (see its own contract) — the durable
+  // notice of what setup did is appended here, after creation resolves,
+  // mirroring the refusal notice's append through the returned handle.
+  // `restriction` is NEVER a muted outcome here: that branch above threw and
+  // this line was never reached for it.
+  if (restriction !== undefined) {
+    handle.agent.session.append('user/message', seatToolRestrictionUserMessage(name, restriction), { surfaceOp: 'append' })
+    emitSeatToolsRestricted(ctx, name, restriction)
+  }
+  return handle
 }
 
 /** Stable Cordis plugin name. */
@@ -1283,6 +1734,25 @@ export interface MailboxRefusal {
   readonly reason: string
 }
 
+/**
+ * One drain-time (or cold-resume) seat tool-restriction outcome, carried on
+ * the context bus. Mirrors the durable notice's structured fields — see
+ * {@link SeatToolRestrictionNoticeSource} for why `degraded` and `muted` are
+ * kept as two separate booleans rather than blended into one.
+ */
+export interface SeatToolsRestricted {
+  /** The seat the restriction was applied to. */
+  readonly seatName: string
+  /** Whether the seat's effective tool set is empty — it has no tools at all. */
+  readonly muted: boolean
+  /** Whether at least one configured tool name was not currently known and was dropped. */
+  readonly degraded: boolean
+  /** Configured names that were not currently known, in configured order; empty when not degraded. */
+  readonly missing: readonly string[]
+  /** The tool names the seat is actually left with, sorted; empty when muted. */
+  readonly remaining: readonly string[]
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     /** Union of every mounted bridge's serving roster in mount order. */
@@ -1308,6 +1778,79 @@ declare module '@deepseek-ai/cordis' {
      * @mode emit
      */
     'mailbox/refused'(refusal: MailboxRefusal): void
+
+    /**
+     * A seat's configured tool restriction was resolved at create or
+     * cold-resume, in one of two shapes:
+     *
+     * - `muted: false` — `composeSeatAgent` applied it and the seat composed
+     *   normally. This event is the restriction's LIVE outlet, emitted
+     *   alongside (never instead of) the durable notice node
+     *   `seatToolRestrictionUserMessage` appends into the seat's OWN
+     *   session — that durable append is the outlet that does not depend on
+     *   anyone watching a live stream, and this event is the one that
+     *   reaches a listener right now.
+     * - `muted: true` — the rule left the seat with NO tools at all, so
+     *   `composeSeatAgent`'s `setup` threw {@link SeatMutedToolsError}
+     *   before anything was ever published; the seat was never composed, so
+     *   it has no session to notice. `deliverLease` catches that error,
+     *   warns the host log, emits this event, and routes the mail through
+     *   `refuse()` instead — whose own `mailbox/refused` event and durable
+     *   SENDER-side notice report the refusal itself. This event exists
+     *   alongside that one because `mailbox/refused` carries only
+     *   `{ from, to, reason }`: this is the richer, domain-specific record
+     *   of WHY — the missing/remaining tool names a listener would otherwise
+     *   have to parse back out of the reason string.
+     *
+     * Listener failures are logged and contained by Cordis dispatch.
+     * @param restriction - the seat, the effective outcome, and the muted/degraded conditions.
+     * @mode emit
+     */
+    'mailbox/seat-tools-restricted'(restriction: SeatToolsRestricted): void
+  }
+}
+
+/**
+ * SWD-118 mount-time roster-drift alarm. Declares this bridge's served
+ * roster to the shared `ctx.mailbox` registry — condition (A): this roster
+ * disagreeing with another mount's (`tool-mailbox`'s) — and checks it
+ * against the org registry — condition (B): a served name the registry
+ * does not know. Runs once at mount, independent of whether any lease is
+ * waiting to drain: the routing pipeline only loads the registry when a
+ * lease needs judging (`judgmentRegistry`), and a quiet mount with no mail
+ * waiting must still be checked.
+ *
+ * Warns, never throws: nothing here may block mount or refuse mail, per the
+ * founder's standing rule that no fence may remove the operator's ability
+ * to drive the system. A registry that is simply ABSENT is the legitimate
+ * no-registry world {@link judgmentRegistry} already distinguishes: nothing
+ * is knowable as a seat, so condition (B) no-ops rather than alarming. A
+ * registry that EXISTS but will not load is different, and the alarm
+ * itself must never become a silent failure — that case warns explicitly
+ * that condition (B) could not be checked, instead of quietly passing as
+ * "nothing is wrong."
+ * @param ctx - plugin context carrying the shared mailbox registry.
+ * @param spec - resolved serving parameters.
+ */
+async function checkRosterDrift(ctx: Context, spec: BridgeSpec): Promise<void> {
+  try {
+    ctx.mailbox.declareRoster('mailbox-bridge', spec.addresses)
+    const outcome = await loadRegistrySeatNames(spec.orgRegistryPath)
+    if (outcome.kind === 'missing') return
+    if (outcome.kind === 'unavailable') {
+      ctx.logger.warn(
+        `mailbox-bridge: cannot check served addresses against the org registry at "${spec.orgRegistryPath}" `
+        + `for roster drift — it exists but would not load: ${outcome.error.message}. Fix the registry and `
+        + 'restart to re-run this check; treat this as unresolved, not as "nothing is wrong."',
+      )
+      return
+    }
+    const unknown = unknownServedSeats(spec.addresses, outcome.seatNames)
+    if (unknown.length > 0) ctx.logger.warn(unknownServedSeatsWarning('mailbox-bridge', unknown))
+  } catch (error) {
+    // The alarm itself must never crash the mount; an unexpected failure
+    // here is reported the same way any other roster-drift finding would be.
+    ctx.logger.warn(`mailbox-bridge: roster-drift check failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
 
@@ -1321,6 +1864,9 @@ export type RouteResult = { kind: 'done' } | { kind: 'pending' } | { kind: 'fail
  * One drain pass without the interval wrapper — the unit-test surface. The
  * optional observer fires once per routed lease at its settlement write, so a
  * consumer can learn what became of a specific message it just published.
+ * Also carries the idle-retire logging thresholds and their pure decision
+ * function, so a test can exercise the reannounce/escalate cadence directly
+ * instead of waiting on real recheck timers.
  * @param ctx - plugin context carrying the mailbox registry and core services.
  * @param spec - resolved serving parameters.
  * @param onSettled - observer keyed by the provider-assigned message id.
@@ -1344,6 +1890,10 @@ export const internals = {
       }
     }
   },
+  describeBlockedResident,
+  DESCENDANT_REANNOUNCE_TICKS,
+  DESCENDANT_ESCALATE_TICKS,
+  checkRosterDrift,
 }
 
 /**
@@ -1386,6 +1936,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     for (const resident of spec.residents.values()) resident.release()
     spec.residents.clear()
   }, 'mailbox-bridge.poll')
+  // SWD-118 roster-drift alarm: warns loudly, never throws — see
+  // `checkRosterDrift`'s own contract. Deliberately LAST: the poll cycle is
+  // already live and torn down by the effect above before this runs, so a
+  // stalled registry read (a hung or slow filesystem, not merely a thrown
+  // error) can never delay the bridge's actual job of serving mail.
+  await internals.checkRosterDrift(ctx, spec)
 }
 
 /** What the wire reports about one woken message. */

@@ -55,6 +55,7 @@ function props(
         title: '正在扫描项目文件',
         displayTitle: 'worker',
         running: true,
+        attached: true,
         blank: false,
         updatedAt: Date.now(),
       },
@@ -82,6 +83,7 @@ function summary(id: SessionId, updatedAt: number): SessionSummary {
     id,
     displayTitle: id,
     running: false,
+    attached: true,
     blank: false,
     updatedAt,
   }

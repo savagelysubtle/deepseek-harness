@@ -2,7 +2,7 @@
 
 Status: implemented
 
-[English](2026-08-31-port-env-allocator-integration.md) | [中文](2026-08-31-port-env-allocator-integration.zh.md)
+[English](2026-08-31-port-env-allocator-integration.md) | 中文
 
 ## Problem
 

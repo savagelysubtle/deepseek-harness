@@ -21,6 +21,17 @@
       config:
         root: ['.']
 
+    # Without this row the logger has exactly ONE exporter -- an in-memory ring
+    # buffer nothing reads -- so every operator-facing `logger.warn` on the host
+    # reaches nobody. That is not theoretical: the SWD-118 roster-drift alarm and
+    # the tool-mailbox no-roster warning were both verified firing into silence on
+    # 2026-09-17, and the telemetry exporter is DISABLED by default (and points off
+    # this machine), so it is not a substitute. No threshold is set here: the
+    # exporter default keeps error, warn and info and drops only debug (see
+    # LoggerLevel in vendor/cordis/src/logger.ts, local modification 19).
+    - id: logger-console
+      name: '@deepseek-ai/cordis-plugin-logger-console'
+
     - id: llm
       name: '@deepseek-ai/dsh-llm'
 
@@ -125,6 +136,16 @@
     # loud without it; web layers reuse this same mount for list rows.
     - id: session-projection
       name: '@deepseek-ai/dsh-session-projection'
+
+    # Whole-log turn-open bit and last-close cause (SWD-120): distinguishes a
+    # deliberate user stop from a programmatic cancellation, a crash-repair
+    # interruption, an error, and normal completion, so `session.list` rows
+    # and a future watchdog can read the difference without replaying the
+    # log. Mounted at this shared layer (like session-title above) rather
+    # than a surface-specific bundle, since every profile's session-list
+    # consumers need the same distinction.
+    - id: session-turn-status
+      name: '@deepseek-ai/dsh-session-turn-status'
 
     # Session telemetry is mounted but disabled by default. DSH_TELEMETRY_MODE
     # explicitly opts into FULL or FEEDBACK_ONLY reporting; uploading mirrors
@@ -281,8 +302,23 @@
     - id: token-meter
       name: '@deepseek-ai/dsh-token-meter'
 
+    # Automatic compaction ceiling. thresholdRatio was LOWERED from the package
+    # default of 0.95 to the founder's standing ceiling of 0.75: a seat entered a
+    # degenerate reasoning loop at 82% context consumed (incident 2026-09-01), and
+    # the ruling on file is that the auto-compact ceiling must be no higher than
+    # 0.75 for this model. Declared here, in one visible place, rather than as a
+    # package default, so the operative number is reviewable.
     - id: compaction-basic
       name: '@deepseek-ai/dsh-compaction-basic'
+      config:
+        thresholdRatio: 0.75
+
+    # The warning ladder that precedes the cut. Warns the agent at 25/50/75% of
+    # context used so it can compact at the end of a unit of work rather than
+    # being cut off mid-thought under pressure. Uses the package's own
+    # [0.25, 0.5, 0.75] defaults; an explicit empty array would disable it.
+    - id: context-pressure
+      name: '@deepseek-ai/dsh-context-pressure'
 
     # Human `/compact`: one useful reduction below the automatic threshold. Backend
     # independent, so it follows whichever compaction service this leaf mounts.

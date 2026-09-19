@@ -52,6 +52,20 @@ describe('parseOrgRegistry', () => {
     ['seats:\n  solo: { cwd: one }\nbaseDir: "  "', 'baseDir'],
     ['seats:\n  "bad seat": { cwd: one }', 'names must match'],
     ['seats:\n  solo: { cwd: one, lead: "yes" }\nbaseDir: /p', 'seats.solo.lead'],
+    ['seats:\n  solo: { cwd: one, tools: "everything" }', 'seats.solo.tools'],
+    ['seats:\n  solo: { cwd: one, tools: [] }', 'seats.solo.tools'],
+    ['seats:\n  solo: { cwd: one, tools: {} }', 'seats.solo.tools'],
+    ['seats:\n  solo: { cwd: one, tools: { allow: "bash" } }', 'seats.solo.tools.allow'],
+    ['seats:\n  solo: { cwd: one, tools: { allow: [""] } }', 'seats.solo.tools.allow'],
+    ['seats:\n  solo: { cwd: one, tools: { allow: [bash, 1] } }', 'seats.solo.tools.allow'],
+    ['seats:\n  solo: { cwd: one, tools: { deny: "bash" } }', 'seats.solo.tools.deny'],
+    ['seats:\n  solo: { cwd: one, tools: { deny: [""] } }', 'seats.solo.tools.deny'],
+    // A PRESENT but empty allow/deny list parses cleanly and silently leaves
+    // the seat with zero tools — the same "meaningless as configuration"
+    // problem the whole-field guard above catches, one level deeper. Reject
+    // it here too, naming both the seat and the specific empty field.
+    ['seats:\n  solo: { cwd: one, tools: { allow: [] } }', 'seats.solo.tools.allow'],
+    ['seats:\n  solo: { cwd: one, tools: { deny: [] } }', 'seats.solo.tools.deny'],
   ])('rejects %j loudly naming the field', (_document, message) => {
     const document = _document.includes('baseDir') ? _document : `${_document}\nbaseDir: /projects`
     expect(() => parseOrgRegistry(document)).toThrow(message)
@@ -158,6 +172,35 @@ describe('seat identity — recorded beats derived', () => {
       'baseDir: /projects\nseats:\n  tt-ping: { cwd: a, test: true }\nedges: []\n', {},
     )
     expect(registry.seats['tt-ping']?.test).toBe(true)
+  })
+})
+
+describe('seats.tools', () => {
+  it('parses an allow rule onto the seat', () => {
+    const registry = parseOrgRegistry(
+      'baseDir: /projects\nseats:\n  robin: { cwd: a, tools: { allow: [bash, read] } }\n', {},
+    )
+    expect(registry.seats.robin?.tools).toEqual({ allow: ['bash', 'read'] })
+  })
+
+  it('parses a deny rule onto the seat', () => {
+    const registry = parseOrgRegistry(
+      'baseDir: /projects\nseats:\n  robin: { cwd: a, tools: { deny: [bash] } }\n', {},
+    )
+    expect(registry.seats.robin?.tools).toEqual({ deny: ['bash'] })
+  })
+
+  it('parses allow and deny together', () => {
+    const registry = parseOrgRegistry(
+      'baseDir: /projects\nseats:\n  robin: { cwd: a, tools: { allow: [bash, read], deny: [write] } }\n', {},
+    )
+    expect(registry.seats.robin?.tools).toEqual({ allow: ['bash', 'read'], deny: ['write'] })
+  })
+
+  it('leaves a seat with no tools field exactly as it parses today — the no-op default', () => {
+    const registry = parseOrgRegistry('baseDir: /projects\nseats:\n  solo: { cwd: one }\n')
+    expect(registry.seats.solo).toEqual({ cwd: 'one' })
+    expect('tools' in (registry.seats.solo as object)).toBe(false)
   })
 })
 

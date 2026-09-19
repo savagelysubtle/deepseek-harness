@@ -18,11 +18,22 @@ export type LoggerMethod = (format: any, ...param: any[]) => void
 /** Formatter used to resolve a printf-style placeholder. */
 export type Formatter = (value: any, exporter: Exporter, message: Message) => any
 
-/** Numeric severity used when exporters decide whether to emit a message. */
+/**
+ * Numeric severity used when exporters decide whether to emit a message.
+ *
+ * The value is a VERBOSITY RANK, not an importance rank: an exporter emits a
+ * message when its configured threshold is greater than or equal to the
+ * message's value, so lower means "kept by a quieter exporter". `warn`
+ * therefore has to sit between `error` and `info` — upstream ordered it
+ * between `info` and `debug`, which made the default threshold (`INFO`) keep
+ * `error` and `info` while silently discarding every `warn`. Verified on the
+ * running host 2026-09-17: an `info` and a `warn` emitted from the same
+ * context in the same instant, and only the `info` reached the exporter.
+ */
 export const enum LoggerLevel {
   ERROR = 0,
-  INFO = 1,
-  WARN = 2,
+  WARN = 1,
+  INFO = 2,
   DEBUG = 3,
 }
 

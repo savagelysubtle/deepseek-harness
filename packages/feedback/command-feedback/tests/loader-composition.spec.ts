@@ -42,7 +42,7 @@ function agent(ctx: Context): Agent {
     followup: () => {},
     steer: () => {},
     inject: () => {},
-    cancel() { status = 'idle' },
+    cancel() { status = 'idle'; return false },
     runMaintenance: task => task(new AbortController().signal),
     whenIdle: () => Promise.resolve(),
   }

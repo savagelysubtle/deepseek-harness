@@ -135,6 +135,21 @@ function drainManager(ctx: Context): Promise<void> {
   return manager.drain()
 }
 
+/**
+ * Reach the package-private manager to drive `hasLiveDescendants` directly,
+ * the same way {@link drainManager} reaches `drain()`: the operation is
+ * deliberately not on the public `SubagentRuntime` surface's test-facing
+ * shape (only the pass-through wrapper is), so the manager is the thing a
+ * test asserting the actual scan logic must reach.
+ */
+function continuationManager(ctx: Context): { hasLiveDescendants(root: Agent): boolean } {
+  const manager = (ctx.subagents as unknown as {
+    continuations?: { hasLiveDescendants(root: Agent): boolean }
+  }).continuations
+  if (manager === undefined) throw new Error('expected a bound continuation manager')
+  return manager
+}
+
 /** Wait until a child's Activation is gone, i.e. its handle finished disposal. */
 async function waitNoActivation(ctx: Context, childId: SessionId): Promise<void> {
   await vi.waitFor(() => {
@@ -163,7 +178,7 @@ function observeCancel(agent: Agent, callback: () => void): void {
       observed = true
       callback()
     }
-    cancel(cause, options)
+    return cancel(cause, options)
   })
 }
 
@@ -2519,5 +2534,106 @@ describe('SubagentRuntime.interrupt', () => {
 
     hold.resolve(undefined)
     await drained
+  })
+})
+
+describe('SubagentContinuationManager.hasLiveDescendants', () => {
+  it('reports true for an immediate live continuable child (depth 1)', async () => {
+    const hold = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([{ chunks: textResponse('child running'), gate: hold.promise }])
+    const { ctx, parent } = await setupWith(adapter)
+    const manager = continuationManager(ctx)
+    expect(manager.hasLiveDescendants(parent)).toBe(false)
+
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+
+    expect(manager.hasLiveDescendants(parent)).toBe(true)
+    // The public `SubagentRuntime` surface is a pure pass-through onto the
+    // same scan; both must agree, since nothing else re-derives this answer.
+    expect(ctx.subagents.hasLiveDescendants(parent)).toBe(true)
+
+    hold.resolve(undefined)
+    await waitNoActivation(ctx, started.childId)
+    expect(manager.hasLiveDescendants(parent)).toBe(false)
+  })
+
+  it('reports true through an intermediate live parent — a depth-2 chain, not just an immediate child', async () => {
+    const releaseGrandchild = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      // The child finishes its own turn, then starts a grandchild that stays running.
+      { chunks: textResponse('child done') },
+      { chunks: textResponse('grandchild running'), gate: releaseGrandchild.promise },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    const manager = continuationManager(ctx)
+
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    const child = await vi.waitFor(() => {
+      const found = ctx.agents.get(started.childId)
+      expect(found).toBeDefined()
+      return found!
+    })
+    // Start the grandchild immediately, without waiting for the child to go
+    // idle first: an idle child with no owned children yet is 'settled' and
+    // the watcher disposes it right away, so registering the grandchild as an
+    // owned child before that happens is what keeps this Activation resident.
+    const grandchild = await ctx.subagents.startContinuable(startSpec(child))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(2) })
+
+    expect(manager.hasLiveDescendants(child)).toBe(true)
+    expect(manager.hasLiveDescendants(parent)).toBe(true)
+
+    releaseGrandchild.resolve(undefined)
+    await waitNoActivation(ctx, grandchild.childId)
+    await waitNoActivation(ctx, started.childId)
+    expect(manager.hasLiveDescendants(parent)).toBe(false)
+  })
+
+  it('returns false for the root itself — the predicate is strict, since a continuable Agent may itself be a host-owned root', async () => {
+    const hold = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([{ chunks: textResponse('child running'), gate: hold.promise }])
+    const { ctx, parent } = await setupWith(adapter)
+    const manager = continuationManager(ctx)
+
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    const child = await vi.waitFor(() => {
+      const found = ctx.agents.get(started.childId)
+      expect(found).toBeDefined()
+      return found!
+    })
+
+    // The child's own Activation ancestry trivially contains itself (it seeds
+    // `[handle.agent, ...parentLineage]`), so only the strict `!==` guard
+    // keeps a childless child from reporting itself as its own descendant.
+    expect(manager.hasLiveDescendants(child)).toBe(false)
+
+    hold.resolve(undefined)
+    await waitNoActivation(ctx, started.childId)
+  })
+
+  it('returns false when there are no Activations at all', async () => {
+    const { ctx, parent } = await setup([])
+    expect(continuationManager(ctx).hasLiveDescendants(parent)).toBe(false)
+  })
+
+  it('does not report a descendant of a different root as belonging to this one', async () => {
+    const hold = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([{ chunks: textResponse('child running'), gate: hold.promise }])
+    const { ctx, parent } = await setupWith(adapter)
+    const manager = continuationManager(ctx)
+    const otherRoot = ctx.agentLoop.create(SessionId('unrelated-parent'), { provider: 'mock', model: 'mock' })
+
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+
+    // The manager's Activation map is non-empty (it holds the live child of
+    // `parent`), yet an unrelated root with no descendants of its own must
+    // still see none — a live Activation elsewhere is not "any Activation".
+    expect(manager.hasLiveDescendants(parent)).toBe(true)
+    expect(manager.hasLiveDescendants(otherRoot)).toBe(false)
+
+    hold.resolve(undefined)
+    await waitNoActivation(ctx, started.childId)
   })
 })

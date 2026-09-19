@@ -5,7 +5,7 @@
  * routing outcomes a claimed lease can take.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -19,7 +19,7 @@ import MailboxLocal from '@deepseek-ai/dsh-mailbox-local'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import * as mailCli from '../../local/src/cli.ts'
 import * as bridge from '../src/index.ts'
-import { admittedOutcome, relaySource, relayText } from '../src/delivery.ts'
+import { admittedOutcome, relaySource, relayText, seatToolRestrictionSource, seatToolRestrictionText } from '../src/delivery.ts'
 
 let homes: string[] = []
 
@@ -50,9 +50,10 @@ beforeEach(() => {
  * alice→other is a legal-but-indirect pair a topology refusal can name a
  * route for. `island` has no edges at all — the no-route refusal case.
  * @param seats - seat names to roster.
- * @param options - edges, test-marked seats, and call-up seats; each test
- *   writing its own registry passes a distinct temp path, so the module-level
- *   mtime-keyed registry cache never sees a stale file.
+ * @param options - edges, test-marked seats, call-up seats, and a per-seat
+ *   tool restriction; each test writing its own registry passes a distinct
+ *   temp path, so the module-level mtime-keyed registry cache never sees a
+ *   stale file.
  */
 function writeTestRegistry(
   seats: readonly string[],
@@ -60,12 +61,21 @@ function writeTestRegistry(
     readonly edges?: readonly (readonly [string, string])[]
     readonly testSeats?: readonly string[]
     readonly callUp?: readonly string[]
+    readonly tools?: Readonly<Record<string, { readonly allow?: readonly string[]; readonly deny?: readonly string[] }>>
   } = {},
 ): string {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-bridge-registry-'))
   const path = join(dir, 'registry.yml')
   const testSeats = new Set(options.testSeats ?? [])
-  const rows = seats.map(seat => `  ${seat}: { cwd: ${seat}${testSeats.has(seat) ? ', test: true' : ''} }`).join('\n')
+  const toolsRow = (seat: string): string => {
+    const rule = options.tools?.[seat]
+    if (rule === undefined) return ''
+    const parts: string[] = []
+    if (rule.allow !== undefined) parts.push(`allow: [${rule.allow.join(', ')}]`)
+    if (rule.deny !== undefined) parts.push(`deny: [${rule.deny.join(', ')}]`)
+    return `, tools: { ${parts.join(', ')} }`
+  }
+  const rows = seats.map(seat => `  ${seat}: { cwd: ${seat}${testSeats.has(seat) ? ', test: true' : ''}${toolsRow(seat)} }`).join('\n')
   const edges = options.edges ?? [['alice', 'target'], ['alice', 'ghost'], ['ghost', 'other']]
   const edgeBlock = edges.length === 0
     ? 'edges: []'
@@ -76,15 +86,41 @@ function writeTestRegistry(
   return path
 }
 
-function targetSpec(addresses = ['target']): Parameters<typeof bridge.resolveBridgeSpec>[0] {
+function targetSpec(
+  addresses = ['target'],
+  // Overrides are named rather than spread over the returned spec: the spec's
+  // declared type reads as a class instance to the linter, so `{ ...targetSpec() }`
+  // trips no-misused-spread. Callers that need a different registry path take
+  // this route instead of spreading.
+  overrides: { orgRegistryPath?: string } = {},
+): Parameters<typeof bridge.resolveBridgeSpec>[0] {
   return {
     addresses,
     pollIntervalMs: 5,
     maxClaimPerCycle: 10,
     staleClaimMs: 600_000,
     admitFrom: ['sender'],
-    orgRegistryPath: registryPath,
+    orgRegistryPath: overrides.orgRegistryPath ?? registryPath,
   }
+}
+
+/**
+ * A resolved spec for the idle-retire tests, carrying `residencyIdleMs`.
+ * Built directly rather than as `{ ...targetSpec(), residencyIdleMs }` — see
+ * the comment on {@link targetSpec}'s own override parameter for why spreading
+ * its return trips `no-misused-spread`.
+ * @param residencyIdleMs - idle milliseconds before the resident retires.
+ */
+function residencySpec(residencyIdleMs: number): ReturnType<typeof bridge.resolveBridgeSpec> {
+  return bridge.resolveBridgeSpec({
+    addresses: ['target'],
+    pollIntervalMs: 5,
+    maxClaimPerCycle: 10,
+    staleClaimMs: 600_000,
+    admitFrom: ['sender'],
+    orgRegistryPath: registryPath,
+    residencyIdleMs,
+  })
 }
 
 interface LiveAgentStub {
@@ -108,6 +144,13 @@ async function makeHarness(options: {
   storePath?: string
   /** Explicit live-seat roster passed through to the spec (web-seat tests). */
   seatAliases?: readonly { readonly address: string; readonly sessionId: string }[]
+  /**
+   * The tool names the fake `agentCtx.tools` reports as currently known,
+   * handed to every `setup` callback create/resume invoke. Defaults to a
+   * small fixed set; a test asserting a seat's tool-restriction wiring
+   * overrides it to control what a configured rule intersects against.
+   */
+  knownTools?: readonly string[]
 } = {}): Promise<{
   ctx: ContextType
   storePath: string
@@ -118,6 +161,8 @@ async function makeHarness(options: {
   flushes: () => number
   /** The stub agent a resume/create registered under one session id. */
   agentFor: (id: string) => { session: { append: ReturnType<typeof vi.fn> } } | undefined
+  /** Every call the setup-invoked fake `agentCtx.tools.restrict()` recorded. */
+  toolsRestrictCalls: () => unknown[][]
 }> {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-mailbox-bridge-unit-'))
   homes.push(dir)
@@ -146,17 +191,36 @@ async function makeHarness(options: {
     }
     return { agent, handle: { agent, dispose: async () => { state.disposes += 1 } } }
   }
+  // The setup callback create/resume are handed needs a real Cordis Context
+  // (installModelSelection calls `agentCtx.on(...)`) with a stubbed `tools`
+  // service — a bare plain object has no `.on()` and would throw the moment
+  // setup ran. Shared across every create/resume in one harness, mirroring
+  // how one bridge-managed seat has one live tool registry.
+  const toolsSchemas = vi.fn(() => (options.knownTools ?? ['read', 'bash']).map(toolName => ({ name: toolName })))
+  const toolsRestrict = vi.fn()
+  const fakeAgentCtx = new Context()
+  fakeAgentCtx.provide('tools', { schemas: toolsSchemas, restrict: toolsRestrict } as never)
   const agents = {
     get: (id: string) => options.liveBySession?.[id] ?? registered.get(id),
-    resume: vi.fn(async (resumeOptions: { resumeSessionId: SessionId }) => {
-      state.resumes += 1
+    // Registration and the resume/create counts happen AFTER `setup`
+    // resolves, never before — mirroring the real `AgentRegistry` contract
+    // (`AgentSetup`'s own doc): a `setup` throw rolls the whole creation or
+    // resume back without ever publishing the session or agent id. A fake
+    // that registered eagerly would let a muted seat's setup-time throw
+    // "succeed" as far as this stub's own bookkeeping is concerned, which is
+    // exactly the case the seat-tools-muted refusal tests need to tell apart
+    // from a real composition.
+    resume: vi.fn(async (resumeOptions: { resumeSessionId: SessionId; setup?: (agentCtx: ContextType) => unknown }) => {
       const { agent, handle } = makeHandle()
+      await resumeOptions.setup?.(fakeAgentCtx)
+      state.resumes += 1
       registered.set(String(resumeOptions.resumeSessionId), agent)
       return handle
     }),
-    create: vi.fn(async (createOptions: { sessionId: SessionId }) => {
-      state.creates.push(String(createOptions.sessionId))
+    create: vi.fn(async (createOptions: { sessionId: SessionId; setup?: (agentCtx: ContextType) => unknown }) => {
       const { agent, handle } = makeHandle()
+      await createOptions.setup?.(fakeAgentCtx)
+      state.creates.push(String(createOptions.sessionId))
       registered.set(String(createOptions.sessionId), agent)
       return handle
     }),
@@ -182,6 +246,7 @@ async function makeHarness(options: {
     flushes: () => state.flushes,
     /** The stub agent a resume/create registered under one session id. */
     agentFor: (id: string) => registered.get(id) as { session: { append: ReturnType<typeof vi.fn> } } | undefined,
+    toolsRestrictCalls: () => toolsRestrict.mock.calls,
   }
 }
 
@@ -371,6 +436,68 @@ describe('delivery rendering', () => {
     expect(bare).not.toHaveProperty('subject')
     expect(bare).not.toHaveProperty('blocking')
     expect(bare.form === 'relay' && bare.senderClass).toBe('unverified')
+  })
+})
+
+describe('seat tool-restriction notice rendering', () => {
+  it('renders a deny-only rule, exercising the denied-tools line the allow-only cases above never hit', () => {
+    const outcome = { rule: { deny: ['bash'] }, missing: [], remaining: ['read'] }
+    const text = seatToolRestrictionText('target', outcome)
+    expect(text).toContain('Denied tools: bash')
+    expect(text).not.toContain('Allowed tools:')
+    const source = seatToolRestrictionSource('target', outcome)
+    expect(source).toMatchObject({ kind: 'mailbox-bridge-tool-restriction', form: 'notice', seatName: 'target', degraded: false, muted: false, missing: [], rule: { deny: ['bash'] } })
+    expect(source.summary).toBe('Seat "target" tool restriction applied.')
+  })
+
+  it('renders an empty deny list as "(none)", the same way an empty allow list already does', () => {
+    const text = seatToolRestrictionText('target', { rule: { deny: [] }, missing: [], remaining: ['read', 'bash'] })
+    expect(text).toContain('Denied tools: (none)')
+  })
+
+  it('pluralizes the dropped-name line and summary for two or more missing names', () => {
+    const outcome = { rule: { allow: ['read'] }, missing: ['ghost-one', 'ghost-two'], remaining: ['read'] }
+    const text = seatToolRestrictionText('target', outcome)
+    expect(text).toContain('Configured tool names were not currently known and dropped: ghost-one, ghost-two.')
+    const source = seatToolRestrictionSource('target', outcome)
+    expect(source.summary).toBe('Seat "target" tool restriction degraded: 2 configured names missing.')
+    expect(source).toMatchObject({ degraded: true, muted: false, missing: ['ghost-one', 'ghost-two'] })
+  })
+
+  it('renders a single missing name with the singular form, and a deny-only degradation without the all-tools-gone line', () => {
+    const outcome = { rule: { deny: ['ghost-tool'] }, missing: ['ghost-tool'], remaining: ['read', 'bash'] }
+    const text = seatToolRestrictionText('target', outcome)
+    expect(text).toContain('Configured tool name was not currently known and dropped: ghost-tool.')
+    // A degraded DENY rule never empties the tool set the way an all-missing
+    // ALLOW rule does, so the "no tools at all" line must not appear here.
+    expect(text).not.toContain('NO tools at all')
+    const source = seatToolRestrictionSource('target', outcome)
+    expect(source.summary).toBe('Seat "target" tool restriction degraded: 1 configured name missing.')
+    expect(source.muted).toBe(false)
+  })
+
+  it('spells out that the seat has no tools at all when `remaining` is empty — independent of `missing`', () => {
+    // Route 1: every allowed name was missing (missing is non-empty here).
+    const missingAllowText = seatToolRestrictionText('target', { rule: { allow: [] }, missing: ['ghost-tool'], remaining: [] })
+    expect(missingAllowText).toContain('This seat now has NO tools at all — it cannot call any tool, which includes the tool it would use to report this.')
+
+    // Route 2: a deny list that happens to cover every known tool — nothing
+    // was "missing" (every configured name matched), yet the seat is still
+    // muted. `missing` alone could never catch this; `remaining` does.
+    const denyEverythingText = seatToolRestrictionText('target', { rule: { deny: ['read', 'bash'] }, missing: [], remaining: [] })
+    expect(denyEverythingText).toContain('This seat now has NO tools at all — it cannot call any tool, which includes the tool it would use to report this.')
+  })
+
+  it('reports `muted: true` on the source for both muted routes, and stamps a MUTED summary ahead of the ordinary applied/degraded wording', () => {
+    const missingAllowSource = seatToolRestrictionSource('target', { rule: { allow: [] }, missing: ['ghost-tool'], remaining: [] })
+    expect(missingAllowSource).toMatchObject({ muted: true, degraded: true })
+    expect(missingAllowSource.summary).toBe('Seat "target" tool restriction MUTED: this seat now has NO tools at all.')
+
+    const denyEverythingSource = seatToolRestrictionSource('target', { rule: { deny: ['read', 'bash'] }, missing: [], remaining: [] })
+    // Nothing was missing here, yet still muted — degraded and muted are
+    // genuinely independent booleans, not one blended condition.
+    expect(denyEverythingSource).toMatchObject({ muted: true, degraded: false })
+    expect(denyEverythingSource.summary).toBe('Seat "target" tool restriction MUTED: this seat now has NO tools at all.')
   })
 })
 
@@ -571,6 +698,605 @@ describe('routing outcomes', () => {
     expect(badRow.state).toBe('failed')
     expect(JSON.parse(badRow.result ?? '{}').reason).toContain('boom')
     await expect(rowState(h.storePath, good)).resolves.toMatchObject({ state: 'done' })
+  })
+
+  it('a live agent disposed between the registry lookup and delivery fails the lease loud, never a silent drop (SWD-137 follow-up)', async () => {
+    // The registry can still hand back an entry for a session that is mid
+    // host-owned disposal (see agent.ts's own `disposed` field doc): both
+    // steer() and its followup() fallback refuse in that window, exactly
+    // like the generic "isolates a poison delivery" case above -- but this
+    // is the SPECIFIC shape that motivated deliverToLive's `delivered` return
+    // and the explicit failTerminal call at its use site, rather than relying
+    // on an accidental propagation up to drainOnce's catch-all. Asserting the
+    // real disposed-agent error message (not a generic stand-in) is the point:
+    // the reason recorded and bounced back to the sender is the actual cause,
+    // not a guess.
+    const disposed = {
+      status: 'idle' as const,
+      steer: vi.fn(() => { throw new Error('agent "target": send refused, agent is disposed') }),
+      followup: vi.fn(() => { throw new Error('agent "target": send refused, agent is disposed') }),
+    }
+    const h = await makeHarness({
+      liveBySession: { [String(deriveNamedSessionId('target'))]: disposed },
+    })
+    const id = await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(['target'])))
+    expect(disposed.steer).toHaveBeenCalledTimes(1)
+    expect(disposed.followup).toHaveBeenCalledTimes(1)
+    const row = await rowState(h.storePath, id)
+    expect(row.state).toBe('failed')
+    expect((JSON.parse(row.result ?? '{}') as { reason?: string }).reason).toContain('disposed')
+  })
+})
+
+/**
+ * A stub `ctx.get('subagents')` whose `hasLiveDescendants` answer the test
+ * controls from tick to tick, mirroring the real `SubagentRuntime` surface
+ * `retire()` reads (`ctx.get('subagents')?.hasLiveDescendants(handle.agent)`).
+ * @param initial - the answer returned until {@link set} changes it.
+ */
+function subagentsStub(initial: boolean): {
+  readonly api: { hasLiveDescendants: ReturnType<typeof vi.fn> }
+  set(value: boolean): void
+} {
+  let live = initial
+  return {
+    api: { hasLiveDescendants: vi.fn(() => live) },
+    set(value: boolean) { live = value },
+  }
+}
+
+describe('idle-retire deferral for a seat with live continuable descendants', () => {
+  afterEach(() => {
+    // Only the tests in this block opt into a fake clock; restore
+    // unconditionally so a failure mid-test cannot leak it into later files.
+    vi.useRealTimers()
+  })
+
+  it('retires a seat with no live descendants exactly as before once its idle timer fires', async () => {
+    const h = await makeHarness({ persisted: true })
+    const stub = subagentsStub(false)
+    h.ctx.provide('subagents', stub.api as never)
+    vi.useFakeTimers()
+    await publishHello(h.ctx)
+    const spec = residencySpec(1000)
+    await bridge.internals.drainOnce(h.ctx, spec)
+    expect(spec.residents.has('target')).toBe(true)
+
+    await vi.advanceTimersByTimeAsync(1000)
+
+    expect(stub.api.hasLiveDescendants).toHaveBeenCalled()
+    expect(h.flushes()).toBe(1)
+    expect(h.disposeCalls()).toBe(1)
+    expect(spec.residents.has('target')).toBe(false)
+    expect(existsSync(namedLockPath('target'))).toBe(false)
+  })
+
+  it('does not retire while the seat has a live continuable descendant — stays resident, lock held, agent undisposed', async () => {
+    const h = await makeHarness({ persisted: true })
+    const stub = subagentsStub(true)
+    h.ctx.provide('subagents', stub.api as never)
+    vi.useFakeTimers()
+    await publishHello(h.ctx)
+    const spec = residencySpec(1000)
+    await bridge.internals.drainOnce(h.ctx, spec)
+
+    await vi.advanceTimersByTimeAsync(1000)
+
+    expect(stub.api.hasLiveDescendants).toHaveBeenCalled()
+    expect(h.disposeCalls()).toBe(0)
+    expect(spec.residents.has('target')).toBe(true)
+    expect(existsSync(namedLockPath('target'))).toBe(true)
+  })
+
+  it('retires once the live descendant is gone', async () => {
+    const h = await makeHarness({ persisted: true })
+    const stub = subagentsStub(true)
+    h.ctx.provide('subagents', stub.api as never)
+    vi.useFakeTimers()
+    await publishHello(h.ctx)
+    const spec = residencySpec(1000)
+    await bridge.internals.drainOnce(h.ctx, spec)
+
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.disposeCalls()).toBe(0)
+
+    stub.set(false)
+    await vi.advanceTimersByTimeAsync(1000)
+
+    expect(h.disposeCalls()).toBe(1)
+    expect(h.flushes()).toBe(1)
+    expect(spec.residents.has('target')).toBe(false)
+    expect(existsSync(namedLockPath('target'))).toBe(false)
+  })
+
+  it('release() still tears down immediately even with a live descendant — the documented bypass', async () => {
+    const h = await makeHarness({ persisted: true })
+    const stub = subagentsStub(true)
+    h.ctx.provide('subagents', stub.api as never)
+    await publishHello(h.ctx)
+    const spec = residencySpec(1000)
+    await bridge.internals.drainOnce(h.ctx, spec)
+
+    const resident = spec.residents.get('target')
+    expect(resident).toBeDefined()
+    resident!.release()
+
+    // `hardRetire()`'s flush-then-dispose chain is fire-and-forget (`void`),
+    // so disposal lands a tick later than the synchronous release call.
+    await vi.waitFor(() => { expect(h.disposeCalls()).toBe(1) })
+    expect(spec.residents.has('target')).toBe(false)
+    expect(existsSync(namedLockPath('target'))).toBe(false)
+  })
+
+  it('logs on the first blocked tick — never a silent fence', async () => {
+    const h = await makeHarness({ persisted: true })
+    const stub = subagentsStub(true)
+    h.ctx.provide('subagents', stub.api as never)
+    const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
+    vi.useFakeTimers()
+    await publishHello(h.ctx)
+    const spec = residencySpec(1000)
+    await bridge.internals.drainOnce(h.ctx, spec)
+
+    await vi.advanceTimersByTimeAsync(1000)
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('staying resident past its idle window'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('"target"'))
+  })
+})
+
+/**
+ * A stub `ctx.get('subagents')` whose `hasLiveDescendants` answer is tracked
+ * PER AGENT OBJECT rather than one shared flag — {@link subagentsStub} above
+ * cannot tell two generations of one renamed seat apart, but the rename
+ * (SWD-138) tests below need exactly that: the old conversation and the new
+ * one carry distinct stub agent objects (one per `makeHandle()` call in
+ * {@link makeHarness}), so keying live-ness off object identity mirrors what
+ * the real `SubagentRuntime.hasLiveDescendants(agent)` call site actually
+ * receives.
+ */
+function perAgentSubagentsStub(): {
+  readonly api: { hasLiveDescendants: ReturnType<typeof vi.fn> }
+  setLive(agent: unknown, value: boolean): void
+} {
+  const live = new Set<unknown>()
+  return {
+    api: { hasLiveDescendants: vi.fn((agent: unknown) => live.has(agent)) },
+    setLive(agent: unknown, value: boolean) {
+      if (value) live.add(agent)
+      else live.delete(agent)
+    },
+  }
+}
+
+/**
+ * Write a throwaway one-seat registry pinning `target` to an explicit
+ * (non-derived) session id — the shape a real seat rename produces: the org
+ * registry's `sessionId` row for one name is repointed at a different,
+ * already-existing session. Returns the registry path so a test can rewrite
+ * it in place (see {@link repinSeatSessionId}) to simulate the rename itself.
+ * @param sessionId - the session id `target` starts pinned to.
+ */
+function writePinnedRegistry(sessionId: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-bridge-rename-registry-'))
+  const path = join(dir, 'registry.yml')
+  writeFileSync(path, `baseDir: ${dir}\nseats:\n  target: { cwd: target, sessionId: ${sessionId} }\nedges: []\n`, 'utf8')
+  mkdirSync(join(dir, 'target'), { recursive: true })
+  return path
+}
+
+/**
+ * The next forced mtime (epoch ms) to stamp on a registry path this test file
+ * repins, keyed by path. See {@link repinSeatSessionId}: a plain
+ * `Date.now() + 60_000` on every call can collide when two repins land in the
+ * same millisecond (a real risk here — a test can repin the same path twice
+ * with nothing but synchronous JS between the calls), which would leave the
+ * bridge's mtime-keyed registry cache unbusted for the second rename. Tracking
+ * the last forced value per path and always adding to THAT instead of to
+ * `Date.now()` guarantees strictly increasing mtimes regardless of how fast
+ * the calls land.
+ */
+const forcedRegistryMtimeMs = new Map<string, number>()
+
+/**
+ * Repin `target`'s recorded session id in a registry {@link writePinnedRegistry}
+ * wrote, simulating the rename itself. The bridge's registry cache keys on
+ * `mtimeMs` (see `cachedRegistry`), so a rewrite alone is not guaranteed to
+ * invalidate it — see {@link forcedRegistryMtimeMs} for why a monotonic
+ * per-path counter is used instead of trusting real-clock resolution.
+ * @param path - the registry path from {@link writePinnedRegistry}.
+ * @param sessionId - the session id `target` is repinned to.
+ */
+function repinSeatSessionId(path: string, sessionId: string): void {
+  const dir = dirname(path)
+  writeFileSync(path, `baseDir: ${dir}\nseats:\n  target: { cwd: target, sessionId: ${sessionId} }\nedges: []\n`, 'utf8')
+  const nextMs = (forcedRegistryMtimeMs.get(path) ?? Date.now()) + 60_000
+  forcedRegistryMtimeMs.set(path, nextMs)
+  const forced = new Date(nextMs)
+  utimesSync(path, forced, forced)
+}
+
+describe('seat rename supersedes the old resident instead of releasing it (SWD-138)', () => {
+  afterEach(() => {
+    // Same reasoning as the idle-retire block above: only these tests opt
+    // into a fake clock, so it must never leak into a later file on failure.
+    vi.useRealTimers()
+  })
+
+  it('does not dispose the old conversation while it still has live background work, and the new seat takes over the name immediately', async () => {
+    const registryPath2 = writePinnedRegistry('session-a')
+    const h = await makeHarness()
+    const stub = perAgentSubagentsStub()
+    h.ctx.provide('subagents', stub.api as never)
+    const spec = bridge.resolveBridgeSpec({
+      addresses: ['target'],
+      pollIntervalMs: 5,
+      maxClaimPerCycle: 10,
+      staleClaimMs: 600_000,
+      admitFrom: ['sender'],
+      orgRegistryPath: registryPath2,
+      residencyIdleMs: 1000,
+    })
+
+    await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, spec)
+    expect(h.createdSessions()).toEqual(['session-a'])
+    const agentA = h.agentFor('session-a')
+    expect(agentA).toBeDefined()
+    stub.setLive(agentA, true)
+
+    // The rename: the registry now resolves `target` to a fresh session.
+    repinSeatSessionId(registryPath2, 'session-b')
+    const secondId = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'after rename' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+
+    // The new seat was created and admitted the second message normally —
+    // the founder's ruling names this explicitly: the name moves immediately,
+    // the rename is never refused or deferred waiting on the old conversation.
+    expect(h.createdSessions()).toEqual(['session-a', 'session-b'])
+    await expect(rowState(h.storePath, secondId)).resolves.toMatchObject({ state: 'done' })
+    // The old conversation's agent was never disposed — it is still finishing
+    // its background work, exactly as the founder ruled.
+    expect(h.disposeCalls()).toBe(0)
+
+    // And the new seat works normally in the meantime: a THIRD message to the
+    // same name rides the new (live, in-process) resident with no further
+    // creation — proving the rename did not leave `target` in some degraded
+    // or blocked state while the old conversation lingers.
+    const thirdId = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'still works' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+    expect(h.createdSessions()).toEqual(['session-a', 'session-b'])
+    await expect(rowState(h.storePath, thirdId)).resolves.toMatchObject({ state: 'done' })
+  })
+
+  it('disposes the old conversation once its background work finishes, after a rename', async () => {
+    const registryPath2 = writePinnedRegistry('session-a')
+    const h = await makeHarness()
+    const stub = perAgentSubagentsStub()
+    h.ctx.provide('subagents', stub.api as never)
+    // Wired here, before anything runs, the same way the idle-retire block's
+    // own "logs on the first blocked tick" test spies before its first drain:
+    // this is the ONLY thing that proves the supersede path actually calls
+    // `logBlockedAnnouncement` with the 'superseded' reason at all — the
+    // disposal-timing assertions below would pass identically even if that
+    // call were dropped from `retireSuperseded` entirely, or wired with the
+    // wrong reason literal.
+    const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
+    const spec = bridge.resolveBridgeSpec({
+      addresses: ['target'],
+      pollIntervalMs: 5,
+      maxClaimPerCycle: 10,
+      staleClaimMs: 600_000,
+      admitFrom: ['sender'],
+      orgRegistryPath: registryPath2,
+      residencyIdleMs: 1000,
+    })
+    vi.useFakeTimers()
+
+    await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, spec)
+    const agentA = h.agentFor('session-a')
+    stub.setLive(agentA, true)
+
+    repinSeatSessionId(registryPath2, 'session-b')
+    await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'after rename' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+    // The new (current) resident is marked live too, so ITS OWN ordinary
+    // idle-retire timer — armed for the same `idleMs` and due at the same
+    // tick as the old resident's supersede recheck below — defers rather
+    // than coincidentally hardRetiring on schedule and confusing this test's
+    // dispose count with a seat this test never meant to touch.
+    stub.setLive(h.agentFor('session-b'), true)
+    expect(h.disposeCalls()).toBe(0)
+
+    // The rename itself is the first blocked tick — `supersede()` runs its
+    // own first live-descendant check synchronously, so the announcement (see
+    // `describeBlockedResident`'s "first occurrence always announces" rule)
+    // fires during the rename's own drain, never a silent linger even for
+    // one tick. It must carry the SUPERSEDE wording, never the idle-retire
+    // wording the current (session-b) resident's own deferred idle timer
+    // would produce instead.
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('is being kept alive after the name moved to a new session'))
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('staying resident past its idle window'))
+
+    // Still finishing: a recheck tick with the descendant still live changes
+    // nothing.
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.disposeCalls()).toBe(0)
+
+    // The background work completes — the next recheck tears it down.
+    stub.setLive(agentA, false)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.disposeCalls()).toBe(1)
+    expect(h.flushes()).toBe(1)
+  })
+
+  it('a rename with no live background work behaves exactly as before — the old conversation disposes immediately (the common case is unchanged)', async () => {
+    const registryPath2 = writePinnedRegistry('session-a')
+    const h = await makeHarness()
+    // No `subagents` service mounted at all — the same "never materialized a
+    // descendant" deployment shape `retire()`'s own doc already covers.
+    const spec = bridge.resolveBridgeSpec({
+      addresses: ['target'],
+      pollIntervalMs: 5,
+      maxClaimPerCycle: 10,
+      staleClaimMs: 600_000,
+      admitFrom: ['sender'],
+      orgRegistryPath: registryPath2,
+      residencyIdleMs: 1000,
+    })
+
+    await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, spec)
+    expect(h.disposeCalls()).toBe(0)
+
+    repinSeatSessionId(registryPath2, 'session-b')
+    await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'after rename' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+
+    // No deferral at all: the old resident tore down in the very same drain
+    // that created the new one, with no recheck timer ever needed.
+    expect(h.disposeCalls()).toBe(1)
+    expect(h.flushes()).toBe(1)
+    expect(spec.residents.size).toBe(1)
+    expect(spec.residents.has('target')).toBe(true)
+  })
+
+  it('more than one lingering conversation drains independently without corrupting `spec.residents` — a second rename while the first is still finishing', async () => {
+    const registryPath2 = writePinnedRegistry('session-a')
+    const h = await makeHarness()
+    const stub = perAgentSubagentsStub()
+    h.ctx.provide('subagents', stub.api as never)
+    const spec = bridge.resolveBridgeSpec({
+      addresses: ['target'],
+      pollIntervalMs: 5,
+      maxClaimPerCycle: 10,
+      staleClaimMs: 600_000,
+      admitFrom: ['sender'],
+      orgRegistryPath: registryPath2,
+      residencyIdleMs: 1000,
+    })
+    vi.useFakeTimers()
+
+    await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, spec)
+    const agentA = h.agentFor('session-a')
+    // Every generation below is marked live so none disposes until this test
+    // explicitly clears it — including the CURRENT (third) generation, so its
+    // own ordinary idle-retire timer (armed for the same `idleMs`) defers
+    // exactly like any other busy seat instead of coincidentally hardRetiring
+    // and deleting the very map entry this test is asserting stays intact.
+    stub.setLive(agentA, true)
+
+    repinSeatSessionId(registryPath2, 'session-b')
+    await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'rename one' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+    const agentB = h.agentFor('session-b')
+    stub.setLive(agentB, true)
+
+    // A second rename lands while the FIRST superseded conversation
+    // (session-a) is still finishing — this is the scenario the ticket calls
+    // out by name: more than one lingering conversation at once.
+    repinSeatSessionId(registryPath2, 'session-c')
+    await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'rename two' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+    const agentC = h.agentFor('session-c')
+    stub.setLive(agentC, true)
+
+    expect(h.createdSessions()).toEqual(['session-a', 'session-b', 'session-c'])
+    const current = spec.residents.get('target')
+    expect(current).toBeDefined()
+    expect(h.disposeCalls()).toBe(0)
+
+    // One full recheck cadence: every generation is still live, so nothing
+    // disposes and `target` still maps to the same (third-generation)
+    // resident — the recheck loops never touch the map at all.
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.disposeCalls()).toBe(0)
+    expect(spec.residents.get('target')).toBe(current)
+
+    // The FIRST generation (session-a) finishes; only it tears down. The
+    // second generation and the current resident are untouched.
+    stub.setLive(agentA, false)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.disposeCalls()).toBe(1)
+    expect(spec.residents.get('target')).toBe(current)
+
+    // The SECOND generation (session-b) finishes next; the current resident
+    // — a third, still-independent generation — remains completely
+    // unaffected throughout, proving multiple lingering conversations do not
+    // corrupt `spec.residents` bookkeeping for one another or for the seat
+    // presently holding the name.
+    stub.setLive(agentB, false)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.disposeCalls()).toBe(2)
+    expect(spec.residents.get('target')).toBe(current)
+    expect(spec.residents.size).toBe(1)
+  })
+})
+
+describe('describeBlockedResident cadence', () => {
+  const { describeBlockedResident, DESCENDANT_REANNOUNCE_TICKS, DESCENDANT_ESCALATE_TICKS } = bridge.internals
+  const sid = deriveNamedSessionId('target')
+
+  it('logs on the first blocked tick with routine wording', () => {
+    const result = describeBlockedResident('target', sid, 1)
+    expect(result).toBeDefined()
+    expect(result?.escalate).toBe(false)
+    expect(result?.message).toContain('staying resident past its idle window')
+  })
+
+  it('stays quiet on ticks between reannounces', () => {
+    expect(describeBlockedResident('target', sid, 2)).toBeUndefined()
+    expect(describeBlockedResident('target', sid, DESCENDANT_REANNOUNCE_TICKS - 1)).toBeUndefined()
+  })
+
+  it('reannounces at the reannounce tick, still routine wording', () => {
+    const result = describeBlockedResident('target', sid, DESCENDANT_REANNOUNCE_TICKS)
+    expect(result).toBeDefined()
+    expect(result?.escalate).toBe(false)
+  })
+
+  it('flips from routine to escalating wording at the escalate threshold', () => {
+    // The reannounce tick one cadence short of escalation is still routine —
+    // escalation is a coarser highwater over the same reannounce cadence.
+    const stillRoutine = describeBlockedResident('target', sid, DESCENDANT_ESCALATE_TICKS - DESCENDANT_REANNOUNCE_TICKS)
+    expect(stillRoutine?.escalate).toBe(false)
+
+    const escalated = describeBlockedResident('target', sid, DESCENDANT_ESCALATE_TICKS)
+    expect(escalated).toBeDefined()
+    expect(escalated?.escalate).toBe(true)
+    expect(escalated?.message).toContain('this has now run far longer than one idle window is meant to mean')
+  })
+
+  it('defaults to the idle wording when no reason is passed, for every existing caller', () => {
+    expect(describeBlockedResident('target', sid, 1)?.message).toContain('staying resident past its idle window')
+  })
+
+  it('uses the rename/supersede wording — and cadence/escalation identically — when reason is "superseded"', () => {
+    const first = describeBlockedResident('target', sid, 1, 'superseded')
+    expect(first).toBeDefined()
+    expect(first?.escalate).toBe(false)
+    expect(first?.message).toContain('is being kept alive after the name moved to a new session')
+    expect(first?.message).not.toContain('staying resident past its idle window')
+
+    // Same cadence constants govern both reasons: quiet between reannounces,
+    expect(describeBlockedResident('target', sid, 2, 'superseded')).toBeUndefined()
+    // reannounces on schedule,
+    expect(describeBlockedResident('target', sid, DESCENDANT_REANNOUNCE_TICKS, 'superseded')?.escalate).toBe(false)
+    // and escalates at the same threshold, with wording for THIS reason.
+    const escalated = describeBlockedResident('target', sid, DESCENDANT_ESCALATE_TICKS, 'superseded')
+    expect(escalated?.escalate).toBe(true)
+    expect(escalated?.message).toContain('this has now run far longer than one idle window is meant to mean')
+    expect(escalated?.message).toContain('this conversation should not still be running')
+  })
+})
+
+describe('seat tool-restriction wiring', () => {
+  it('a seat WITH a configured rule causes the setup-installed tools.restrict() to run', async () => {
+    const toolsRegistryPath = writeTestRegistry(['target', 'alice', 'ghost', 'other'], {
+      tools: { target: { allow: ['read'] } },
+    })
+    // Unpersisted: exercises createTarget's half of the wiring.
+    const h = await makeHarness({ persisted: false, knownTools: ['read', 'bash'] })
+    const id = await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(undefined, { orgRegistryPath: toolsRegistryPath })))
+    expect(h.toolsRestrictCalls()).toEqual([[{ allow: ['read'] }]])
+    await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'done' })
+  })
+
+  it('a seat WITH a configured rule also restricts on cold-resume, not only first creation', async () => {
+    const toolsRegistryPath = writeTestRegistry(['target', 'alice', 'ghost', 'other'], {
+      tools: { target: { deny: ['bash'] } },
+    })
+    // Persisted: exercises resumeTarget's half of the wiring.
+    const h = await makeHarness({ persisted: true, knownTools: ['read', 'bash'] })
+    await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(undefined, { orgRegistryPath: toolsRegistryPath })))
+    expect(h.toolsRestrictCalls()).toEqual([[{ deny: ['bash'] }]])
+  })
+
+  it('a seat with NO configured rule never calls tools.restrict()', async () => {
+    // The suite's default registry (`beforeEach`) rosters "target" with no
+    // `tools` field at all — the unconfigured-by-default case this feature's
+    // hard constraint rests on.
+    const h = await makeHarness({ persisted: false })
+    await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec()))
+    expect(h.toolsRestrictCalls()).toEqual([])
+  })
+})
+
+describe('muted seats (a resolved tool restriction leaving NO tools at all) are refused, never composed', () => {
+  it('a deny list covering every known tool refuses the mail on first creation: never restricted, never registered, the sender told why', async () => {
+    const toolsRegistryPath = writeTestRegistry(['target', 'alice', 'ghost', 'other'], {
+      tools: { target: { deny: ['read', 'bash'] } },
+    })
+    // Unpersisted: exercises createTarget's half of the muted-abort wiring.
+    const h = await makeHarness({ persisted: false, knownTools: ['read', 'bash'] })
+    const refusals: bridge.MailboxRefusal[] = []
+    h.ctx.on('mailbox/refused', (refusal) => { refusals.push(refusal) })
+    const restrictions: unknown[] = []
+    h.ctx.on('mailbox/seat-tools-restricted', (restriction) => { restrictions.push(restriction) })
+    const id = await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(undefined, { orgRegistryPath: toolsRegistryPath })))
+
+    // The registry was never mutated: applySeatToolRestriction skips
+    // restrict() entirely for a muted outcome.
+    expect(h.toolsRestrictCalls()).toEqual([])
+    // No agent was ever published under the target's session id — the setup
+    // throw rolled the whole creation back before announce/publish, and the
+    // stub only registers after setup succeeds (mirroring that contract).
+    expect(h.createdSessions()).not.toContain(String(deriveNamedSessionId('target')))
+    expect(h.agentFor(String(deriveNamedSessionId('target')))).toBeUndefined()
+
+    // The mail is refused, not left pending or silently dropped, and the
+    // reason names both the cause and the seat.
+    const row = await rowState(h.storePath, id)
+    expect(row.state).toBe('failed')
+    const reason = (JSON.parse(row.result ?? '{}') as { reason: string }).reason
+    expect(reason).toContain('seat-tools-muted')
+    expect(reason).toContain('target')
+
+    // The sender-facing refusal fired exactly once, with the same reason.
+    expect(refusals).toEqual([{ from: 'sender', to: String(TARGET), reason }])
+
+    // The richer domain-specific event fired too, describing WHY.
+    expect(restrictions).toEqual([{ seatName: 'target', muted: true, degraded: false, missing: [], remaining: [] }])
+  })
+
+  it('an allow list whose every name is unknown refuses on cold-resume as well: never restricted, never resumed', async () => {
+    const toolsRegistryPath = writeTestRegistry(['target', 'alice', 'ghost', 'other'], {
+      tools: { target: { allow: ['ghost-tool', 'wraith-tool'] } },
+    })
+    // Persisted: exercises resumeTarget's half of the muted-abort wiring.
+    const h = await makeHarness({ persisted: true, knownTools: ['read', 'bash'] })
+    const id = await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(undefined, { orgRegistryPath: toolsRegistryPath })))
+
+    expect(h.toolsRestrictCalls()).toEqual([])
+    // The stub's own resume counter increments only after setup succeeds —
+    // a muted setup throw means this never happens.
+    expect(h.resumeCalls()).toBe(0)
+    expect(h.agentFor(String(deriveNamedSessionId('target')))).toBeUndefined()
+
+    const row = await rowState(h.storePath, id)
+    expect(row.state).toBe('failed')
+    const reason = (JSON.parse(row.result ?? '{}') as { reason: string }).reason
+    expect(reason).toContain('seat-tools-muted')
+  })
+
+  it('the host log gets a live warning naming the seat when a mail addressed to a muted seat is refused', async () => {
+    const denyEverythingPath = writeTestRegistry(['target', 'alice', 'ghost', 'other'], {
+      tools: { target: { deny: ['read', 'bash'] } },
+    })
+    const h = await makeHarness({ persisted: false, knownTools: ['read', 'bash'] })
+    const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
+    await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(undefined, { orgRegistryPath: denyEverythingPath })))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('NO tools at all'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('target'))
   })
 })
 
@@ -1398,6 +2124,82 @@ describe('loop guards', () => {
     for (const id of ids) {
       await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'done' })
     }
+    expect(live.steer).toHaveBeenCalledTimes(4)
+  })
+
+  it('sails a trace past the legacy 8-hop lock — the default cap is 50 per UTC day', async () => {
+    const { live } = liveTarget()
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    const spec = specWithGuards(
+      { addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 20, staleClaimMs: 600_000, admitFrom: ['sender'] },
+      {},
+      { at: 1_000_000 },
+    )
+    // Nine hops on one trace: hop 9 is past the old lifetime cap of 8 and
+    // must admit under the 50/day cap.
+    const ids: string[] = []
+    for (let index = 1; index <= 9; index++) {
+      ids.push(await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: `relay ${index}`, traceId: 'legacy-lock' }))
+    }
+    await bridge.internals.drainOnce(h.ctx, spec)
+    for (const id of ids) {
+      await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'done' })
+    }
+    expect(live.steer).toHaveBeenCalledTimes(9)
+  })
+
+  it('refuses hop 51 with an honest message naming the 50/day cap and the daily reset', async () => {
+    const { live } = liveTarget()
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    // The depth guard judges BEFORE hops and also defaults to 50/60s; raise
+    // it so the HOP guard is the one that fires at the 51st message.
+    const spec = specWithGuards(
+      { addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 60, staleClaimMs: 600_000, admitFrom: ['sender'] },
+      { maxDepthPerAddress: 1_000 },
+      { at: 1_000_000 },
+    )
+    const ids: string[] = []
+    for (let index = 1; index <= 51; index++) {
+      ids.push(await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: `flood ${index}`, traceId: 'flood' }))
+    }
+    await bridge.internals.drainOnce(h.ctx, spec)
+    await expect(rowState(h.storePath, ids[49]!)).resolves.toMatchObject({ state: 'done' })
+    const refused = await rowState(h.storePath, ids[50]!)
+    expect(refused.state).toBe('failed')
+    const reason = JSON.parse(refused.result ?? '{}').reason as string
+    expect(reason).toContain('hop-limit-exceeded')
+    expect(reason).toContain('already carried 50 admitted hops today')
+    expect(reason).toContain('cap 50')
+    expect(reason).toContain('resets daily at 00:00 UTC')
+  })
+
+  it('resets the trace hop counter when the UTC day turns, so a chronic relay thread never locks', async () => {
+    const { live } = liveTarget()
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    const clock: Clock = { at: 1_000_000 }
+    const spec = specWithGuards(
+      { addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000, admitFrom: ['sender'] },
+      { maxHopsPerTrace: 2 },
+      clock,
+    )
+    const day1: string[] = []
+    for (let index = 1; index <= 3; index++) {
+      day1.push(await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: `day-one ${index}`, traceId: 'chronic' }))
+    }
+    await bridge.internals.drainOnce(h.ctx, spec)
+    await expect(rowState(h.storePath, day1[0]!)).resolves.toMatchObject({ state: 'done' })
+    await expect(rowState(h.storePath, day1[1]!)).resolves.toMatchObject({ state: 'done' })
+    expect(JSON.parse((await rowState(h.storePath, day1[2]!)).result ?? '{}').reason as string).toContain('hop-limit-exceeded')
+
+    clock.at += 86_400_000 // next UTC day: the counter must read as zero again
+    const day2: string[] = []
+    for (let index = 1; index <= 3; index++) {
+      day2.push(await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: `day-two ${index}`, traceId: 'chronic' }))
+    }
+    await bridge.internals.drainOnce(h.ctx, spec)
+    await expect(rowState(h.storePath, day2[0]!)).resolves.toMatchObject({ state: 'done' })
+    await expect(rowState(h.storePath, day2[1]!)).resolves.toMatchObject({ state: 'done' })
+    expect(JSON.parse((await rowState(h.storePath, day2[2]!)).result ?? '{}').reason as string).toContain('resets daily')
     expect(live.steer).toHaveBeenCalledTimes(4)
   })
 

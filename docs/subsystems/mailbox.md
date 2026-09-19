@@ -254,9 +254,29 @@ async lookupByTraceId(traceId: string, signal?: AbortSignal): Promise<readonly M
  * @returns one entry per matching row, earliest admission first.
  */
 async lookupInboundSince(address: MailboxAddress, sinceMs: number, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]>
+
+/**
+ * SWD-118 roster-drift alarm, condition (A): declare the addresses one
+ * mount serves under `mountId`, then warn — never throw — if the result
+ * disagrees with any roster already declared under a DIFFERENT mount id.
+ * The two mounts that call this today (`mailbox-bridge`, `tool-mailbox`)
+ * are expected to serve byte-identical rosters; nothing enforced that
+ * before this ticket, and a one-sided address meant mail to that seat
+ * silently half-worked with no error and no bounce.
+ *
+ * Declarations under the SAME mount id accumulate as a union rather than
+ * overwrite, so more than one mount instance sharing an id (e.g. two
+ * `mailbox-bridge` mounts each serving a subset) is judged as one served
+ * roster, not a disagreement with itself. The comparison runs once per
+ * call, against every OTHER declared roster, so the alarm fires at mount
+ * time as each side registers — never on a hot path.
+ * @param mountId - the declaring mount's identity (its plugin `name`).
+ * @param addresses - the bare addresses that mount serves.
+ */
+declareRoster(mountId: string, addresses: readonly string[]): void
 ```
 
-Source: [`packages/mailbox/mailbox/src/index.ts:60`](../../packages/mailbox/mailbox/src/index.ts)
+Source: [`packages/mailbox/mailbox/src/index.ts:65`](../../packages/mailbox/mailbox/src/index.ts)
 
 <a id="mailbox-events"></a>
 
@@ -289,5 +309,49 @@ The bridge refused a claimed lease terminally at admission — registry health, 
 'mailbox/refused'(refusal: MailboxRefusal): void
 ```
 
-Source: [`packages/mailbox/bridge/src/index.ts:1310`](../../packages/mailbox/bridge/src/index.ts)
+Source: [`packages/mailbox/bridge/src/index.ts:1780`](../../packages/mailbox/bridge/src/index.ts)
+
+<a id="mailboxseat-tools-restricted--emit"></a>
+
+#### `mailbox/seat-tools-restricted` — emit
+
+A seat's configured tool restriction was resolved at create or cold-resume, in one of two shapes:
+
+- `muted: false` — `composeSeatAgent` applied it and the seat composed normally. This event is the restriction's LIVE outlet, emitted alongside (never instead of) the durable notice node `seatToolRestrictionUserMessage` appends into the seat's OWN session — that durable append is the outlet that does not depend on anyone watching a live stream, and this event is the one that reaches a listener right now.
+- `muted: true` — the rule left the seat with NO tools at all, so `composeSeatAgent`'s `setup` threw SeatMutedToolsError before anything was ever published; the seat was never composed, so it has no session to notice. `deliverLease` catches that error, warns the host log, emits this event, and routes the mail through `refuse()` instead — whose own `mailbox/refused` event and durable SENDER-side notice report the refusal itself. This event exists alongside that one because `mailbox/refused` carries only `{ from, to, reason }`: this is the richer, domain-specific record of WHY — the missing/remaining tool names a listener would otherwise have to parse back out of the reason string.
+
+Listener failures are logged and contained by Cordis dispatch.
+
+```ts cordis-catalog
+/**
+ * A seat's configured tool restriction was resolved at create or
+ * cold-resume, in one of two shapes:
+ *
+ * - `muted: false` — `composeSeatAgent` applied it and the seat composed
+ *   normally. This event is the restriction's LIVE outlet, emitted
+ *   alongside (never instead of) the durable notice node
+ *   `seatToolRestrictionUserMessage` appends into the seat's OWN
+ *   session — that durable append is the outlet that does not depend on
+ *   anyone watching a live stream, and this event is the one that
+ *   reaches a listener right now.
+ * - `muted: true` — the rule left the seat with NO tools at all, so
+ *   `composeSeatAgent`'s `setup` threw {@link SeatMutedToolsError}
+ *   before anything was ever published; the seat was never composed, so
+ *   it has no session to notice. `deliverLease` catches that error,
+ *   warns the host log, emits this event, and routes the mail through
+ *   `refuse()` instead — whose own `mailbox/refused` event and durable
+ *   SENDER-side notice report the refusal itself. This event exists
+ *   alongside that one because `mailbox/refused` carries only
+ *   `{ from, to, reason }`: this is the richer, domain-specific record
+ *   of WHY — the missing/remaining tool names a listener would otherwise
+ *   have to parse back out of the reason string.
+ *
+ * Listener failures are logged and contained by Cordis dispatch.
+ * @param restriction - the seat, the effective outcome, and the muted/degraded conditions.
+ * @mode emit
+ */
+'mailbox/seat-tools-restricted'(restriction: SeatToolsRestricted): void
+```
+
+Source: [`packages/mailbox/bridge/src/index.ts:1809`](../../packages/mailbox/bridge/src/index.ts)
 <!-- END GENERATED cordis-surface -->

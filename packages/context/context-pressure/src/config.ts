@@ -4,6 +4,8 @@
  * @module @deepseek-ai/dsh-context-pressure/config
  */
 
+import z from '@deepseek-ai/schemastery'
+
 /** Request-preparation pressure configuration. Invalid values fail plugin load. */
 export interface Config {
   /** Fractions of the routed model's context window; ascending, unique, each in (0,1). Omit for the default [0.25, 0.5, 0.75]. */
@@ -26,6 +28,22 @@ export interface Spec {
 
 /** Fractions watched when `Config.thresholds` is omitted. */
 export const DEFAULT_THRESHOLDS: readonly number[] = [0.25, 0.5, 0.75]
+
+/**
+ * Schemastery validation for {@link Config}. The array default is declared
+ * here because Schemastery otherwise resolves an omitted array to `[]`, which
+ * `Config.thresholds` defines as the explicit disable switch; the documented
+ * default must stay distinguishable from it.
+ *
+ * Declared in this module rather than the plugin entry so the entry can import
+ * the config type under its own name: the entry re-exports `Config`, and an
+ * entry-local schema const of the same name would force the type import to be
+ * aliased, which `verify-config-catalog` rejects (the catalog pastes
+ * declarations verbatim and an alias breaks that).
+ */
+export const Config: z<Config> = z.object({
+  thresholds: z.array(z.number()).default([...DEFAULT_THRESHOLDS]),
+})
 
 /**
  * Render a fraction as the canonical percent text used inside warnings.

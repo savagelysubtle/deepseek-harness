@@ -14,6 +14,7 @@ import type Schema from '@deepseek-ai/schemastery'
 import type { MailboxAddress, MailboxClaimFilter, MailboxLeaseRef, MailboxLease, MailboxMessageId, MailboxOutcome, MailboxPublishInput, MailboxTraceEntry } from './types.ts'
 import type { MailboxProvider } from './provider.ts'
 import { parseMailboxAddress } from './address.ts'
+import { diffRosters, rosterDriftWarning } from './roster.ts'
 import './source.ts'
 
 export { parseMailboxAddress, formatMailboxAddress, MAILBOX_SEGMENT_PATTERN_SOURCE } from './address.ts'
@@ -25,6 +26,10 @@ export {
   resolveSeatCwd, resolveSeatSessionId,
 } from './org-registry.ts'
 export type { OrgRegistry, OrgRegistryEdge, OrgRegistryParseOptions, OrgRegistrySeat } from './org-registry.ts'
+export {
+  diffRosters, loadRegistrySeatNames, rosterDriftWarning, unknownServedSeats, unknownServedSeatsWarning,
+} from './roster.ts'
+export type { RegistryLoadOutcome, RosterDrift } from './roster.ts'
 
 /** Deployment config of the registry service. */
 export interface Config {
@@ -62,6 +67,8 @@ export class MailboxRegistry extends Service {
 
   private readonly providers = new Map<string, MailboxProvider>()
   private readonly defaultProvider: string | undefined
+  /** Rosters declared so far by {@link declareRoster}, keyed by mount id. */
+  private readonly declaredRosters = new Map<string, Set<string>>()
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'mailbox')
@@ -169,6 +176,36 @@ export class MailboxRegistry extends Service {
   async lookupInboundSince(address: MailboxAddress, sinceMs: number, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]> {
     parseMailboxAddress(address)
     return this.resolveDefault('lookupInboundSince').lookupInboundSince(address, sinceMs, signal)
+  }
+
+  /**
+   * SWD-118 roster-drift alarm, condition (A): declare the addresses one
+   * mount serves under `mountId`, then warn — never throw — if the result
+   * disagrees with any roster already declared under a DIFFERENT mount id.
+   * The two mounts that call this today (`mailbox-bridge`, `tool-mailbox`)
+   * are expected to serve byte-identical rosters; nothing enforced that
+   * before this ticket, and a one-sided address meant mail to that seat
+   * silently half-worked with no error and no bounce.
+   *
+   * Declarations under the SAME mount id accumulate as a union rather than
+   * overwrite, so more than one mount instance sharing an id (e.g. two
+   * `mailbox-bridge` mounts each serving a subset) is judged as one served
+   * roster, not a disagreement with itself. The comparison runs once per
+   * call, against every OTHER declared roster, so the alarm fires at mount
+   * time as each side registers — never on a hot path.
+   * @param mountId - the declaring mount's identity (its plugin `name`).
+   * @param addresses - the bare addresses that mount serves.
+   */
+  declareRoster(mountId: string, addresses: readonly string[]): void {
+    const existing = this.declaredRosters.get(mountId) ?? new Set<string>()
+    for (const address of addresses) existing.add(address)
+    this.declaredRosters.set(mountId, existing)
+    for (const [otherId, otherAddresses] of this.declaredRosters) {
+      if (otherId === mountId) continue
+      const drift = diffRosters(existing, otherAddresses)
+      if (drift.onlyFirst.length === 0 && drift.onlySecond.length === 0) continue
+      this.ctx.logger.warn(rosterDriftWarning(mountId, otherId, drift))
+    }
   }
 
   /**

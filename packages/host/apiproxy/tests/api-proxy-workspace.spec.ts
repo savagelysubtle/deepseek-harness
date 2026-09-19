@@ -51,7 +51,7 @@ function stubAgent(session: Session): Agent {
     followup: () => {},
     steer: () => ({ outcome: Promise.resolve({ status: 'rejected' as const }) }),
     inject: () => {},
-    cancel() {},
+    cancel() { return false },
     runMaintenance: job => job(new AbortController().signal),
     whenIdle: () => Promise.resolve(),
   }

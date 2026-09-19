@@ -524,8 +524,28 @@ async followup( parent: Agent, childId: SessionId, content: ContentBlock[], opti
  * @param authority - the human parent address or exact live ancestor Agent.
  * @throws {SubagentError} `UNAUTHORIZED` when the authority does not own the
  *   live target.
+ * @returns whether the target actually had active work aborted by this
+ *   call. A manager-less composition, which cannot own a live Activation,
+ *   always reports `false`.
  */
-interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): void
+interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): boolean
+
+/**
+ * Whether `root` currently has any live continuable descendant Activation.
+ * Synchronous and process-local — backed only by the resident Activation
+ * map, never a persistence read or a durable-history projection — so a
+ * caller like an idle-retire timer can afford to call it on every tick.
+ * {@link listDescendants} answers a different, more expensive question (the
+ * durable tree, including already-settled children); this one exists
+ * because that question is the wrong one, and the wrong cost, for a timer
+ * callback. A manager-less composition (the `agents` service never
+ * mounted) has never materialized an Activation, so it truthfully reports
+ * no descendants rather than throwing — the same `?? false` honesty
+ * {@link interrupt} uses for the same absence.
+ * @param root - the exact live Agent to test for live descendants.
+ * @returns whether `root` has at least one live continuable descendant.
+ */
+hasLiveDescendants(root: Agent): boolean
 
 /**
  * Deliver selected content from one live continuable child to its durable

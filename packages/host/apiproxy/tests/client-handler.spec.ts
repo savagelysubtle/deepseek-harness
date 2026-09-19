@@ -61,6 +61,9 @@ function scriptedApi(overrides: {
       }),
       updateQueue: r => ok(r, { accepted: true as const }),
       cancel: r => ok(r, { accepted: true as const }),
+      stopTree: r => ok(r, { ownTurnStopped: true, descendants: 'ok' as const }),
+      stopAll: r => ok(r, { stoppedCount: 0, descendants: 'ok' as const }),
+      sendAll: r => ok(r, { sentCount: 0, result: 'ok' as const }),
       ...overrides.sessions,
     },
     subagents: {
@@ -130,6 +133,7 @@ function scriptedApi(overrides: {
     },
     mailbox: { publish: err },
     worktree: { list: err, create: err, lock: err, remove: err },
+    org: { get: err },
     events: { mux: () => empty<MuxFrame>(), host: () => empty<HostFrame>(), ...overrides.events },
     respond: overrides.respond ?? (() => Promise.resolve({ accepted: false as const, reason: 'not-pending' as const })),
     downloads: { sessionLog: async () => new Response('stub', { status: 404 }) },
@@ -156,7 +160,7 @@ describe('unary round trip', () => {
       sessions: {
         list: (r) => {
           seen = r
-          return ok(r, { items: [{ sessionId: sid('s1'), updatedAt: 7, running: false, blank: false }] })
+          return ok(r, { items: [{ sessionId: sid('s1'), updatedAt: 7, running: false, attached: true, blank: false }] })
         },
       },
     })
@@ -165,7 +169,7 @@ describe('unary round trip', () => {
     expect(seen?.payload).toEqual({ cursor: 'c1' })
     expect(seen?.rpcId).toBeTruthy()
     expect(response.rpcId).toBe(seen?.rpcId)
-    expect(response.result).toEqual({ ok: true, value: { items: [{ sessionId: 's1', updatedAt: 7, running: false, blank: false }] } })
+    expect(response.result).toEqual({ ok: true, value: { items: [{ sessionId: 's1', updatedAt: 7, running: false, attached: true, blank: false }] } })
   })
 
   it('round-trips a trimmed session search query and its bounded result metadata', async () => {

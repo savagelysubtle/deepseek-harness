@@ -2,7 +2,7 @@
 
 Status: proposed
 
-[English](2026-08-26-memory-tool-shaped.md) | 中文
+English | [中文](2026-08-26-memory-tool-shaped.zh.md)
 
 ## Problem
 

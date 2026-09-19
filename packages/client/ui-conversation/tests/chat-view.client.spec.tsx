@@ -9,7 +9,7 @@ import { useEffect } from 'react'
 import type {
   AssistantMessageNode, CommandNode, CompactionSummaryNode, ConversationNode, ConversationSnapshot,
   ModelRetryNode, RunningToolCall, SessionId, SessionListState, ToolCallBlock, ToolResultNode, TurnErrorNode,
-  TurnMaxTokensNode, UserMessageNode, WorkspaceListState,
+  TurnMaxTokensNode, TurnStoppedNode, UserMessageNode, WorkspaceListState,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-web-react'
 import {
@@ -28,7 +28,7 @@ import { AssistantNodeView } from '../src/client/chat/AssistantNodeView.tsx'
 import { CommandNodeView, ManualCompactionNodeView } from '../src/client/chat/CommandNodeView.tsx'
 import {
   CompactionNodeView, ContextMessageNodeView, RetryNodeView, TurnErrorNodeView,
-  TurnMaxTokensNodeView, UnknownNodeView, UserMessageNodeView,
+  TurnMaxTokensNodeView, TurnStoppedNodeView, UnknownNodeView, UserMessageNodeView,
 } from '../src/client/chat/MessageItem.tsx'
 import { TurnTailNodeView } from '../src/client/chat/TurnTailNodeView.tsx'
 import { formatRunDuration } from '../src/client/chat/message-chrome.ts'
@@ -110,6 +110,9 @@ const turnError = (seq: number, code?: string): TurnErrorNode => ({
 })
 const turnMaxTokens = (seq: number): TurnMaxTokensNode => ({
   kind: 'turn-max-tokens', seq, time: seq * 1_000, turn: 1, step: 0,
+})
+const turnStopped = (seq: number, cause: TurnStoppedNode['cause']): TurnStoppedNode => ({
+  kind: 'turn-stopped', seq, time: seq * 1_000, turn: 1, step: 0, cause,
 })
 const toolResult = (seq: number, callId: string, name = 'bash'): ToolResultNode => ({
   kind: 'tool-result', seq, time: seq * 1_000, callId,
@@ -222,6 +225,8 @@ function makeHarness(init?: Partial<ConversationSnapshot>) {
         return <TurnErrorNodeView {...nodeProps<'turn-error'>()} />
       case 'turn-max-tokens':
         return <TurnMaxTokensNodeView {...nodeProps<'turn-max-tokens'>()} />
+      case 'turn-stopped':
+        return <TurnStoppedNodeView {...nodeProps<'turn-stopped'>()} />
       case 'turn-tail':
         return (
           <TurnTailNodeView
@@ -598,6 +603,30 @@ describe('ChatView', () => {
       '已达到输出 token 上限回答被截断，已有输出保留在对话中。发送“继续”可让模型接着输出。',
     ])
     expect(view.queryByText('本轮运行失败')).toBeNull()
+  })
+
+  it('SWD-120: renders distinct localized text for a user stop, a system stop, and a crash interruption', () => {
+    const stoppedByUser = makeHarness({ nodes: [user(1, 'try'), turnStopped(2, 'user')] })
+    const userView = render(<stoppedByUser.ChatView {...stoppedByUser.props} />)
+    expect(userView.getByRole('status').textContent).toBe('已停止你手动停止了本轮。')
+    // Each case renders its own snapshot; unmount before the next render so
+    // getByRole('status') (bound to document.body by default) cannot match a
+    // still-mounted node left over from a previous case in this same test.
+    userView.unmount()
+
+    const stoppedBySystem = makeHarness({ nodes: [user(1, 'try'), turnStopped(2, 'system')] })
+    const systemView = render(<stoppedBySystem.ChatView {...stoppedBySystem.props} />)
+    expect(systemView.getByRole('status').textContent)
+      .toBe('已停止本轮被系统自动取消（例如父会话结束或权限钩子拒绝）。')
+    systemView.unmount()
+
+    const crashed = makeHarness({ nodes: [user(1, 'try'), turnStopped(2, 'crash')] })
+    const crashedView = render(<crashed.ChatView {...crashed.props} />)
+    expect(crashedView.getByRole('status').textContent)
+      .toBe('已中断此前的运行意外中断（例如进程崩溃）；会话重新加载后自动补全了这条记录，崩溃前的内容均完整保留。')
+    // A crash reads distinctly from both an ordinary stop and a hard turn error.
+    expect(crashedView.queryByText('已停止')).toBeNull()
+    expect(crashedView.queryByText('本轮运行失败')).toBeNull()
   })
 
   it('hands the trajectory callback to the Tool seat', () => {

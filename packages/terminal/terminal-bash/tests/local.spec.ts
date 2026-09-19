@@ -40,7 +40,7 @@ function stubAgent(ctx: Context, rawId: string): Agent {
     status: 'idle',
     ctx: scope.ctx,
     send: () => {},
-    followup: () => {}, steer: () => {}, inject: () => {}, cancel() {},
+    followup: () => {}, steer: () => {}, inject: () => {}, cancel() { return false },
     runMaintenance: task => task(new AbortController().signal),
     whenIdle: () => Promise.resolve(),
   }

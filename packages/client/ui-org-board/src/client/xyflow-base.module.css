@@ -1,0 +1,523 @@
+/**
+ * @xyflow/react 12.11.6 base.css, mechanically wrapped in :global(...) around
+ * every selector (the build's CSS-Modules pipeline hashes bare class names,
+ * which would break React Flow's own hardcoded `react-flow__*` DOM classes).
+ * This is the library's structural/layout stylesheet only (pane/viewport
+ * positioning, node/handle/edge hit-testing) -- NOT its default color theme
+ * -- since org-board supplies its own node/edge visuals via OrgBoard.module.css
+ * and never imports `.react-flow__node-default`'s themed variant.
+ *
+ * Regenerated from `node_modules/@xyflow/react/dist/base.css` by wrapping
+ * each top-level selector list (one :global() per comma-separated item;
+ * @keyframes left untouched, since lightningcss already scopes keyframe
+ * idents safely on its own -- verified custom properties pass through
+ * unscoped too). Re-run the same transform against the new base.css if
+ * @xyflow/react is ever upgraded and this file needs to move with it.
+ */
+/* this will be exported as base.css and can be used for a basic styling */
+/* these are the necessary styles for React/Svelte Flow, they get used by base.css and style.css */
+:global(.react-flow) {
+  direction: ltr;
+
+  --xy-edge-stroke-default: #b1b1b7;
+  --xy-edge-stroke-width-default: 1;
+  --xy-edge-stroke-selected-default: #555;
+
+  --xy-connectionline-stroke-default: #b1b1b7;
+  --xy-connectionline-stroke-width-default: 1;
+
+  --xy-attribution-background-color-default: rgba(255, 255, 255, 0.5);
+
+  --xy-minimap-background-color-default: #fff;
+  --xy-minimap-mask-background-color-default: rgba(240, 240, 240, 0.6);
+  --xy-minimap-mask-stroke-color-default: transparent;
+  --xy-minimap-mask-stroke-width-default: 1;
+  --xy-minimap-node-background-color-default: #e2e2e2;
+  --xy-minimap-node-stroke-color-default: transparent;
+  --xy-minimap-node-stroke-width-default: 2;
+
+  --xy-background-color-default: transparent;
+  --xy-background-pattern-dots-color-default: #91919a;
+  --xy-background-pattern-lines-color-default: #eee;
+  --xy-background-pattern-cross-color-default: #e2e2e2;
+  background-color: var(--xy-background-color, var(--xy-background-color-default));
+  --xy-node-border-default: 1px solid #bbb;
+  --xy-node-border-selected-default: 1px solid #555;
+
+  --xy-handle-background-color-default: #333;
+
+  --xy-selection-background-color-default: rgba(150, 150, 180, 0.1);
+  --xy-selection-border-default: 1px dotted rgba(155, 155, 155, 0.8);
+  --xy-resize-background-color-default: #3367d9;
+}
+:global(.react-flow.dark) {
+  --xy-edge-stroke-default: #3e3e3e;
+  --xy-edge-stroke-width-default: 1;
+  --xy-edge-stroke-selected-default: #727272;
+
+  --xy-connectionline-stroke-default: #b1b1b7;
+  --xy-connectionline-stroke-width-default: 1;
+
+  --xy-attribution-background-color-default: rgba(150, 150, 150, 0.25);
+
+  --xy-minimap-background-color-default: #141414;
+  --xy-minimap-mask-background-color-default: rgba(60, 60, 60, 0.6);
+  --xy-minimap-mask-stroke-color-default: transparent;
+  --xy-minimap-mask-stroke-width-default: 1;
+  --xy-minimap-node-background-color-default: #2b2b2b;
+  --xy-minimap-node-stroke-color-default: transparent;
+  --xy-minimap-node-stroke-width-default: 2;
+
+  --xy-background-color-default: #141414;
+  --xy-background-pattern-dots-color-default: #555;
+  --xy-background-pattern-lines-color-default: #333;
+  --xy-background-pattern-cross-color-default: #333;
+  --xy-node-color-default: #f8f8f8;
+}
+:global(.react-flow__background) {
+  background-color: var(--xy-background-color-props, var(--xy-background-color, var(--xy-background-color-default)));
+  pointer-events: none;
+  z-index: -1;
+}
+:global(.react-flow__container) {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  top: 0;
+  left: 0;
+}
+:global(.react-flow__pane) {
+  z-index: 1;
+  touch-action: none;
+}
+:global(.react-flow__pane.draggable) {
+    cursor: grab;
+  }
+:global(.react-flow__pane.dragging) {
+    cursor: grabbing;
+  }
+:global(.react-flow__pane.selection) {
+    cursor: pointer;
+  }
+:global(.react-flow__viewport) {
+  transform-origin: 0 0;
+  z-index: 2;
+  pointer-events: none;
+}
+:global(.react-flow__renderer) {
+  z-index: 4;
+}
+:global(.react-flow__selection) {
+  z-index: 6;
+}
+:global(.react-flow__nodesselection-rect:focus),
+:global(.react-flow__nodesselection-rect:focus-visible) {
+  outline: none;
+}
+:global(.react-flow__edge-path) {
+  stroke: var(--xy-edge-stroke, var(--xy-edge-stroke-default));
+  stroke-width: var(--xy-edge-stroke-width, var(--xy-edge-stroke-width-default));
+  fill: none;
+}
+:global(.react-flow__connection-path) {
+  stroke: var(--xy-connectionline-stroke, var(--xy-connectionline-stroke-default));
+  stroke-width: var(--xy-connectionline-stroke-width, var(--xy-connectionline-stroke-width-default));
+  fill: none;
+}
+:global(.react-flow .react-flow__edges) {
+  position: absolute;
+}
+:global(.react-flow .react-flow__edges svg) {
+    overflow: visible;
+    position: absolute;
+    pointer-events: none;
+  }
+:global(.react-flow__edge) {
+  pointer-events: visibleStroke;
+}
+:global(.react-flow__edge.selectable) {
+    cursor: pointer;
+  }
+:global(.react-flow__edge.animated path) {
+    stroke-dasharray: 5;
+    animation: dashdraw 0.5s linear infinite;
+  }
+:global(.react-flow__edge.animated path.react-flow__edge-interaction) {
+    stroke-dasharray: none;
+    animation: none;
+  }
+:global(.react-flow__edge.inactive) {
+    pointer-events: none;
+  }
+:global(.react-flow__edge.selected),
+:global(.react-flow__edge:focus),
+:global(.react-flow__edge:focus-visible) {
+    outline: none;
+  }
+:global(.react-flow__edge.selected .react-flow__edge-path),
+:global(.react-flow__edge.selectable:focus .react-flow__edge-path),
+:global(.react-flow__edge.selectable:focus-visible .react-flow__edge-path) {
+    stroke: var(--xy-edge-stroke-selected, var(--xy-edge-stroke-selected-default));
+  }
+:global(.react-flow__edge-textwrapper) {
+    pointer-events: all;
+  }
+:global(.react-flow__edge .react-flow__edge-text) {
+    pointer-events: none;
+    -webkit-user-select: none;
+       -moz-user-select: none;
+            user-select: none;
+  }
+/* Arrowhead marker styles - use CSS custom properties as default */
+:global(.react-flow__arrowhead polyline) {
+  stroke: var(--xy-edge-stroke, var(--xy-edge-stroke-default));
+}
+:global(.react-flow__arrowhead polyline.arrowclosed) {
+  fill: var(--xy-edge-stroke, var(--xy-edge-stroke-default));
+}
+:global(.react-flow__connection) {
+  pointer-events: none;
+}
+:global(.react-flow__connection .animated) {
+    stroke-dasharray: 5;
+    animation: dashdraw 0.5s linear infinite;
+  }
+:global(svg.react-flow__connectionline) {
+  z-index: 1001;
+  overflow: visible;
+  position: absolute;
+}
+:global(.react-flow__nodes) {
+  pointer-events: none;
+  transform-origin: 0 0;
+}
+:global(.react-flow__node) {
+  position: absolute;
+  -webkit-user-select: none;
+     -moz-user-select: none;
+          user-select: none;
+  pointer-events: all;
+  transform-origin: 0 0;
+  box-sizing: border-box;
+  cursor: default;
+}
+:global(.react-flow__node.selectable) {
+    cursor: pointer;
+  }
+:global(.react-flow__node.draggable) {
+    cursor: grab;
+    pointer-events: all;
+  }
+:global(.react-flow__node.draggable.dragging) {
+      cursor: grabbing;
+    }
+:global(.react-flow__nodesselection) {
+  z-index: 3;
+  transform-origin: left top;
+  pointer-events: none;
+}
+:global(.react-flow__nodesselection-rect) {
+    position: absolute;
+    pointer-events: all;
+    cursor: grab;
+  }
+:global(.react-flow__handle) {
+  position: absolute;
+  pointer-events: none;
+  min-width: 5px;
+  min-height: 5px;
+  background-color: var(--xy-handle-background-color, var(--xy-handle-background-color-default));
+}
+:global(.react-flow__handle.connectingfrom) {
+    pointer-events: all;
+  }
+:global(.react-flow__handle.connectionindicator) {
+    pointer-events: all;
+    cursor: crosshair;
+  }
+:global(.react-flow__handle-bottom) {
+    top: auto;
+    left: 50%;
+    bottom: 0;
+    transform: translate(-50%, 50%);
+  }
+:global(.react-flow__handle-top) {
+    top: 0;
+    left: 50%;
+    transform: translate(-50%, -50%);
+  }
+:global(.react-flow__handle-left) {
+    top: 50%;
+    left: 0;
+    transform: translate(-50%, -50%);
+  }
+:global(.react-flow__handle-right) {
+    top: 50%;
+    right: 0;
+    transform: translate(50%, -50%);
+  }
+:global(.react-flow__edgeupdater) {
+  cursor: move;
+  pointer-events: all;
+}
+:global(.react-flow__pane.selection .react-flow__panel) {
+  pointer-events: none;
+}
+:global(.react-flow__panel) {
+  position: absolute;
+  z-index: 5;
+  margin: 15px;
+}
+:global(.react-flow__panel.top) {
+    top: 0;
+  }
+:global(.react-flow__panel.bottom) {
+    bottom: 0;
+  }
+:global(.react-flow__panel.top.center),
+:global(.react-flow__panel.bottom.center) {
+      left: 50%;
+      transform: translateX(-15px) translateX(-50%);
+    }
+:global(.react-flow__panel.left) {
+    left: 0;
+  }
+:global(.react-flow__panel.right) {
+    right: 0;
+  }
+:global(.react-flow__panel.left.center),
+:global(.react-flow__panel.right.center) {
+      top: 50%;
+      transform: translateY(-15px) translateY(-50%);
+    }
+:global(.react-flow__attribution) {
+  font-size: 10px;
+  background: var(--xy-attribution-background-color, var(--xy-attribution-background-color-default));
+  padding: 2px 3px;
+  margin: 0;
+}
+:global(.react-flow__attribution a) {
+    text-decoration: none;
+    color: #999;
+  }
+@keyframes dashdraw {
+  from {
+    stroke-dashoffset: 10;
+  }
+}
+:global(.react-flow__edgelabel-renderer) {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  -webkit-user-select: none;
+     -moz-user-select: none;
+          user-select: none;
+  left: 0;
+  top: 0;
+}
+:global(.react-flow__viewport-portal) {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  left: 0;
+  top: 0;
+  -webkit-user-select: none;
+     -moz-user-select: none;
+          user-select: none;
+}
+:global(.react-flow__minimap) {
+  background: var(
+    --xy-minimap-background-color-props,
+    var(--xy-minimap-background-color, var(--xy-minimap-background-color-default))
+  );
+}
+:global(.react-flow__minimap-svg) {
+    display: block;
+  }
+:global(.react-flow__minimap-mask) {
+    fill: var(
+      --xy-minimap-mask-background-color-props,
+      var(--xy-minimap-mask-background-color, var(--xy-minimap-mask-background-color-default))
+    );
+    stroke: var(
+      --xy-minimap-mask-stroke-color-props,
+      var(--xy-minimap-mask-stroke-color, var(--xy-minimap-mask-stroke-color-default))
+    );
+    stroke-width: var(
+      --xy-minimap-mask-stroke-width-props,
+      var(--xy-minimap-mask-stroke-width, var(--xy-minimap-mask-stroke-width-default))
+    );
+  }
+:global(.react-flow__minimap-node) {
+    fill: var(
+      --xy-minimap-node-background-color-props,
+      var(--xy-minimap-node-background-color, var(--xy-minimap-node-background-color-default))
+    );
+    stroke: var(
+      --xy-minimap-node-stroke-color-props,
+      var(--xy-minimap-node-stroke-color, var(--xy-minimap-node-stroke-color-default))
+    );
+    stroke-width: var(
+      --xy-minimap-node-stroke-width-props,
+      var(--xy-minimap-node-stroke-width, var(--xy-minimap-node-stroke-width-default))
+    );
+  }
+:global(.react-flow__background-pattern.dots) {
+    fill: var(
+      --xy-background-pattern-color-props,
+      var(--xy-background-pattern-color, var(--xy-background-pattern-dots-color-default))
+    );
+  }
+:global(.react-flow__background-pattern.lines) {
+    stroke: var(
+      --xy-background-pattern-color-props,
+      var(--xy-background-pattern-color, var(--xy-background-pattern-lines-color-default))
+    );
+  }
+:global(.react-flow__background-pattern.cross) {
+    stroke: var(
+      --xy-background-pattern-color-props,
+      var(--xy-background-pattern-color, var(--xy-background-pattern-cross-color-default))
+    );
+  }
+:global(.react-flow__controls) {
+  display: flex;
+  flex-direction: column;
+}
+:global(.react-flow__controls.horizontal) {
+    flex-direction: row;
+  }
+:global(.react-flow__controls-button) {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 26px;
+    width: 26px;
+    padding: 4px;
+  }
+:global(.react-flow__controls-button svg) {
+      width: 100%;
+      max-width: 12px;
+      max-height: 12px;
+      fill: currentColor;
+    }
+:global(.react-flow__node-input),
+:global(.react-flow__node-default),
+:global(.react-flow__node-output),
+:global(.react-flow__node-group) {
+  border: var(--xy-node-border, var(--xy-node-border-default));
+  color: var(--xy-node-color, var(--xy-node-color-default));
+}
+:global(.react-flow__node-input.selected),
+:global(.react-flow__node-input:focus),
+:global(.react-flow__node-input:focus-visible),
+:global(.react-flow__node-default.selected),
+:global(.react-flow__node-default:focus),
+:global(.react-flow__node-default:focus-visible),
+:global(.react-flow__node-output.selected),
+:global(.react-flow__node-output:focus),
+:global(.react-flow__node-output:focus-visible),
+:global(.react-flow__node-group.selected),
+:global(.react-flow__node-group:focus),
+:global(.react-flow__node-group:focus-visible) {
+    outline: none;
+    border: var(--xy-node-border-selected, var(--xy-node-border-selected-default));
+  }
+:global(.react-flow__nodesselection-rect),
+:global(.react-flow__selection) {
+  background: var(--xy-selection-background-color, var(--xy-selection-background-color-default));
+  border: var(--xy-selection-border, var(--xy-selection-border-default));
+}
+:global(.react-flow__resize-control) {
+  position: absolute;
+}
+:global(.react-flow__resize-control.left),
+:global(.react-flow__resize-control.right) {
+  cursor: ew-resize;
+}
+:global(.react-flow__resize-control.top),
+:global(.react-flow__resize-control.bottom) {
+  cursor: ns-resize;
+}
+:global(.react-flow__resize-control.top.left),
+:global(.react-flow__resize-control.bottom.right) {
+  cursor: nwse-resize;
+}
+:global(.react-flow__resize-control.bottom.left),
+:global(.react-flow__resize-control.top.right) {
+  cursor: nesw-resize;
+}
+/* handle styles */
+:global(.react-flow__resize-control.handle) {
+  width: 5px;
+  height: 5px;
+  border: 1px solid #fff;
+  border-radius: 1px;
+  background-color: var(--xy-resize-background-color, var(--xy-resize-background-color-default));
+  translate: -50% -50%;
+}
+:global(.react-flow__resize-control.handle.left) {
+  left: 0;
+  top: 50%;
+}
+:global(.react-flow__resize-control.handle.right) {
+  left: 100%;
+  top: 50%;
+}
+:global(.react-flow__resize-control.handle.top) {
+  left: 50%;
+  top: 0;
+}
+:global(.react-flow__resize-control.handle.bottom) {
+  left: 50%;
+  top: 100%;
+}
+:global(.react-flow__resize-control.handle.top.left) {
+  left: 0;
+}
+:global(.react-flow__resize-control.handle.bottom.left) {
+  left: 0;
+}
+:global(.react-flow__resize-control.handle.top.right) {
+  left: 100%;
+}
+:global(.react-flow__resize-control.handle.bottom.right) {
+  left: 100%;
+}
+/* line styles */
+:global(.react-flow__resize-control.line) {
+  border-color: var(--xy-resize-background-color, var(--xy-resize-background-color-default));
+  border-width: 0;
+  border-style: solid;
+}
+:global(.react-flow__resize-control.line.left),
+:global(.react-flow__resize-control.line.right) {
+  width: 1px;
+  transform: translate(-50%, 0);
+  top: 0;
+  height: 100%;
+}
+:global(.react-flow__resize-control.line.left) {
+  left: 0;
+  border-left-width: 1px;
+}
+:global(.react-flow__resize-control.line.right) {
+  left: 100%;
+  border-right-width: 1px;
+}
+:global(.react-flow__resize-control.line.top),
+:global(.react-flow__resize-control.line.bottom) {
+  height: 1px;
+  transform: translate(0, -50%);
+  left: 0;
+  width: 100%;
+}
+:global(.react-flow__resize-control.line.top) {
+  top: 0;
+  border-top-width: 1px;
+}
+:global(.react-flow__resize-control.line.bottom) {
+  border-bottom-width: 1px;
+  top: 100%;
+}

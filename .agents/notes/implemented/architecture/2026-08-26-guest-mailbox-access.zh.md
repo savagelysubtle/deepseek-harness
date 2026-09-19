@@ -1,8 +1,8 @@
-[English](2026-08-26-guest-mailbox-access.md) | 中文
-
 # Agent Note：访客邮箱访问——宕机期存储接口与排水时治理
 
 Status: implemented
+
+[English](2026-08-26-guest-mailbox-access.md) | 中文
 
 ## 问题
 

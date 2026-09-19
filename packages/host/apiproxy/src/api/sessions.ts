@@ -174,6 +174,27 @@ export type QueueAction =
   | { kind: 'remove' }
   | { kind: 'steer' }
 
+/**
+ * Outcome of draining a stop's live descendant forest. `'ok'` means every
+ * continuable descendant beneath the stopped root(s) released cleanly.
+ * `{ failed }` carries the one joined teardown-failure message the drain
+ * primitive throws when any branch did not release — surfaced here rather
+ * than folded into a bare success, since a stop control that reports done
+ * while something kept running is the one outcome this API must never produce.
+ */
+export type StopDescendantsResult = 'ok' | { failed: string }
+
+/**
+ * Outcome of steering every live top-level session in one `session.sendAll`
+ * broadcast. `'ok'` means every targeted root accepted the steer. `{ failed }`
+ * carries every per-session steer failure joined into one message — surfaced
+ * here rather than folded into a bare success, since a broadcast control that
+ * reports "sent" while a seat never actually received the message is the one
+ * outcome this API must never produce (the same precedent `StopDescendantsResult`
+ * sets for `session.stopAll`: a partial outcome cannot type-check as success).
+ */
+export type SendAllResult = 'ok' | { failed: string }
+
 /** One Session list entry. */
 export interface SessionSummary {
   sessionId: SessionId
@@ -185,6 +206,17 @@ export interface SessionSummary {
   updatedAt: number
   /** Status of the attached agent; always false for cold (unattached) sessions. */
   running: boolean
+  /**
+   * Whether a live in-memory Agent currently backs this session — the exact
+   * fact `session.stopAll`/`session.sendAll` root selection reads to decide
+   * who is reachable. Deliberately NOT derivable from `running`: an attached
+   * session sitting idle between turns is `attached: true, running: false`,
+   * and a broadcast control's audience is "reachable", not "mid-turn" — a
+   * count that filtered on `running` would skip every seat idly awaiting its
+   * next instruction, which is most of a broadcast's actual audience. Always
+   * false for cold (persisted-only) sessions.
+   */
+  attached: boolean
   /**
    * Derived not-yet-real bit: true while no turn has run and no user rename
    * has pinned a title. A user-pinned title is an existence assertion — it is
@@ -390,5 +422,65 @@ export interface SessionsApi {
    * subagents reject with `agent-busy`.
    */
   cancel(request: RpcRequest<{ sessionId: SessionId }>): Promise<RpcResponse<{ accepted: true }>>
+
+  /**
+   * Stops one session's own current turn and every live continuable
+   * descendant beneath it, child-first. An absent live agent is an accepted
+   * no-op (`ownTurnStopped: false`), never a `session-not-found` failure — a
+   * stop request racing natural completion or a repeated click must not read
+   * as an error. A session-backed-subagent target stops through
+   * `subagent.interrupt`'s own authorization instead of `cancel`, since
+   * `cancel` refuses subagent ownership outright. `ownTurnStopped` reports
+   * whether the target actually had a live turn or maintenance task aborted
+   * by this call, taken from `cancel`/`interrupt`'s own answer rather than
+   * guessed from the target's public `status` — a running maintenance task
+   * leaves `status` at `'idle'` the whole time, so a status read from
+   * outside would wrongly call it unstopped. An already-idle target (no live
+   * turn and no maintenance task) reports `false`, the same as an absent
+   * one. Root descendant teardown failures never masquerade as a clean
+   * stop: a joined teardown failure comes back as `descendants: { failed }`,
+   * not as `accepted`/`ok`.
+   */
+  stopTree(request: RpcRequest<{ sessionId: SessionId }>): Promise<RpcResponse<{
+    ownTurnStopped: boolean
+    descendants: StopDescendantsResult
+  }>>
+
+  /**
+   * Stops every live top-level session's own current turn (session-backed
+   * subagents are never roots here — they stop as descendants of their
+   * owning top-level session), then drains every root's live descendant
+   * forest in one shared call so the drain's admission cutoff and converging
+   * teardown apply across all roots at once rather than racing N independent
+   * calls. Every root is cancelled regardless of its reported outcome — the
+   * count never causes work to be skipped. `stoppedCount` counts only the
+   * roots that actually had a live turn or maintenance task aborted by this
+   * call, never the number of roots merely considered or cancelled against;
+   * an already-idle root does not add to the count. A partial
+   * descendant-teardown failure still reports `descendants: { failed }`
+   * rather than folding into a bare success.
+   */
+  stopAll(request: RpcRequest<{}>): Promise<RpcResponse<{
+    stoppedCount: number
+    descendants: StopDescendantsResult
+  }>>
+
+  /**
+   * Steers every live top-level session with the same content in one call
+   * (session-backed subagents are never targeted directly here — reaching
+   * one means steering its owning top-level session). Each root is steered
+   * immediately, mid-turn, through `Agent.steer` — the founder-specified
+   * behavior is to cut into whatever a seat is doing right now, never to
+   * queue silently behind it. `sentCount` counts only the roots that
+   * actually accepted the steer; a per-root `steer` failure (the agent
+   * disposing between root selection and delivery) is never dropped — every
+   * such failure is joined into `result: { failed }`, mirroring
+   * `StopDescendantsResult`'s precedent so a partial broadcast can never
+   * type-check as a clean send.
+   */
+  sendAll(request: RpcRequest<{ content: PromptContentPart[] }>): Promise<RpcResponse<{
+    sentCount: number
+    result: SendAllResult
+  }>>
 
 }

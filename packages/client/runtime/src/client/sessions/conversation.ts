@@ -169,6 +169,31 @@ export interface TurnErrorNode {
   code?: string
 }
 
+/**
+ * Durable notice for a turn ended by cancellation (SWD-120): a deliberate
+ * user stop, a programmatic cancellation, or a crash a later reload
+ * discovered and closed. Distinct from {@link TurnErrorNode} (a provider/tool
+ * failure) and {@link TurnMaxTokensNode} (the output-token cap) — none of
+ * those three turn/end reasons overlap.
+ */
+export interface TurnStoppedNode {
+  kind: 'turn-stopped'
+  /** Seq of the owning turn/end event. */
+  seq: number
+  /** Unix epoch ms from the turn/end event. */
+  time: number
+  turn: number
+  step: number
+  /**
+   * `'user'` — the founder pressed stop. `'system'` — a programmatic
+   * cancellation (a parent session, a hook, disposal, or an imported legacy
+   * record with no recorded cause). `'crash'` — a crash-repair reload closed
+   * this turn after the fact; the events recorded before the crash remain
+   * intact, only the boundary is synthetic.
+   */
+  cause: 'user' | 'system' | 'crash'
+}
+
 /** Durable notice for a turn ended by the per-request output-token cap. */
 export interface TurnMaxTokensNode {
   kind: 'turn-max-tokens'
@@ -285,6 +310,7 @@ export type ConversationNode =
   | ContextMessageNode
   | ModelRetryNode
   | TurnErrorNode
+  | TurnStoppedNode
   | TurnMaxTokensNode
   | ToolResultNode
   | CommandNode

@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-26-guest-mailbox-access.md
-2026-08-26-guest-mailbox-access.md: 9292990f532465a10e5d2f6821395425b24f72b5
-2026-08-26-guest-mailbox-access.zh.md: a16be3b8c3332ce450e025f74ac5b1aa8d068554
+2026-08-26-guest-mailbox-access.md: bdb668abbb73d09aefdd964680ce8e0f44acd878
+2026-08-26-guest-mailbox-access.zh.md: b94c1bb6f1d3742f1e90eb6ee2aa684ff7a77cd6

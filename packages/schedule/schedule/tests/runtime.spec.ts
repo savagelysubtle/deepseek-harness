@@ -82,7 +82,7 @@ async function harness(): Promise<RuntimeHarness> {
         }
       })()
     },
-    cancel(_cause: AgentCancelCause) {},
+    cancel(_cause: AgentCancelCause) { return false },
     whenIdle() {
       controls.whenIdleCount += 1
       order.push('whenIdle')

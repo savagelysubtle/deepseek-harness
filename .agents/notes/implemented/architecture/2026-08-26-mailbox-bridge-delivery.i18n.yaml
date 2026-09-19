@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-26-mailbox-bridge-delivery.md
-2026-08-26-mailbox-bridge-delivery.md: fc6d93b8cafe4ae3d21000d04eeb33f103e04504
-2026-08-26-mailbox-bridge-delivery.zh.md: ce78f3d886d43207ddd1ef6b0422eba205112041
+2026-08-26-mailbox-bridge-delivery.md: 467e6a9dc5fbe9339fc7559bb7d98a77dc5d126c
+2026-08-26-mailbox-bridge-delivery.zh.md: 9b400dadb00b906d24f29a9bc3522aa810f1d03e

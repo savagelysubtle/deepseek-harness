@@ -102,10 +102,10 @@ function mount(
   } = {},
 ) {
   const root = sid('root')
-  const rootRow = { id: root, displayTitle: 'Root', running: false, blank: false, updatedAt: 1 }
+  const rootRow = { id: root, displayTitle: 'Root', running: false, attached: true, blank: false, updatedAt: 1 }
   const childRow = {
     id: SID, displayTitle: 'Child', parentId: root, cwd: '/projects/one',
-    running: false, blank: options.summaryBlank ?? false, updatedAt: 2,
+    running: false, attached: true, blank: options.summaryBlank ?? false, updatedAt: 2,
     ...(options.summaryOrigin === undefined ? {} : { origin: options.summaryOrigin }),
   }
   const listed = options.omitSummaryRow !== true

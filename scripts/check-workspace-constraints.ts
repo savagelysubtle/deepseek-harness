@@ -145,10 +145,19 @@ const packageFileExtras: Readonly<Record<string, readonly string[]>> = {
   '@deepseek-ai/dsh-sandbox-windows-acl': ['lib/runner.js', 'lib/types-*.js'],
   '@deepseek-ai/dsh-skill-badge': ['assets'],
   '@deepseek-ai/dsh-subprocess-local': ['scripts/ensure-spawn-helper.mjs'],
+  // The local provider, tool consumer, and local-plugin entry each ship as
+  // their own bundle beside the seam root; resolved through the package's
+  // ./local, ./tool, and ./local-plugin exports respectively.
+  '@deepseek-ai/dsh-memory': ['lib/local.js', 'lib/tool.js', 'lib/local-plugin.js'],
 }
 
 function sameStringList(actual: readonly string[] | undefined, expected: readonly string[]): boolean {
   return !!actual && actual.length === expected.length && actual.every((value, index) => value === expected[index])
+}
+
+/** Repo-relative published file paths named by a package's own `bin` map/string, deduplicated in declaration order. */
+function binPackageFiles(bin: string | Record<string, string>): string[] {
+  return [...new Set(typeof bin === 'string' ? [bin] : Object.values(bin))]
 }
 
 function expectedDshPackageFiles(manifest: PackageManifest): readonly string[] {
@@ -158,7 +167,10 @@ function expectedDshPackageFiles(manifest: PackageManifest): readonly string[] {
     // Every package publishes its invariant ownership companion as a separate
     // bundle; the package-invariant gate validates the companion itself.
     'lib/invariant.js',
-    ...manifest.bin ? ['lib/bin.js'] : [],
+    // The published path comes from the manifest's own bin map/string, not a
+    // hardcoded name: several packages build a self-describing CLI bundle
+    // (e.g. lib/cli.js, lib/auth-cli.js) rather than lib/bin.js.
+    ...manifest.bin ? binPackageFiles(manifest.bin) : [],
     ...manifest.exports?.['./worker'] ? ['lib/worker.cjs'] : [],
     // UI plugin packages ship their browser bundle beside the node lib
     // (single-artifact ruling: dist/ retired, ./client resolves lib/client.js).

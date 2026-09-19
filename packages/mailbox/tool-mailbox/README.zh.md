@@ -6,6 +6,10 @@
 
 需要一个已加载的邮箱 Service Provider（如 `@deepseek-ai/dsh-mailbox-local`）注册为注册表的 `defaultProvider`；注入的服务齐备之前插件保持 pending。
 
+## Roster-drift alarm (SWD-118)
+
+当配置了 `addresses`（多席位宿主场景）时，本挂载点会在挂载时把已服务名册声明给共享的 `ctx.mailbox` 注册表（[`declareRoster`](../mailbox/README.md#roster-drift-alarm)），并对照组织注册表做一次检查。两种情况会响亮告警，绝不抛出、绝不拒绝挂载、绝不阻塞工具调用：本名册与 `mailbox-bridge` 的名册不一致，以及本名册服务了组织注册表并不认识的名称。单席位无头运行（未配置 `addresses`）不服务任何名册，因此既不声明也不受检查。完整契约（包括刻意不告警的情形）见 [mailbox 包的 roster-drift alarm](../mailbox/README.md#roster-drift-alarm)。
+
 ## 工具
 
 ### `mailbox_send`

@@ -282,6 +282,23 @@ function disposalOf(activation: Activation): Promise<void> | undefined {
 }
 
 /**
+ * Whether `activation` is a strict live descendant of `root`. The one
+ * selection predicate shared by {@link SubagentContinuationManager.drainDescendants}
+ * (which stops exactly these Activations) and
+ * {@link SubagentContinuationManager.hasLiveDescendants} (which only asks
+ * whether any exist), so a caller of the cheap check can never disagree with
+ * what a subsequent drain would actually select. Strict (`!==`) because a
+ * continuable Agent may itself be a host-owned root, and its own host —
+ * not this predicate — remains responsible for that root handle.
+ * @param activation - the candidate Activation.
+ * @param root - the exact live Agent to test ancestry against.
+ * @returns whether `activation`'s Agent is a strict descendant of `root`.
+ */
+function isLiveDescendantOf(activation: Activation, root: Agent): boolean {
+  return activation.handle.agent !== root && activation.ancestry.has(root)
+}
+
+/**
  * One line telling a parent that a background child is finished and why, in
  * the parent's own task vocabulary.
  * @param childId - the durable child the parent knows by id.
@@ -524,8 +541,12 @@ export class SubagentContinuationManager {
    *   not own the live target: a stale or self-targeting ancestor caller, a
    *   parent address that is not the live target's durable direct parent, or
    *   an ancestor outside the target's recorded live lineage.
+   * @returns whether the target actually had active work aborted by this
+   *   call — the underlying {@link Agent.cancel} result. `false` covers every
+   *   no-op path (absent target, already-disposing target) and a target that
+   *   was live but idle.
    */
-  interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): void {
+  interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): boolean {
     if (authority.kind === 'ancestor') {
       const caller = authority.agent
       // A stale caller is rejected even when the target is absent, so a
@@ -544,7 +565,7 @@ export class SubagentContinuationManager {
       }
     }
     const activation = this.activations.get(targetSessionId)
-    if (activation === undefined) return
+    if (activation === undefined) return false
     if (authority.kind === 'user') {
       if (activation.handle.agent.session.header.parentSession !== authority.parentSessionId) {
         throw new SubagentError(
@@ -560,8 +581,8 @@ export class SubagentContinuationManager {
     }
     // Disposal already stopped the target with a whole-Activation teardown;
     // a second cancel would be a redundant signal on a closing handle.
-    if (activation.disposal !== undefined) return
-    activation.handle.agent.cancel(
+    if (activation.disposal !== undefined) return false
+    return activation.handle.agent.cancel(
       authority.kind === 'user' ? { kind: 'user' } : { kind: 'parent' },
       { keepInbox: true },
     )
@@ -740,10 +761,7 @@ export class SubagentContinuationManager {
     const targets: Activation[] = []
     for (const activation of this.activations.values()) {
       const lineage = this.liveLineage(activation.handle.agent)
-      // Strict descendants only: a continuable Agent may itself be a
-      // host-owned root, and its host remains responsible for that root handle.
-      const owners = [...roots].filter(root => activation.handle.agent !== root
-        && activation.ancestry.has(root))
+      const owners = [...roots].filter(root => isLiveDescendantOf(activation, root))
       if (owners.length === 0) continue
       targets.push(activation)
       for (const owner of owners) {
@@ -777,6 +795,26 @@ export class SubagentContinuationManager {
 
     await Promise.all(materializations.map(materialization => materialization.settled))
     await this.disposeRoots(targetRoots, 'scoped activation(s)')
+  }
+
+  /**
+   * Whether any live continuable Activation is a strict descendant of `root`,
+   * checked synchronously against only the resident `activations` map. No
+   * persistence read and no durable-history projection: this is the cheap
+   * question an idle-retire timer can afford to ask on every tick, unlike
+   * {@link SubagentRuntime.listDescendants}, which answers the durable-tree
+   * question (including already-settled children) at a cost a timer callback
+   * must not pay. Selection reuses {@link isLiveDescendantOf}, the exact
+   * predicate {@link drainDescendants} selects scoped teardown targets with,
+   * so this can never disagree with what a subsequent drain would stop.
+   * @param root - the exact live Agent to test for live descendants.
+   * @returns whether at least one live Activation is a strict descendant of `root`.
+   */
+  hasLiveDescendants(root: Agent): boolean {
+    for (const activation of this.activations.values()) {
+      if (isLiveDescendantOf(activation, root)) return true
+    }
+    return false
   }
 
   /** Dispose independent roots and report every branch failure after all settle. */

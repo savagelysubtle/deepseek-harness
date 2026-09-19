@@ -27,6 +27,9 @@ import {
   sessionRenameRequestSchema,
   sessionSearchRequestSchema,
   sessionSelectModelRequestSchema,
+  sessionSendAllRequestSchema,
+  sessionStopAllRequestSchema,
+  sessionStopTreeRequestSchema,
   sessionUpdateQueueRequestSchema,
 } from '../api/sessions.schema.ts'
 import {
@@ -68,6 +71,7 @@ import {
   worktreeCreateRequestSchema, worktreeListRequestSchema, worktreeLockRequestSchema,
   worktreeRemoveRequestSchema,
 } from '../api/worktree.schema.ts'
+import { orgGetRequestSchema } from '../api/org.schema.ts'
 import { llmDiscoverModelsRequestSchema, llmModelsRequestSchema, llmProvidersRequestSchema } from '../api/llm.schema.ts'
 import {
   subagentHistoryRequestSchema,
@@ -105,6 +109,9 @@ const UNARY_ROUTES: UnaryRoutes = {
   'session.attachment': { schema: sessionAttachmentRequestSchema, invoke: (api, r) => api.sessions.attachment(r) },
   'session.updateQueue': { schema: sessionUpdateQueueRequestSchema, invoke: (api, r) => api.sessions.updateQueue(r) },
   'session.cancel': { schema: sessionCancelRequestSchema, invoke: (api, r) => api.sessions.cancel(r) },
+  'session.stopTree': { schema: sessionStopTreeRequestSchema, invoke: (api, r) => api.sessions.stopTree(r) },
+  'session.stopAll': { schema: sessionStopAllRequestSchema, invoke: (api, r) => api.sessions.stopAll(r) },
+  'session.sendAll': { schema: sessionSendAllRequestSchema, invoke: (api, r) => api.sessions.sendAll(r) },
   'subagent.list': { schema: subagentListRequestSchema, invoke: (api, r, signal) => api.subagents.list(r, signal) },
   'subagent.history': { schema: subagentHistoryRequestSchema, invoke: (api, r, signal) => api.subagents.history(r, signal) },
   'subagent.prompt': { schema: subagentPromptRequestSchema, invoke: (api, r, signal) => api.subagents.prompt(r, signal) },
@@ -150,6 +157,7 @@ const UNARY_ROUTES: UnaryRoutes = {
   'worktree.create': { schema: worktreeCreateRequestSchema, invoke: (api, r) => api.worktree.create(r) },
   'worktree.lock': { schema: worktreeLockRequestSchema, invoke: (api, r) => api.worktree.lock(r) },
   'worktree.remove': { schema: worktreeRemoveRequestSchema, invoke: (api, r) => api.worktree.remove(r) },
+  'org.get': { schema: orgGetRequestSchema, invoke: (api, r) => api.org.get(r) },
 }
 
 /** Route lookup that narrows an arbitrary path segment to a map key (single cast point for the string→key refinement). */

@@ -1,8 +1,8 @@
-[English](2026-08-26-mailbox-bridge-delivery.md) | 中文
-
 # Agent Note：邮箱桥——派生会话身份上的 steer 优先投递
 
 Status: implemented
+
+[English](2026-08-26-mailbox-bridge-delivery.md) | 中文
 
 ## 问题
 

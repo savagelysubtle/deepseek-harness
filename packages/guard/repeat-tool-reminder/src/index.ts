@@ -42,8 +42,18 @@ export interface Config {
   argumentsPreviewChars?: number
 }
 
+/**
+ * Default escalation tiers: nudge gently at the first, in detail at the rest.
+ *
+ * Named rather than inlined so the agent loop's abort threshold can be checked
+ * against it — the abort must sit strictly above the highest tier here, or it
+ * kills the turn before these reminders can do their job. See
+ * `tests/abort-ordering.spec.ts`.
+ */
+export const DEFAULT_REMINDER_THRESHOLDS = [3, 5, 8]
+
 export const Config: z<Config> = z.object({
-  thresholds: z.array(z.number()).default([3, 5, 8]),
+  thresholds: z.array(z.number()).default(DEFAULT_REMINDER_THRESHOLDS),
   include: z.array(z.string()).default([]),
   exclude: z.array(z.string()).default([]),
   argumentsPreviewChars: z.number().default(500),

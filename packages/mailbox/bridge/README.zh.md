@@ -34,6 +34,10 @@
 
 轮询计时器从不钉住宿主事件循环（`unref`）：只为服务邮件而存在的部署须通过其他句柄维持自身存活。挂载后的结构性失败会清除计时器并抛出，而不是永远静默空转。
 
+## Roster-drift alarm (SWD-118)
+
+挂载时，仅一次，在第一次排水之前——无论此刻是否有邮件在等待——本桥会把 `addresses` 声明给共享的 `ctx.mailbox` 注册表（[`declareRoster`](../mailbox/README.md#roster-drift-alarm)），并对照组织注册表做检查。两种情况会响亮告警，绝不抛出、绝不拒绝挂载、绝不阻塞邮件：本桥的名册与 `tool-mailbox` 的名册不一致，以及本桥服务了组织注册表并不认识的名称。注册表若根本不存在，属于合法的“无注册表”世界，直接跳过；注册表存在却无法加载，则告警说明检查未能完成，而不是悄悄当作“一切正常”。完整契约（包括刻意不告警的情形）见 [mailbox 包的 roster-drift alarm](../mailbox/README.md#roster-drift-alarm)。
+
 ## 线路准入
 
 非 dsh 调用方经宿主 API 的 `mailbox.publish`（[apiproxy](../../host/apiproxy/README.md)）走同一条排水路径，其内部封装了导出的 [`publishAndWake`](./src/index.ts)：对照每个已挂载桥的地址做响亮的花名册校验、经默认提供方的一次存储写入、一次立即路由，以及取自本次唤醒落定观察的 `delivered`／`queued` 处置。终态路由失败会携带记录原因响亮拒绝，而不是虚假的快速确认。

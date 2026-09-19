@@ -34,7 +34,7 @@ function agent(ctx: Context): Agent {
   const value: Agent = {
     id, options: {}, session, inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
     status: 'idle', ctx: scope.ctx,
-    followup: () => {}, steer: () => {}, inject: () => {}, send: () => {}, cancel() {},
+    followup: () => {}, steer: () => {}, inject: () => {}, send: () => {}, cancel() { return false },
     runMaintenance: task => task(new AbortController().signal),
     whenIdle: () => Promise.resolve(),
   }

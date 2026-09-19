@@ -905,7 +905,31 @@ export class DynamicCordisRunnerService extends TypertRemoteService {
       run.fiber = await startHostHalf(
         this.requireGroup(),
         evaluated,
-        (error) => { this.steerGuardFailure(plugin, run, 'Host', errorDetails(error)) },
+        (error) => {
+          // Unlike every other call into steerGuardFailure/steerRunOutcome/
+          // steerRenderFailure/steerHostHandlerFailure, this callback fires
+          // from ARBITRARILY LATER, fully detached code the Host half itself
+          // registered during activation (see lifecycle.ts's own doc: "reports
+          // post-activation Host guard rejections") -- by the time it runs,
+          // `startHost`'s own try/catch above has long since returned
+          // successfully, and nothing else sits above this closure to catch a
+          // throw. Every OTHER caller of these four steer helpers is itself a
+          // `@Remote` method invoked only through the API gateway's RPC
+          // dispatch, which already converts any thrown error into an RPC
+          // failure response -- this is the one exception, so it is the one
+          // that needs its own guard: log and continue rather than let the
+          // agent's own disposal (or any other steer failure) become an
+          // unhandled rejection with no caller left to see it.
+          try {
+            this.steerGuardFailure(plugin, run, 'Host', errorDetails(error))
+          } catch (steerError) {
+            const detail = steerError instanceof Error ? steerError.message : String(steerError)
+            this.ctx.logger.warn(
+              'cordis-host-runner: could not report a post-activation Host guard failure for '
+              + `"${plugin.pluginId}/${run.packageId}" (${run.pluginRunId}) to its agent: ${detail}`,
+            )
+          }
+        },
       )
       return undefined
     } catch (error) {
