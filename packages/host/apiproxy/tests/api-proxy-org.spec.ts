@@ -426,6 +426,39 @@ describe('org.get', () => {
     if (!again.registry.ok) throw new Error('unreachable')
     expect(again.registry.token).toBe(expectedToken)
   })
+
+  it('reports servedRosterToken equal to sha256 of the profile patch file\'s exact bytes — a SEPARATE token from the registry\'s', async () => {
+    const registryDir = tempDir('dsh-org-registry-')
+    const profileDir = tempDir('dsh-org-profile-')
+    const registryPath = writeRegistry(registryDir, { a: {} })
+    writeProfile(profileDir, [
+      { id: 'mailbox-bridge', addresses: ['a'] },
+      { id: 'tool-mailbox', addresses: ['a'] },
+    ])
+    const value = expectOk(await api(await floor(), { orgRegistryPath: registryPath, orgProfileDir: profileDir }).org.get(request()))
+    const expectedServedRosterToken = createHash('sha256')
+      .update(readFileSync(join(profileDir, 'cordis.patch.yml')))
+      .digest('hex')
+    expect(value.servedRosterToken).toEqual({ ok: true, token: expectedServedRosterToken })
+    expect(value.registry.ok).toBe(true)
+    if (!value.registry.ok) throw new Error('unreachable')
+    // Two files, two independent tokens — never conflated.
+    expect(value.servedRosterToken.ok && value.servedRosterToken.token).not.toBe(value.registry.token)
+  })
+
+  it('reports servedRosterToken as its own named failure when the profile patch file is unreadable, independent of the registry succeeding', async () => {
+    const registryDir = tempDir('dsh-org-registry-')
+    const registryPath = writeRegistry(registryDir, { a: {} })
+    const emptyProfileDir = tempDir('dsh-org-profile-')
+    const value = expectOk(await api(await floor(), {
+      orgRegistryPath: registryPath,
+      orgProfileDir: emptyProfileDir,
+    }).org.get(request()))
+    expect(value.registry.ok).toBe(true)
+    expect(value.servedRosterToken.ok).toBe(false)
+    if (value.servedRosterToken.ok) throw new Error('unreachable')
+    expect(value.servedRosterToken.reason).toContain('cordis.patch.yml')
+  })
 })
 
 describe('org.write', () => {
@@ -530,6 +563,154 @@ describe('org.write', () => {
     const error = expectErr(await app.org.write(requestWith({ document: validDocument, expectedToken: before.registry.token })))
     expect(error.code).toBe('org-registry-write-failed')
     expect(error.code).not.toBe('org-registry-rejected')
+    expect(error.message).toContain('could not be read for the concurrency check')
+  })
+})
+
+describe('org.writeServed', () => {
+  it('replaces BOTH served mounts with the same list, end-to-end through the real handler against a real tmp profile dir', async () => {
+    const registryDir = tempDir('dsh-org-registry-')
+    const profileDir = tempDir('dsh-org-profile-')
+    const registryPath = writeRegistry(registryDir, { a: {} })
+    writeProfile(profileDir, [
+      { id: 'mailbox-bridge', addresses: ['a'] },
+      { id: 'tool-mailbox', addresses: ['a'] },
+    ])
+    const app = api(await floor(), { orgRegistryPath: registryPath, orgProfileDir: profileDir })
+    const before = expectOk(await app.org.get(request()))
+    if (!before.servedRosterToken.ok) throw new Error('unreachable')
+
+    const written = expectOk(await app.org.writeServed(requestWith({
+      addresses: ['a', 'b'],
+      expectedToken: before.servedRosterToken.token,
+    })))
+    expect(written.addresses).toEqual(['a', 'b'])
+    expect(written.token).not.toBe(before.servedRosterToken.token)
+
+    // A follow-up org.get sees exactly what was written, on BOTH rosters.
+    const after = expectOk(await app.org.get(request()))
+    expect(after.mailboxBridge).toEqual({ ok: true, addresses: ['a', 'b'] })
+    expect(after.toolMailbox).toEqual({ ok: true, addresses: ['a', 'b'] })
+    if (!after.servedRosterToken.ok) throw new Error('unreachable')
+    expect(after.servedRosterToken.token).toBe(written.token)
+    // The registry itself is untouched by a served-roster write.
+    expect(after.registry).toEqual(before.registry)
+  })
+
+  it('refuses org-served-roster-conflict when expectedToken no longer matches the file, naming both tokens, and writes nothing', async () => {
+    const registryDir = tempDir('dsh-org-registry-')
+    const profileDir = tempDir('dsh-org-profile-')
+    const registryPath = writeRegistry(registryDir, { a: {} })
+    writeProfile(profileDir, [
+      { id: 'mailbox-bridge', addresses: ['a'] },
+      { id: 'tool-mailbox', addresses: ['a'] },
+    ])
+    const app = api(await floor(), { orgRegistryPath: registryPath, orgProfileDir: profileDir })
+    const originalBytes = readFileSync(join(profileDir, 'cordis.patch.yml'))
+    const staleToken = 'stale-served-roster-token-not-the-real-hash'
+
+    const error = expectErr(await app.org.writeServed(requestWith({ addresses: ['a'], expectedToken: staleToken })))
+    expect(error.code).toBe('org-served-roster-conflict')
+    expect(error.message).toContain('changed since it was read')
+    expect(error.details).toEqual({
+      expectedToken: staleToken,
+      actualToken: createHash('sha256').update(originalBytes).digest('hex'),
+    })
+    expect(readFileSync(join(profileDir, 'cordis.patch.yml'))).toEqual(originalBytes)
+  })
+
+  it('refuses org-served-roster-split with POPULATED details when the two mounts already disagree and acknowledgeSplit is omitted, and writes nothing', async () => {
+    const registryDir = tempDir('dsh-org-registry-')
+    const profileDir = tempDir('dsh-org-profile-')
+    const registryPath = writeRegistry(registryDir, { a: {} })
+    writeProfile(profileDir, [
+      { id: 'mailbox-bridge', addresses: ['a', 'b'] },
+      { id: 'tool-mailbox', addresses: ['a'] },
+    ])
+    const app = api(await floor(), { orgRegistryPath: registryPath, orgProfileDir: profileDir })
+    const originalBytes = readFileSync(join(profileDir, 'cordis.patch.yml'))
+    const before = expectOk(await app.org.get(request()))
+    if (!before.servedRosterToken.ok) throw new Error('unreachable')
+
+    const error = expectErr(await app.org.writeServed(requestWith({
+      addresses: ['c'],
+      expectedToken: before.servedRosterToken.token,
+    })))
+    expect(error.code).toBe('org-served-roster-split')
+    // Not empty — the whole point of this refusal is to name exactly which
+    // addresses are one-sided so the caller can act on it.
+    expect(error.details).toEqual({ onlyMailboxBridge: ['b'], onlyToolMailbox: [] })
+    expect(readFileSync(join(profileDir, 'cordis.patch.yml'))).toEqual(originalBytes)
+  })
+
+  it('succeeds with acknowledgeSplit: true on the same disagreeing fixture, end-to-end', async () => {
+    const registryDir = tempDir('dsh-org-registry-')
+    const profileDir = tempDir('dsh-org-profile-')
+    const registryPath = writeRegistry(registryDir, { a: {} })
+    writeProfile(profileDir, [
+      { id: 'mailbox-bridge', addresses: ['a', 'b'] },
+      { id: 'tool-mailbox', addresses: ['a'] },
+    ])
+    const app = api(await floor(), { orgRegistryPath: registryPath, orgProfileDir: profileDir })
+    const before = expectOk(await app.org.get(request()))
+    if (!before.servedRosterToken.ok) throw new Error('unreachable')
+
+    const written = expectOk(await app.org.writeServed(requestWith({
+      addresses: ['c'],
+      expectedToken: before.servedRosterToken.token,
+      acknowledgeSplit: true,
+    })))
+    expect(written.addresses).toEqual(['c'])
+
+    const after = expectOk(await app.org.get(request()))
+    expect(after.mailboxBridge).toEqual({ ok: true, addresses: ['c'] })
+    expect(after.toolMailbox).toEqual({ ok: true, addresses: ['c'] })
+  })
+
+  it('refuses org-served-roster-rejected for an invalid proposed address, and writes nothing', async () => {
+    const registryDir = tempDir('dsh-org-registry-')
+    const profileDir = tempDir('dsh-org-profile-')
+    const registryPath = writeRegistry(registryDir, { a: {} })
+    writeProfile(profileDir, [
+      { id: 'mailbox-bridge', addresses: ['a'] },
+      { id: 'tool-mailbox', addresses: ['a'] },
+    ])
+    const app = api(await floor(), { orgRegistryPath: registryPath, orgProfileDir: profileDir })
+    const originalBytes = readFileSync(join(profileDir, 'cordis.patch.yml'))
+    const before = expectOk(await app.org.get(request()))
+    if (!before.servedRosterToken.ok) throw new Error('unreachable')
+
+    const error = expectErr(await app.org.writeServed(requestWith({
+      addresses: ['not a valid address!'],
+      expectedToken: before.servedRosterToken.token,
+    })))
+    expect(error.code).toBe('org-served-roster-rejected')
+    expect(readFileSync(join(profileDir, 'cordis.patch.yml'))).toEqual(originalBytes)
+  })
+
+  it('refuses org-served-roster-write-failed — a distinct code from org-served-roster-rejected — for an I/O failure unrelated to the proposed content', async () => {
+    const registryDir = tempDir('dsh-org-registry-')
+    const profileDir = tempDir('dsh-org-profile-')
+    const registryPath = writeRegistry(registryDir, { a: {} })
+    writeProfile(profileDir, [
+      { id: 'mailbox-bridge', addresses: ['a'] },
+      { id: 'tool-mailbox', addresses: ['a'] },
+    ])
+    const app = api(await floor(), { orgRegistryPath: registryPath, orgProfileDir: profileDir })
+    const before = expectOk(await app.org.get(request()))
+    if (!before.servedRosterToken.ok) throw new Error('unreachable')
+
+    // The file vanishes between the caller's read and its write — nothing to
+    // do with the proposed content, which is perfectly valid. A caller
+    // seeing this code knows to retry the SAME list, the opposite
+    // instruction from org-served-roster-rejected.
+    rmSync(join(profileDir, 'cordis.patch.yml'), { force: true })
+    const error = expectErr(await app.org.writeServed(requestWith({
+      addresses: ['a'],
+      expectedToken: before.servedRosterToken.token,
+    })))
+    expect(error.code).toBe('org-served-roster-write-failed')
+    expect(error.code).not.toBe('org-served-roster-rejected')
     expect(error.message).toContain('could not be read for the concurrency check')
   })
 })

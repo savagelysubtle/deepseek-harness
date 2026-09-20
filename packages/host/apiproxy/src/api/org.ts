@@ -178,6 +178,19 @@ export type OrgDriftResult =
   | { readonly ok: true; readonly rows: readonly OrgDriftRow[] }
   | { readonly ok: false; readonly reason: string }
 
+/**
+ * The served-roster file's (`cordis.patch.yml`) content token, or a named
+ * reason it could not be produced — the same read that already produces
+ * `mailboxBridge`/`toolMailbox` also yields this, so `writeServed` never has
+ * to trigger a second read of the file just to learn what to send back as
+ * `expectedToken` (that would reopen the exact race a content token exists
+ * to close). Distinct from {@link OrgRegistryResult}'s `token`: these are
+ * two different files, each with its own independent write guard.
+ */
+export type OrgServedRosterTokenResult =
+  | { readonly ok: true; readonly token: string }
+  | { readonly ok: false; readonly reason: string }
+
 /** Org-domain unary methods (the map keys org.* of RpcMethodMap). */
 export interface OrgApi {
   /**
@@ -207,6 +220,12 @@ export interface OrgApi {
     mailboxBridge: OrgRosterResult
     toolMailbox: OrgRosterResult
     drift: OrgDriftResult
+    /**
+     * Content token of the served-roster file (`cordis.patch.yml`) at this
+     * read, for `writeServed`'s `expectedToken` — the write-side guard
+     * against another writer landing between this read and that write.
+     */
+    servedRosterToken: OrgServedRosterTokenResult
   }>>
 
   /**
@@ -233,6 +252,56 @@ export interface OrgApi {
     expectedToken: string
   }>): Promise<RpcResponse<{
     registry: OrgRegistryView
+    token: string
+  }>>
+
+  /**
+   * Replace BOTH served-roster mounts' `config.addresses` — the
+   * `mailbox-bridge` and `tool-mailbox` mounts in the active profile's
+   * `cordis.patch.yml` — with the SAME one address list, in a single atomic
+   * write. This method touches ONLY the two served mounts; it never reads
+   * or writes the org registry document (that is `write`'s own separate
+   * scope, guarded by its own independent token). One list on the wire,
+   * both mounts updated together, because a seat present on one served list
+   * but not the other silently loses mail with no error on either side —
+   * see the `org-served-roster.ts` module header for the full account of
+   * why.
+   *
+   * Refuses `org-served-roster-conflict` (naming both tokens) when
+   * `expectedToken` (from a prior `org.get`'s `servedRosterToken`) no longer
+   * matches the served-roster file's current content — another writer
+   * landed first, and this call must never overwrite that change silently.
+   *
+   * Refuses `org-served-roster-split` when the two mounts' CURRENT served
+   * lists already disagree with each other and `acknowledgeSplit` is not
+   * set — details name exactly which addresses are served by only one side
+   * (`onlyMailboxBridge`, `onlyToolMailbox`). Pass `acknowledgeSplit: true`
+   * to proceed anyway and reconcile both mounts onto the one proposed list.
+   *
+   * Refuses `org-served-roster-rejected` for an invalid proposed address
+   * (grammar violation or a duplicate) — "fix your content", the same list
+   * will fail again unchanged.
+   *
+   * Refuses `org-served-roster-write-failed` for anything else that has
+   * nothing to do with the proposed content — the file could not be read,
+   * either mount is missing or malformed, no free backup filename was
+   * found, or the atomic write/rename itself failed. This means "retry the
+   * same list", the opposite instruction from `org-served-roster-rejected`.
+   */
+  writeServed(request: RpcRequest<{
+    /** The single served-address list applied to BOTH mounts identically. */
+    addresses: readonly string[]
+    /** The served-roster file's content token, from a prior `org.get`'s `servedRosterToken`. */
+    expectedToken: string
+    /**
+     * When true, proceeds even if the two mounts' CURRENT lists already
+     * disagree with each other. Omitted or false means the call refuses
+     * with `org-served-roster-split` instead, on the common-path assumption
+     * that the two mounts already agree and no acknowledgement is needed.
+     */
+    acknowledgeSplit?: boolean
+  }>): Promise<RpcResponse<{
+    addresses: readonly string[]
     token: string
   }>>
 }

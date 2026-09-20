@@ -70,7 +70,7 @@ export type {
 } from './worktree.ts'
 export type {
   OrgApi, OrgDriftResult, OrgDriftRow, OrgEdge, OrgRegistryDocument, OrgRegistryDocumentSeat,
-  OrgRegistryResult, OrgRegistryView, OrgRosterResult, OrgSeat, OrgSeatTools,
+  OrgRegistryResult, OrgRegistryView, OrgRosterResult, OrgSeat, OrgSeatTools, OrgServedRosterTokenResult,
 } from './org.ts'
 export type { SkillsApi, SkillEntry } from './skills.ts'
 export type { AgentPresetsApi, AgentPresetEntry } from './agent-presets.ts'

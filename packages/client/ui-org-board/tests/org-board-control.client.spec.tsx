@@ -57,6 +57,7 @@ const READY_VALUE: ResponseValue<'org.get'> = {
   mailboxBridge: { ok: true, addresses: ['alfred'] },
   toolMailbox: { ok: true, addresses: ['alfred'] },
   drift: { ok: true, rows: [] },
+  servedRosterToken: { ok: true, token: 'served-token-1' },
 }
 
 const READY_STATE: OrgBoardState = {

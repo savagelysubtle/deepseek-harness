@@ -5,7 +5,7 @@ import type { RequestPayload, ResponseValue } from './rpc-map.ts'
 import type { Wire } from './rpc.schema.ts'
 import type {
   OrgDriftResult, OrgDriftRow, OrgEdge, OrgRegistryDocument, OrgRegistryDocumentSeat,
-  OrgRegistryResult, OrgRegistryView, OrgRosterResult, OrgSeat, OrgSeatTools,
+  OrgRegistryResult, OrgRegistryView, OrgRosterResult, OrgSeat, OrgSeatTools, OrgServedRosterTokenResult,
 } from './org.ts'
 
 /** OrgSeatTools of a registry seat's `tools` field. */
@@ -91,16 +91,35 @@ export const orgDriftResultSchema = z.discriminatedUnion('ok', [
   z.object({ ok: z.literal(false), reason: z.string() }),
 ]) satisfies z.ZodType<Wire<OrgDriftResult>>
 
+/**
+ * OrgServedRosterTokenResult: the served-roster file's content token, or a
+ * named failure reason (see {@link OrgServedRosterTokenResult}). Declared
+ * before `orgGetValueSchema` below, which references it — a schema used
+ * before it is declared is a temporal-dead-zone error at module load, not a
+ * type error, so ordering here is load-bearing.
+ */
+export const orgServedRosterTokenResultSchema = z.discriminatedUnion('ok', [
+  z.object({ ok: z.literal(true), token: z.string() }),
+  z.object({ ok: z.literal(false), reason: z.string() }),
+]) satisfies z.ZodType<Wire<OrgServedRosterTokenResult>>
+
 /** org.get request payload (empty object literal — no arguments). */
 export const orgGetRequestSchema = z.object({}) satisfies z.ZodType<Wire<RequestPayload<'org.get'>>>
 
-/** org.get response value. */
+/**
+ * org.get response value. `servedRosterToken` is load-bearing here, not
+ * cosmetic: Zod silently STRIPS unknown keys from an object schema, so a
+ * field the server sends but this schema omits vanishes before the real
+ * wire client ever sees it — the exact trap `orgRegistryResultSchema`'s
+ * `document` field above already documents.
+ */
 export const orgGetValueSchema = z.object({
   profile: z.string(),
   registry: orgRegistryResultSchema,
   mailboxBridge: orgRosterResultSchema,
   toolMailbox: orgRosterResultSchema,
   drift: orgDriftResultSchema,
+  servedRosterToken: orgServedRosterTokenResultSchema,
 }) satisfies z.ZodType<Wire<ResponseValue<'org.get'>>>
 
 /** org.write request payload: the whole proposed document plus the token it was built against. */
@@ -114,3 +133,21 @@ export const orgWriteValueSchema = z.object({
   registry: orgRegistryViewSchema,
   token: z.string(),
 }) satisfies z.ZodType<Wire<ResponseValue<'org.write'>>>
+
+/**
+ * org.writeServed request payload: the single address list applied to both
+ * served mounts, the token the write was built against, and the optional
+ * split acknowledgement. `acknowledgeSplit` is optional here (never
+ * defaulted in the schema) — the host treats an absent value as `false`.
+ */
+export const orgWriteServedRequestSchema = z.object({
+  addresses: z.array(z.string()),
+  expectedToken: z.string(),
+  acknowledgeSplit: z.boolean().optional(),
+}) satisfies z.ZodType<Wire<RequestPayload<'org.writeServed'>>>
+
+/** org.writeServed response value: the newly written address list and the served-roster file's new content token. */
+export const orgWriteServedValueSchema = z.object({
+  addresses: z.array(z.string()),
+  token: z.string(),
+}) satisfies z.ZodType<Wire<ResponseValue<'org.writeServed'>>>

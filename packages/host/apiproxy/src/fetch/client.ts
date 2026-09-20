@@ -70,7 +70,7 @@ import {
   worktreeCreateValueSchema, worktreeListValueSchema, worktreeLockValueSchema,
   worktreeRemoveValueSchema,
 } from '../api/worktree.schema.ts'
-import { orgGetValueSchema, orgWriteValueSchema } from '../api/org.schema.ts'
+import { orgGetValueSchema, orgWriteServedValueSchema, orgWriteValueSchema } from '../api/org.schema.ts'
 import {
   subagentHistoryValueSchema,
   subagentInterruptValueSchema,
@@ -185,10 +185,11 @@ export interface IApiClient {
     lock(payload: RequestPayload<'worktree.lock'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'worktree.lock'>>>
     remove(payload: RequestPayload<'worktree.remove'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'worktree.remove'>>>
   }
-  /** Org registry and served-roster projection, with computed drift, plus the registry's one write primitive. */
+  /** Org registry and served-roster projection, with computed drift, plus the registry's and served-roster's write primitives. */
   org: {
     get(payload: RequestPayload<'org.get'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'org.get'>>>
     write(payload: RequestPayload<'org.write'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'org.write'>>>
+    writeServed(payload: RequestPayload<'org.writeServed'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'org.writeServed'>>>
   }
   /** client-response passthrough (rpcId is a backfill of the server-request's id — never minted here). */
   respond(message: ClientResponse, signal?: AbortSignal): Promise<RpcReceipt>
@@ -261,6 +262,7 @@ const UNARY_VALUE_SCHEMAS: { [K in keyof RpcMethodMap]: z.ZodType<Wire<ResponseV
   'worktree.remove': worktreeRemoveValueSchema,
   'org.get': orgGetValueSchema,
   'org.write': orgWriteValueSchema,
+  'org.writeServed': orgWriteServedValueSchema,
 }
 
 /** Default timeout for bounded unary calls (rpc-compare 2026-07-19: a hung host must not leave callers pending forever). */
@@ -564,6 +566,7 @@ export abstract class AbstractApiClient implements IApiClient {
   readonly org: IApiClient['org'] = {
     get: (payload, signal) => this.callUnary('org.get', payload, signal),
     write: (payload, signal) => this.callUnary('org.write', payload, signal),
+    writeServed: (payload, signal) => this.callUnary('org.writeServed', payload, signal),
   }
 
   readonly events: IApiClient['events'] = {

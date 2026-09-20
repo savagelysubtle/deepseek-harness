@@ -85,6 +85,7 @@ const VALUE: ResponseValue<'org.get'> = {
   mailboxBridge: { ok: true, addresses: ['alfred'] },
   toolMailbox: { ok: true, addresses: ['alfred'] },
   drift: { ok: true, rows: [] },
+  servedRosterToken: { ok: true, token: 'served-token-1' },
 }
 
 /** A second `org.get` value, distinguishable from {@link VALUE} by `profile` and its registry `token`. */
@@ -102,7 +103,7 @@ const WRITE_OK: ResponseValue<'org.write'> = {
 
 describe('OrgBoardController', () => {
   it('starts idle with no value and no error', () => {
-    const controller = new OrgBoardController({ org: { get: vi.fn(), write: vi.fn() } })
+    const controller = new OrgBoardController({ org: { get: vi.fn(), write: vi.fn(), writeServed: vi.fn() } })
     expect(controller.store.getSnapshot()).toEqual({
       status: 'idle', error: null, value: null, write: { pending: false, notice: null },
     })
@@ -110,7 +111,7 @@ describe('OrgBoardController', () => {
 
   it('publishes the full value on a successful read', async () => {
     const get = vi.fn().mockResolvedValue(ok(VALUE))
-    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed: vi.fn() } })
     await controller.load()
     expect(get).toHaveBeenCalledWith({})
     expect(controller.store.getSnapshot()).toEqual({
@@ -120,7 +121,7 @@ describe('OrgBoardController', () => {
 
   it('publishes its own error state on an outer RPC failure, never a ready-but-empty shape', async () => {
     const get = vi.fn().mockResolvedValue(failed('connection lost'))
-    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed: vi.fn() } })
     await controller.load()
     expect(controller.store.getSnapshot()).toEqual({
       status: 'error', error: 'connection lost', value: null, write: { pending: false, notice: null },
@@ -129,7 +130,7 @@ describe('OrgBoardController', () => {
 
   it('catches a thrown transport error the same way as a business error', async () => {
     const get = vi.fn().mockRejectedValue(new Error('socket closed'))
-    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed: vi.fn() } })
     await controller.load()
     expect(controller.store.getSnapshot()).toEqual({
       status: 'error', error: 'socket closed', value: null, write: { pending: false, notice: null },
@@ -138,14 +139,14 @@ describe('OrgBoardController', () => {
 
   it('stringifies a non-Error throw', async () => {
     const get = vi.fn().mockRejectedValue('boom')
-    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed: vi.fn() } })
     await controller.load()
     expect(controller.store.getSnapshot().error).toBe('boom')
   })
 
   it('sets status to loading synchronously before the promise settles', () => {
     const get = vi.fn(() => new Promise<OrgGetResponse>(() => {}))
-    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed: vi.fn() } })
     void controller.load()
     expect(controller.store.getSnapshot().status).toBe('loading')
   })
@@ -155,7 +156,7 @@ describe('OrgBoardController', () => {
     const get = vi.fn()
       .mockImplementationOnce(() => new Promise<OrgGetResponse>((resolve) => { resolveFirst = resolve }))
       .mockResolvedValueOnce(ok(VALUE))
-    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed: vi.fn() } })
 
     const first = controller.load()
     await controller.load()
@@ -169,7 +170,7 @@ describe('OrgBoardController', () => {
   it('dispose stops an in-flight response from publishing', async () => {
     let resolve: (value: OrgGetResponse) => void = () => {}
     const get = vi.fn(() => new Promise<OrgGetResponse>((r) => { resolve = r }))
-    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed: vi.fn() } })
     const pending = controller.load()
     controller.dispose()
     resolve(ok(VALUE))
@@ -180,7 +181,7 @@ describe('OrgBoardController', () => {
   it('dispose after an outer-failure in-flight response also suppresses the publish', async () => {
     let reject: (error: unknown) => void = () => {}
     const get = vi.fn(() => new Promise<OrgGetResponse>((_resolve, r) => { reject = r }))
-    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed: vi.fn() } })
     const pending = controller.load()
     controller.dispose()
     reject(new Error('too late'))
@@ -192,7 +193,7 @@ describe('OrgBoardController', () => {
 describe('refreshOrgBoardIfLoaded', () => {
   it('is a no-op before the modal has ever loaded (idle stays idle, no request issued)', () => {
     const get = vi.fn()
-    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed: vi.fn() } })
     refreshOrgBoardIfLoaded(controller)
     expect(get).not.toHaveBeenCalled()
     expect(controller.store.getSnapshot().status).toBe('idle')
@@ -202,7 +203,7 @@ describe('refreshOrgBoardIfLoaded', () => {
     const get = vi.fn()
       .mockResolvedValueOnce(ok(VALUE))
       .mockResolvedValueOnce(ok({ ...VALUE, profile: 'post-reconnect' }))
-    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed: vi.fn() } })
     await controller.load()
     expect(controller.store.getSnapshot().value?.profile).toBe('web-stable')
 
@@ -221,7 +222,7 @@ describe('refreshOrgBoardIfLoaded', () => {
     const get = vi.fn()
       .mockResolvedValueOnce(failed('connection lost'))
       .mockResolvedValueOnce(ok(VALUE))
-    const controller = new OrgBoardController({ org: { get, write: vi.fn() } })
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed: vi.fn() } })
     await controller.load()
     expect(controller.store.getSnapshot().status).toBe('error')
 
@@ -236,7 +237,7 @@ describe('refreshOrgBoardIfLoaded', () => {
 describe('OrgBoardController write path', () => {
   it('refuses locally, without ever calling org.write, before any registry has been loaded', async () => {
     const write = vi.fn()
-    const controller = new OrgBoardController({ org: { get: vi.fn(), write } })
+    const controller = new OrgBoardController({ org: { get: vi.fn(), write, writeServed: vi.fn() } })
     await controller.addSeat('lucius', '/org/lucius')
     expect(write).not.toHaveBeenCalled()
     const { write: writeState } = controller.store.getSnapshot()
@@ -248,7 +249,7 @@ describe('OrgBoardController write path', () => {
   it('a local edit.ts refusal (duplicate seat name) never reaches org.write', async () => {
     const get = vi.fn().mockResolvedValue(ok(VALUE))
     const write = vi.fn()
-    const controller = new OrgBoardController({ org: { get, write } })
+    const controller = new OrgBoardController({ org: { get, write, writeServed: vi.fn() } })
     await controller.load()
     await controller.addSeat('alfred', '/org/other')
     expect(write).not.toHaveBeenCalled()
@@ -261,7 +262,7 @@ describe('OrgBoardController write path', () => {
   it('sets write.pending synchronously before an in-flight write settles', async () => {
     const get = vi.fn().mockResolvedValue(ok(VALUE))
     const write = vi.fn(() => new Promise<OrgWriteResponse>(() => {}))
-    const controller = new OrgBoardController({ org: { get, write } })
+    const controller = new OrgBoardController({ org: { get, write, writeServed: vi.fn() } })
     await controller.load()
     void controller.addSeat('lucius', '/org/lucius')
     // Synchronous flush: the write() body runs its first `store.update` before
@@ -275,7 +276,7 @@ describe('OrgBoardController write path', () => {
       .mockResolvedValueOnce(ok(VALUE))
       .mockResolvedValueOnce(ok(VALUE_2))
     const write = vi.fn().mockResolvedValue(okWrite(WRITE_OK))
-    const controller = new OrgBoardController({ org: { get, write } })
+    const controller = new OrgBoardController({ org: { get, write, writeServed: vi.fn() } })
     await controller.load()
     await controller.load() // simulates a reconnect refresh landing before any write
     await controller.addSeat('lucius', '/org/lucius')
@@ -290,7 +291,7 @@ describe('OrgBoardController write path', () => {
       .mockResolvedValueOnce(ok(VALUE))
       .mockResolvedValueOnce(ok(VALUE_2))
     const write = vi.fn().mockResolvedValue(okWrite(WRITE_OK))
-    const controller = new OrgBoardController({ org: { get, write } })
+    const controller = new OrgBoardController({ org: { get, write, writeServed: vi.fn() } })
     await controller.load()
     await controller.addSeat('lucius', '/org/lucius')
     expect(get).toHaveBeenCalledTimes(2)
@@ -303,7 +304,7 @@ describe('OrgBoardController write path', () => {
       .mockResolvedValueOnce(ok(VALUE))
       .mockResolvedValueOnce(ok(VALUE_2))
     const write = vi.fn().mockResolvedValue(failedWrite('org-registry-conflict', 'registry changed since it was read'))
-    const controller = new OrgBoardController({ org: { get, write } })
+    const controller = new OrgBoardController({ org: { get, write, writeServed: vi.fn() } })
     await controller.load()
     await controller.addSeat('lucius', '/org/lucius')
     expect(write).toHaveBeenCalledTimes(1)
@@ -317,7 +318,7 @@ describe('OrgBoardController write path', () => {
   it('org-registry-rejected does NOT reload (nothing changed on disk) and leaves value untouched, with its own distinct notice', async () => {
     const get = vi.fn().mockResolvedValueOnce(ok(VALUE))
     const write = vi.fn().mockResolvedValue(failedWrite('org-registry-rejected', 'seat "lucius" has no cwd'))
-    const controller = new OrgBoardController({ org: { get, write } })
+    const controller = new OrgBoardController({ org: { get, write, writeServed: vi.fn() } })
     await controller.load()
     await controller.addSeat('lucius', '/org/lucius')
     expect(get).toHaveBeenCalledTimes(1)
@@ -330,7 +331,7 @@ describe('OrgBoardController write path', () => {
   it('org-registry-write-failed does NOT reload and leaves value untouched, with its own distinct notice (never collapsed with rejected)', async () => {
     const get = vi.fn().mockResolvedValueOnce(ok(VALUE))
     const write = vi.fn().mockResolvedValue(failedWrite('org-registry-write-failed', 'disk full'))
-    const controller = new OrgBoardController({ org: { get, write } })
+    const controller = new OrgBoardController({ org: { get, write, writeServed: vi.fn() } })
     await controller.load()
     await controller.addSeat('lucius', '/org/lucius')
     expect(get).toHaveBeenCalledTimes(1)
@@ -343,7 +344,7 @@ describe('OrgBoardController write path', () => {
   it('a thrown transport error during write is treated as write-failed (retry-the-same-document), not reloaded', async () => {
     const get = vi.fn().mockResolvedValueOnce(ok(VALUE))
     const write = vi.fn().mockRejectedValue(new Error('socket closed'))
-    const controller = new OrgBoardController({ org: { get, write } })
+    const controller = new OrgBoardController({ org: { get, write, writeServed: vi.fn() } })
     await controller.load()
     await controller.addSeat('lucius', '/org/lucius')
     expect(get).toHaveBeenCalledTimes(1)
@@ -356,7 +357,7 @@ describe('OrgBoardController write path', () => {
   it('a rejected write leaves the exact same payload resubmittable: the identical verb call rebuilds it unchanged', async () => {
     const get = vi.fn().mockResolvedValue(ok(VALUE))
     const write = vi.fn().mockResolvedValue(failedWrite('org-registry-rejected', 'invalid'))
-    const controller = new OrgBoardController({ org: { get, write } })
+    const controller = new OrgBoardController({ org: { get, write, writeServed: vi.fn() } })
     await controller.load()
     await controller.addSeat('lucius', '/org/lucius')
     const firstCallArgs = write.mock.calls[0]?.[0] as unknown
@@ -371,7 +372,7 @@ describe('OrgBoardController write path', () => {
       .mockResolvedValueOnce(ok(VALUE))
       .mockResolvedValueOnce(ok(VALUE_2))
     const write = vi.fn(() => new Promise<OrgWriteResponse>((resolve) => { resolveWrite = resolve }))
-    const controller = new OrgBoardController({ org: { get, write } })
+    const controller = new OrgBoardController({ org: { get, write, writeServed: vi.fn() } })
     await controller.load()
 
     const writing = controller.addSeat('lucius', '/org/lucius')
@@ -415,7 +416,7 @@ describe('OrgBoardController write path', () => {
     // chain, exactly like the real controller against a real (mocked) host.
     const get = vi.fn().mockResolvedValue(ok(richValue))
     const write = vi.fn().mockResolvedValue(okWrite(WRITE_OK))
-    const controller = new OrgBoardController({ org: { get, write } })
+    const controller = new OrgBoardController({ org: { get, write, writeServed: vi.fn() } })
     await controller.load()
 
     await controller.addEdge('batman', 'robin')

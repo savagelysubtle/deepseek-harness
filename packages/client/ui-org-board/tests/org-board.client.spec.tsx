@@ -165,6 +165,7 @@ const BASE_VALUE: ResponseValue<'org.get'> = {
       { seat: 'ghost', registered: false, servedByMailboxBridge: true, servedByToolMailbox: false },
     ],
   },
+  servedRosterToken: { ok: true, token: 'served-token-1' },
 }
 
 describe('OrgBoard', () => {
@@ -201,6 +202,7 @@ describe('OrgBoard', () => {
       mailboxBridge: { ok: false, reason: 'patch mount absent' },
       toolMailbox: { ok: false, reason: 'patch file unreadable' },
       drift: { ok: false, reason: 'registry, mailboxBridge, toolMailbox unavailable' },
+      servedRosterToken: { ok: false, reason: 'patch file unreadable' },
     })
     renderBoard(state)
     expect(screen.getByText('Profile: web-stable')).toBeTruthy()

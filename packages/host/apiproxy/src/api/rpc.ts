@@ -146,6 +146,39 @@ export interface RpcErrorDetailsMap {
    * as one undifferentiated word.
    */
   'org-registry-write-failed': {}
+  /**
+   * An `org.writeServed` carried an `expectedToken` the served-roster file
+   * (`cordis.patch.yml`) has already moved past: another writer landed
+   * first. The details carry both tokens so a client can re-read and retry
+   * — same shape-of-intent as `org-registry-conflict`, keyed on this
+   * file's own independent content hash (see org-served-roster.ts on why
+   * the two tokens are never conflated).
+   */
+  'org-served-roster-conflict': { expectedToken: string; actualToken: string }
+  /**
+   * An `org.writeServed` was refused because the two served rosters
+   * (`mailbox-bridge` and `tool-mailbox`) already disagree with each other,
+   * before the proposed content was even considered — the caller must see
+   * both sides and pass `acknowledgeSplit` to proceed. Details name exactly
+   * which addresses are served by only one side.
+   */
+  'org-served-roster-split': { onlyMailboxBridge: readonly string[]; onlyToolMailbox: readonly string[] }
+  /**
+   * An `org.writeServed` was refused because a proposed address failed the
+   * mailbox address grammar or duplicated another; the message is the
+   * validation's own text. This means "fix your content" — the same list
+   * will fail again unchanged.
+   */
+  'org-served-roster-rejected': {}
+  /**
+   * An `org.writeServed`'s proposed content was fine but the write itself
+   * failed for a reason unrelated to it: the served-roster file could not
+   * be read, either mount is missing or malformed, no free backup filename
+   * could be found, or the atomic write/rename failed. This means "retry
+   * the same list" — never "fix your content", which is what
+   * `org-served-roster-rejected` means instead.
+   */
+  'org-served-roster-write-failed': {}
   'internal': {}
 }
 

@@ -1589,6 +1589,17 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
   let orgRegistryToken = 'fixture-token-1'
   let nextOrgRegistryToken = 2
 
+  // Mutable demo served-roster address list + its own independent content
+  // token — mirrors the registry's fixture-token pattern above, but keyed
+  // separately: the real API guards this file (cordis.patch.yml) and the
+  // registry file with two unrelated tokens (see org-served-roster.ts), and
+  // the fixture preserves that separation rather than reusing one counter
+  // for both. Both fixture served mounts always read this SAME list, so
+  // there is no drift to demo here the way the real two-file split can.
+  let orgServedAddresses: readonly string[] = ['alfred', 'batman']
+  let orgServedRosterToken = 'fixture-served-token-1'
+  let nextOrgServedRosterToken = 2
+
   /**
    * Fresh `registry`/`document` copies of the current demo state for
    * `org.get`. The two fields exist for different purposes on the real API
@@ -3150,9 +3161,10 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         // absolute, so it mirrors that guarantee without a resolution step.
         profile: 'fixture',
         registry: { ok: true, ...orgRegistrySnapshot(), token: orgRegistryToken },
-        mailboxBridge: { ok: true, addresses: ['alfred', 'batman'] },
-        toolMailbox: { ok: true, addresses: ['alfred', 'batman'] },
+        mailboxBridge: { ok: true, addresses: [...orgServedAddresses] },
+        toolMailbox: { ok: true, addresses: [...orgServedAddresses] },
         drift: { ok: true, rows: [] },
+        servedRosterToken: { ok: true, token: orgServedRosterToken },
       }),
       // Whole-document replace, guarded by the same content-token shape the
       // real API uses (org-registry-conflict / org-registry-rejected in
@@ -3172,6 +3184,25 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         orgRegistryDocument = document
         orgRegistryToken = `fixture-token-${String(nextOrgRegistryToken++)}`
         return ok(request, { registry: orgRegistryDocument, token: orgRegistryToken })
+      },
+      // Replaces the one demo served-address list both fixture mounts read
+      // from, guarded by its own independent token — never the registry's.
+      // The fixture's two served mounts always share this single list, so
+      // there is nothing for them to disagree about: `acknowledgeSplit` is
+      // accepted (never rejected as an unknown field) but never itself
+      // causes or averts a refusal here, unlike the real two-file API.
+      writeServed: (request) => {
+        const { addresses, expectedToken } = request.payload
+        if (expectedToken !== orgServedRosterToken) {
+          return err(request, {
+            code: 'org-served-roster-conflict',
+            message: `fixture served roster changed since it was read (expected token ${expectedToken}, now ${orgServedRosterToken}); re-read and retry`,
+            details: { expectedToken, actualToken: orgServedRosterToken },
+          })
+        }
+        orgServedAddresses = [...addresses]
+        orgServedRosterToken = `fixture-served-token-${String(nextOrgServedRosterToken++)}`
+        return ok(request, { addresses: orgServedAddresses, token: orgServedRosterToken })
       },
     },
     respond(message: ClientResponse): Promise<RpcReceipt> {
@@ -3326,6 +3357,7 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'worktree.remove': return this.api.worktree.remove(request)
       case 'org.get': return this.api.org.get(request)
       case 'org.write': return this.api.org.write(request)
+      case 'org.writeServed': return this.api.org.writeServed(request)
       case 'skill.list': return this.api.skills.list(request)
       case 'agentPreset.list': return this.api.agentPresets.list(request)
       case 'agentPreset.select': return this.api.agentPresets.select(request)
