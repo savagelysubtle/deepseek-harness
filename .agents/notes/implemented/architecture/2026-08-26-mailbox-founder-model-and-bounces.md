@@ -8,7 +8,9 @@ English | [中文](2026-08-26-mailbox-founder-model-and-bounces.zh.md)
 
 Doc 1 (outside council) found three coupled defects: urgency inferred from the wrong party (`deliverToLive` interrupted busy seats while queueing to idle ones — the busier a seat, the more disruptive identical mail), aborts risked rendering as empty successes once interrupts became real, and terminal delivery failures were invisible to senders (`unknown-address` left a durable failed row nobody ever reads).
 
-## Decision — revised twice by chair/founder rulings, final semantics:
+## Decision
+
+Revised twice by chair and founder rulings; the semantics below are final.
 
 - **ALL mail steers a live turn** (founder revision superseding the interim sender-intent `type:'steer'` design): no busyness inference, no type-gated interrupt requests. Transport guarantees immediacy uniformly.
 - **`MailboxMessage.blocking?: boolean`** (default false) carries sender-side WAIT state. It drives receiver JUDGING, not transport: blocked-sender mail renders a visible `[BLOCKING]` prefix so a seat sees at a glance that a colleague/boss is stuck until it replies; everything else is FYI weight. Untrusted-sender risk stays handled by facts-not-directives delivery plus the fail-closed `admitFromNamespaces` drain gate — no steer allowlist, which would defeat founder intent.
@@ -17,6 +19,16 @@ Doc 1 (outside council) found three coupled defects: urgency inferred from the w
 **Seat-alias roster (composition gap, same change):** the bridge previously assumed every target id derives from the address name — true only for headless named runs. `Config.seatAliases` (default absent) now routes a full grammar-checked address to an EXISTING session id, so web-host seat sessions become steerable/cold-resumable exactly like named ones. Fail-closed: no auto-discovery from preset personas; a chair's composition declares its rows.
 
 Store: SCHEMA_VERSION bumped 1→2 for the new `blocking` column (monotonic, older files reject loud per contract). CLI inbox entries expose `blocking`. The apiproxy `mailbox.publish` wire accepts and forwards `blocking`.
+
+## Alternatives considered
+
+**Sender-declared interrupt intent (`type: 'steer'`).** The interim design had the sender mark a message as interrupting. Superseded by founder revision: all mail steers a live turn, so there is nothing for a sender to declare.
+
+**Busyness inference and type-gated interrupt requests.** Not adopted; transport guarantees immediacy uniformly instead of deciding per message.
+
+**A steer allowlist.** Rejected as defeating founder intent. Untrusted-sender risk is carried by facts-not-directives delivery and the fail-closed `admitFromNamespaces` drain gate instead.
+
+**Auto-discovering seat aliases from preset personas.** Rejected as fail-open: a chair's composition declares its rows.
 
 ## Verification
 

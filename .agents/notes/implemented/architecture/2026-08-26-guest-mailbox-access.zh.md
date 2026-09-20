@@ -17,9 +17,11 @@ Status: implemented
 - 排水时准入（`admitFromNamespaces`，默认空即 fail-closed）：外部写入者在构造上就绕过一切写侧检查，因此外来来源邮件的接受与否在路由前的 `deliverLease` 里裁决。不可解析的发送方一律关闭。chairs-only 由组合而非代码成立——只有主席桥选择加入 `['guest']`。
 - payload 隔离前提（议事席发现的 DoS）：此前一条坏 payload 行会让所有地址的整个认领批次瘫痪。认领循环现在隔离这些行（以认领取得所有权、提交后落定 `failed/malformed-payload`），兄弟消息照常投递。
 
-按议事席对照表否决：claudecode-bridge 插件（自举悖论）；对接 Claude Code 自带消息（传输不符且仅达活会话）；给 MailboxProvider 加 `peek()`/`list()`（claim+settle-pending 已表达非消费读——PR-B 契约保持冻结）；推送给访客（访客不可寻呼）；写时执法（构造上不可能）；独立 guest-mailbox 包（约两百行的仪式感）。
-
 差异所及之处的勘误已记录：plan 配置字段是 `path`（→ `mailbox.db`）而非 `databasePath`（→ `.sqlite`）；席位约定为冒号形式 `<namespace>:<name>`（`gotham:alfred`），而非斜杠；包目录名与包短名的分歧已标注于计划包表。
+
+## 曾考虑的替代方案
+
+按议事席对照表否决：claudecode-bridge 插件（自举悖论）；对接 Claude Code 自带消息（传输不符且仅达活会话）；给 MailboxProvider 加 `peek()`/`list()`（claim+settle-pending 已表达非消费读——PR-B 契约保持冻结）；推送给访客（访客不可寻呼）；写时执法（构造上不可能）；独立 guest-mailbox 包（约两百行的仪式感）。
 
 ## 验证
 

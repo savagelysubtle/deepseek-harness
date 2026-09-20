@@ -18,6 +18,8 @@ The mailbox seam (see the capability-seam note) defines publish/claim/settle but
 - Schema ownership rides a `mailbox_meta.schema_version` stamp checked inside the open transaction: empty files initialize at v1; non-mailbox files and any foreign version reject the mount loud. Monotonic, no migration path — the pre-release stance covers reformatting freely.
 - The plugin resolves config once (`path?` → `<dsh home>/mailbox/mailbox.db`), opens synchronously so an incompatible database fails the mount itself, and registers provider `local` through `ctx.effect`; disposal unregisters first, then closes the handle (storage-sqlite ordering).
 
+## Alternatives considered
+
 Rejected: pid artifacts in queue rows (the named-sessions lock already owns residency liveness; duplicating it here would wedge leases that stale-timestamp reclaim dissolves); `PRAGMA user_version` for the schema stamp (a bare integer cannot distinguish "mailbox database" from "some other tool's file" the way a named meta table can); configurable journal mode (no deployment needs a rollback-journal fallback yet; WAL stays fixed until one does).
 
 ## Verification

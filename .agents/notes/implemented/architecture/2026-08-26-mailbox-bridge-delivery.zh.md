@@ -17,6 +17,8 @@ Status: implemented
 - 驻留完全沿用具名会话的 pid 存活锁，`lockStaleMs` 作为可选的有界接管逃生口（`maxAgeMs`），供楔死的持有者需要。获取失败立即落定 `pending`——“驻留他处”的推迟绝不消耗任何过期窗口。持久化日志缺失 → `failed 'unknown-address'`，日后成为 SeatRegistry 的铸造门禁绊线。`done` 在准入即落定（静默之前），因为准入语义不得依赖被投递回合之后的运行时长。
 - 投递渲染收敛在一个共享模块中，headless runner 复用它，使运行启动时的排水与中途排水产出逐字节一致的回合：subject + payload 文本置于合并的 `{ kind: 'mailbox', form: 'relay' }` 来源之下。headless 侧以 `--mailbox-namespace` 暴露，在任务之前排出固定界限的积压，使任务保持最后一回合的最后一条消息。
 
+## 曾考虑的替代方案
+
 否决项：经 session 内部结构或合成事件推送投递（违反 model-visible ⟺ logged）；按地址路由提供方与推送通知（尚无第二个消费者）；让轮询计时器钉住宿主（unref 的排水循环意味着邮箱部署须依靠自己真正的长生命周期句柄维生）。
 
 ## 验证
