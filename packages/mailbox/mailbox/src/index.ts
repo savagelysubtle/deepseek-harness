@@ -221,7 +221,12 @@ export class MailboxRegistry extends Service {
     }
     const provider = this.providers.get(this.defaultProvider)
     if (provider === undefined) {
-      throw new Error(`mailbox ${operation}: configured defaultProvider "${this.defaultProvider}" is not registered`)
+      throw new Error(
+        `mailbox ${operation}: configured defaultProvider "${this.defaultProvider}" is not registered — either `
+        + 'no plugin provides that name, or it has not finished mounting yet (sibling plugins mount concurrently '
+        + 'with no guaranteed order). If this is mount ordering, give the caller a real `inject` edge on that '
+        + 'provider so it waits; do not just retry.',
+      )
     }
     return provider
   }

@@ -1295,7 +1295,7 @@ Source: [`packages/lsp/lsp-stdio/src/index.ts:82`](../packages/lsp/lsp-stdio/src
 
 ## `@deepseek-ai/dsh-mailbox-bridge`
 
-Requires: `mailbox` · `agents`
+Requires: `mailbox` · `agents` · `mailboxLocal`
 
 ```ts config-catalog
 /** Plugin configuration. */
