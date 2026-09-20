@@ -29,9 +29,3 @@ worktree seam 只能通过已挂载的服务访问:seat(或站在 harness 之外
 ## Testing
 
 `packages/worktree/worktree/tests/cli.spec.ts` 钉住解析器(子命令、可选的 `--main-ref`/路径标志、`--help` 选择、对未知/缺失/畸形参数的响亮拒绝)、输出契约(stdout 上的 JSON 且退出码 0、恰好一个结尾换行的 usage、stderr 上的 `<code>: <message>` 拒绝且退出码 1)、跨调用的真实 git 生命周期(spawn → 重锁拒绝 → unlock → lock → 锁定态 remove 拒绝 → unlock → remove,行由注册表镜像在多次独立调用间携带)、env 门与配置拒绝,以及 bin 入口:解析符号链接的执行守卫,和经 tsx 以子进程运行真实源码入口。
-
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
-#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-31-worktree-cli.md
-2026-08-31-worktree-cli.md: PENDING 2026-08-31-worktree-cli.zh.md: PENDING
