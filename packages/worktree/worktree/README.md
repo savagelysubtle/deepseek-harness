@@ -35,6 +35,27 @@ The worktree capability seam: seat-scoped git worktrees for parallel agent round
 
 Providers implement [`WorktreeProvider`](./src/provider.ts) — `add`/`lock`/`unlock`/`remove`/`pathExists`/`branchExists`/`list` — and register through `ctx.worktrees`. Mount the bundled local provider with the `LocalGitWorktrees` service beside the worktree service; it registers `local-git` against the service's resolved `repoRoot` and unregisters on fiber disposal.
 
+## CLI (`dsh-worktree` bin)
+
+The package ships a bash-invocable CLI so seats and operators drive worktrees from a shell — no harness, no MCP dependency, no resident process. Each invocation constructs a `WorktreeService` plus the local git provider from CLI flags, runs exactly one operation, prints the result as JSON on stdout, and exits 0. It is built as its own bundle (`lib/cli.js`) and declared in `package.json` `bin`; runs under plain Node with no host up.
+
+```
+dsh-worktree spawn  --seat <name> --intent <text> [--main-ref <ref>]
+dsh-worktree list
+dsh-worktree lock   --slug <slug> --reason <text>
+dsh-worktree unlock --slug <slug> --reason <text>
+dsh-worktree remove --slug <slug> --reason <text>
+```
+
+| Concern | Semantics |
+|---|---|
+| Stateless invocations | One operation per process; there is no resident agent behind the command. Spawn prints the full spawn result, lock/unlock print the committed row, `list` prints the rows array, and `remove` prints `{ "removed": "<slug>" }`. |
+| Config from flags | `--repo-root` (default: the current directory) and `--worktrees-root` (default: the `<basename(repoRoot)>.worktrees` sibling) feed the same `Config` resolution the plugin mount runs; `--main-ref` overrides the `master` spawn default per request. |
+| Statelessness and persistence | Every invocation runs with `persist: true`, mirroring rows to `<worktreesRoot>/registry.json`; the next invocation loads them, so a slug an earlier invocation minted stays addressable (`dsh-worktree spawn … && dsh-worktree unlock --slug <minted> …`). Git's own worktree state stays the authority over what exists on disk. |
+| Refusals | A `WorktreeError` refusal prints `<code>: <message>` on stderr and exits 1 — the message is the seam's own reason (lock fences, unknown slug, env gate), never paraphrased. Usage and parse errors print without a code prefix, also exit 1. |
+| Env gate | `spawn` requires `DEEPSEEK_API_KEY` in the environment (the seam's `ENV_MISSING` refusal); the other commands do not. |
+| Help | `--help` / `-h` prints the usage text on stdout and exits 0. |
+
 ## Model Experience
 
 ### Worktree lifecycle, when a consumer mounts the seam
@@ -53,6 +74,7 @@ None from the seam itself: worktree names enter a request only where a consumer 
 
 ## Known Limitations and Deferred Work
 
+- The CLI mounts only the bundled local git provider; a deployment with other providers registered needs the plugin surface, which resolves providers by name.
 - No consumer ships yet: the seat-spawning slice that mounts this seam into the runtime is a separate change; until then nothing in the shipped defaults exercises it.
 - Copy-list v1 copies literal files only; globs, negation, and directory entries refuse loudly instead of half-honoring.
 - `remove` leaves the branch behind; branch deletion is a separate explicit operation rather than silently destroying possibly-unmerged work.
