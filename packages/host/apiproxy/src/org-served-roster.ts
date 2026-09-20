@@ -369,7 +369,7 @@ export function buildNextServedRosterPatches(
  *   4. Validate every proposed address (grammar + duplicates) — refuses a
  *      plain `Error`, the "fix your content" branch.
  *   5. Build the next document ({@link buildNextServedRosterPatches}).
- *   6. Serialise with `stringifyYaml(next, { indentSeq: false })` — the same
+ *   6. Serialise with `stringifyYaml(next, { indentSeq: false, singleQuote: true })` — the same
  *      pinned option `writeOrgRegistry` uses, required for a byte-stable
  *      round trip of this file's real shape.
  *   7. Re-parse the produced text and re-run {@link findOrgMountAddresses}
@@ -439,8 +439,15 @@ export async function writeOrgServedRoster(
   // 5. Build next document with minimal new objects.
   const nextPatches = buildNextServedRosterPatches(patches as unknown[], mountIds, addresses)
 
-  // 6. Serialise, pinned option.
-  const nextText = stringifyYaml(nextPatches, { indentSeq: false })
+  // 6. Serialise. BOTH options are pinned, and both were established against
+  // the REAL profile file rather than a fixture: without `indentSeq: false`
+  // every sequence in the document re-indents, and without `singleQuote: true`
+  // every quoted string flips from the single quotes a hand-editor writes to
+  // double quotes -- 10 lines of the real file, none of them the two lists
+  // this write is supposed to touch. A save that reformats parts of the file
+  // nobody asked to change makes the next hand-diff unreadable, on a document
+  // whose whole purpose is being read by a person.
+  const nextText = stringifyYaml(nextPatches, { indentSeq: false, singleQuote: true })
 
   // 7. Re-parse and re-validate through the same reader both mounts use.
   const reparsed: unknown = parseYaml(nextText)

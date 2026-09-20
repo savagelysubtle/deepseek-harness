@@ -111,7 +111,7 @@ function writeProfile(
   toolAddresses: readonly string[] = bridgeAddresses,
 ): string {
   const path = join(dir, 'cordis.patch.yml')
-  writeFileSync(path, stringifyYaml(realShapedPatches(bridgeAddresses, toolAddresses), { indentSeq: false }))
+  writeFileSync(path, stringifyYaml(realShapedPatches(bridgeAddresses, toolAddresses), { indentSeq: false, singleQuote: true }))
   return path
 }
 
@@ -161,7 +161,15 @@ function withAddressesBlanked(itemText: string): string {
 }
 
 // A hand-verified fixture in the EXACT shape `stringifyYaml(doc, {
-// indentSeq: false })` produces for this repo's installed `yaml` version
+// indentSeq: false, singleQuote: true })` produces for this repo's `yaml`
+// version, AND in the style the REAL profile file is hand-authored in:
+// single-quoted package names. That detail is the whole point. This fixture
+// was originally written with DOUBLE quotes -- the serializer's own default
+// output -- which made the round-trip assertion below pass trivially and
+// unable to fail. The real file uses single quotes, so the first save through
+// the board reformatted 10 of its lines, none of them the addresses the write
+// was meant to touch. Build this fixture in the serializer's output style
+// again and the test goes back to proving nothing.
 // (confirmed empirically before writing this fixture, same precedent as
 // ROUND_TRIP_FIXTURE in packages/mailbox/mailbox/tests/org-registry.spec.ts)
 // — written by hand rather than generated at test time, so the round-trip
@@ -171,55 +179,55 @@ function withAddressesBlanked(itemText: string): string {
 // byte-identical assertion catches it.
 const ROUND_TRIP_FIXTURE = `- insert:
   - id: mcp-fixture-one
-    name: "@deepseek-ai/dsh-mcp-client"
+    name: '@deepseek-ai/dsh-mcp-client'
     config:
       serverName: mcp-fixture-one
       transport: stdio
-      command: "true"
+      command: 'true'
 - insert:
   - id: mcp-fixture-two
-    name: "@deepseek-ai/dsh-mcp-client"
+    name: '@deepseek-ai/dsh-mcp-client'
     config:
       serverName: mcp-fixture-two
       transport: stdio
-      command: "true"
+      command: 'true'
 - insert:
   - id: mcp-fixture-three
-    name: "@deepseek-ai/dsh-mcp-client"
+    name: '@deepseek-ai/dsh-mcp-client'
     config:
       serverName: mcp-fixture-three
       transport: stdio
-      command: "true"
+      command: 'true'
 - insert:
   - id: mcp-fixture-four
-    name: "@deepseek-ai/dsh-mcp-client"
+    name: '@deepseek-ai/dsh-mcp-client'
     config:
       serverName: mcp-fixture-four
       transport: stdio
-      command: "true"
+      command: 'true'
 - insert:
   - id: mcp-fixture-five
-    name: "@deepseek-ai/dsh-mcp-client"
+    name: '@deepseek-ai/dsh-mcp-client'
     config:
       serverName: mcp-fixture-five
       transport: stdio
-      command: "true"
+      command: 'true'
 - insert:
   - id: mcp-fixture-six
-    name: "@deepseek-ai/dsh-mcp-client"
+    name: '@deepseek-ai/dsh-mcp-client'
     config:
       serverName: mcp-fixture-six
       transport: stdio
-      command: "true"
+      command: 'true'
 - insert:
   - id: mailbox
-    name: "@deepseek-ai/dsh-mailbox"
+    name: '@deepseek-ai/dsh-mailbox'
     config:
       defaultProvider: local
   - id: mailbox-local
-    name: "@deepseek-ai/dsh-mailbox-local"
+    name: '@deepseek-ai/dsh-mailbox-local'
   - id: mailbox-bridge
-    name: "@deepseek-ai/dsh-mailbox-bridge"
+    name: '@deepseek-ai/dsh-mailbox-bridge'
     config:
       addresses:
       - seat-alpha
@@ -230,7 +238,7 @@ const ROUND_TRIP_FIXTURE = `- insert:
       admitFrom:
       - operator
   - id: tool-mailbox
-    name: "@deepseek-ai/dsh-tool-mailbox"
+    name: '@deepseek-ai/dsh-tool-mailbox'
     config:
       addresses:
       - seat-alpha
@@ -238,16 +246,27 @@ const ROUND_TRIP_FIXTURE = `- insert:
       - seat-charlie
 `
 
-describe('YAML round-trip stability (indentSeq: false)', () => {
-  it('reproduces the fixture exactly via parse + stringify(..., { indentSeq: false })', () => {
-    expect(stringifyYaml(parseYaml(ROUND_TRIP_FIXTURE), { indentSeq: false })).toBe(ROUND_TRIP_FIXTURE)
+describe('YAML round-trip stability (indentSeq: false, singleQuote: true)', () => {
+  it('reproduces the fixture exactly via parse + stringify with both pinned options', () => {
+    expect(stringifyYaml(parseYaml(ROUND_TRIP_FIXTURE), { indentSeq: false, singleQuote: true })).toBe(ROUND_TRIP_FIXTURE)
   })
 
-  it('is NOT byte-identical without the option — proves the option is load-bearing, not incidental', () => {
+  it('is NOT byte-identical without the options — proves they are load-bearing, not incidental', () => {
     expect(stringifyYaml(parseYaml(ROUND_TRIP_FIXTURE))).not.toBe(ROUND_TRIP_FIXTURE)
   })
 
-  it('writeOrgServedRoster itself serializes with indentSeq: false, matching the fixture round-trip shape', async () => {
+  it('is NOT byte-identical with indentSeq alone — the quote style is its own guarantee', () => {
+    // Dropping `singleQuote` reformats every quoted string in the document.
+    // Nothing else in the suite covers this: it is invisible unless the
+    // fixture is authored the way a person writes the file.
+    expect(stringifyYaml(parseYaml(ROUND_TRIP_FIXTURE), { indentSeq: false })).not.toBe(ROUND_TRIP_FIXTURE)
+  })
+
+  it('is NOT byte-identical with singleQuote alone — the sequence indent is its own guarantee too', () => {
+    expect(stringifyYaml(parseYaml(ROUND_TRIP_FIXTURE), { singleQuote: true })).not.toBe(ROUND_TRIP_FIXTURE)
+  })
+
+  it('writeOrgServedRoster itself serializes with both pinned options, matching the fixture round-trip shape', async () => {
     const dir = tempDir()
     const path = join(dir, 'cordis.patch.yml')
     writeFileSync(path, ROUND_TRIP_FIXTURE)
