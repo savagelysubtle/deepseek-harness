@@ -15,6 +15,28 @@ import { stubSettingsScope } from '@deepseek-ai/dsh-client-test-runtime'
 import { apply, inject } from '../src/client/index.ts'
 import { apply as nodeApply } from '../src/index.ts'
 import type { OrgBoardFace } from '../src/client/slots.ts'
+import type { ResponseValue } from '@deepseek-ai/dsh-api-remotes/client'
+
+/**
+ * Typed against the real response, so a field added to `org.get` breaks this
+ * file at build time. It was two untyped inline literals until 2026-09-20,
+ * which let them fall a field behind the server with nothing failing: the
+ * board was reading a value these mocks had never carried, and every test
+ * here still passed against a shape the server no longer sends.
+ */
+const ORG_GET_VALUE: ResponseValue<'org.get'> = {
+  profile: 'web-stable',
+  registry: {
+    ok: true,
+    registry: { baseDir: '/org', seats: {}, edges: [], callUp: [] },
+    document: { baseDir: '/org', seats: {}, edges: [], callUp: [] },
+    token: 'registry-token',
+  },
+  mailboxBridge: { ok: true, addresses: [] },
+  toolMailbox: { ok: true, addresses: [] },
+  drift: { ok: true, rows: [] },
+  servedRosterToken: { ok: true, token: 'served-roster-token' },
+}
 
 afterEach(cleanup)
 
@@ -62,18 +84,7 @@ describe('plugin registration', () => {
   })
 
   it('routes the injected load face straight through to ctx.connection.api.org.get', async () => {
-    const orgGet = vi.fn().mockResolvedValue({
-      result: {
-        ok: true,
-        value: {
-          profile: 'web-stable',
-          registry: { ok: true, registry: { baseDir: '/org', seats: {}, edges: [], callUp: [] } },
-          mailboxBridge: { ok: true, addresses: [] },
-          toolMailbox: { ok: true, addresses: [] },
-          drift: { ok: true, rows: [] },
-        },
-      },
-    })
+    const orgGet = vi.fn().mockResolvedValue({ result: { ok: true, value: ORG_GET_VALUE } })
     const b = await bench(orgGet)
     const entry = b.slots.entries('sidebar.footer.action').find(e => e.options.id === 'org-board')
     const face = (entry?.inject as (() => OrgBoardFace) | undefined)?.()
@@ -83,18 +94,7 @@ describe('plugin registration', () => {
   })
 
   it('a reconnect re-reads a loaded board, so pre-reconnect wiring is never left on screen', async () => {
-    const orgGet = vi.fn().mockResolvedValue({
-      result: {
-        ok: true,
-        value: {
-          profile: 'web-stable',
-          registry: { ok: true, registry: { baseDir: '/org', seats: {}, edges: [], callUp: [] } },
-          mailboxBridge: { ok: true, addresses: [] },
-          toolMailbox: { ok: true, addresses: [] },
-          drift: { ok: true, rows: [] },
-        },
-      },
-    })
+    const orgGet = vi.fn().mockResolvedValue({ result: { ok: true, value: ORG_GET_VALUE } })
     const b = await bench(orgGet)
     const entry = b.slots.entries('sidebar.footer.action').find(e => e.options.id === 'org-board')
     const face = (entry?.inject as (() => OrgBoardFace) | undefined)?.()

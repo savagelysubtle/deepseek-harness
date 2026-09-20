@@ -39,7 +39,7 @@ function translate(key: LocaleKeysOf<'orgBoard'>, params?: Record<string, unknow
 }
 
 const IDLE_STATE: OrgBoardState = {
-  status: 'idle', error: null, value: null, write: { pending: false, notice: null },
+  status: 'idle', error: null, value: null, write: { pending: false, notice: null }, servedWrite: { pending: false, notice: null },
 }
 
 /**
@@ -61,7 +61,7 @@ const READY_VALUE: ResponseValue<'org.get'> = {
 }
 
 const READY_STATE: OrgBoardState = {
-  status: 'ready', error: null, value: READY_VALUE, write: { pending: false, notice: null },
+  status: 'ready', error: null, value: READY_VALUE, write: { pending: false, notice: null }, servedWrite: { pending: false, notice: null },
 }
 
 /** GlobalStandardProps stubs OrgBoardControl never reads (org.get, not sessions/workspaces). */
@@ -156,7 +156,7 @@ describe('OrgBoardControl', () => {
         status: 'error',
         error: 'connection lost',
         value: null,
-        write: { pending: false, notice: null },
+        write: { pending: false, notice: null }, servedWrite: { pending: false, notice: null },
       },
     })
     fireEvent.click(screen.getByRole('button', { name: 'Org Board' }))

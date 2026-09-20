@@ -13,6 +13,17 @@
  * a local `edit.ts` refusal never calls `org.write` at all; a stale in-flight
  * write can never overwrite newer state; and every write reads the CURRENT
  * token, never one captured across an intervening reload.
+ *
+ * SWD-134 slice 5 step 2 adds the served-roster write path's own coverage:
+ * `setSeatServed` forwards `acknowledgeSplit` verbatim in both directions
+ * (never re-derived); the four server outcomes
+ * (`org-served-roster-conflict`/`org-served-roster-split`/
+ * `org-served-roster-rejected`/`org-served-roster-write-failed`) stay
+ * distinct (conflict alone auto-reloads; split carries both roster lists and
+ * never reloads, since the file never changed); a stale in-flight served
+ * write can never overwrite newer state; and `servedAddresses` is populated
+ * ONLY when `drift.ok` is true, proven by a case where the registry and one
+ * roster load but the other does not.
  */
 import { describe, expect, it, vi } from 'vitest'
 import type {
@@ -25,6 +36,9 @@ type OrgGetResponse = RpcResponse<ResponseValue<'org.get'>>
 
 /** The `org.write` response envelope, exactly as the controller's caller receives it. */
 type OrgWriteResponse = RpcResponse<ResponseValue<'org.write'>>
+
+/** The `org.writeServed` response envelope, exactly as the controller's caller receives it. */
+type OrgWriteServedResponse = RpcResponse<ResponseValue<'org.writeServed'>>
 
 let rpc = 0
 
@@ -55,6 +69,24 @@ function failedWrite(
     ? { code, message, details: { expectedToken: 'stale', actualToken: 'current' } }
     : { code, message, details: {} }
   return { rpcId: `org-write-${rpc++}` as never, result: { ok: false, error } }
+}
+
+/** A successful `org.writeServed` envelope. Built through the real response type so a wire-shape change breaks here. */
+function okWriteServed(value: ResponseValue<'org.writeServed'>): OrgWriteServedResponse {
+  return { rpcId: `org-write-served-${rpc++}` as never, result: { ok: true, value } }
+}
+
+/** A refused `org.writeServed` envelope carrying one of the four writeServed-specific error codes. */
+function failedWriteServed(
+  code: 'org-served-roster-conflict' | 'org-served-roster-split' | 'org-served-roster-rejected' | 'org-served-roster-write-failed',
+  message: string,
+): OrgWriteServedResponse {
+  const error: RpcError = code === 'org-served-roster-conflict'
+    ? { code, message, details: { expectedToken: 'stale-served', actualToken: 'current-served' } }
+    : code === 'org-served-roster-split'
+      ? { code, message, details: { onlyMailboxBridge: ['alfred'], onlyToolMailbox: ['batman'] } }
+      : { code, message, details: {} }
+  return { rpcId: `org-write-served-${rpc++}` as never, result: { ok: false, error } }
 }
 
 /**
@@ -101,11 +133,21 @@ const WRITE_OK: ResponseValue<'org.write'> = {
   token: 'token-after-write',
 }
 
+/** A minimal, always-valid `org.writeServed` success value; the controller only uses it to trigger a reload. */
+const WRITE_SERVED_OK: ResponseValue<'org.writeServed'> = {
+  addresses: ['alfred', 'lucius'],
+  token: 'served-token-after-write',
+}
+
 describe('OrgBoardController', () => {
   it('starts idle with no value and no error', () => {
     const controller = new OrgBoardController({ org: { get: vi.fn(), write: vi.fn(), writeServed: vi.fn() } })
     expect(controller.store.getSnapshot()).toEqual({
-      status: 'idle', error: null, value: null, write: { pending: false, notice: null },
+      status: 'idle',
+      error: null,
+      value: null,
+      write: { pending: false, notice: null },
+      servedWrite: { pending: false, notice: null },
     })
   })
 
@@ -115,7 +157,11 @@ describe('OrgBoardController', () => {
     await controller.load()
     expect(get).toHaveBeenCalledWith({})
     expect(controller.store.getSnapshot()).toEqual({
-      status: 'ready', error: null, value: VALUE, write: { pending: false, notice: null },
+      status: 'ready',
+      error: null,
+      value: VALUE,
+      write: { pending: false, notice: null },
+      servedWrite: { pending: false, notice: null },
     })
   })
 
@@ -124,7 +170,11 @@ describe('OrgBoardController', () => {
     const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed: vi.fn() } })
     await controller.load()
     expect(controller.store.getSnapshot()).toEqual({
-      status: 'error', error: 'connection lost', value: null, write: { pending: false, notice: null },
+      status: 'error',
+      error: 'connection lost',
+      value: null,
+      write: { pending: false, notice: null },
+      servedWrite: { pending: false, notice: null },
     })
   })
 
@@ -133,7 +183,11 @@ describe('OrgBoardController', () => {
     const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed: vi.fn() } })
     await controller.load()
     expect(controller.store.getSnapshot()).toEqual({
-      status: 'error', error: 'socket closed', value: null, write: { pending: false, notice: null },
+      status: 'error',
+      error: 'socket closed',
+      value: null,
+      write: { pending: false, notice: null },
+      servedWrite: { pending: false, notice: null },
     })
   })
 
@@ -447,5 +501,154 @@ describe('OrgBoardController write path', () => {
       },
       expectedToken: 'token-rich',
     })
+  })
+})
+
+describe('OrgBoardController served-roster write path', () => {
+  it('setSeatServed(x, true, true) forwards acknowledgeSplit: true verbatim to org.writeServed', async () => {
+    const get = vi.fn().mockResolvedValue(ok(VALUE))
+    const writeServed = vi.fn().mockResolvedValue(okWriteServed(WRITE_SERVED_OK))
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed } })
+    await controller.load()
+    await controller.setSeatServed('x', true, true)
+    expect(writeServed).toHaveBeenCalledWith({
+      addresses: ['alfred', 'x'],
+      expectedToken: 'served-token-1',
+      acknowledgeSplit: true,
+    })
+  })
+
+  it('setSeatServed(x, true, false) forwards acknowledgeSplit: false verbatim to org.writeServed', async () => {
+    const get = vi.fn().mockResolvedValue(ok(VALUE))
+    const writeServed = vi.fn().mockResolvedValue(okWriteServed(WRITE_SERVED_OK))
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed } })
+    await controller.load()
+    await controller.setSeatServed('x', true, false)
+    expect(writeServed).toHaveBeenCalledWith({
+      addresses: ['alfred', 'x'],
+      expectedToken: 'served-token-1',
+      acknowledgeSplit: false,
+    })
+  })
+
+  it('org-served-roster-split sets a split notice carrying both lists, and does NOT reload', async () => {
+    const get = vi.fn().mockResolvedValueOnce(ok(VALUE))
+    const writeServed = vi.fn().mockResolvedValue(
+      failedWriteServed('org-served-roster-split', 'mailbox-bridge and tool-mailbox served rosters currently disagree'),
+    )
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed } })
+    await controller.load()
+    await controller.setSeatServed('x', true, false)
+    expect(get).toHaveBeenCalledTimes(1)
+    expect(controller.store.getSnapshot().servedWrite).toEqual({
+      pending: false,
+      notice: { kind: 'split', onlyMailboxBridge: ['alfred'], onlyToolMailbox: ['batman'] },
+    })
+  })
+
+  it('org-served-roster-conflict auto-reloads so the viewer sees the true state, and does NOT retry the write', async () => {
+    const get = vi.fn()
+      .mockResolvedValueOnce(ok(VALUE))
+      .mockResolvedValueOnce(ok(VALUE_2))
+    const writeServed = vi.fn().mockResolvedValue(
+      failedWriteServed('org-served-roster-conflict', 'served roster changed since it was read'),
+    )
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed } })
+    await controller.load()
+    await controller.setSeatServed('x', true, false)
+    expect(writeServed).toHaveBeenCalledTimes(1)
+    expect(get).toHaveBeenCalledTimes(2)
+    expect(controller.store.getSnapshot().value).toEqual(VALUE_2)
+    expect(controller.store.getSnapshot().servedWrite).toEqual({
+      pending: false, notice: { kind: 'conflict', message: 'served roster changed since it was read' },
+    })
+  })
+
+  it('org-served-roster-rejected does NOT reload and leaves value untouched, with its own distinct notice', async () => {
+    const get = vi.fn().mockResolvedValueOnce(ok(VALUE))
+    const writeServed = vi.fn().mockResolvedValue(failedWriteServed('org-served-roster-rejected', 'invalid served address'))
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed } })
+    await controller.load()
+    await controller.setSeatServed('x', true, false)
+    expect(get).toHaveBeenCalledTimes(1)
+    expect(controller.store.getSnapshot().value).toEqual(VALUE)
+    expect(controller.store.getSnapshot().servedWrite).toEqual({
+      pending: false, notice: { kind: 'rejected', message: 'invalid served address' },
+    })
+  })
+
+  it('org-served-roster-write-failed does NOT reload and leaves value untouched, with its own distinct notice (never collapsed with rejected)', async () => {
+    const get = vi.fn().mockResolvedValueOnce(ok(VALUE))
+    const writeServed = vi.fn().mockResolvedValue(failedWriteServed('org-served-roster-write-failed', 'disk full'))
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed } })
+    await controller.load()
+    await controller.setSeatServed('x', true, false)
+    expect(get).toHaveBeenCalledTimes(1)
+    expect(controller.store.getSnapshot().value).toEqual(VALUE)
+    expect(controller.store.getSnapshot().servedWrite).toEqual({
+      pending: false, notice: { kind: 'write-failed', message: 'disk full' },
+    })
+  })
+
+  it('on success, chains a fresh full load() rather than hand-patching state', async () => {
+    const get = vi.fn()
+      .mockResolvedValueOnce(ok(VALUE))
+      .mockResolvedValueOnce(ok(VALUE_2))
+    const writeServed = vi.fn().mockResolvedValue(okWriteServed(WRITE_SERVED_OK))
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed } })
+    await controller.load()
+    await controller.setSeatServed('x', true, false)
+    expect(get).toHaveBeenCalledTimes(2)
+    expect(controller.store.getSnapshot().value).toEqual(VALUE_2)
+    expect(controller.store.getSnapshot().servedWrite).toEqual({ pending: false, notice: null })
+  })
+
+  it('a stale in-flight served write can never overwrite newer state (a reload landing mid-write wins)', async () => {
+    let resolveWriteServed: (value: OrgWriteServedResponse) => void = () => {}
+    const get = vi.fn()
+      .mockResolvedValueOnce(ok(VALUE))
+      .mockResolvedValueOnce(ok(VALUE_2))
+    const writeServed = vi.fn(() => new Promise<OrgWriteServedResponse>((resolve) => { resolveWriteServed = resolve }))
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed } })
+    await controller.load()
+
+    const writing = controller.setSeatServed('x', true, false)
+    await Promise.resolve()
+    expect(controller.store.getSnapshot().servedWrite.pending).toBe(true)
+
+    // A background reconnect refresh lands while the served write is still in flight.
+    await controller.load()
+    expect(controller.store.getSnapshot().value).toEqual(VALUE_2)
+    expect(controller.store.getSnapshot().servedWrite.pending).toBe(false)
+
+    // The write's late response arrives after the fact -- even a SUCCESS
+    // response must be discarded: it answers a question (against the OLD
+    // token/list) the UI has already moved past.
+    resolveWriteServed(okWriteServed(WRITE_SERVED_OK))
+    await writing
+
+    expect(get).toHaveBeenCalledTimes(2) // no extra reload triggered by the stale write's own success handling
+    expect(controller.store.getSnapshot().value).toEqual(VALUE_2)
+    expect(controller.store.getSnapshot().servedWrite).toEqual({ pending: false, notice: null })
+  })
+
+  it('servedAddresses is null when drift.ok is false, including a partial roster failure (registry and ONE roster loaded, the other did not)', async () => {
+    const partialValue: ResponseValue<'org.get'> = {
+      ...VALUE,
+      toolMailbox: { ok: false, reason: 'profile patch file could not be read' },
+      drift: { ok: false, reason: 'toolMailbox could not be read' },
+    }
+    const get = vi.fn().mockResolvedValue(ok(partialValue))
+    const writeServed = vi.fn()
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed } })
+    await controller.load()
+    await controller.setSeatServed('x', true, false)
+    // Proves the toggle's base list is never silently derived from the
+    // surviving mailboxBridge roster when drift.ok is false: the local
+    // refusal fires and org.writeServed is never even called.
+    expect(writeServed).not.toHaveBeenCalled()
+    const { servedWrite } = controller.store.getSnapshot()
+    expect(servedWrite.pending).toBe(false)
+    expect(servedWrite.notice?.kind).toBe('invalid')
   })
 })
