@@ -16,11 +16,15 @@ A new `mailbox` capability group following the Service Definition / Provider / C
 - Delivered content is an ordinary user-role turn carrying `{ kind: 'mailbox' }` provenance — facts, not directives; receiving agents reason about mailbox input, never auto-execute it. No new event kinds; no log-version bump.
 - Auth targets per-consumer `sb_secret_*` keys via the credentials seam with store-side RLS enforcement; custom JWT minting was measured dead on asymmetric-key Supab projects and survives only as legacy/self-hosted fallback.
 
-Rejected: extending the subagent continuation manager across processes (residency ownership graph is intentionally process-local; a second coordination state machine inside it would double every teardown ordering rule); recording names on `SessionHeader` (re-couples session format to a display concern — see the named-sessions note); pid artifacts in the queue store (crashed holders would wedge leases that stale-timestamp reclaim dissolves).
-
 ## Verification
 
 Unit suites cover address-grammar round-trips and validation, duplicate-provider registration rejection (loud failure), claim-filter invariant rejections, and the message-source kind fold. Real-composition coverage arrives with the bridge slice (product-visible delivery through the Loader against a scripted model), per the testing policy for product-visible plugins.
+
+## Alternatives considered
+
+- **Extending the subagent continuation manager across processes**: rejected. The residency ownership graph is intentionally process-local; a second coordination state machine inside it would double every teardown ordering rule.
+- **Recording names on `SessionHeader`**: rejected. It re-couples the session format to a display concern — see the named-sessions note.
+- **Pid artifacts in the queue store**: rejected. Crashed holders would wedge leases that stale-timestamp reclaim dissolves instead.
 
 ## Consequences
 
