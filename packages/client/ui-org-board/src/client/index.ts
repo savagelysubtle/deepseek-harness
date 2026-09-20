@@ -1,8 +1,9 @@
 /**
- * Browser org-board plugin (SWD-134 slice 2): one entry in the sidebar's
- * existing `sidebar.footer.action` list slot, beside Stop All / Send All.
- * Read-only for this slice — `OrgBoardController.load` is the only verb, and
- * it only re-issues `org.get`; a later slice owns mutation.
+ * Browser org-board plugin: one entry in the sidebar's existing
+ * `sidebar.footer.action` list slot, beside Stop All / Send All. Slice 2 was
+ * read-only (`load` was the only verb); SWD-134 slice 4 step 3 wires in the
+ * five write verbs `OrgBoardController` now exposes — this step still owns
+ * no UI, so nothing here renders a control for them yet.
  */
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
@@ -39,9 +40,24 @@ export function apply(ctx: ClientContext): void {
   const connection = ctx.get('connection') as ConnectionHandle
   const controller = new OrgBoardController(connection.api)
   const load = (): Promise<void> => controller.load()
+  const addSeat = (name: string, cwd: string): Promise<void> => controller.addSeat(name, cwd)
+  const removeSeat = (name: string): Promise<void> => controller.removeSeat(name)
+  const addEdge = (from: string, to: string): Promise<void> => controller.addEdge(from, to)
+  const removeEdge = (from: string, to: string): Promise<void> => controller.removeEdge(from, to)
+  const setSeatTools = (
+    name: string, allow: readonly string[] | undefined, deny: readonly string[] | undefined,
+  ): Promise<void> => controller.setSeatTools(name, allow, deny)
+  const setSeatServed = (name: string, served: boolean, acknowledgeSplit: boolean): Promise<void> =>
+    controller.setSeatServed(name, served, acknowledgeSplit)
   const injected = (): OrgBoardFace => ({
     hooks: { orgBoard: controller.store },
     load,
+    addSeat,
+    removeSeat,
+    addEdge,
+    removeEdge,
+    setSeatTools,
+    setSeatServed,
   })
 
   ctx.effect(() => () => { controller.dispose() }, 'ui-org-board: controller lifecycle')

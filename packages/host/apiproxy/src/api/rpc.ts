@@ -118,6 +118,67 @@ export interface RpcErrorDetailsMap {
     ref?: string
     seamCode?: string
   }
+  /**
+   * An `org.write` carried an `expectedToken` the registry file has already
+   * moved past: another writer — most often the founder's own hand edit —
+   * landed first. The details carry both tokens so a client can re-read and
+   * retry rather than treat the write as malformed (same shape-of-intent as
+   * `settings-conflict`, keyed on a content hash instead of a revision
+   * number — see org.ts on why).
+   */
+  'org-registry-conflict': { expectedToken: string; actualToken: string }
+  /**
+   * An `org.write` was refused because the proposed document failed
+   * validation; the message is `parseOrgRegistry`'s own text, reused
+   * verbatim rather than re-worded. This means "fix your content" — the same
+   * document will fail again unchanged. Contrast `org-registry-write-failed`
+   * below, which means the opposite: retry the same document.
+   */
+  'org-registry-rejected': {}
+  /**
+   * An `org.write`'s document passed validation but the write itself failed
+   * for a reason unrelated to document content: the current file could not
+   * be read for the concurrency check, no free backup filename could be
+   * found, or the atomic temp-write/fsync/rename failed. This means "retry
+   * the same document" — never "fix your content", which is what
+   * `org-registry-rejected` means instead. Kept distinct so a caller can act
+   * correctly on the refusal rather than treating every non-conflict failure
+   * as one undifferentiated word.
+   */
+  'org-registry-write-failed': {}
+  /**
+   * An `org.writeServed` carried an `expectedToken` the served-roster file
+   * (`cordis.patch.yml`) has already moved past: another writer landed
+   * first. The details carry both tokens so a client can re-read and retry
+   * — same shape-of-intent as `org-registry-conflict`, keyed on this
+   * file's own independent content hash (see org-served-roster.ts on why
+   * the two tokens are never conflated).
+   */
+  'org-served-roster-conflict': { expectedToken: string; actualToken: string }
+  /**
+   * An `org.writeServed` was refused because the two served rosters
+   * (`mailbox-bridge` and `tool-mailbox`) already disagree with each other,
+   * before the proposed content was even considered — the caller must see
+   * both sides and pass `acknowledgeSplit` to proceed. Details name exactly
+   * which addresses are served by only one side.
+   */
+  'org-served-roster-split': { onlyMailboxBridge: readonly string[]; onlyToolMailbox: readonly string[] }
+  /**
+   * An `org.writeServed` was refused because a proposed address failed the
+   * mailbox address grammar or duplicated another; the message is the
+   * validation's own text. This means "fix your content" — the same list
+   * will fail again unchanged.
+   */
+  'org-served-roster-rejected': {}
+  /**
+   * An `org.writeServed`'s proposed content was fine but the write itself
+   * failed for a reason unrelated to it: the served-roster file could not
+   * be read, either mount is missing or malformed, no free backup filename
+   * could be found, or the atomic write/rename failed. This means "retry
+   * the same list" — never "fix your content", which is what
+   * `org-served-roster-rejected` means instead.
+   */
+  'org-served-roster-write-failed': {}
   'internal': {}
 }
 

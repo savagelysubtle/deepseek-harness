@@ -4,10 +4,9 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, stat } from 'node:fs/promises'
+import { mkdir, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { parse as parseYaml } from 'yaml'
 import { PROFILE_PATCH_FILENAME, resolveProfileDir } from '@deepseek-ai/dsh-app-boot'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
@@ -43,7 +42,7 @@ import type {
   ModelReasoning, MuxFrame, PromptContentPart, QuestionResponsePayload, SessionListMetadata, SessionProjectionsBlock, SessionSearchItem,
   QueuedInboxItem, SessionSummary, SettingsNamespaceView, StopDescendantsResult, SubagentAddress, JobView, ToolEventView,
   WorkspaceId, WorkspaceView,
-  OrgDriftResult, OrgDriftRow, OrgRegistryResult, OrgRosterResult,
+  OrgDriftResult, OrgDriftRow, OrgRegistryDocument, OrgRegistryResult, OrgRegistryView, OrgRosterResult,
 } from './api/index.ts'
 import {
   DEFAULT_SESSION_LOG_COMPRESSION_LEVEL,
@@ -88,7 +87,15 @@ import { SettingsConflictError, settingsNamespace } from '@deepseek-ai/dsh-setti
 import type { SettingsDescriptor, SettingsNamespace, SettingsPathOp } from '@deepseek-ai/dsh-settings'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { publishAndWake, GUEST_SENDER_PREFIX } from '@deepseek-ai/dsh-mailbox-bridge'
-import { loadOrgRegistry, parseMailboxAddress, resolveSeatCwd } from '@deepseek-ai/dsh-mailbox'
+import {
+  loadOrgRegistryWithToken, OrgRegistryConflictError, OrgRegistryWriteError, parseMailboxAddress,
+  resolveSeatCwd, writeOrgRegistry,
+} from '@deepseek-ai/dsh-mailbox'
+import type { OrgRegistry } from '@deepseek-ai/dsh-mailbox'
+import {
+  findOrgMountAddresses, OrgServedRosterConflictError, OrgServedRosterSplitError,
+  OrgServedRosterWriteError, readOrgProfilePatchesWithToken, writeOrgServedRoster,
+} from './org-served-roster.ts'
 // The refusal-notice addresser derives the sender's session id the same way
 // the bridge routes a seat: the address IS the session name.
 import { deriveNamedSessionId } from '@deepseek-ai/dsh-named-sessions'
@@ -413,101 +420,70 @@ function worktreeRefusal(
 }
 
 /**
+ * Resolve every seat's `cwd` to an absolute path for the OrgApi's read/write
+ * views (see the org.ts module header: "already resolved to an absolute
+ * path"). The loader/writer both leave `cwd` exactly as authored — absolute,
+ * or relative to `baseDir` — which is their own contract (a write must
+ * round-trip the founder's relative paths unchanged); this is what turns
+ * that into the one guarantee every OrgApi caller gets instead, so neither
+ * `org.get` nor `org.write`'s response makes a UI re-derive `baseDir` itself.
+ * @param registry - the parsed registry, cwd unresolved.
+ * @returns the same registry with every seat's cwd resolved absolute.
+ */
+function resolvedOrgRegistryView(registry: OrgRegistry): OrgRegistryView {
+  const seats = Object.fromEntries(
+    Object.entries(registry.seats).map(([name, seat]) => [
+      name,
+      { ...seat, cwd: resolveSeatCwd(registry, name) },
+    ]),
+  )
+  return { ...registry, seats }
+}
+
+/**
+ * The SAME parsed registry, in the unresolved document shape `org.write`
+ * requires (see the org.ts module header and {@link OrgRegistryResult}'s doc
+ * comment on why `org.get` returns both shapes). `loadOrgRegistryWithToken`
+ * already leaves every seat's `cwd` exactly as authored — absolute, or
+ * relative to `baseDir` — so this is a plain reshape, never a resolve: the
+ * mailbox-side `OrgRegistry`/`OrgRegistrySeat` fields (`baseDir`, `seats`,
+ * `edges`, `callUp`; per-seat `cwd`/`lead`/`sessionId`/`test`/`tools`) are
+ * structurally identical to `OrgRegistryDocument`/`OrgRegistryDocumentSeat`
+ * field-for-field, so TypeScript accepts this object literal without a cast.
+ * @param registry - the parsed registry, cwd unresolved.
+ * @returns the same registry reshaped to the `org.write` document contract.
+ */
+function orgRegistryDocumentOf(registry: OrgRegistry): OrgRegistryDocument {
+  return {
+    baseDir: registry.baseDir,
+    seats: registry.seats,
+    edges: registry.edges,
+    callUp: registry.callUp,
+  }
+}
+
+/**
  * Read and validate the org registry at `path`, or report a named reason it
  * could not be produced (see {@link OrgRegistryResult}) — never an empty
  * roster standing in for "could not read this".
  * @param path - absolute org registry path.
- * @returns the parsed registry, or the failure reason naming the path.
+ * @returns the parsed registry (resolved view and unresolved document) and its content token, or the failure reason naming the path.
  */
 async function readOrgRegistryResult(path: string): Promise<OrgRegistryResult> {
   try {
-    const registry = await loadOrgRegistry(path)
-    // The loader leaves cwd exactly as written — absolute, or relative to
-    // baseDir (its own contract). Callers of this API get one guarantee
-    // instead: every cwd reported here is already absolute, so a later
-    // consumer (the org board UI) never has to re-derive baseDir itself.
-    const seats = Object.fromEntries(
-      Object.entries(registry.seats).map(([name, seat]) => [
-        name,
-        { ...seat, cwd: resolveSeatCwd(registry, name) },
-      ]),
-    )
-    return { ok: true, registry: { ...registry, seats } }
+    const { registry, token } = await loadOrgRegistryWithToken(path)
+    return {
+      ok: true,
+      registry: resolvedOrgRegistryView(registry),
+      document: orgRegistryDocumentOf(registry),
+      token,
+    }
   } catch (error: unknown) {
     return {
       ok: false,
       reason: `org registry at "${path}" could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
     }
   }
-}
-
-/**
- * Read and parse the profile patch file beneath `profileDir`. Shared by both
- * served-roster reads so a broken patch file reports the SAME reason for
- * both mounts, rather than reading (and possibly failing to parse) the file
- * twice with two independently-worded errors.
- * @param profileDir - absolute directory of the profile to read.
- * @returns the parsed patch document, or a named read/parse failure.
- */
-async function readOrgProfilePatches(
-  profileDir: string,
-): Promise<{ ok: true; patches: unknown } | { ok: false; reason: string }> {
-  const path = join(profileDir, PROFILE_PATCH_FILENAME)
-  let text: string
-  try {
-    text = await readFile(path, 'utf8')
-  } catch (error: unknown) {
-    return {
-      ok: false,
-      reason: `profile patch file "${path}" could not be read: ${error instanceof Error ? error.message : String(error)}`,
-    }
-  }
-  let patches: unknown
-  try {
-    patches = parseYaml(text)
-  } catch (error: unknown) {
-    return {
-      ok: false,
-      reason: `profile patch file "${path}" is not valid YAML: ${error instanceof Error ? error.message : String(error)}`,
-    }
-  }
-  return { ok: true, patches }
-}
-
-/**
- * Extract one mount's `config.addresses` from a parsed `cordis.patch.yml`
- * document: the top-level patch list's `insert` entries, matched by `id`.
- * Reads the entry's OWN declared config rather than simulating cordis's full
- * patch-application semantics (an id-targeted override elsewhere in the
- * list could in principle further patch the same entry's config) — out of
- * scope for a read-only reporter, and every mount this deployment serves is
- * declared whole in one `insert`.
- * @param patches - the parsed top-level patch list (or any other parsed YAML value).
- * @param mountId - the mount `id` to locate (`mailbox-bridge` or `tool-mailbox`).
- * @returns the mount's served addresses, or a named reason none could be read.
- */
-function findOrgMountAddresses(patches: unknown, mountId: string): OrgRosterResult {
-  if (!Array.isArray(patches)) {
-    return { ok: false, reason: 'profile patch file does not contain a top-level list' }
-  }
-  for (const patch of patches) {
-    if (typeof patch !== 'object' || patch === null) continue
-    const insert = (patch as Record<string, unknown>).insert
-    if (!Array.isArray(insert)) continue
-    for (const entry of insert) {
-      if (typeof entry !== 'object' || entry === null) continue
-      if ((entry as Record<string, unknown>).id !== mountId) continue
-      const config = (entry as Record<string, unknown>).config
-      const addresses = typeof config === 'object' && config !== null
-        ? (config as Record<string, unknown>).addresses
-        : undefined
-      if (!Array.isArray(addresses) || addresses.some(address => typeof address !== 'string')) {
-        return { ok: false, reason: `profile mount "${mountId}" config.addresses is not a list of strings` }
-      }
-      return { ok: true, addresses: addresses as string[] }
-    }
-  }
-  return { ok: false, reason: `profile patch file has no mount of the recognised shape with id "${mountId}"` }
 }
 
 /**
@@ -1405,6 +1381,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   const orgRegistryPath = defaults.orgRegistryPath ?? dshHomePath('org', 'registry.yml')
   const orgProfileName = defaults.orgProfileName ?? DEFAULT_ORG_PROFILE_NAME
   const orgProfileDir = defaults.orgProfileDir ?? resolveProfileDir(orgProfileName)
+  // Both served-roster mounts (mailbox-bridge, tool-mailbox) live in this
+  // SAME file — org.get's read and org.writeServed's write share one path.
+  const orgProfilePatchPath = join(orgProfileDir, PROFILE_PATCH_FILENAME)
   /** The seed model each create/resume declares; re-read so it never goes stale. */
   const agentOptions = (): AgentOptions => {
     const { provider, model } = defaults.defaultModelSelection()
@@ -3551,15 +3530,18 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
     },
 
-    // Read-only projection: every field is a fresh, independent read (see
-    // the org.ts module header). No mutation, no caching — the drift report
-    // this exists to serve is only trustworthy computed from what the files
-    // say right now.
+    // `get` is a read-only projection: every field is a fresh, independent
+    // read (see the org.ts module header). No mutation, no caching — the
+    // drift report this exists to serve is only trustworthy computed from
+    // what the files say right now. `write` and `writeServed` are this
+    // domain's two host-side write primitives, each guarding a DIFFERENT
+    // file with its own content token — see org.ts on why they are never
+    // folded into one call.
     org: {
       async get(request) {
         const [registry, patches] = await Promise.all([
           readOrgRegistryResult(orgRegistryPath),
-          readOrgProfilePatches(orgProfileDir),
+          readOrgProfilePatchesWithToken(orgProfilePatchPath),
         ])
         const mailboxBridge = patches.ok
           ? findOrgMountAddresses(patches.patches, ORG_MAILBOX_BRIDGE_MOUNT_ID)
@@ -3568,7 +3550,107 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           ? findOrgMountAddresses(patches.patches, ORG_TOOL_MAILBOX_MOUNT_ID)
           : { ok: false as const, reason: patches.reason }
         const drift = computeOrgDrift(registry, mailboxBridge, toolMailbox)
-        return ok(request, { profile: orgProfileName, registry, mailboxBridge, toolMailbox, drift })
+        const servedRosterToken = patches.ok
+          ? { ok: true as const, token: patches.token }
+          : { ok: false as const, reason: patches.reason }
+        return ok(request, { profile: orgProfileName, registry, mailboxBridge, toolMailbox, drift, servedRosterToken })
+      },
+
+      // Whole-document replace, guarded by a content token rather than a
+      // revision counter (see org.ts on write and hashOrgRegistryBytes in
+      // @deepseek-ai/dsh-mailbox on why): a hand edit never bumps a counter,
+      // so a counter-based guard would let this call silently overwrite the
+      // founder's own change. Never touches the served-roster mounts — that
+      // is `writeServed`'s own separate scope, guarded by its own token
+      // against its own file.
+      async write(request) {
+        const { document, expectedToken } = request.payload
+        let written: { registry: OrgRegistry; token: string }
+        try {
+          written = await writeOrgRegistry(orgRegistryPath, document, expectedToken)
+        } catch (error: unknown) {
+          if (error instanceof OrgRegistryConflictError) {
+            return err(request, {
+              code: 'org-registry-conflict',
+              message: error.message,
+              details: { expectedToken: error.expectedToken, actualToken: error.actualToken },
+            })
+          }
+          // OrgRegistryWriteError is the write primitive's own distinction
+          // between "retry the same document" (I/O trouble unrelated to
+          // content) and everything else here, a plain Error from the
+          // parser meaning "fix your content" — collapsing the two into one
+          // code is exactly the kind of state-doesn't-match-reality defect
+          // this API exists to not repeat.
+          if (error instanceof OrgRegistryWriteError) {
+            return err(request, {
+              code: 'org-registry-write-failed',
+              message: error.message,
+              details: {},
+            })
+          }
+          return err(request, {
+            code: 'org-registry-rejected',
+            message: error instanceof Error ? error.message : String(error),
+            details: {},
+          })
+        }
+        return ok(request, { registry: resolvedOrgRegistryView(written.registry), token: written.token })
+      },
+
+      // Replaces BOTH served-roster mounts' addresses with one list, in one
+      // atomic write against the profile's cordis.patch.yml — never the
+      // registry document (see org.ts and org-served-roster.ts's module
+      // header on why both mounts, and only both, ever move together).
+      async writeServed(request) {
+        const { addresses, expectedToken, acknowledgeSplit } = request.payload
+        let written: { addresses: readonly string[]; token: string }
+        try {
+          written = await writeOrgServedRoster(
+            orgProfilePatchPath,
+            [ORG_MAILBOX_BRIDGE_MOUNT_ID, ORG_TOOL_MAILBOX_MOUNT_ID],
+            addresses,
+            expectedToken,
+            acknowledgeSplit ?? false,
+          )
+        } catch (error: unknown) {
+          if (error instanceof OrgServedRosterConflictError) {
+            return err(request, {
+              code: 'org-served-roster-conflict',
+              message: error.message,
+              details: { expectedToken: error.expectedToken, actualToken: error.actualToken },
+            })
+          }
+          // The split refusal fires BEFORE the proposed content is even
+          // validated (see org-served-roster.ts): the two mounts already
+          // disagreed with each other before this call ran, and the caller
+          // must see both sides and explicitly acknowledge before either
+          // list moves.
+          if (error instanceof OrgServedRosterSplitError) {
+            return err(request, {
+              code: 'org-served-roster-split',
+              message: error.message,
+              details: { onlyMailboxBridge: error.onlyMailboxBridge, onlyToolMailbox: error.onlyToolMailbox },
+            })
+          }
+          // Same three-way distinction as org.write: OrgServedRosterWriteError
+          // means "retry the same document" (I/O/structural trouble
+          // unrelated to content); a plain Error from address validation
+          // means "fix your content" instead.
+          if (error instanceof OrgServedRosterWriteError) {
+            return err(request, {
+              code: 'org-served-roster-write-failed',
+              message: error.message,
+              details: {},
+            })
+          }
+          return err(request, {
+            code: 'org-served-roster-rejected',
+            message: error instanceof Error ? error.message : String(error),
+            details: {},
+          })
+        }
+        return ok(request, written)
       },
     },
 

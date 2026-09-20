@@ -33,10 +33,12 @@ import type { CommandDescriptor, CommandExecution, CommandResult } from '@deepse
 import { deriveEventMessage, foldSurface } from '@deepseek-ai/dsh-session/surface'
 import type {
   ApiProxy, ClientRequest, ClientResponse, HistoryEntry, HostFrame, MuxFrame, PromptContentPart, RpcReceipt,
-  ModelProviderGroup, ModelSelection, RpcRequest, RpcResponse, RpcResult, ServerRequest, ServerResponse, SessionSummary,
+  ModelProviderGroup, ModelSelection, OrgRegistryView, RpcRequest, RpcResponse, RpcResult, ServerRequest, ServerResponse, SessionSummary,
   ToolCallView, ToolEventView, ToolResultView, WorkspaceId, WorkspaceView,
 } from './api.ts'
-import type { RequestPayload, ResponseValue, RpcMethodMap, WorktreeRow } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type {
+  OrgRegistryDocument, RequestPayload, ResponseValue, RpcMethodMap, WorktreeRow,
+} from '@deepseek-ai/dsh-host-apiproxy/api'
 import { AbstractApiClient, RpcId, SESSION_SEARCH_RESULT_LIMIT } from './api.ts'
 import { randomUuid } from './random-uuid.ts'
 import type { ClientConnectionRpc } from '../rpc.ts'
@@ -1569,6 +1571,66 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
   const worktreeRows = new Map<string, WorktreeRow>()
   let nextWorktreeSlug = 1
 
+  // Mutable demo org registry + its content token, so org.write can
+  // round-trip through org.get like the real API. The token here is a
+  // fixture-only opaque counter, never a real sha256 — this file must stay
+  // Node-free (see the module header) — but it changes on every successful
+  // write exactly as the real guard's content hash would, so a stale-token
+  // conflict is demoable too.
+  let orgRegistryDocument: OrgRegistryDocument = {
+    baseDir: '/fixture/org',
+    seats: {
+      alfred: { cwd: '/fixture/org/deepseek-harness', lead: true },
+      batman: { cwd: '/fixture/org/deepseek-harness' },
+    },
+    edges: [['alfred', 'batman']],
+    callUp: [],
+  }
+  let orgRegistryToken = 'fixture-token-1'
+  let nextOrgRegistryToken = 2
+
+  // Mutable demo served-roster address list + its own independent content
+  // token — mirrors the registry's fixture-token pattern above, but keyed
+  // separately: the real API guards this file (cordis.patch.yml) and the
+  // registry file with two unrelated tokens (see org-served-roster.ts), and
+  // the fixture preserves that separation rather than reusing one counter
+  // for both. Both fixture served mounts always read this SAME list, so
+  // there is no drift to demo here the way the real two-file split can.
+  let orgServedAddresses: readonly string[] = ['alfred', 'batman']
+  let orgServedRosterToken = 'fixture-served-token-1'
+  let nextOrgServedRosterToken = 2
+
+  /**
+   * Fresh `registry`/`document` copies of the current demo state for
+   * `org.get`. The two fields exist for different purposes on the real API
+   * (`registry` resolved for display, `document` unresolved for `org.write`
+   * — see {@link OrgRegistryDocument}'s doc comment), and even though the
+   * fixture's demo seats are already absolute (so one object could satisfy
+   * both shapes), returning the SAME object reference for both would let a
+   * caller that mutates one (e.g. through `registry`) silently corrupt the
+   * other. Each call returns its own independent copy — including each
+   * seat's own object — so `registry` and `document` never alias each
+   * other or the live `orgRegistryDocument` state.
+   */
+  const orgRegistrySnapshot = (): { registry: OrgRegistryView; document: OrgRegistryDocument } => {
+    const cloneSeats = <S>(seats: Readonly<Record<string, S>>): Record<string, S> =>
+      Object.fromEntries(Object.entries(seats).map(([name, seat]) => [name, { ...seat }]))
+    return {
+      registry: {
+        baseDir: orgRegistryDocument.baseDir,
+        seats: cloneSeats(orgRegistryDocument.seats),
+        edges: [...orgRegistryDocument.edges],
+        callUp: [...orgRegistryDocument.callUp],
+      },
+      document: {
+        baseDir: orgRegistryDocument.baseDir,
+        seats: cloneSeats(orgRegistryDocument.seats),
+        edges: [...orgRegistryDocument.edges],
+        callUp: [...orgRegistryDocument.callUp],
+      },
+    }
+  }
+
   // In-memory browse tree behind the fixture's `browse` picker capability —
   // deterministic content mirroring the design mock so assembled Web tests
   // and snapshots can walk it. Leaves are materialized lazily: a child listed
@@ -3095,25 +3157,53 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
     org: {
       get: request => ok(request, {
         // The real API always resolves cwd to an absolute path (see
-        // readOrgRegistryResult); the fixture mirrors that guarantee rather
-        // than demoing the pre-resolution shape a UI would never actually see.
+        // readOrgRegistryResult); the fixture's demo data is already
+        // absolute, so it mirrors that guarantee without a resolution step.
         profile: 'fixture',
-        registry: {
-          ok: true,
-          registry: {
-            baseDir: '/fixture/org',
-            seats: {
-              alfred: { cwd: '/fixture/org/deepseek-harness', lead: true },
-              batman: { cwd: '/fixture/org/deepseek-harness' },
-            },
-            edges: [['alfred', 'batman']],
-            callUp: [],
-          },
-        },
-        mailboxBridge: { ok: true, addresses: ['alfred', 'batman'] },
-        toolMailbox: { ok: true, addresses: ['alfred', 'batman'] },
+        registry: { ok: true, ...orgRegistrySnapshot(), token: orgRegistryToken },
+        mailboxBridge: { ok: true, addresses: [...orgServedAddresses] },
+        toolMailbox: { ok: true, addresses: [...orgServedAddresses] },
         drift: { ok: true, rows: [] },
+        servedRosterToken: { ok: true, token: orgServedRosterToken },
       }),
+      // Whole-document replace, guarded by the same content-token shape the
+      // real API uses (org-registry-conflict / org-registry-rejected in
+      // rpc.ts) — backed by an in-memory counter rather than a file's
+      // sha256, since this fixture never touches the filesystem. No
+      // validation beyond the request's own type: a real semantic check
+      // (unknown edge endpoint, etc.) belongs to the host, not this demo.
+      write: (request) => {
+        const { document, expectedToken } = request.payload
+        if (expectedToken !== orgRegistryToken) {
+          return err(request, {
+            code: 'org-registry-conflict',
+            message: `fixture org registry changed since it was read (expected token ${expectedToken}, now ${orgRegistryToken}); re-read and retry`,
+            details: { expectedToken, actualToken: orgRegistryToken },
+          })
+        }
+        orgRegistryDocument = document
+        orgRegistryToken = `fixture-token-${String(nextOrgRegistryToken++)}`
+        return ok(request, { registry: orgRegistryDocument, token: orgRegistryToken })
+      },
+      // Replaces the one demo served-address list both fixture mounts read
+      // from, guarded by its own independent token — never the registry's.
+      // The fixture's two served mounts always share this single list, so
+      // there is nothing for them to disagree about: `acknowledgeSplit` is
+      // accepted (never rejected as an unknown field) but never itself
+      // causes or averts a refusal here, unlike the real two-file API.
+      writeServed: (request) => {
+        const { addresses, expectedToken } = request.payload
+        if (expectedToken !== orgServedRosterToken) {
+          return err(request, {
+            code: 'org-served-roster-conflict',
+            message: `fixture served roster changed since it was read (expected token ${expectedToken}, now ${orgServedRosterToken}); re-read and retry`,
+            details: { expectedToken, actualToken: orgServedRosterToken },
+          })
+        }
+        orgServedAddresses = [...addresses]
+        orgServedRosterToken = `fixture-served-token-${String(nextOrgServedRosterToken++)}`
+        return ok(request, { addresses: orgServedAddresses, token: orgServedRosterToken })
+      },
     },
     respond(message: ClientResponse): Promise<RpcReceipt> {
       // Same routing discipline as the host: rpcId first, then the payload's
@@ -3266,6 +3356,8 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'worktree.lock': return this.api.worktree.lock(request)
       case 'worktree.remove': return this.api.worktree.remove(request)
       case 'org.get': return this.api.org.get(request)
+      case 'org.write': return this.api.org.write(request)
+      case 'org.writeServed': return this.api.org.writeServed(request)
       case 'skill.list': return this.api.skills.list(request)
       case 'agentPreset.list': return this.api.agentPresets.list(request)
       case 'agentPreset.select': return this.api.agentPresets.select(request)

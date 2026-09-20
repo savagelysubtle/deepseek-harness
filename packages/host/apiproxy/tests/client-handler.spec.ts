@@ -133,7 +133,7 @@ function scriptedApi(overrides: {
     },
     mailbox: { publish: err },
     worktree: { list: err, create: err, lock: err, remove: err },
-    org: { get: err },
+    org: { get: err, write: err, writeServed: err },
     events: { mux: () => empty<MuxFrame>(), host: () => empty<HostFrame>(), ...overrides.events },
     respond: overrides.respond ?? (() => Promise.resolve({ accepted: false as const, reason: 'not-pending' as const })),
     downloads: { sessionLog: async () => new Response('stub', { status: 404 }) },

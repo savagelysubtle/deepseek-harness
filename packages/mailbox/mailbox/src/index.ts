@@ -22,8 +22,9 @@ export type { MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxLeaseRef,
 export type { AddressResolutionExtension, MailboxProvider } from './provider.ts'
 export type { MailboxMessageSource, MailboxRelaySource, MailboxRefusalSource } from './source.ts'
 export {
-  findOrgRegistryRoute, isSeatIdentityPinned, loadOrgRegistry, orgRegistryAllows, parseOrgRegistry,
-  resolveSeatCwd, resolveSeatSessionId,
+  findOrgRegistryRoute, hashOrgRegistryBytes, isSeatIdentityPinned, loadOrgRegistry,
+  loadOrgRegistryWithToken, OrgRegistryConflictError, OrgRegistryWriteError, orgRegistryAllows,
+  parseOrgRegistry, resolveSeatCwd, resolveSeatSessionId, writeOrgRegistry,
 } from './org-registry.ts'
 export type { OrgRegistry, OrgRegistryEdge, OrgRegistryParseOptions, OrgRegistrySeat } from './org-registry.ts'
 export {
@@ -220,7 +221,12 @@ export class MailboxRegistry extends Service {
     }
     const provider = this.providers.get(this.defaultProvider)
     if (provider === undefined) {
-      throw new Error(`mailbox ${operation}: configured defaultProvider "${this.defaultProvider}" is not registered`)
+      throw new Error(
+        `mailbox ${operation}: configured defaultProvider "${this.defaultProvider}" is not registered — either `
+        + 'no plugin provides that name, or it has not finished mounting yet (sibling plugins mount concurrently '
+        + 'with no guaranteed order). If this is mount ordering, give the caller a real `inject` edge on that '
+        + 'provider so it waits; do not just retry.',
+      )
     }
     return provider
   }

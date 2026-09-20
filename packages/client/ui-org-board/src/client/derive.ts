@@ -106,6 +106,43 @@ export function unservedByName(unserved: readonly OrgDriftRow[] | undefined): Ma
 }
 
 /**
+ * The three states one seat's served status can be in, judged purely from
+ * its (possibly absent) drift row. This is the ONE function the served-
+ * status indicator and toggle in `OrgBoard.tsx`'s detail panel use to decide
+ * that three-value verdict, and its only callers.
+ *
+ * The drift section deliberately does NOT read through this function: it
+ * answers a different question -- "which specific roster(s) is this seat
+ * missing from" -- which needs `row.servedByMailboxBridge`/
+ * `row.servedByToolMailbox` individually (see `missingRosterLabels`/
+ * `servedRosterLabels` below), not a three-value summary that has already
+ * thrown that distinction away. Two readings of the same row data are
+ * correct here because they answer different questions; this function only
+ * needs to be the ONE place that answers ITS question, not the one place
+ * every reader of a drift row goes through.
+ */
+export type SeatServedStatus = 'served' | 'unserved' | 'split'
+
+/**
+ * Classify one seat's served status from its drift row.
+ *
+ * Per `OrgDriftRow`'s own doc comment (packages/host/apiproxy/src/api/org.ts),
+ * a row is produced for every name that is NOT registered-and-served-by-both
+ * — so a registered row that exists at all can only be "served by neither"
+ * (booleans agree, both false) or "served by exactly one" (booleans
+ * disagree); "served by both" never produces a row in the first place.
+ * @param row - this seat's row from the unserved (registered) drift list, or
+ *   `undefined` when the seat has none.
+ * @returns `'served'` when there is no row at all; `'unserved'` when a row
+ *   exists and its two served booleans agree (both false); `'split'` when a
+ *   row exists and its two served booleans disagree.
+ */
+export function seatServedStatus(row: OrgDriftRow | undefined): SeatServedStatus {
+  if (row === undefined) return 'served'
+  return row.servedByMailboxBridge === row.servedByToolMailbox ? 'unserved' : 'split'
+}
+
+/**
  * Seat names in a registry, in the registry's own key order.
  *
  * Key order is deliberate: the board's layout is alphabetical by name, but the

@@ -276,7 +276,7 @@ async lookupInboundSince(address: MailboxAddress, sinceMs: number, signal?: Abor
 declareRoster(mountId: string, addresses: readonly string[]): void
 ```
 
-Source: [`packages/mailbox/mailbox/src/index.ts:65`](../../packages/mailbox/mailbox/src/index.ts)
+Source: [`packages/mailbox/mailbox/src/index.ts:66`](../../packages/mailbox/mailbox/src/index.ts)
 
 <a id="mailbox-events"></a>
 
@@ -309,7 +309,7 @@ The bridge refused a claimed lease terminally at admission — registry health, 
 'mailbox/refused'(refusal: MailboxRefusal): void
 ```
 
-Source: [`packages/mailbox/bridge/src/index.ts:1780`](../../packages/mailbox/bridge/src/index.ts)
+Source: [`packages/mailbox/bridge/src/index.ts:1803`](../../packages/mailbox/bridge/src/index.ts)
 
 <a id="mailboxseat-tools-restricted--emit"></a>
 
@@ -353,5 +353,5 @@ Listener failures are logged and contained by Cordis dispatch.
 'mailbox/seat-tools-restricted'(restriction: SeatToolsRestricted): void
 ```
 
-Source: [`packages/mailbox/bridge/src/index.ts:1809`](../../packages/mailbox/bridge/src/index.ts)
+Source: [`packages/mailbox/bridge/src/index.ts:1832`](../../packages/mailbox/bridge/src/index.ts)
 <!-- END GENERATED cordis-surface -->

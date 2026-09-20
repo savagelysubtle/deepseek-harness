@@ -69,8 +69,8 @@ export type {
   WorktreeApi, WorktreeHandle, WorktreeRef, WorktreeRow, WorktreeSpawnInput,
 } from './worktree.ts'
 export type {
-  OrgApi, OrgDriftResult, OrgDriftRow, OrgEdge, OrgRegistryResult, OrgRegistryView,
-  OrgRosterResult, OrgSeat, OrgSeatTools,
+  OrgApi, OrgDriftResult, OrgDriftRow, OrgEdge, OrgRegistryDocument, OrgRegistryDocumentSeat,
+  OrgRegistryResult, OrgRegistryView, OrgRosterResult, OrgSeat, OrgSeatTools, OrgServedRosterTokenResult,
 } from './org.ts'
 export type { SkillsApi, SkillEntry } from './skills.ts'
 export type { AgentPresetsApi, AgentPresetEntry } from './agent-presets.ts'

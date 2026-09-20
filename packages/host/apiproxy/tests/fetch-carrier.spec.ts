@@ -321,11 +321,38 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
             ok: true,
             value: {
               profile: 'scripted',
-              registry: { ok: true, registry: { baseDir: '/org', seats: {}, edges: [], callUp: [] } },
+              // `document` is the unresolved twin of `registry`: same shape, seat
+              // cwds exactly as authored. Both travel so an editor never builds a
+              // write payload out of resolved absolute paths.
+              registry: {
+                ok: true,
+                registry: { baseDir: '/org', seats: {}, edges: [], callUp: [] },
+                document: { baseDir: '/org', seats: {}, edges: [], callUp: [] },
+                token: 'scripted-token',
+              },
               mailboxBridge: { ok: true, addresses: [] },
               toolMailbox: { ok: true, addresses: [] },
               drift: { ok: true, rows: [] },
+              servedRosterToken: { ok: true, token: 'scripted-served-roster-token' },
             },
+          },
+        }
+      },
+      async write(request) {
+        return {
+          rpcId: request.rpcId,
+          result: {
+            ok: true,
+            value: { registry: { baseDir: '/org', seats: {}, edges: [], callUp: [] }, token: 'scripted-token-2' },
+          },
+        }
+      },
+      async writeServed(request) {
+        return {
+          rpcId: request.rpcId,
+          result: {
+            ok: true,
+            value: { addresses: request.payload.addresses, token: 'scripted-served-roster-token-2' },
           },
         }
       },

@@ -14,10 +14,12 @@
  * @module @deepseek-ai/dsh-mailbox/org-registry
  */
 
-import { readFile } from 'node:fs/promises'
+import { createHash, randomBytes } from 'node:crypto'
+import { open, readFile, rename, rm } from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { parse as parseYaml } from 'yaml'
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { MAILBOX_SEGMENT_PATTERN_SOURCE } from './address.ts'
 
 const SEGMENT_PATTERN = new RegExp(MAILBOX_SEGMENT_PATTERN_SOURCE)
@@ -191,6 +193,211 @@ export async function loadOrgRegistry(path: string, options: OrgRegistryParseOpt
   const expanded = expandTilde(path, options.home ?? homedir())
   const text = await readFile(expanded, 'utf8')
   return parseOrgRegistry(text, options)
+}
+
+/**
+ * Compute the optimistic-concurrency token for a registry file's exact
+ * bytes: sha256 hex of what is (or is about to be) on disk. The write guard
+ * keys on file CONTENT, not a stored revision counter — the founder edits
+ * this file by hand, and a hand edit never bumps a counter, so a
+ * counter-based guard would let a write silently clobber him. Exported so a
+ * caller already holding the bytes (a write's own new content, say) never
+ * has to re-read the file just to learn its token.
+ * @param bytes - the file's raw bytes, exactly as read or about to be written.
+ * @returns the sha256 hex digest.
+ */
+export function hashOrgRegistryBytes(bytes: Uint8Array): string {
+  return createHash('sha256').update(bytes).digest('hex')
+}
+
+/**
+ * Read, validate, and hash one registry file in a single pass — the read
+ * side of the optimistic-concurrency guard {@link writeOrgRegistry} enforces.
+ * A caller planning a write reads with this (never {@link loadOrgRegistry})
+ * so the token it later sends back is provably the hash of the exact bytes
+ * it validated against.
+ * @param path - the registry file path; a leading `~` expands against the user's home.
+ * @param options - host-specific resolution options.
+ * @returns the validated registry and its content token.
+ * @throws when the file is unreadable or its content fails validation.
+ */
+export async function loadOrgRegistryWithToken(
+  path: string, options: OrgRegistryParseOptions = {},
+): Promise<{ registry: OrgRegistry; token: string }> {
+  const expanded = expandTilde(path, options.home ?? homedir())
+  const bytes = await readFile(expanded)
+  return { registry: parseOrgRegistry(bytes.toString('utf8'), options), token: hashOrgRegistryBytes(bytes) }
+}
+
+/**
+ * A write refused because the registry file changed since its token was
+ * read: another writer — most often the founder's own hand edit — landed
+ * first. The caller must re-read and re-apply rather than treat the write as
+ * malformed; see {@link hashOrgRegistryBytes} on why the guard keys on
+ * content rather than a revision counter.
+ */
+export class OrgRegistryConflictError extends Error {
+  /** The token the write expected (the caller's last-read hash). */
+  readonly expectedToken: string
+  /** The token the file actually holds right now. */
+  readonly actualToken: string
+
+  /**
+   * @param path - the registry file path whose write was refused.
+   * @param expectedToken - the token the caller sent.
+   * @param actualToken - the token now on disk.
+   */
+  constructor(path: string, expectedToken: string, actualToken: string) {
+    super(`org registry at "${path}" changed since it was read (expected token ${expectedToken}, now ${actualToken}); re-read and retry`)
+    this.name = 'OrgRegistryConflictError'
+    this.expectedToken = expectedToken
+    this.actualToken = actualToken
+  }
+}
+
+/**
+ * The write failed for a reason that has nothing to do with the proposed
+ * document's content: the current file could not be read for the
+ * concurrency check, no free backup filename could be found, the temp file
+ * could not be opened/written/fsynced, or the final rename failed. This is
+ * retry-the-same-write territory — a permissions change, a full volume, a
+ * transient disk fault — never "fix your content and try again", which is
+ * what a plain validation `Error` thrown by {@link parseOrgRegistry} means
+ * instead, and never "re-read and retry", which is what
+ * {@link OrgRegistryConflictError} means. A caller that cannot tell these
+ * three apart cannot act correctly on a refusal, which is exactly the class
+ * of defect this write API exists to not repeat.
+ */
+export class OrgRegistryWriteError extends Error {
+  /**
+   * @param path - the registry file path the write was attempted against.
+   * @param reason - what step failed, for the message text.
+   * @param cause - the underlying error.
+   */
+  constructor(path: string, reason: string, cause: unknown) {
+    super(`org registry at "${path}" ${reason}: ${cause instanceof Error ? cause.message : String(cause)}`, { cause })
+    this.name = 'OrgRegistryWriteError'
+  }
+}
+
+/** Bound on disambiguating suffixes {@link backupOrgRegistryBytes} tries before giving up loudly. */
+const MAX_BACKUP_FILENAME_ATTEMPTS = 100
+
+/**
+ * Write a timestamped backup of the registry's previous bytes, next to the
+ * file, without ever silently destroying an existing backup. The timestamp
+ * alone is only millisecond-granular, so two writes landing in the same
+ * millisecond would otherwise collide on the same filename; each attempt
+ * opens with `wx` (exclusive create, fails on an existing path) so a
+ * collision can never resolve as a quiet overwrite — it always either finds
+ * a genuinely free name or throws.
+ * @param expanded - the registry file's expanded, absolute path.
+ * @param currentBytes - the previous content to preserve.
+ * @returns the backup file's path.
+ * @throws {OrgRegistryWriteError} when the backup cannot be written, or no free filename is found within the attempt bound.
+ */
+async function backupOrgRegistryBytes(expanded: string, currentBytes: Buffer): Promise<string> {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const base = `${expanded}.bak-${stamp}`
+  for (let attempt = 0; attempt < MAX_BACKUP_FILENAME_ATTEMPTS; attempt++) {
+    const candidate = attempt === 0 ? base : `${base}-${String(attempt)}`
+    let handle: FileHandle | undefined
+    try {
+      handle = await open(candidate, 'wx')
+      await handle.writeFile(currentBytes)
+      await handle.sync()
+      return candidate
+    } catch (error: unknown) {
+      if (error instanceof Error && 'code' in error && error.code === 'EEXIST') continue
+      throw new OrgRegistryWriteError(expanded, 'could not write a backup of its previous content', error)
+    } finally {
+      await handle?.close()
+    }
+  }
+  throw new OrgRegistryWriteError(
+    expanded,
+    `could not find a free backup filename after ${String(MAX_BACKUP_FILENAME_ATTEMPTS)} same-millisecond attempts`,
+    new Error('backup filename space exhausted'),
+  )
+}
+
+/**
+ * Replace the whole registry document, refusing when the file has changed
+ * since `expectedToken` was read, or when the proposed document fails
+ * validation. Never writes a registry that cannot be read back: the
+ * proposed document is serialized and run through {@link parseOrgRegistry} —
+ * the SAME parser every reader uses — before anything on disk is touched.
+ *
+ * Serialization uses `indentSeq: false`: a round-trip of the real registry's
+ * shape is byte-identical only with that option set (see the fixture
+ * round-trip test in this package's tests) — without it, the whole `edges`
+ * block reformats on the very first write.
+ *
+ * The write itself is atomic — a temp file in the same directory, fsync,
+ * then rename over the target — so a crash mid-write can never leave a
+ * truncated registry, and the file's previous content is preserved as a
+ * timestamped sibling backup before the rename.
+ * @param path - the registry file path; a leading `~` expands against the user's home.
+ * @param document - the complete proposed registry document (the `baseDir`/`seats`/`edges`/`callUp` shape a hand-edited file has).
+ * @param expectedToken - the token the caller last read (from {@link loadOrgRegistryWithToken}).
+ * @param options - host-specific resolution options.
+ * @returns the newly written registry, parsed, and its new content token.
+ * @throws {OrgRegistryConflictError} when the file's current token does not match `expectedToken`.
+ * @throws {OrgRegistryWriteError} when the current file cannot be read for the concurrency
+ *   check, the backup cannot be written, or the atomic write/rename itself fails —
+ *   retry-the-same-write territory, never "fix your content."
+ * @throws a plain `Error` (from {@link parseOrgRegistry}) when the proposed document fails
+ *   validation — "fix your content", never a reason to retry unchanged.
+ */
+export async function writeOrgRegistry(
+  path: string,
+  document: object,
+  expectedToken: string,
+  options: OrgRegistryParseOptions = {},
+): Promise<{ registry: OrgRegistry; token: string }> {
+  const expanded = expandTilde(path, options.home ?? homedir())
+
+  let currentBytes: Buffer
+  try {
+    currentBytes = await readFile(expanded)
+  } catch (error: unknown) {
+    throw new OrgRegistryWriteError(expanded, 'could not be read for the concurrency check', error)
+  }
+  const actualToken = hashOrgRegistryBytes(currentBytes)
+  if (actualToken !== expectedToken) throw new OrgRegistryConflictError(expanded, expectedToken, actualToken)
+
+  const proposedText = stringifyYaml(document, { indentSeq: false })
+  // Validate against the exact parser every reader uses; a document that
+  // fails here is refused before anything on disk is touched. Left as
+  // parseOrgRegistry's own plain Error (never wrapped in
+  // OrgRegistryWriteError): this is the "fix your content" branch, and a
+  // caller must be able to tell it apart from the I/O failures below, which
+  // mean "retry the same document."
+  const registry = parseOrgRegistry(proposedText, options)
+
+  await backupOrgRegistryBytes(expanded, currentBytes)
+
+  const tempPath = `${expanded}.${randomBytes(6).toString('hex')}.tmp`
+  try {
+    const handle = await open(tempPath, 'w')
+    try {
+      await handle.writeFile(proposedText, 'utf8')
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+    await rename(tempPath, expanded)
+  } catch (error: unknown) {
+    // Cleanup is best-effort only: if `rm` itself throws, that failure must
+    // never replace `error` in what the caller sees — the caller needs to
+    // learn why the WRITE failed, not why the temp-file cleanup afterward
+    // also failed. A leftover `.tmp` file is a nuisance; a swallowed real
+    // failure is the exact defect this whole write API exists to remove.
+    await rm(tempPath, { force: true }).catch(() => undefined)
+    throw new OrgRegistryWriteError(expanded, 'could not be written atomically', error)
+  }
+
+  return { registry, token: hashOrgRegistryBytes(Buffer.from(proposedText, 'utf8')) }
 }
 
 /**

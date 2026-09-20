@@ -1,10 +1,14 @@
 /**
- * org domain contract: a read-only projection of the organisation's seat
- * roster and mail topology. `org.get` reads three independent sources — the
- * hand-edited registry, and the two served-address rosters a profile's patch
- * layer mounts (`mailbox-bridge`, `tool-mailbox`) — and reports the drift
- * between them. Writes nothing and mutates no state; a later slice owns
- * mutation.
+ * org domain contract: a projection of the organisation's seat roster and
+ * mail topology, plus its one host-side write primitive. `org.get` reads
+ * three independent sources — the hand-edited registry, and the two
+ * served-address rosters a profile's patch layer mounts (`mailbox-bridge`,
+ * `tool-mailbox`) — and reports the drift between them. `org.write` replaces
+ * the whole registry document, guarded by a content token so a write can
+ * never silently clobber a change the founder made by hand between the read
+ * and the write (see {@link OrgApi.write}). Neither method touches the
+ * served-roster mounts — existing in the registry and being served are
+ * different facts, and mutating the served side is a later slice's scope.
  */
 
 import type { RpcRequest, RpcResponse } from './rpc.ts'
@@ -58,10 +62,80 @@ export interface OrgRegistryView {
  * used to mean "the registry could not be loaded", mirroring the precedent
  * `StopDescendantsResult` sets: a partial or missing outcome must never
  * type-check as the same shape as success.
+ *
+ * `token` is the file's content hash at the moment of this read — sha256 of
+ * its raw bytes, not a stored revision counter (see {@link OrgApi.write}).
+ * Send it back as `write`'s `expectedToken` so a write built on this read is
+ * refused if the file changed underneath it, rather than silently clobbering
+ * whatever changed it.
+ *
+ * BOTH `registry` and `document` are the same read, in two different shapes,
+ * for two different purposes — do NOT "simplify" this back into one field:
+ *   - `registry` (`OrgRegistryView`) has every seat `cwd` RESOLVED to an
+ *     absolute path. It exists to DISPLAY — a UI never has to know or
+ *     re-derive `baseDir` to show where a seat runs.
+ *   - `document` (`OrgRegistryDocument`) has every seat `cwd` UNRESOLVED —
+ *     absolute, or relative-to-`baseDir`, exactly as the file was hand-authored.
+ *     It exists to EDIT: `org.write` requires this exact unresolved shape,
+ *     and it round-trips through the real YAML parser. If an editor instead
+ *     read the resolved `registry`, mutated it, and submitted THAT to
+ *     `org.write`, every seat's relative `cwd` would be silently rewritten to
+ *     absolute — including seats the caller never touched — corrupting the
+ *     founder's hand-edited file on the very first save (see
+ *     {@link OrgRegistryDocumentSeat}'s doc comment for the same danger from
+ *     the write side). `document` is what makes it possible for a caller to
+ *     edit without ever holding a resolved path.
  */
 export type OrgRegistryResult =
-  | { readonly ok: true; readonly registry: OrgRegistryView }
+  | {
+    readonly ok: true
+    readonly registry: OrgRegistryView
+    readonly document: OrgRegistryDocument
+    readonly token: string
+  }
   | { readonly ok: false; readonly reason: string }
+
+/**
+ * One registry seat exactly as a caller submits it to `org.write` —
+ * structurally identical to {@link OrgSeat}, but `cwd` is NOT resolved: it is
+ * absolute or relative-to-`baseDir` exactly as a hand-edited file would carry
+ * it, because `org.write` round-trips through the real YAML parser and a
+ * pre-resolved absolute path would silently rewrite every relative seat the
+ * founder wrote by hand.
+ */
+export interface OrgRegistryDocumentSeat {
+  /** Workspace the seat's runs execute in: absolute, or relative to the document's `baseDir`. */
+  readonly cwd: string
+  /** Marks a department head; documentation metadata, not enforcement data. */
+  readonly lead?: boolean
+  /** The seat's durable session id, when the document records one. */
+  readonly sessionId?: string
+  /** Marks a throwaway seat; an edge may never cross the test boundary. */
+  readonly test?: boolean
+  /** Restricts which tools the seat's agent may use; absent means unrestricted. */
+  readonly tools?: OrgSeatTools
+}
+
+/**
+ * The complete registry document `org.write` accepts and persists — the same
+ * `baseDir`/`seats`/`edges`/`callUp` shape the YAML file itself has, unlike
+ * {@link OrgRegistryView}'s already-resolved read projection. A whole-document
+ * replace rather than fine-grained mutations: the caller already holds the
+ * entire registry from `org.get`, and one atomic replace is far easier to
+ * reason about than a mutation language. The host runs this through the
+ * SAME parser/validator `org.get` reads with before writing a single byte —
+ * a document that fails validation is refused, never partially applied.
+ */
+export interface OrgRegistryDocument {
+  /** Absolute base every relative seat `cwd` resolves against. */
+  readonly baseDir: string
+  /** Roster keyed by seat name; seat names are mailbox addresses. */
+  readonly seats: Readonly<Record<string, OrgRegistryDocumentSeat>>
+  /** Undirected seat-to-seat edges that permit direct mail. */
+  readonly edges: readonly OrgEdge[]
+  /** Seats that may message ANY seat regardless of edges. */
+  readonly callUp: readonly string[]
+}
 
 /**
  * One served-address roster read from a profile's `cordis.patch.yml` mount
@@ -104,6 +178,19 @@ export type OrgDriftResult =
   | { readonly ok: true; readonly rows: readonly OrgDriftRow[] }
   | { readonly ok: false; readonly reason: string }
 
+/**
+ * The served-roster file's (`cordis.patch.yml`) content token, or a named
+ * reason it could not be produced — the same read that already produces
+ * `mailboxBridge`/`toolMailbox` also yields this, so `writeServed` never has
+ * to trigger a second read of the file just to learn what to send back as
+ * `expectedToken` (that would reopen the exact race a content token exists
+ * to close). Distinct from {@link OrgRegistryResult}'s `token`: these are
+ * two different files, each with its own independent write guard.
+ */
+export type OrgServedRosterTokenResult =
+  | { readonly ok: true; readonly token: string }
+  | { readonly ok: false; readonly reason: string }
+
 /** Org-domain unary methods (the map keys org.* of RpcMethodMap). */
 export interface OrgApi {
   /**
@@ -133,5 +220,88 @@ export interface OrgApi {
     mailboxBridge: OrgRosterResult
     toolMailbox: OrgRosterResult
     drift: OrgDriftResult
+    /**
+     * Content token of the served-roster file (`cordis.patch.yml`) at this
+     * read, for `writeServed`'s `expectedToken` — the write-side guard
+     * against another writer landing between this read and that write.
+     */
+    servedRosterToken: OrgServedRosterTokenResult
+  }>>
+
+  /**
+   * Replace the whole registry document. Refuses when `expectedToken`
+   * (from a prior `org.get`'s `registry.token`) no longer matches the file's
+   * current content — the file changed since it was read, most often
+   * because the founder hand-edited it, and this call must never overwrite
+   * that change silently — as an `org-registry-conflict` error naming both
+   * tokens. Refuses an invalid document (unknown edge endpoint, malformed
+   * seat, etc.) as an `org-registry-rejected` error carrying the parser's
+   * own message; nothing is written in that case either — this means "fix
+   * your content", the same document will fail again unchanged. A write
+   * whose document was valid but that failed for an unrelated reason (the
+   * current file could not be read, no free backup filename was found, or
+   * the atomic write/rename itself failed) refuses as
+   * `org-registry-write-failed` instead — this means "retry the same
+   * document", the opposite instruction, which is why the two are never
+   * folded into one code. Out of scope: the served-seat rosters a profile's
+   * patch layer mounts — this method only ever touches the registry file
+   * itself, never `cordis.patch.yml`.
+   */
+  write(request: RpcRequest<{
+    document: OrgRegistryDocument
+    expectedToken: string
+  }>): Promise<RpcResponse<{
+    registry: OrgRegistryView
+    token: string
+  }>>
+
+  /**
+   * Replace BOTH served-roster mounts' `config.addresses` — the
+   * `mailbox-bridge` and `tool-mailbox` mounts in the active profile's
+   * `cordis.patch.yml` — with the SAME one address list, in a single atomic
+   * write. This method touches ONLY the two served mounts; it never reads
+   * or writes the org registry document (that is `write`'s own separate
+   * scope, guarded by its own independent token). One list on the wire,
+   * both mounts updated together, because a seat present on one served list
+   * but not the other silently loses mail with no error on either side —
+   * see the `org-served-roster.ts` module header for the full account of
+   * why.
+   *
+   * Refuses `org-served-roster-conflict` (naming both tokens) when
+   * `expectedToken` (from a prior `org.get`'s `servedRosterToken`) no longer
+   * matches the served-roster file's current content — another writer
+   * landed first, and this call must never overwrite that change silently.
+   *
+   * Refuses `org-served-roster-split` when the two mounts' CURRENT served
+   * lists already disagree with each other and `acknowledgeSplit` is not
+   * set — details name exactly which addresses are served by only one side
+   * (`onlyMailboxBridge`, `onlyToolMailbox`). Pass `acknowledgeSplit: true`
+   * to proceed anyway and reconcile both mounts onto the one proposed list.
+   *
+   * Refuses `org-served-roster-rejected` for an invalid proposed address
+   * (grammar violation or a duplicate) — "fix your content", the same list
+   * will fail again unchanged.
+   *
+   * Refuses `org-served-roster-write-failed` for anything else that has
+   * nothing to do with the proposed content — the file could not be read,
+   * either mount is missing or malformed, no free backup filename was
+   * found, or the atomic write/rename itself failed. This means "retry the
+   * same list", the opposite instruction from `org-served-roster-rejected`.
+   */
+  writeServed(request: RpcRequest<{
+    /** The single served-address list applied to BOTH mounts identically. */
+    addresses: readonly string[]
+    /** The served-roster file's content token, from a prior `org.get`'s `servedRosterToken`. */
+    expectedToken: string
+    /**
+     * When true, proceeds even if the two mounts' CURRENT lists already
+     * disagree with each other. Omitted or false means the call refuses
+     * with `org-served-roster-split` instead, on the common-path assumption
+     * that the two mounts already agree and no acknowledgement is needed.
+     */
+    acknowledgeSplit?: boolean
+  }>): Promise<RpcResponse<{
+    addresses: readonly string[]
+    token: string
   }>>
 }

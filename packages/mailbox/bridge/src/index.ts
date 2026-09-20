@@ -1710,8 +1710,31 @@ async function composeSeatAgent(
 /** Stable Cordis plugin name. */
 export const name = 'mailbox-bridge'
 
-/** Core services required before any cycle can route deliveries. */
-export const inject = ['mailbox', 'agents']
+/**
+ * Core services required before any cycle can route deliveries.
+ *
+ * `mailboxLocal` is a real Cordis dependency edge, not a timing hope (see the
+ * analogous fixture-ready edge in `tests/composition.spec.ts`'s
+ * `toolSeatBridgeRows`). Sibling loader entries mount CONCURRENTLY
+ * (`Promise.allSettled` over the group — `vendor/loader/src/config/group.ts`),
+ * so a profile's row order guarantees nothing about start order. Without this
+ * edge, `apply()`'s deliberately inline first drain (below) can call into
+ * `ctx.mailbox` before `@deepseek-ai/dsh-mailbox-local`'s constructor has
+ * registered the `local` provider, and lose that race: the throw surfaces as
+ * a mount failure with no obvious cause, because the true fault is ordering,
+ * not configuration. Today's live composition happens to win that race —
+ * which is exactly how this stayed latent — but a different sibling set
+ * loses it, reproducibly.
+ *
+ * This hardcodes the bridge to the ONE provider implementation the repo has
+ * today. If a second provider is ever added, this must become config-driven
+ * — the injected name derived from the resolved `defaultProvider` rather
+ * than hardcoded here — because an `inject` entry that is never satisfied
+ * leaves the fiber PENDING forever (`vendor/cordis/src/fiber.ts`, "waiting
+ * for required services") with no error and no log: silent, not loud, which
+ * is the one failure mode a mount-time structural fault here must never take.
+ */
+export const inject = ['mailbox', 'agents', 'mailboxLocal']
 
 /**
  * Context key every mounted bridge contributes its resolved spec under, so
