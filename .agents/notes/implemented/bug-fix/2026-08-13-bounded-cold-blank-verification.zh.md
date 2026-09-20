@@ -35,3 +35,5 @@ Web 会话树会隐藏空白 Session，并把当前选中的空白项复用为 N
 超过阈值的空白工件，以及来自不提供位置的后端的空白 Session 会保持可见。对于未被读取的工件，缺失或延迟的最近时间 cache 会回退到 `createdAt`。这些都是保守降级：UI 可能多显示一条空记录，或把 Session 排得偏低，但不会隐藏真实对话，也不会因为单纯打开而把会话提升到前面。
 
 网关自有投影是网关 fiber 的 effect；卸载网关会移除该 key。单元覆盖固定了临界大小资格、拒绝陈旧 true、复用单调 false、小日志精确最近时间、实时附加竞态、回退方向、真人 prompt 最近时间和 fiber 销毁。无密钥 Web snapshot 会启动发行版的压缩 JSONL 组合，在没有 cache row 的情况下播种一份小型冷空白工件，并验证侧栏不展示它。
+
+本探测所折叠的存在性判定由[用户固定标题决策](../architecture/2026-08-26-user-pinned-title-clears-blank.md)拥有：用户来源的 `session/title` 事件现在也能在同一次有界读取中证明非空。
