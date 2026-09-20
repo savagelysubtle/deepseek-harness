@@ -398,9 +398,20 @@ describe('typert loader', () => {
 
     await ctx.loader.create({ name: '@fixture/steady-failure' })
     await ctx.loader.await()
-    await new Promise(resolve => setTimeout(resolve, 20))
 
-    expect(logged).toHaveBeenCalledWith(expect.objectContaining({ message: 'register failed' }))
+    // Wait for the log call itself, never for a duration. `loader.await()`
+    // resolves when the FIBER has mounted; it has no visibility into this
+    // plugin's own dirty-set flush, which schedules a microtask, dynamically
+    // imports the fixture, validates it, and only then calls register(). That
+    // chain and the loader's task are not linked, so any fixed sleep here is a
+    // guess about how long an unrelated import takes -- and under a loaded
+    // full-suite run it loses, reproducibly, with the mock never called at all.
+    // Waiting on the log is exact rather than merely longer: register() throws
+    // synchronously and is caught in the same microtask, so once the error has
+    // been logged the package state below has already settled.
+    await vi.waitFor(() => {
+      expect(logged).toHaveBeenCalledWith(expect.objectContaining({ message: 'register failed' }))
+    })
     expect(ctx.typert.getPackage('@fixture/steady-failure')).toBeUndefined()
   })
 })
