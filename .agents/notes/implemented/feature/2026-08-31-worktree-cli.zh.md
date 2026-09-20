@@ -34,5 +34,4 @@ worktree seam 只能通过已挂载的服务访问:seat(或站在 harness 之外
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-31-worktree-cli.md
-2026-08-31-worktree-cli.md: PENDING
-2026-08-31-worktree-cli.zh.md: PENDING
+2026-08-31-worktree-cli.md: PENDING 2026-08-31-worktree-cli.zh.md: PENDING
