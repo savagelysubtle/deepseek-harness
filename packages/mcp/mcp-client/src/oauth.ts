@@ -117,7 +117,13 @@ function parseState(serverName: string, ref: CredentialRef, raw: string): Stored
   return state
 }
 
-/** Metadata describing this client to authorization servers. */
+/**
+ * Metadata describing this client to authorization servers.
+ * @param redirectUri - the redirect URI advertised for the authorization-code flow.
+ * @param scope - optional scope override; omitted entirely when unset so the
+ *   SDK's server-driven scope selection is left to make its own choice.
+ * @returns the client metadata to send with registration and authorization requests.
+ */
 export function buildClientMetadata(redirectUri: string, scope?: string): OAuthClientMetadata {
   return {
     client_name: 'DeepSeek Harness',
@@ -160,6 +166,7 @@ export interface CredentialsOAuthProviderOptions {
  * process is visible to the other immediately.
  */
 export class CredentialsOAuthProvider {
+  /** The credential reference this provider's state is stored under, derived from `options.serverName`. */
   readonly ref: CredentialRef
 
   private constructor(private readonly options: CredentialsOAuthProviderOptions) {
@@ -206,10 +213,12 @@ export class CredentialsOAuthProvider {
 
   // ---- OAuthClientProvider surface ----
 
+  /** The configured redirect URI: a documented placeholder for host instances, the consent CLI's loopback listener otherwise. */
   get redirectUrl(): string {
     return this.options.redirectUri
   }
 
+  /** This provider's client metadata, rebuilt from the configured redirect URI and scope on every read. */
   get clientMetadata(): OAuthClientMetadata {
     return buildClientMetadata(this.options.redirectUri, this.options.scope)
   }

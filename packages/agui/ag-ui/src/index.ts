@@ -43,6 +43,7 @@ export const name = 'ag-ui'
 /** The session store resolves thread ids to live sessions; without it no stream can attach. */
 export const inject = ['sessions']
 
+/** Plugin config: listener address, required bearer token, and buffering knobs. */
 export type Config = AgUiConfig
 
 /**

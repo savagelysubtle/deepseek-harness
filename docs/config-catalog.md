@@ -93,6 +93,7 @@ Source: [`packages/examples/acp-demo/src/index.ts:39`](../packages/examples/acp-
 Requires: `sessions`
 
 ```ts config-catalog
+/** Plugin config: listener address, required bearer token, and buffering knobs. */
 export type Config = AgUiConfig
 
 /** Deployment configuration for the AG-UI outbound adapter plugin. */
@@ -113,7 +114,7 @@ export interface AgUiConfig {
 }
 ```
 
-Source: [`packages/agui/ag-ui/src/index.ts:46`](../packages/agui/ag-ui/src/index.ts)
+Source: [`packages/agui/ag-ui/src/index.ts:47`](../packages/agui/ag-ui/src/index.ts)
 
 <a id="deepseek-aidsh-agent-default-model"></a>
 
