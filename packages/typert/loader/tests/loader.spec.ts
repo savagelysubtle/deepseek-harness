@@ -209,22 +209,32 @@ describe('typert loader', () => {
     if (mounted?.fiber === undefined) throw new Error('fixture loader entry has no fiber')
     ctx.emit('internal/plugin', mounted.fiber)
     ctx.emit('internal/plugin', mounted.fiber)
+    // DELIBERATELY still a sleep, unlike the waits below. This asserts a
+    // NEGATIVE -- that a second emit added no second record -- and the list is
+    // already length 1 before the flush runs, so `vi.waitFor` would be
+    // satisfied on its first attempt and prove nothing. The flush voids its own
+    // task promises (see the loader plugin's flush call), so there is no handle
+    // to await either. Converting this would make it look stronger while
+    // actually weakening it.
     await new Promise(resolve => setTimeout(resolve, 20))
     expect(ctx.typert.list()).toHaveLength(1)
 
     await ctx.loader.remove(id)
     await ctx.loader.await()
-    // The unmount reconciliation rides a queued microtask flush.
-    await new Promise(resolve => setTimeout(resolve, 20))
-    expect(ctx.typert.get('@fixture/with-typert#Thing')).toBeUndefined()
+    // The unmount reconciliation rides a queued microtask flush that
+    // `loader.await()` knows nothing about, so wait for the record to actually
+    // go rather than for a duration.
+    await vi.waitFor(() => {
+      expect(ctx.typert.get('@fixture/with-typert#Thing')).toBeUndefined()
+    })
     await ctx.loader.remove(plainId)
     await ctx.loader.await()
-    await new Promise(resolve => setTimeout(resolve, 20))
 
     await ctx.loader.create({ name: '@fixture/with-typert' })
     await ctx.loader.await()
-    await new Promise(resolve => setTimeout(resolve, 20))
-    expect(ctx.typert.get('@fixture/with-typert#Thing')).toBeDefined()
+    await vi.waitFor(() => {
+      expect(ctx.typert.get('@fixture/with-typert#Thing')).toBeDefined()
+    })
   })
 
   it('follows entries mounted after activation', LOADER_TEST_TIMEOUT, async () => {
@@ -290,6 +300,11 @@ describe('typert loader', () => {
     await loaderFiber.dispose()
     queued?.()
     releaseImport?.()
+    // Deliberately a sleep, for the same reason as the one above: this asserts
+    // a NEGATIVE -- that the late import never registered anything after
+    // disposal -- and the package is already absent, so waiting for a condition
+    // would be satisfied instantly and prove nothing. The point is to give the
+    // released import real time to do the wrong thing, then confirm it did not.
     await new Promise(resolve => setTimeout(resolve, 20))
 
     expect(ctx.typert.getPackage('@fixture/pending')).toBeUndefined()
