@@ -6,7 +6,8 @@
 import { describe, expect, it } from 'vitest'
 import type { OrgDriftResult, OrgDriftRow, OrgRegistryView } from '@deepseek-ai/dsh-api-remotes/client'
 import {
-  driftLists, missingRosterLabels, seatBadges, seatNamesOf, servedRosterLabels, unservedByName,
+  driftLists, missingRosterLabels, seatBadges, seatNamesOf, seatServedStatus, servedRosterLabels, unservedByName,
+  type SeatServedStatus,
 } from '../src/client/derive.ts'
 
 /** Minimal mustache-style interpolation, matching the real dictionary's `{name}` templating. */
@@ -114,5 +115,24 @@ describe('seatBadges', () => {
   it('emits only the call-up badge when only call-up membership holds', () => {
     const badges = seatBadges('robin', { cwd: '/x' }, ['robin'], undefined, t)
     expect(badges).toEqual([{ kind: 'callUp', label: t('badge.callUp') }])
+  })
+})
+
+describe('seatServedStatus', () => {
+  const cases: readonly [string, OrgDriftRow | undefined, SeatServedStatus][] = [
+    ['no row at all: both rosters already serve it', undefined, 'served'],
+    ['a row whose two served booleans agree (both false): served by neither', ROW_UNSERVED_BOTH, 'unserved'],
+    ['a row whose two served booleans disagree: served by exactly one', ROW_UNSERVED_ONE, 'split'],
+  ]
+
+  it.each(cases)('%s -> %s', (_description, row, expected) => {
+    expect(seatServedStatus(row)).toBe(expected)
+  })
+
+  it('disagreeing in the other direction (mailbox-bridge only) is still split, not order-dependent', () => {
+    const row: OrgDriftRow = {
+      seat: 'ghost', registered: true, servedByMailboxBridge: true, servedByToolMailbox: false,
+    }
+    expect(seatServedStatus(row)).toBe('split')
   })
 })

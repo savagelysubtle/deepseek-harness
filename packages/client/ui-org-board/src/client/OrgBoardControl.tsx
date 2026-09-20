@@ -24,7 +24,7 @@ export type OrgBoardControlProps =
  * forwarded to the board, and the bound `t`.
  */
 export function OrgBoardControl({
-  wide, useOrgBoard, load, addSeat, removeSeat, addEdge, removeEdge, setSeatTools, t,
+  wide, useOrgBoard, load, addSeat, removeSeat, addEdge, removeEdge, setSeatTools, setSeatServed, t,
 }: OrgBoardControlProps) {
   const [open, setOpen] = useState(false)
   const state = useOrgBoard(snapshot => snapshot)
@@ -75,6 +75,7 @@ export function OrgBoardControl({
           addEdge={addEdge}
           removeEdge={removeEdge}
           setSeatTools={setSeatTools}
+          setSeatServed={setSeatServed}
         />
       </Modal>
     </div>

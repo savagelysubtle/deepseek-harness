@@ -82,6 +82,7 @@ function renderControl(overrides: { wide?: boolean; state?: OrgBoardState } = {}
   const addEdge = vi.fn<OrgBoardControlProps['addEdge']>().mockResolvedValue(undefined)
   const removeEdge = vi.fn<OrgBoardControlProps['removeEdge']>().mockResolvedValue(undefined)
   const setSeatTools = vi.fn<OrgBoardControlProps['setSeatTools']>().mockResolvedValue(undefined)
+  const setSeatServed = vi.fn<OrgBoardControlProps['setSeatServed']>().mockResolvedValue(undefined)
   const useOrgBoard = (<S,>(selector: (snapshot: OrgBoardState) => S): S => selector(state)) as OrgBoardControlProps['useOrgBoard']
   return {
     load,
@@ -90,6 +91,7 @@ function renderControl(overrides: { wide?: boolean; state?: OrgBoardState } = {}
     addEdge,
     removeEdge,
     setSeatTools,
+    setSeatServed,
     ...render(<OrgBoardControl
       wide={wide}
       useSessions={useSessions}
@@ -101,6 +103,7 @@ function renderControl(overrides: { wide?: boolean; state?: OrgBoardState } = {}
       addEdge={addEdge}
       removeEdge={removeEdge}
       setSeatTools={setSeatTools}
+      setSeatServed={setSeatServed}
       t={translate}
     />),
   }
@@ -141,6 +144,24 @@ describe('OrgBoardControl', () => {
 
     expect(addSeat).toHaveBeenCalledTimes(1)
     expect(addSeat).toHaveBeenCalledWith('lucius', 'lucius-workspace')
+  })
+
+  it('forwards setSeatServed to the board through a real served-status toggle', async () => {
+    // Same regression class as the addSeat test above, for the sixth verb
+    // added in SWD-134 slice 5 step 3: it was once accepted and never
+    // forwarded, so this drives a real confirm-and-save through the real
+    // component tree rather than trusting the prop is wired.
+    const { setSeatServed } = renderControl({ state: READY_STATE })
+    fireEvent.click(screen.getByRole('button', { name: 'Org Board' }))
+    expect(await screen.findByRole('dialog')).toBeTruthy()
+
+    fireEvent.click(screen.getByText('alfred'))
+    fireEvent.click(screen.getByRole('button', { name: 'Change served status' }))
+    fireEvent.click(screen.getByRole('checkbox'))
+    fireEvent.click(screen.getByRole('button', { name: 'Stop serving' }))
+
+    expect(setSeatServed).toHaveBeenCalledTimes(1)
+    expect(setSeatServed).toHaveBeenCalledWith('alfred', false, false)
   })
 
   it('clicking the trigger opens the modal and issues load', async () => {

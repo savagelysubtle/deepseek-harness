@@ -47,6 +47,8 @@ export function apply(ctx: ClientContext): void {
   const setSeatTools = (
     name: string, allow: readonly string[] | undefined, deny: readonly string[] | undefined,
   ): Promise<void> => controller.setSeatTools(name, allow, deny)
+  const setSeatServed = (name: string, served: boolean, acknowledgeSplit: boolean): Promise<void> =>
+    controller.setSeatServed(name, served, acknowledgeSplit)
   const injected = (): OrgBoardFace => ({
     hooks: { orgBoard: controller.store },
     load,
@@ -55,6 +57,7 @@ export function apply(ctx: ClientContext): void {
     addEdge,
     removeEdge,
     setSeatTools,
+    setSeatServed,
   })
 
   ctx.effect(() => () => { controller.dispose() }, 'ui-org-board: controller lifecycle')

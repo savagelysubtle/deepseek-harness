@@ -8,7 +8,9 @@
  * confusable with a failure) case, badges, and the detail panel.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import {
+  cleanup, fireEvent, render, screen, waitFor, within,
+} from '@testing-library/react'
 import type { ResponseValue } from '@deepseek-ai/dsh-api-remotes/client'
 import type { LocaleKeysOf } from '@deepseek-ai/dsh-client-ui-slots'
 import { OrgBoard } from '../src/client/OrgBoard.tsx'
@@ -99,6 +101,7 @@ function verbs() {
     addEdge: vi.fn<NonNullable<OrgBoardProps['addEdge']>>().mockResolvedValue(undefined),
     removeEdge: vi.fn<NonNullable<OrgBoardProps['removeEdge']>>().mockResolvedValue(undefined),
     setSeatTools: vi.fn<NonNullable<OrgBoardProps['setSeatTools']>>().mockResolvedValue(undefined),
+    setSeatServed: vi.fn<NonNullable<OrgBoardProps['setSeatServed']>>().mockResolvedValue(undefined),
   }
 }
 
@@ -531,5 +534,139 @@ describe('OrgBoard seat tools editing (SWD-134 slice 4 step 4)', () => {
     expect(screen.getByLabelText<HTMLInputElement>('Allowed tools').value).toBe('')
     fireEvent.click(screen.getByText('batman'))
     expect(screen.getByLabelText<HTMLInputElement>('Allowed tools').value).toBe('bash')
+  })
+})
+
+describe('OrgBoard served status toggle (SWD-134 slice 5 step 3)', () => {
+  it('opens a confirmation, and confirming calls setSeatServed with the right arguments', () => {
+    // No split anywhere in this state, so the write carries acknowledgeSplit: false.
+    const state = ready({ ...BASE_VALUE, drift: { ok: true, rows: [] } })
+    const { setSeatServed } = renderBoard(state)
+    fireEvent.click(screen.getByText('batman'))
+    expect(screen.queryByRole('dialog', { name: 'Change served status' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Change served status' }))
+    expect(screen.getByRole('dialog', { name: 'Change served status' })).toBeTruthy()
+    expect(setSeatServed).not.toHaveBeenCalled()
+    // RiskConfirmation gates its primary action on the acknowledgement checkbox.
+    // "Stop serving" -- distinct from SeatToolsEditor's own "Save" button,
+    // which is on screen at the same time (see OrgBoard.tsx's confirmLabel comment).
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Stop serving' }).disabled).toBe(true)
+    fireEvent.click(screen.getByRole('checkbox'))
+    fireEvent.click(screen.getByRole('button', { name: 'Stop serving' }))
+    expect(setSeatServed).toHaveBeenCalledTimes(1)
+    // batman has no drift row (fully served by both), so the toggle flips it off.
+    expect(setSeatServed).toHaveBeenCalledWith('batman', false, false)
+  })
+
+  it('cancelling the confirmation never calls setSeatServed', () => {
+    const state = ready({ ...BASE_VALUE, drift: { ok: true, rows: [] } })
+    const { setSeatServed } = renderBoard(state)
+    fireEvent.click(screen.getByText('batman'))
+    fireEvent.click(screen.getByRole('button', { name: 'Change served status' }))
+    fireEvent.click(screen.getByRole('checkbox'))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(setSeatServed).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog', { name: 'Change served status' })).toBeNull()
+  })
+
+  it('with drift.ok false, the toggle trigger carries a real disabled attribute, and clicking it anyway never calls setSeatServed or opens the confirmation', () => {
+    const state = ready({
+      ...BASE_VALUE,
+      mailboxBridge: { ok: false, reason: 'patch mount absent' },
+      drift: { ok: false, reason: 'mailboxBridge unavailable' },
+    })
+    const { setSeatServed } = renderBoard(state)
+    fireEvent.click(screen.getByText('alfred'))
+    const toggle = screen.getByRole<HTMLButtonElement>('button', { name: 'Change served status' })
+    expect(toggle.disabled).toBe(true)
+    fireEvent.click(toggle)
+    expect(setSeatServed).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog', { name: 'Change served status' })).toBeNull()
+    // No new banner text was added for this -- the existing drift-unavailable
+    // banner (already asserted by the drift-suppression tests above) is what
+    // explains it.
+  })
+
+  it('with a split present while toggling a DIFFERENT seat, the confirmation names the split seat and passes acknowledgeSplit: true', () => {
+    // BASE_VALUE's own drift rows already carry robin as split (mailbox-bridge
+    // false, tool-mailbox true) -- toggle batman, which has no row at all.
+    const { setSeatServed } = renderBoard(ready(BASE_VALUE))
+    fireEvent.click(screen.getByText('batman'))
+    fireEvent.click(screen.getByRole('button', { name: 'Change served status' }))
+    const dialog = screen.getByRole('dialog', { name: 'Change served status' })
+    expect(within(dialog).getByText(/robin/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('checkbox'))
+    fireEvent.click(screen.getByRole('button', { name: 'Stop serving' }))
+    expect(setSeatServed).toHaveBeenCalledWith('batman', false, true)
+  })
+
+  it('shows the classified served status text for the selected seat, matching the drift section', () => {
+    renderBoard(ready(BASE_VALUE))
+    fireEvent.click(screen.getByText('robin'))
+    // robin is the split row in BASE_VALUE.
+    expect(screen.getByText('Split — the two rosters disagree')).toBeTruthy()
+  })
+
+  it('renders the servedWrite split notice with the addresses named on each side', () => {
+    const state: OrgBoardState = {
+      status: 'ready',
+      error: null,
+      value: BASE_VALUE,
+      write: { pending: false, notice: null },
+      servedWrite: { pending: false, notice: { kind: 'split', onlyMailboxBridge: ['batman'], onlyToolMailbox: ['robin'] } },
+    }
+    renderBoard(state)
+    expect(screen.getByRole('alert').textContent).toBe(
+      translate('servedWrite.notice.split', { onlyMailboxBridge: 'batman', onlyToolMailbox: 'robin' }),
+    )
+  })
+
+  it('discloses the SERVER\'s split seats, not the board\'s own reading, once a split refusal is showing', () => {
+    // The server refused naming a ghost address -- served by one roster with
+    // no registry seat behind it, so the board's own scan over REGISTERED
+    // rows can never see it. Deriving the disclosure from the board alone
+    // would show no split, resend acknowledgeSplit: false, and be refused
+    // again on every retry with nothing on screen saying why.
+    const state: OrgBoardState = {
+      status: 'ready',
+      error: null,
+      value: BASE_VALUE,
+      write: { pending: false, notice: null },
+      servedWrite: { pending: false, notice: { kind: 'split', onlyMailboxBridge: ['ghost-address'], onlyToolMailbox: [] } },
+    }
+    const { setSeatServed } = renderBoard(state)
+    fireEvent.click(screen.getByText('batman'))
+    fireEvent.click(screen.getByRole('button', { name: 'Change served status' }))
+    const dialog = screen.getByRole('dialog', { name: 'Change served status' })
+    expect(within(dialog).getByText(/ghost-address/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('checkbox'))
+    fireEvent.click(screen.getByRole('button', { name: 'Stop serving' }))
+    expect(setSeatServed).toHaveBeenCalledWith('batman', false, true)
+  })
+
+  it('offers Retry on a failed served write and re-sends the identical payload', () => {
+    const state: OrgBoardState = {
+      status: 'ready',
+      error: null,
+      value: BASE_VALUE,
+      write: { pending: false, notice: null },
+      servedWrite: { pending: false, notice: null },
+    }
+    const { setSeatServed, rerenderWithState } = renderBoard(state)
+    fireEvent.click(screen.getByText('batman'))
+    fireEvent.click(screen.getByRole('button', { name: 'Change served status' }))
+    fireEvent.click(screen.getByRole('checkbox'))
+    fireEvent.click(screen.getByRole('button', { name: 'Stop serving' }))
+    expect(setSeatServed).toHaveBeenCalledTimes(1)
+
+    // The write came back failed: the banner must offer the same payload
+    // again rather than making the operator redo the whole confirmation.
+    rerenderWithState({
+      ...state,
+      servedWrite: { pending: false, notice: { kind: 'write-failed', message: 'disk full' } },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(setSeatServed).toHaveBeenCalledTimes(2)
+    expect(setSeatServed).toHaveBeenLastCalledWith('batman', false, true)
   })
 })

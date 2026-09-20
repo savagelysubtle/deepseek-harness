@@ -6,9 +6,10 @@ import type { OrgBoardState } from './org-board-store.ts'
 /**
  * Live verb + read snapshot for the Org Board control. Slice 2 was read-only
  * (`load` was the only verb); SWD-134 slice 4 step 3 adds the five
- * document-editing verbs — the component still never mutates the snapshot
- * itself, every verb round-trips through `OrgBoardController` and its
- * published `hooks.orgBoard` store the same way `load` always has.
+ * document-editing verbs; SWD-134 slice 5 step 3 adds `setSeatServed` — the
+ * component still never mutates the snapshot itself, every verb round-trips
+ * through `OrgBoardController` and its published `hooks.orgBoard` store the
+ * same way `load` always has.
  */
 export interface OrgBoardFace {
   hooks: {
@@ -27,4 +28,21 @@ export interface OrgBoardFace {
   removeEdge: (from: string, to: string) => Promise<void>
   /** Replace one seat's tool restriction; an empty/`undefined` allow AND deny clears it. */
   setSeatTools: (name: string, allow: readonly string[] | undefined, deny: readonly string[] | undefined) => Promise<void>
+  /**
+   * Set one seat's served / not-served state — the ONE fact the board offers
+   * per seat; see `org-board-store.ts`'s `setSeatServed` doc comment for why
+   * this always writes BOTH served rosters (`mailbox-bridge` and
+   * `tool-mailbox`) identically, never one without the other.
+   *
+   * REQUIRED, deliberately, exactly like the five verbs above: this whole
+   * board briefly shipped with its edit props optional and a silent no-op
+   * default, which let every control render fully wired-looking while doing
+   * nothing — the board's own tests mount it directly with their own mocks
+   * and never cross the seam that only the hosting `OrgBoardControl` closes,
+   * so the defect stayed green. A required prop turns an unwired call site
+   * into a BUILD failure instead of a passing test suite. Do NOT make this
+   * optional, and do NOT give it a default — that reintroduces the exact
+   * defect this comment exists to prevent.
+   */
+  setSeatServed: (name: string, served: boolean, acknowledgeSplit: boolean) => Promise<void>
 }

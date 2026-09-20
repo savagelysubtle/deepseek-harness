@@ -31,10 +31,10 @@ import { Button, RiskConfirmation } from '@deepseek-ai/dsh-client-ui-primitives'
 import './xyflow-base.module.css'
 import css from './OrgBoard.module.css'
 import { removeSeat as previewRemoveSeat } from './edit.ts'
-import type { OrgBoardWriteNotice, OrgBoardState } from './org-board-store.ts'
+import type { OrgBoardServedWriteNotice, OrgBoardWriteNotice, OrgBoardState } from './org-board-store.ts'
 import {
-  driftLists, missingRosterLabels, seatBadges, seatNamesOf, servedRosterLabels, unservedByName,
-  type DriftLists, type OrgBoardTranslate,
+  driftLists, missingRosterLabels, seatBadges, seatNamesOf, seatServedStatus, servedRosterLabels, unservedByName,
+  type DriftLists, type OrgBoardTranslate, type SeatServedStatus,
 } from './derive.ts'
 import { gridPositions } from './layout.ts'
 import { SeatNode, type SeatNodeType } from './SeatNode.tsx'
@@ -47,10 +47,10 @@ export interface OrgBoardProps {
   t: OrgBoardTranslate
   /**
    * Add one new seat. See {@link OrgBoardFace.addSeat} in `slots.ts` -- these
-   * five verbs share that exact signature, so `OrgBoardControl.tsx` forwards
-   * its own injected verbs straight through unchanged.
+   * six verbs share that exact signature shape, so `OrgBoardControl.tsx`
+   * forwards its own injected verbs straight through unchanged.
    *
-   * ALL FIVE ARE REQUIRED, deliberately. They were briefly optional with a
+   * ALL SIX ARE REQUIRED, deliberately. They were briefly optional with a
    * no-op fallback so an unforwarded call site could keep compiling, which
    * rendered every control on this board inert while looking live -- a
    * button that silently does nothing is the exact failure this board was
@@ -66,6 +66,17 @@ export interface OrgBoardProps {
   removeEdge: (from: string, to: string) => Promise<void>
   /** Replace one seat's tool restriction; an empty/`undefined` allow AND deny clears it. */
   setSeatTools: (name: string, allow: readonly string[] | undefined, deny: readonly string[] | undefined) => Promise<void>
+  /**
+   * Set one seat's served / not-served state, writing BOTH served rosters
+   * identically. See {@link OrgBoardFace.setSeatServed} in `slots.ts` for the
+   * full account of why this is REQUIRED and must never gain a default --
+   * this board once shipped an entire edit surface wired to nothing because
+   * its props were optional, with the full suite green throughout, since the
+   * board's own tests mount it directly and never cross the seam only
+   * `OrgBoardControl` closes. A required prop turns an unwired call site
+   * into a build error instead of a silently inert button.
+   */
+  setSeatServed: (name: string, served: boolean, acknowledgeSplit: boolean) => Promise<void>
 }
 
 /**
@@ -98,6 +109,49 @@ function writeNoticeText(notice: OrgBoardWriteNotice, t: OrgBoardTranslate): str
 /** The banner's `data-variant`: `conflict` is informational (a reload already fixed it), the other three are refusals/failures. */
 function writeNoticeVariant(kind: OrgBoardWriteNotice['kind']): 'error' | 'warning' {
   return kind === 'conflict' ? 'warning' : 'error'
+}
+
+/**
+ * The served-write notice's user-facing text -- {@link writeNoticeText}'s own
+ * shape, extended with the `split` kind's own message: the two served
+ * rosters already disagreed before this write ever ran, naming exactly which
+ * addresses only one side currently serves.
+ * @param notice - the store's most recent `setSeatServed` outcome.
+ * @param t - namespace-bound translate.
+ * @returns the message to show.
+ */
+function servedWriteNoticeText(notice: OrgBoardServedWriteNotice, t: OrgBoardTranslate): string {
+  switch (notice.kind) {
+    case 'invalid': return t('servedWrite.notice.invalid', { reason: notice.message })
+    case 'conflict': return t('servedWrite.notice.conflict')
+    case 'rejected': return t('servedWrite.notice.rejected', { reason: notice.message })
+    case 'write-failed': return t('servedWrite.notice.writeFailed')
+    case 'split': return t('servedWrite.notice.split', {
+      onlyMailboxBridge: notice.onlyMailboxBridge.length > 0 ? notice.onlyMailboxBridge.join(', ') : t('drift.unserved.empty'),
+      onlyToolMailbox: notice.onlyToolMailbox.length > 0 ? notice.onlyToolMailbox.join(', ') : t('drift.unserved.empty'),
+    })
+  }
+}
+
+/** The served-write banner's `data-variant`: `conflict` is informational, everything else (incl. `split`) is a refusal/failure. */
+function servedWriteNoticeVariant(kind: OrgBoardServedWriteNotice['kind']): 'error' | 'warning' {
+  return kind === 'conflict' ? 'warning' : 'error'
+}
+
+/**
+ * The served-status indicator's text for one of the three classified states
+ * -- reads {@link SeatServedStatus} literally, so it can never show a value
+ * `seatServedStatus` did not itself produce.
+ * @param status - the seat's classified served status.
+ * @param t - namespace-bound translate.
+ * @returns the label to show.
+ */
+function servedStatusLabel(status: SeatServedStatus, t: OrgBoardTranslate): string {
+  switch (status) {
+    case 'served': return t('detail.served.value.served')
+    case 'unserved': return t('detail.served.value.unserved')
+    case 'split': return t('detail.served.value.split')
+  }
 }
 
 /** Props for the detail panel's editable tool allow/deny lists. */
@@ -175,6 +229,7 @@ export function OrgBoard({
   addEdge,
   removeEdge,
   setSeatTools,
+  setSeatServed,
 }: OrgBoardProps) {
   const [selectedSeat, setSelectedSeat] = useState<string | null>(null)
   const [addSeatOpen, setAddSeatOpen] = useState(false)
@@ -185,12 +240,26 @@ export function OrgBoard({
   const [removeAcknowledged, setRemoveAcknowledged] = useState(false)
   const [edgeToRemove, setEdgeToRemove] = useState<{ from: string; to: string } | null>(null)
   const [edgeRemoveAcknowledged, setEdgeRemoveAcknowledged] = useState(false)
+  // The seat whose served state is pending confirmation, and the boolean it
+  // would be set to on confirm -- `nextServed` is captured at trigger-click
+  // time (never re-derived at confirm time) so a concurrent background
+  // reload landing while the confirmation is open can't silently flip which
+  // direction "confirm" commits to.
+  const [servedToggle, setServedToggle] = useState<{ name: string; nextServed: boolean } | null>(null)
+  const [servedAcknowledged, setServedAcknowledged] = useState(false)
   // The most recently attempted write, re-invocable verbatim -- 'write-failed'
   // is retry-the-same-payload territory (see org-board-store.ts's `write()`
   // doc comment: a failed write never advances the controller's held
   // document/token, so the identical verb call reproduces the identical
   // payload). Never read for anything but Retry.
   const [lastAttempt, setLastAttempt] = useState<(() => Promise<void>) | null>(null)
+  // The served-roster counterpart, kept separate so a failed registry write
+  // and a failed served write never offer each other's Retry. Only
+  // 'write-failed' is retried: 'rejected' means the content itself was
+  // refused, 'conflict' has already reloaded underneath the operator, and
+  // 'split' needs the confirmation's disclosure again rather than a silent
+  // resend of the same unacknowledged payload.
+  const [servedLastAttempt, setServedLastAttempt] = useState<(() => Promise<void>) | null>(null)
 
   if (state.status === 'error') {
     return (
@@ -215,8 +284,35 @@ export function OrgBoard({
   } = state.value
   const pending = state.write.pending
   const notice = state.write.notice
+  const servedPending = state.servedWrite.pending
+  const servedNotice = state.servedWrite.notice
   const lists = driftLists(drift)
   const driftLookup = unservedByName(lists?.unserved)
+  // Every currently-split REGISTERED seat, via `seatServedStatus`. This is a
+  // DIFFERENT reading of the same drift rows than the drift section renders
+  // below (`missingRosterLabels`/`servedRosterLabels` against
+  // `row.servedByMailboxBridge`/`row.servedByToolMailbox` directly, around
+  // line 469) -- that section answers "which specific roster(s) is this seat
+  // missing from", which needs the individual booleans, not a three-value
+  // summary, so it correctly never calls `seatServedStatus` at all. Two
+  // readings of the same row data are fine here: they answer different
+  // questions, not the same one twice.
+  //
+  // Scoped to REGISTERED rows only (`lists.unserved`), same scope as the
+  // drift section's own "unserved" column -- an address served by only one
+  // roster with no matching registry seat (e.g. a stray "ghost" entry) is
+  // just as split but never appears here, because it is `registered: false`
+  // and so lands in `lists.unregistered` instead. `servedConfirmDescription`
+  // below prefers the SERVER's own authoritative split lists over this one
+  // whenever a split-refusal notice is showing, which is exactly what covers
+  // that gap -- see that computation's own comment for why.
+  //
+  // `lists` (and so `driftLookup`) is `undefined`/empty whenever drift
+  // itself failed (per `driftLists`), so this reads as "none known" rather
+  // than crashing -- never confused with "no splits exist", since the
+  // toggle trigger is separately disabled whenever `!drift.ok` (see the
+  // detail panel below).
+  const splitSeatNames = (lists?.unserved ?? []).filter(row => seatServedStatus(row) === 'split').map(row => row.seat)
   const seatNames = registry.ok ? seatNamesOf(registry.registry) : []
   const positions = gridPositions(seatNames)
 
@@ -256,6 +352,25 @@ export function OrgBoard({
   const hasAllow = selectedRecord?.tools?.allow !== undefined && selectedRecord.tools.allow.length > 0
   const hasDeny = selectedRecord?.tools?.deny !== undefined && selectedRecord.tools.deny.length > 0
 
+  // The selected seat's drift row, and its served status through the ONE
+  // shared classifier -- gated on `drift.ok` (never just "row is absent"):
+  // when drift itself failed, `driftLookup` reads empty for every name
+  // regardless of the real underlying state, so treating that as "served"
+  // would be exactly the silently-wrong confident answer this whole feature
+  // exists to prevent. `null` here means "unknown", not "served".
+  const selectedDriftRow = selectedSeat !== null ? driftLookup.get(selectedSeat) : undefined
+  const selectedServedStatus: SeatServedStatus | null =
+    selectedRecord !== undefined && drift.ok ? seatServedStatus(selectedDriftRow) : null
+  // What `setSeatServed`'s `served` argument should flip TO on the next
+  // toggle click -- the opposite of whether `mailbox-bridge` (the base list
+  // `served-edit.ts`'s `nextServedAddresses` toggles against; see
+  // `org-board-store.ts`'s `servedAddresses` doc comment on why always that
+  // side, never `toolMailbox`) currently includes this seat. Only ever read
+  // from the trigger's `onClick`, which is itself disabled whenever
+  // `!drift.ok` -- see the toggle button below -- so an unknown baseline here
+  // is never acted on.
+  const selectedCurrentlyServedByMailboxBridge = selectedDriftRow === undefined ? true : selectedDriftRow.servedByMailboxBridge
+
   // Cascade preview for the pending seat-removal confirmation, computed from
   // the UNRESOLVED document (never `registry.registry`, which is a display
   // view) via edit.ts's own pure `removeSeat` -- the exact function the real
@@ -274,6 +389,36 @@ export function OrgBoard({
     ? ''
     : t('seat.remove.cascade', { seat: seatToRemove, count: removeCascadedEdges.length, edges: removeEdgesLabel })
       + (removeCascadedCallUp.length > 0 ? ` ${t('seat.remove.cascadeCallUp', { seat: seatToRemove })}` : '')
+
+  // The served-toggle confirmation's description, and whether this write
+  // must carry `acknowledgeSplit: true`: whenever ANY seat is currently split
+  // (per `splitSeatNames`, derived above through the shared `seatServedStatus`
+  // classifier), not only the seat being toggled -- `writeServed` replaces
+  // BOTH mounts with ONE list built off `mailbox-bridge`'s current addresses,
+  // so every other split seat's `tool-mailbox` side is unified onto that same
+  // list by this write too (see `org-board-store.ts`'s `setSeatServed` doc
+  // comment on why `servedAddresses` is always the `mailbox-bridge` list).
+  //
+  // TWO SOURCES, AND THE SERVER'S WINS. A split-refusal notice carries the
+  // split the server measured on the file it had just read; `splitSeatNames`
+  // is only this board's own reading. They agree in the ordinary case -- a
+  // split refusal can only be raised AFTER the content token matched, so the
+  // file has not moved since the board read it -- but they are scoped
+  // differently, and that difference is reachable: `splitSeatNames` covers
+  // REGISTERED seats only, while the server compares the two address lists
+  // whole. An address served by one roster with no registry seat behind it is
+  // split to the server and invisible here. Deriving the disclosure from the
+  // client alone would then refuse the save, show no split, and refuse again
+  // on every retry -- forever, with nothing on screen explaining why.
+  const serverSplitSeats = servedNotice?.kind === 'split'
+    ? [...new Set([...servedNotice.onlyMailboxBridge, ...servedNotice.onlyToolMailbox])].sort()
+    : null
+  const disclosedSplitSeats = serverSplitSeats ?? splitSeatNames
+  const servedAcknowledgeSplit = disclosedSplitSeats.length > 0
+  const servedConfirmDescription = servedToggle === null
+    ? ''
+    : t('servedConfirm.description', { seat: servedToggle.name })
+      + (servedAcknowledgeSplit ? ` ${t('servedConfirm.split', { seats: disclosedSplitSeats.join(', ') })}` : '')
 
   const handleAddSeatSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -306,6 +451,24 @@ export function OrgBoard({
               className={css.noticeRetry}
               disabled={pending}
               onClick={() => { void lastAttempt() }}
+            >
+              {t('write.notice.retry')}
+            </Button>
+          )}
+        </div>
+      )}
+
+      {servedNotice !== null && (
+        <div className={css.banner} data-variant={servedWriteNoticeVariant(servedNotice.kind)} role="alert">
+          <span>{servedWriteNoticeText(servedNotice, t)}</span>
+          {servedNotice.kind === 'write-failed' && servedLastAttempt !== null && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className={css.noticeRetry}
+              disabled={servedPending}
+              onClick={() => { void servedLastAttempt() }}
             >
               {t('write.notice.retry')}
             </Button>
@@ -512,6 +675,30 @@ export function OrgBoard({
                       <p className={css.detailLabel}>{t('detail.session')}</p>
                       <p className={css.detailValue}>{selectedRecord.sessionId ?? t('detail.session.none')}</p>
                     </div>
+                    <div className={css.detailRow}>
+                      <p className={css.detailLabel}>{t('detail.served.label')}</p>
+                      {selectedServedStatus !== null && (
+                        <p className={css.detailValue}>{servedStatusLabel(selectedServedStatus, t)}</p>
+                      )}
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        // Genuinely disabled -- a real `disabled` attribute,
+                        // never a CSS-only affordance -- whenever `!drift.ok`:
+                        // with no honest baseline to toggle from, acting on a
+                        // guessed empty list would write a roster derived
+                        // from nothing. The existing `error.drift` banner
+                        // above already explains why; this adds no new text.
+                        disabled={pending || servedPending || !drift.ok}
+                        onClick={() => {
+                          if (selectedSeat === null) return
+                          setServedToggle({ name: selectedSeat, nextServed: !selectedCurrentlyServedByMailboxBridge })
+                        }}
+                      >
+                        {t('detail.served.toggle')}
+                      </Button>
+                    </div>
                     {!hasAllow && !hasDeny && (
                       <p className={css.detailValue}>{t('detail.tools.none')}</p>
                     )}
@@ -575,6 +762,33 @@ export function OrgBoard({
               setEdgeRemoveAcknowledged(false)
               setLastAttempt(() => () => removeEdge(from, to))
               void removeEdge(from, to)
+            }}
+          />
+
+          <RiskConfirmation
+            open={servedToggle !== null}
+            title={t('servedConfirm.title')}
+            description={servedConfirmDescription}
+            acknowledgeLabel={servedAcknowledgeSplit ? t('servedConfirm.acknowledgeSplit') : t('servedConfirm.acknowledge')}
+            cancelLabel={t('action.cancel')}
+            // Distinct per direction -- deliberately never the generic "Save"
+            // SeatToolsEditor already uses in this same detail panel: both
+            // buttons can be on screen together (the modal overlays the
+            // panel, it does not unmount it), and a shared label would make
+            // them indistinguishable by accessible name.
+            confirmLabel={servedToggle !== null && servedToggle.nextServed ? t('action.serve') : t('action.stopServing')}
+            acknowledged={servedAcknowledged}
+            disabled={servedPending}
+            onAcknowledgedChange={setServedAcknowledged}
+            onCancel={() => { setServedToggle(null); setServedAcknowledged(false) }}
+            onConfirm={() => {
+              if (servedToggle === null) return
+              const { name, nextServed } = servedToggle
+              const acknowledgeSplit = servedAcknowledgeSplit
+              setServedToggle(null)
+              setServedAcknowledged(false)
+              setServedLastAttempt(() => () => setSeatServed(name, nextServed, acknowledgeSplit))
+              void setSeatServed(name, nextServed, acknowledgeSplit)
             }}
           />
         </div>
