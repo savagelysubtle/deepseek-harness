@@ -44,8 +44,12 @@ interagentstuff/
 interagent/
 *.code-workspace
 
-# seat working notes — churn, not law (personas stay committed)
-org/*/scratchpad/
+# seat files — the org's own personas and working notes, kept local.
+# These were removed from this repository's history on 2026-09-21, before its
+# first push to a public remote, and they stay out: the repository is public and
+# the personas are not. Ignoring the whole directory means a broad `git add`
+# cannot quietly put them back.
+org/
 
 # per-spawn-root permission grants
 .dsh/
