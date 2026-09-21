@@ -32,8 +32,11 @@ import {
   type MergedHookOutcome,
 } from '@deepseek-ai/dsh-hook-protocol'
 // Pulls in the declaration-merged subagent events and the identity pairing their
-// start/end edges.
-import type { SubagentRunId } from '@deepseek-ai/dsh-subagent'
+// start/end edges, plus the same last-assistant-output selection rule the
+// subagent seam itself uses for `SubagentRunEndInfo.lastAssistantMessage`, so
+// the Stop payload's `last_assistant_message` picks the same message a
+// SubagentStop payload would report for an equivalent child.
+import { finalAssistantOutput, type SubagentRunId } from '@deepseek-ai/dsh-subagent'
 import { parseClaudeCodeConfig, type ClaudeCodeHookConfig } from './config.ts'
 
 export const name = 'hooks-claude-code'
@@ -123,6 +126,17 @@ export function apply(ctx: Context, config: Config): void {
   // handle unregisters the agent. Every retained entry relies on that paired
   // end; a producer that can omit it must provide another release edge.
   const subagentChildren = new Map<SubagentRunId, Agent>()
+  // Consecutive forced continuations per agent, counted only at the Stop point
+  // (`agent/turn-stopping` below) — SubagentStop never acts on its hook's
+  // decision (observe-only, see the listener below), so it cannot loop and
+  // needs no counter of its own. A WeakMap keyed by the live Agent self-cleans
+  // once the agent is gone; unlike `subagentChildren` above there is no
+  // registry gap to bridge, so no explicit release edge is needed here.
+  const stopForcedContinuations = new WeakMap<Agent, number>()
+  // Claude Code's own Stop hook gives up after 8 consecutive self-forced
+  // continuations and lets the turn stop rather than loop forever; matched
+  // here so a refusing hook cannot trap an agent indefinitely.
+  const STOP_HOOK_LOOP_CAP = 8
   ctx.effect(() => () => detached.drain(), 'hooks-claude-code: drain detached hook runs')
 
   /**
@@ -265,15 +279,27 @@ export function apply(ctx: Context, config: Config): void {
   })
 
   // A blocking Stop hook steers at the stopping boundary, which makes the
-  // machine observe pending input and run another step.
-  // TODO(stop-loop-guard): cap consecutive forced continuations; hooks must self-limit meanwhile.
+  // machine observe pending input and run another step. `stop_hook_active`
+  // reports whether THIS stopping point follows a continuation this bridge
+  // already forced for the same agent, so a well-behaved hook can stand down;
+  // `STOP_HOOK_LOOP_CAP` is the backstop for one that never does.
   ctx.on('agent/turn-stopping', async ({ agent, turn, signal }): Promise<void> => {
-    const merged = await runPoint('Stop', '', stopPayload(ctx, agent), { agent, turn, signal })
-    if (merged.decision === 'deny') {
+    const forced = stopForcedContinuations.get(agent) ?? 0
+    const merged = await runPoint('Stop', '', stopPayload(ctx, agent, forced > 0), { agent, turn, signal })
+    if (merged.decision === 'deny' && forced < STOP_HOOK_LOOP_CAP) {
       // A blocking Stop hook forces continuation.
       const text = merged.reason ?? 'continue: blocked by Stop hook'
       agent.steer(createUserMessage({ content: [{ type: 'text', text }], source: PLUGIN_SOURCE }))
+      stopForcedContinuations.set(agent, forced + 1)
+      return
     }
+    if (merged.decision === 'deny') {
+      // The hook refused again past the cap: honor the cap over the hook,
+      // and delete below resets the streak — a later single refusal reports
+      // stop_hook_active:false again rather than staying stuck at true.
+      ctx.logger.warn(`hooks-claude-code: Stop hook refused ${STOP_HOOK_LOOP_CAP} consecutive times for agent "${agent.id}" — letting it stop instead of forcing another continuation`)
+    }
+    stopForcedContinuations.delete(agent)
   })
 
   // SubagentStart may inject child context; SubagentStop only observes. Both
@@ -319,6 +345,19 @@ function blocksToText(content: ContentBlock[]): string {
   return content.filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text').map(b => b.text).join('')
 }
 
+/**
+ * `last_assistant_message` for a Stop/SubagentStop payload — the field a
+ * done-evidence hook reads to judge a completion claim. Omitted (never the
+ * literal `"undefined"`) when there is no message, or when one exists but
+ * reduces to no text (non-text blocks only): both read as "no claim" to a
+ * hook, so both get the same absent field rather than an empty string.
+ */
+function lastAssistantMessageField(content: ContentBlock[] | undefined): Record<string, unknown> {
+  if (content === undefined) return {}
+  const text = blocksToText(content)
+  return text.length > 0 ? { last_assistant_message: text } : {}
+}
+
 function base(ctx: Context, agent: Agent | undefined, event: string): Record<string, unknown> {
   return {
     session_id: agent?.session.header.id ?? '',
@@ -342,20 +381,37 @@ function preToolPayload(ctx: Context, exec: ToolExecution): Record<string, unkno
 function postToolPayload(ctx: Context, exec: ToolExecution, result: ToolExecutionResult): Record<string, unknown> {
   return { ...base(ctx, exec.agent, 'PostToolUse'), tool_name: exec.name, tool_input: exec.arguments, tool_use_id: exec.callId, tool_response: blocksToText(result.content) }
 }
-function stopPayload(ctx: Context, agent: Agent): Record<string, unknown> {
-  return { ...base(ctx, agent, 'Stop'), stop_hook_active: false }
+/**
+ * `stopHookActive` is the caller's loop-guard state (true when this stopping
+ * point follows a continuation this bridge already forced for `agent`), and
+ * `last_assistant_message` is the agent's own final assistant output, selected
+ * by the same rule `@deepseek-ai/dsh-subagent` applies to a child's — the
+ * evidence a done-evidence Stop hook judges.
+ */
+function stopPayload(ctx: Context, agent: Agent, stopHookActive: boolean): Record<string, unknown> {
+  return {
+    ...base(ctx, agent, 'Stop'),
+    stop_hook_active: stopHookActive,
+    ...lastAssistantMessageField(finalAssistantOutput(agent.session.events)),
+  }
 }
 /**
  * Build a SubagentStart/SubagentStop payload from the CC base (the child's
  * `session_id`/`cwd` when the child agent is available) plus the subagent-hook
- * fields. `agent_type` is the CC-default {@link SUBAGENT_TYPE}; `stop_hook_active`
- * is present on SubagentStop only (the loop-guard flag, always false).
+ * fields. `agent_type` is the CC-default {@link SUBAGENT_TYPE}. `stop_hook_active`
+ * and `last_assistant_message` are present on SubagentStop only:
+ * `stop_hook_active` stays unconditionally `false` there (accurately, not as a
+ * stub) because SubagentStop is observe-only — the `subagent/end` listener
+ * below never acts on its hook's decision, so a SubagentStop can never be the
+ * re-entry after a forced continuation and has no loop to guard against;
+ * `last_assistant_message` comes from the end info's `lastAssistantMessage`,
+ * already selected by the same rule as the Stop payload's.
  */
-function subagentPayload(ctx: Context, event: 'SubagentStart' | 'SubagentStop', info: { id: string }, child: Agent | undefined): Record<string, unknown> {
+function subagentPayload(ctx: Context, event: 'SubagentStart' | 'SubagentStop', info: { id: string; lastAssistantMessage?: ContentBlock[] }, child: Agent | undefined): Record<string, unknown> {
   return {
     ...base(ctx, child, event),
     agent_id: info.id,
     agent_type: SUBAGENT_TYPE,
-    ...event === 'SubagentStop' ? { stop_hook_active: false } : {},
+    ...event === 'SubagentStop' ? { stop_hook_active: false, ...lastAssistantMessageField(info.lastAssistantMessage) } : {},
   }
 }
