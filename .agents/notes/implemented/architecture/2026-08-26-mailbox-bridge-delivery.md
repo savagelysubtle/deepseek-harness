@@ -17,6 +17,8 @@ After the seam and the SQLite store landed, queued mail still had no path to an 
 - Residency stays the named-session pid-liveness lock exactly as shipped, with `lockStaleMs` as the optional bounded-takeover escape (`maxAgeMs`) wedged holders need. A lost acquire settles `pending` immediately — the "resident elsewhere" deferral never burns a staleness window waiting. Absent persistence log → `failed 'unknown-address'`, which later becomes the SeatRegistry mint-gate tripwire. `done` settles AT ADMISSION (before quiescence), because admission semantics must not depend on how long the delivered turn runs afterward.
 - Delivery rendering lives in one shared module the headless runner reuses, so a queue drained at run start and one drained mid-flight produce byte- identical turns: subject + payload text under a merged `{ kind: 'mailbox', form: 'relay' }` source. The headless side exposes it as `--mailbox-namespace`, draining a fixed-bounds backlog before the task so the task remains the last message of the last turn.
 
+## Alternatives considered
+
 Rejected: pushing deliveries through session internals or synthetic events (model-visible ⟺ logged violation); per-address provider routing and push notification (no second consumer yet); making the poll timer keep hosts alive (an unref'd drain loop means mailbox deployments hold themselves up via their real long-lived handles).
 
 ## Verification

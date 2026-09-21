@@ -1,6 +1,6 @@
 # Agent Note: Tool-shaped project memory (memory-by-tool-call)
 
-Status: proposed
+Status: implemented
 
 English | [中文](2026-08-26-memory-tool-shaped.zh.md)
 
@@ -10,7 +10,7 @@ Steve's agents accumulate operational knowledge — session state, decisions, en
 
 Prompt-injection alternatives (a memory section recomputed each request) were ruled out by Steve directly: injected memory costs its full size on EVERY request whether or not it is relevant, pollutes the cacheable prefix whenever anything changes, and blurs what the model actually consulted.
 
-## Proposal
+## Decision
 
 One package (`@deepseek-ai/dsh-memory`), three faces:
 
@@ -20,7 +20,7 @@ One package (`@deepseek-ai/dsh-memory`), three faces:
 
 Scope slugs mirror the reference deployment's shape — `<workspace-basename>-<6 hash chars of sha256(resolved cwd)>` — so same-named checkouts never share notes while one checkout shares them across sessions, restarts, and seats.
 
-## Alternatives
+## Alternatives considered
 
 - **Injected memory sections / auto-recall embeddings.** Ruled out by directive: tool-shaped only. The deferred-work record keeps substring search as the ceiling; semantic recall can arrive later as another consumer of the same seam without touching the contract.
 - **Session-log-backed memory** (notes as session events). Rejected: wrong lifetime. Memory outlives any session and must be shared across them; the log is per-session by design.
@@ -32,7 +32,7 @@ Scope slugs mirror the reference deployment's shape — `<workspace-basename>-<6
 - Humans join the loop for free: notes are real files under `$DSH_HOME/memory/`, editable and diffable like any repo documentation.
 - Standard-preset adoption is a three-line group block; deployments that decline memory simply omit it, keeping request-cache catalogs stable.
 
-## Required verification
+## Verification
 
 - Keyless suites: provider round-trips, slug scoping/isolation, jail escape rejections (`../`, absolute, backslash, NUL, whitespace-only), byte bounds, search clipping and limits — plus the tool mounted through the real ToolRuntime exercising write→list→read→search against a session carrying a cwd, including the no-session rejection path.
-- REAL-composition snapshot coverage through a runnable example stays OPEN for the landing PR (this slice holds within the assigned write-set); the tool's render paths are otherwise pinned by unit assertions here.
+- No REAL-composition snapshot through a runnable example covers this seam; the tool's render paths are pinned by the unit assertions above.

@@ -156,7 +156,11 @@ export class FollowTailer {
 
   constructor(private readonly deps: FollowTailerDeps) {}
 
-  /** Whether a session currently has an active tail, or one that is still starting up. */
+  /**
+   * Whether a session currently has an active tail, or one that is still starting up.
+   * @param sessionId - the session to check.
+   * @returns true while the session is being polled or its tail is still initializing.
+   */
   isFollowing(sessionId: SessionId): boolean {
     return this.timers.has(sessionId) || this.starting.has(sessionId)
   }
@@ -198,7 +202,10 @@ export class FollowTailer {
     this.starting.delete(sessionId)
   }
 
-  /** Stop tailing a session (the owner died, or this host resumed ordinary ownership). Idempotent. */
+  /**
+   * Stop tailing a session (the owner died, or this host resumed ordinary ownership). Idempotent.
+   * @param sessionId - the session to stop tailing.
+   */
   stop(sessionId: SessionId): void {
     this.starting.delete(sessionId)
     const timer = this.timers.get(sessionId)

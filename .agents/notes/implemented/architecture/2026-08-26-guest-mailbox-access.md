@@ -17,9 +17,11 @@ Two paths over one address space, chosen by host health. Path A (host up): the l
 - Drain-time admission (`admitFromNamespaces`, default empty = fail-closed): an external writer bypasses write-side checks by construction, so acceptance of foreign-origin mail is decided in `deliverLease` before routing. Unparseable senders fail closed. Chairs-only is then composition, not code: only chair bridges opt into `['guest']`.
 - Payload isolation prerequisite (council-found DoS): one malformed-payload row previously poisoned the WHOLE claim batch for every address. The claim loop now isolates such rows (claim-owned, settled `failed/malformed-payload` after commit) and delivers their siblings.
 
-Rejected per council table: a claudecode-bridge plugin (bootstrap paradox); interop with Claude Code's own messaging (wrong transport, live-only); `peek()`/`list()` on MailboxProvider (claim+settle-pending already expresses non-consuming read — PR-B contract stays frozen); push notifications (guests are not pageable); write-time enforcement (impossible by construction); a separate guest-mailbox package (~200 lines of ceremony).
-
 Corrections recorded where the diffs touched them: plan config is `path` (→ `mailbox.db`) not `databasePath`(→ `.sqlite`); seat convention is colon form `<namespace>:<name>` (`gotham:alfred`), not slash; directory-vs-package-name divergence noted on the plan's package table.
+
+## Alternatives considered
+
+Rejected per council table: a claudecode-bridge plugin (bootstrap paradox); interop with Claude Code's own messaging (wrong transport, live-only); `peek()`/`list()` on MailboxProvider (claim+settle-pending already expresses non-consuming read — PR-B contract stays frozen); push notifications (guests are not pageable); write-time enforcement (impossible by construction); a separate guest-mailbox package (~200 lines of ceremony).
 
 ## Verification
 

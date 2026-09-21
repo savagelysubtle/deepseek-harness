@@ -269,6 +269,12 @@ function rowToTraceEntry(row: TraceRow): MailboxTraceEntry {
   }
 }
 
+/**
+ * The SQLite {@link MailboxProvider}: every durability and exclusivity
+ * guarantee lives in the SQL operations below. One instance owns exactly one
+ * `DatabaseSync`; instances are cheap enough that each plugin mount opens its
+ * own.
+ */
 export class SqliteMailboxStore implements MailboxProvider {
   readonly name = PROVIDER_NAME
 

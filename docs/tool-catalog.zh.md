@@ -17,7 +17,7 @@
 
 | 工具包 | 模型可见名称 | 依赖 | 写入／影响 | 随产品发布的别名 | 部署说明 |
 | --- | --- | --- | --- | --- | --- |
-| `@deepseek-ai/dsh-tool-mailbox` | `mailbox_await`、`mailbox_check_inbox`、`mailbox_send` | `ctx.tools`、`ctx.mailbox` | `tool/call`、`tool/result` | - | mailbox_send 不携带 sender 字段：运行时用受信会话名填充 `from`，席位无法冒充其他席位或创始人。其 replyToTraceId 把一条回复穿透到被等待发送的关联链上。mailbox_check_inbox 不取地址参数，只排水调用会话自身的端点。mailbox_await 占住回合直到回复到达（即使桥已投递也能读到）、被关联发送被拒、或截止时间到期。匿名运行（无会话名）在调用时让所有工具响亮失败，绝不回退到不受信身份。 |
+| `@deepseek-ai/dsh-tool-mailbox` | `mailbox_await`、`mailbox_check_inbox`、`mailbox_directory`、`mailbox_send` | `ctx.tools`、`ctx.mailbox` | `tool/call`、`tool/result` | - | mailbox_send 不携带 sender 字段：运行时用受信会话名填充 `from`，席位无法冒充其他席位或创始人。其 replyToTraceId 把一条回复穿透到被等待发送的关联链上。mailbox_check_inbox 不取地址参数，只排水调用会话自身的端点。mailbox_await 占住回合直到回复到达（即使桥已投递也能读到）、被关联发送被拒、或截止时间到期。mailbox_directory 列出组织内的席位，便于调用方找到用于寻址的裸名。匿名运行（无会话名）在调用时让所有工具响亮失败，绝不回退到不受信身份。 |
 | `@deepseek-ai/dsh-tool-ask-user` | `ask_user_question` | `ctx.tools`、`ctx.userQuestions` | `tool/call`、`tool/result after a UI/provider answers the question` | - | ask_user_question 会暂停工具调用，直到当前 UI 提供方返回人类答案。 |
 | `@deepseek-ai/dsh-tools` | `run_code` | `ctx.tools`、`ctx.codeRuntime (execution time)`、`ctx.systemPrompt` | `tool/call`、`one tool/code-dispatch-start + tool/code-dispatch pair per bridged sub-call`、`tool/result` | - | 在 `mode: code`／`mode: both` 下，它由工具注册表所有，作为可过滤能力层之外的保留传输机制（参见 Code Mode Agent Note）。在 `code` 下，它是注册表对协议格式（wire format）的唯一贡献；其他可见能力在使用已加载运行时语言生成的 SDK 章节中声明。程序通过 binding 调用这些能力，调用按照原生并发约定调度：启动顺序和策略遵循提交顺序，并发安全的函数体最多重叠执行 `maxParallelSubCalls` 个。调用会重新进入完整且受守卫保护的工具流水线，并将每个嵌套执行关联到此外层结果。 |
 | `@deepseek-ai/dsh-plan-mode` | `exit_plan_mode` | `ctx.tools`、`ctx.systemPrompt`、`ctx.userQuestions (execution time, opportunistic)` | `tool/call`、`plan/mode inactive on an approved review`、`tool/result` | - | 规划未激活时，exit_plan_mode 仍保留在面向模型的 schema 中，这样状态转换不会在规划策略变更之外额外造成工具目录变动。其执行路径会拒绝规划模式之外的调用；在规划模式下，它通过用户交互 seam 提交计划（批准／根据反馈继续规划），批准后会在步骤边界记录规划模式已停用。 |
@@ -83,6 +83,19 @@
 
 来源：[`packages/mailbox/tool-mailbox/src/index.ts`](../packages/mailbox/tool-mailbox/src/index.ts)
 
+### `mailbox_directory`
+
+列出组织目录中的每个席位及其角色，便于你在 mailbox_send 的 `to` 中按裸名称呼同事。不取参数。会标出本宿主服务哪些席位、哪些是部门主管，以及哪些是绝不可发信的一次性测试席位。拓扑与准入在你发送时才强制执行——目录告诉你谁存在，而不是谁能听到你。
+
+```json
+{
+  "type": "object",
+  "properties": {}
+}
+```
+
+来源：[`packages/mailbox/tool-mailbox/src/index.ts`](../packages/mailbox/tool-mailbox/src/index.ts)
+
 ### `mailbox_send`
 
 按裸名向另一个席位发送邮箱消息。发送者由运行时根据本会话的受信名填充，无法选择或更改——收件人看到的消息来自本席位。回复作为各自的 mailbox_send 调用传输，不在本调用之内。当本消息就是对方正在等待的回复时，把它发送者引用的 traceId 作为 replyToTraceId 传入：回复随即携带该关联 id，等待席位的 mailbox_await 就能匹配到它而不是超时。结果会给出一个 traceId：把它传给 mailbox_await，即可占住本回合直到回复到达或截止时间到期。
@@ -122,7 +135,7 @@
 
 来源：[`packages/mailbox/tool-mailbox/src/index.ts`](../packages/mailbox/tool-mailbox/src/index.ts)
 
-mailbox_send 不携带 sender 字段：运行时用受信会话名填充 `from`，席位无法冒充其他席位或创始人。其 replyToTraceId 把一条回复穿透到被等待发送的关联链上。mailbox_check_inbox 不取地址参数，只排水调用会话自身的端点。mailbox_await 占住回合直到回复到达（即使桥已投递也能读到）、被关联发送被拒、或截止时间到期。匿名运行（无会话名）在调用时让所有工具响亮失败，绝不回退到不受信身份。
+mailbox_send 不携带 sender 字段：运行时用受信会话名填充 `from`，席位无法冒充其他席位或创始人。其 replyToTraceId 把一条回复穿透到被等待发送的关联链上。mailbox_check_inbox 不取地址参数，只排水调用会话自身的端点。mailbox_await 占住回合直到回复到达（即使桥已投递也能读到）、被关联发送被拒、或截止时间到期。mailbox_directory 列出组织内的席位，便于调用方找到用于寻址的裸名。匿名运行（无会话名）在调用时让所有工具响亮失败，绝不回退到不受信身份。
 
 <a id="deepseek-aidsh-tool-ask-user"></a>
 

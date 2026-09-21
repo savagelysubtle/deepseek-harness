@@ -17,6 +17,7 @@ import type { MailboxAddress, MailboxLease, MailboxMessageId, MailboxRegistry, M
 import { loadOrgRegistry } from '@deepseek-ai/dsh-mailbox'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { resolveMailboxIdentityWithRegistry } from './identity.ts'
 import type { IdentitySources } from './identity.ts'
 
@@ -451,7 +452,7 @@ function takePreStorageRefusal(traceId: string): string | undefined {
  *   agent's own session id is added per call.
  * @returns the registry-ready tool definition.
  */
-export function mailboxSendTool(mailbox: MailboxRegistry, identity: IdentitySources) {
+export function mailboxSendTool(mailbox: MailboxRegistry, identity: IdentitySources): ToolDefinition {
   return defineTool({
     name: 'mailbox_send',
     description: 'Send a mailbox message to another seat by its bare name. '
@@ -597,7 +598,7 @@ export function mailboxSendTool(mailbox: MailboxRegistry, identity: IdentitySour
  *   agent's own session id is added per call.
  * @returns the registry-ready tool definition.
  */
-export function mailboxCheckInboxTool(mailbox: MailboxRegistry, identity: IdentitySources) {
+export function mailboxCheckInboxTool(mailbox: MailboxRegistry, identity: IdentitySources): ToolDefinition {
   return defineTool({
     name: 'mailbox_check_inbox',
     description: 'Drain this seat\'s own mailbox: claim and deliver every pending message addressed to this seat. '
@@ -901,7 +902,7 @@ function renderAwaitOutcome(traceId: string | undefined, value: MailboxAwaitResu
  *   agent's own session id is added per call.
  * @returns the registry-ready tool definition.
  */
-export function mailboxAwaitTool(mailbox: MailboxRegistry, identity: IdentitySources) {
+export function mailboxAwaitTool(mailbox: MailboxRegistry, identity: IdentitySources): ToolDefinition {
   return defineTool({
     name: 'mailbox_await',
     description: 'Hold this turn until a reply arrives or the deadline expires — the wait primitive to call right after '
@@ -1100,7 +1101,7 @@ function renderDirectory(value: MailboxDirectoryResult): string {
 export function mailboxDirectoryTool(config: {
   readonly addresses?: readonly string[]
   readonly orgRegistryPath?: string
-}) {
+}): ToolDefinition {
   // Grammar-checked once at mount: a malformed roster address is a
   // self-contained misconfiguration and fails loud here, not at call time.
   const roster = new Set((config.addresses ?? []).map(name => parseMailboxAddress(name)))

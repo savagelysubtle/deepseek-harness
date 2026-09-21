@@ -29,9 +29,3 @@ Configuration comes from CLI flags, not from a running host: `--repo-root` defau
 ## Testing
 
 `packages/worktree/worktree/tests/cli.spec.ts` pins the parser (subcommands, optional `--main-ref`/path flags, `--help` selection, loud unknown/missing/ malformed refusals), the output contract (JSON on stdout with exit 0, usage with exactly one trailing newline, `<code>: <message>` refusals on stderr with exit 1), the cross-invocation lifecycle over real git (spawn → re-lock refusal → unlock → lock → locked-remove refusal → unlock → remove, rows carried by the registry mirror between separate invocations), the env gate and config refusals, and the bin entry: the symlink-resolving execution guard and a subprocess run of the real source entry through tsx.
-
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
-#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-31-worktree-cli.md
-2026-08-31-worktree-cli.md: PENDING 2026-08-31-worktree-cli.zh.md: PENDING

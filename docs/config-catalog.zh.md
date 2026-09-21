@@ -88,6 +88,36 @@ export interface Config {
 
 来源：[`packages/examples/acp-demo/src/index.ts:39`](../packages/examples/acp-demo/src/index.ts)
 
+<a id="deepseek-aidsh-ag-ui"></a>
+
+## `@deepseek-ai/dsh-ag-ui`
+
+Requires: `sessions`
+
+```ts config-catalog
+/** Plugin config: listener address, required bearer token, and buffering knobs. */
+export type Config = AgUiConfig
+
+/** Deployment configuration for the AG-UI outbound adapter plugin. */
+export interface AgUiConfig {
+  /** Bind address of the adapter's own HTTP listener. Defaults to loopback. */
+  host?: string
+  /** TCP port of the adapter's own HTTP listener; 0 selects an ephemeral port. */
+  port: number
+  /**
+   * Required bearer token every request must present. Fewer than 8 characters
+   * fails schema validation at load.
+   */
+  bearerToken: string
+  /** Interval in milliseconds between SSE keepalive comments. Defaults to 15000. */
+  keepAliveMs?: number
+  /** Per-connection event queue bound; overflow terminates that stream. Defaults to 256. */
+  maxBufferedEvents?: number
+}
+```
+
+Source: [`packages/agui/ag-ui/src/index.ts:47`](../packages/agui/ag-ui/src/index.ts)
+
 <a id="deepseek-aidsh-agent-default-model"></a>
 
 ## `@deepseek-ai/dsh-agent-default-model`
@@ -148,6 +178,12 @@ export interface Config {
    * omission defaults to {@link DEFAULT_MAX_PARALLEL_TOOL_CALLS}.
    */
   maxParallelToolCalls?: number
+  /**
+   * Drift-tolerant loop-guard thresholds (reasoning/output-text drift and
+   * repeated no-op tool calls). Omission, or an omitted individual field,
+   * takes the detectors' own sane defaults — see {@link resolveLoopGuardConfig}.
+   */
+  loopGuard?: LoopGuardConfig
   /** Agents created or resumed at plugin startup. */
   agents: (AgentOptions & {
     /** Stable config label used in logs and as the fresh combined-id prefix. */
@@ -160,11 +196,23 @@ export interface Config {
     resumeSessionId?: SessionId
   })[]
 }
+
+/** Loop-guard thresholds a deployment may override; unset fields take the detector's own defaults. */
+export interface LoopGuardConfig {
+  /** Words per reasoning/output shingle. */
+  reasoningShingleSize?: number
+  /** Trailing shingles the drift guard keeps live counts for. */
+  reasoningWindowSize?: number
+  /** In-window shingle recurrences that trip the reasoning/output drift guard. */
+  reasoningDriftThreshold?: number
+  /** Consecutive identical tool-call signatures that trip the tool-repeat guard. */
+  toolRepeatThreshold?: number
+}
 ```
 
 依赖：[`AgentOptions`](subsystems/core.md) · [`SessionId`](subsystems/core.md)
 
-来源：[`packages/core/agent-loop/src/index.ts:255`](../packages/core/agent-loop/src/index.ts)
+Source: [`packages/core/agent-loop/src/index.ts:271`](../packages/core/agent-loop/src/index.ts)
 
 <a id="deepseek-aidsh-agent-presets"></a>
 
@@ -484,7 +532,10 @@ export interface BasicCompactionConfig extends CompactionPolicyConfig {
 
 /** Policy fields shared by the default policy and exact model overrides. */
 export interface CompactionPolicyConfig {
-  /** Compact at this fraction of the model's context window. Defaults to `0.8`. */
+  /**
+   * Compact at this fraction of the model's context window. Defaults to `0.95`:
+   * warnings plan earlier, so the automatic flush is the hard backstop.
+   */
   thresholdRatio?: number
   /** Recent context retained as a fraction of the model's window. Defaults to `0.16`. */
   retainRatio?: number
@@ -511,7 +562,7 @@ export interface ModelCompactPolicyConfig extends CompactionPolicyConfig {
 }
 ```
 
-来源：[`packages/compaction/compaction-basic/src/types.ts:38`](../packages/compaction/compaction-basic/src/types.ts)
+Source: [`packages/compaction/compaction-basic/src/types.ts:41`](../packages/compaction/compaction-basic/src/types.ts)
 
 <a id="deepseek-aidsh-compaction-tool-result-pruner"></a>
 
@@ -532,6 +583,22 @@ export interface ToolResultPruneConfig {
 ```
 
 来源：[`packages/compaction/compaction-tool-result-pruner/src/types.ts:4`](../packages/compaction/compaction-tool-result-pruner/src/types.ts)
+
+<a id="deepseek-aidsh-context-pressure"></a>
+
+## `@deepseek-ai/dsh-context-pressure`
+
+Requires: `llm` · `tokenMeter` · `agents`
+
+```ts config-catalog
+/** Request-preparation pressure configuration. Invalid values fail plugin load. */
+export interface Config {
+  /** Fractions of the routed model's context window; ascending, unique, each in (0,1). Omit for the default [0.25, 0.5, 0.75]. */
+  thresholds?: number[]
+}
+```
+
+Source: [`packages/context/context-pressure/src/config.ts:10`](../packages/context/context-pressure/src/config.ts)
 
 <a id="deepseek-aidsh-cordis-host-runner"></a>
 
@@ -646,17 +713,38 @@ export interface Config {
 
 ## `@deepseek-ai/dsh-headless`
 
-需要：`agentDefaultModel` · `agents` · `sessions`
+Requires: `agentDefaultModel` · `agents` · `sessions` · `sessionPersistence`
 
 ```ts config-catalog
-/** Plugin config: the task resolved from this app's injected provider service. */
+/** Plugin config: the task plus the optional named-session invocation shape. */
 export interface Config {
   /** The prompt text for the single run. */
   task: string
+  /**
+   * Run against the durable named session derived from this name: first use
+   * creates it, later uses resume it. Absent for anonymous one-shot runs.
+   */
+  sessionName?: string
+  /**
+   * Durable session id to run against, overriding derivation from
+   * {@link Config.sessionName}.
+   *
+   * Identity belongs to whoever knows the org, not to the runner. A seat whose
+   * id is recorded in the org registry keeps that id through a rename, so the
+   * caller resolves it and passes it here; deriving from the name would move
+   * the id when the label moved and orphan the log. The name is still required
+   * — it labels the run and names the lock's error text.
+   */
+  sessionId?: string
+  /** Output mode; the schema default is `text`. */
+  format?: OutputFormat
 }
+
+/** Output formats the runner can produce. */
+export type OutputFormat = 'text' | 'json'
 ```
 
-来源：[`packages/bundle/headless/src/index.ts:31`](../packages/bundle/headless/src/index.ts)
+Source: [`packages/bundle/headless/src/index.ts:47`](../packages/bundle/headless/src/index.ts)
 
 <a id="deepseek-aidsh-hooks-claude-code"></a>
 
@@ -755,7 +843,7 @@ export interface Config {
 }
 ```
 
-来源：[`packages/host/apiproxy/src/index.ts:41`](../packages/host/apiproxy/src/index.ts)
+Source: [`packages/host/apiproxy/src/index.ts:46`](../packages/host/apiproxy/src/index.ts)
 
 <a id="deepseek-aidsh-host-directory-picker-browse"></a>
 
@@ -1206,6 +1294,163 @@ export interface LspLocalServerConfig {
 
 来源：[`packages/lsp/lsp-stdio/src/index.ts:82`](../packages/lsp/lsp-stdio/src/index.ts)
 
+<a id="deepseek-aidsh-mailbox-bridge"></a>
+
+## `@deepseek-ai/dsh-mailbox-bridge`
+
+Requires: `mailbox` · `agents` · `mailboxLocal`
+
+```ts config-catalog
+/** Plugin configuration. */
+export interface Config {
+  /**
+   * The bare seat addresses the bridge serves. Every grammar violation fails
+   * schema-adjacent resolution at mount; routing derives each target's
+   * session id from the address with no second encoding.
+   */
+  readonly addresses?: readonly string[]
+  /** Pause between drain cycles in milliseconds. */
+  readonly pollIntervalMs?: number
+  /** Upper bound on leases claimed per cycle; providers may return fewer. */
+  readonly maxClaimPerCycle?: number
+  /** Age past which an abandoned `claimed` message becomes claimable again. */
+  readonly staleClaimMs?: number
+  /**
+   * Cold-resume takeover bound passed to the named-session lock: a holder
+   * older than this many milliseconds loses the artifact even while alive.
+   * Absent (the default): pid liveness is the only takeover path.
+   */
+  readonly lockStaleMs?: number
+  /**
+   * Idle milliseconds a woken seat's agent stays resident in this host after
+   * its last delivery, so the operator's composer and later mail steer it in
+   * place instead of cold-starting. Zero disposes immediately (delivery-time
+   * semantics). Absent: the default bound.
+   */
+  readonly residencyIdleMs?: number
+  /**
+   * Sender addresses whose mail this bridge's addresses will accept beyond
+   * the served roster. Empty (the default) admits no external-origin mail
+   * except the `guest:` channel ({@link Config.admitGuests}): an outside
+   * writer bypasses every write-side check by construction, so admission is
+   * decided here at drain, where the store can actually enforce it. A
+   * `guest:`-prefixed sender whose stripped name appears here is also
+   * admitted, so a list written for bare sender names keeps matching the
+   * mail the CLI stamps.
+   */
+  readonly admitFrom?: readonly string[]
+  /**
+   * Whether the `guest:`-prefixed outside-operator channel is admitted. The
+   * CLI stamps every guest send with the prefix (a seat cannot claim it —
+   * the transport sets the sender), so true (the default) keeps the
+   * bootstrap path — mail written while no host is up — reaching its seat.
+   *
+   * A guest sender bypasses the `test: true` boundary and the org topology
+   * BY DESIGN. Both rules key off roster seats and judge seat-to-seat pairs;
+   * a guest is never a roster seat, so neither rule applies to it — a
+   * `guest:`-prefixed CLI can mail a live seat, a test seat, or a seat with
+   * no edge to anything. That is the break-glass property the channel exists
+   * for: an outside operator must always be able to reach a working seat,
+   * including for repair, without provisioning an edge first. It costs the
+   * sender no authority: the delivered envelope renders the guest
+   * `unverified`, and the recipient is told so. The loop guards DO still
+   * apply to guest mail in full — size, depth, repeat, and hops.
+   *
+   * False closes the channel, and is the only switch that does: no edge, no
+   * roster mark, and no other rule closes it while it is admitted. Only the
+   * served roster and exact `admitFrom` matches (including a
+   * `guest:`-prefixed sender whose stripped name is listed) are admitted.
+   */
+  readonly admitGuests?: boolean
+  /**
+   * Maximum rendered sender content one message may bring — subject plus
+   * payload, the text the delivered turn carries — in characters. A larger
+   * message is refused naming both sizes. This is a message-shape guard, not a
+   * volume cap: it stops an unbounded payload entering the shared store, and
+   * has no opinion about how many messages flow.
+   */
+  readonly maxMessageChars?: number
+  /**
+   * Maximum messages admitted to ONE recipient address within
+   * `depthWindowMs`. Beyond it the bridge refuses instead of waking the seat
+   * again: a seat's queue must not grow without bound, and a
+   * conversation loop shows up exactly as one address being fed faster than
+   * anyone reads it. Windowed, so ordinary volume resumes when the window
+   * slides; it bounds one address's intake rate, never the org's total work.
+   */
+  readonly maxDepthPerAddress?: number
+  /** Sliding window `maxDepthPerAddress` counts within, in milliseconds. */
+  readonly depthWindowMs?: number
+  /**
+   * Window within which a substantially identical repeat — same sender, same
+   * recipient, same subject and payload — is suppressed with a refusal that
+   * names the original message and says not to resend. A loop is two seats
+   * re-sending the same thing to each other: a correctness bug, not
+   * expensive work, and suppressing the repeat never stops legitimate
+   * activity. Content is fingerprinted exactly (sha256 over sender,
+   * recipient, and rendered body), and the most recent
+   * `RECENT_FINGERPRINTS_PER_PAIR` admissions per pair are remembered, so
+   * alternating repeats are caught too.
+   */
+  readonly repeatWindowMs?: number
+  /**
+   * Maximum admitted deliveries one `traceId` chain may carry per UTC day
+   * before further mail on that trace is refused. The trace id is the
+   * correlation field that rides the message producer → delivery → bounce
+   * (the routing-failure bounce path preserves it), so a relayed chain
+   * terminates instead of hopping forever. The counter is per mounted
+   * bridge and counts hops as they are ADMITTED — a queued burst on one
+   * trace is judged per hop, not by the backlog ahead of it — and resets
+   * at 00:00 UTC and on host restart, so a chronic but legitimate relay
+   * thread never locks permanently. Conversation mail that does not thread
+   * a trace id is bounded by the depth and repeat guards instead.
+   */
+  readonly maxHopsPerTrace?: number
+  /**
+   * Path to the org registry that resolves a seat name to its project
+   * directory. A provisioned seat is created in ITS OWN cwd, never the host's:
+   * the panel groups sessions by directory, so a seat created under the host's
+   * cwd is filed where nobody looks. Absent: the harness-home default.
+   */
+  readonly orgRegistryPath?: string
+  /**
+   * Explicit live-seat roster: full served addresses routed to an EXISTING
+   * session id instead of the name-derivation default. This is how web-host
+   * seat sessions (whose ids are not named-derived) become reachable. Absent
+   * (the default): pure derivation — fail-closed, no discovery magic.
+   */
+  readonly seatAliases?: readonly {
+    /** The full served mailbox address the alias routes; grammar-checked at mount with every served address. */
+    readonly address: string
+    /** The existing session id mail to that address is delivered into, bypassing name derivation. */
+    readonly sessionId: string
+  }[]
+}
+```
+
+Source: [`packages/mailbox/bridge/src/index.ts:203`](../packages/mailbox/bridge/src/index.ts)
+
+<a id="deepseek-aidsh-mailbox-local"></a>
+
+## `@deepseek-ai/dsh-mailbox-local`
+
+Requires: `mailbox`
+
+```ts config-catalog
+/** Plugin configuration. */
+export interface Config {
+  /**
+   * Filesystem path to the SQLite database file. The special value `:memory:`
+   * opens an in-process database (tests). Missing directories and databases
+   * are created owner-only; existing file modes are preserved. Absent:
+   * `<dsh home>/mailbox/mailbox.db`.
+   */
+  readonly path?: string
+}
+```
+
+Source: [`packages/mailbox/local/src/index.ts:24`](../packages/mailbox/local/src/index.ts)
+
 <a id="deepseek-aidsh-mcp-client"></a>
 
 ## `@deepseek-ai/dsh-mcp-client`
@@ -1256,6 +1501,11 @@ export interface StreamableHttpConfig {
   url: string
   /** Additional headers attached to MCP requests. */
   headers: Record<string, string>
+  /**
+   * OAuth 2.0 authorization for this server. Omission sends requests as-is;
+   * a server that answers 401 then fails the connection with its diagnostic.
+   */
+  auth?: OAuthAuthConfig
   /** Per-tool-call timeout in milliseconds. */
   toolCallTimeoutMs: number
   /** Fail plugin activation when the initial connection or tool synchronization fails. */
@@ -1275,9 +1525,28 @@ export interface ReconnectConfig {
   /** Consecutive failed attempts per outage before giving up for good (default 10). */
   maxAttempts?: number
 }
+
+/**
+ * OAuth configuration for one server. Authorization is explicit config, never
+ * an auto-started flow on an unexpected 401: consent is human approval of one
+ * identity grant, so it is declared here where a reviewer can see it.
+ */
+export interface OAuthAuthConfig {
+  /** Selects the OAuth 2.0 authorization-code flow with PKCE. */
+  mode: 'oauth'
+  /** Scope string requested when the server does not advertise one; omission lets discovery decide. */
+  scope?: string
+  /** Pre-registered client id; omission performs RFC 7591 dynamic client registration on first consent. */
+  clientId?: string
+  /**
+   * Loopback port for the consent redirect. Must match the `--redirect-port`
+   * passed to the `dsh-mcp-client-auth` consent CLI. Default {@link DEFAULT_OAUTH_REDIRECT_PORT}.
+   */
+  redirectPort?: number
+}
 ```
 
-来源：[`packages/mcp/mcp-client/src/index.ts:98`](../packages/mcp/mcp-client/src/index.ts)
+Source: [`packages/mcp/mcp-client/src/index.ts:141`](../packages/mcp/mcp-client/src/index.ts)
 
 <a id="deepseek-aidsh-message-feedback"></a>
 
@@ -1583,7 +1852,7 @@ export interface Config {
 export type JsonlCompression = 'zstd' | 'none'
 ```
 
-来源：[`packages/session/session-persistence-jsonl/src/index.ts:60`](../packages/session/session-persistence-jsonl/src/index.ts)
+Source: [`packages/session/session-persistence-jsonl/src/index.ts:72`](../packages/session/session-persistence-jsonl/src/index.ts)
 
 <a id="deepseek-aidsh-session-persistence-sqlite"></a>
 
@@ -2469,6 +2738,17 @@ export interface Config {
    * completion wakes it again.
    */
   maxConsecutiveWakes?: number
+  /**
+   * The same bound for a machine-owned owner — an agent whose session header
+   * carries `origin: 'subagent'`. A delegated child cannot ask (its approval
+   * policy is pinned at delegation), so job settlements are its only built-in
+   * reactivation channel, and starving them silently strands parked children.
+   * Its budget is larger, and exhausting it delivers one loud wind-down turn
+   * that directs the child to persist state via the memory tool before the
+   * degrade-to-injection behavior takes over. Reset by the same user-authored
+   * input as {@link Config.maxConsecutiveWakes} (default 16).
+   */
+  machineOwnerWakeBudget?: number
 }
 
 /**
@@ -2500,6 +2780,43 @@ export interface Config {
 ```
 
 来源：[`packages/lsp/tool-lsp/src/index.ts:58`](../packages/lsp/tool-lsp/src/index.ts)
+
+<a id="deepseek-aidsh-tool-mailbox"></a>
+
+## `@deepseek-ai/dsh-tool-mailbox`
+
+Requires: `tools` · `mailbox`
+
+```ts config-catalog
+/** Plugin configuration: the trusted identity source of the mailbox tools. */
+export interface Config {
+  /**
+   * The calling session's trusted name — the name the operator's launcher
+   * passed to this process. Correct only where the process serves ONE seat,
+   * which is the headless run. Absent for an anonymous run: the tools then
+   * fail loud at call time (see {@link resolveMailboxIdentity}), because
+   * there is no identity to trust.
+   */
+  readonly sessionName?: string
+  /**
+   * The addresses this deployment serves — the same roster the bridge is
+   * mounted with. Set it wherever one process serves MANY seats (the host
+   * behind the UI): the identity then comes from the calling agent's own
+   * session id matched against this roster, never from a mount-time name,
+   * which in a many-seat process would stamp every session as one seat.
+   */
+  readonly addresses?: string[]
+  /**
+   * The org registry the `mailbox_directory` tool lists — the same file the
+   * bridge reads for topology. Defaults to the harness home's
+   * `org/registry.yml`; override wherever the bridge is pointed elsewhere so
+   * the two describe the same org.
+   */
+  readonly orgRegistryPath?: string
+}
+```
+
+Source: [`packages/mailbox/tool-mailbox/src/index.ts:49`](../packages/mailbox/tool-mailbox/src/index.ts)
 
 <a id="deepseek-aidsh-tool-pwsh"></a>
 
@@ -3034,6 +3351,7 @@ export interface Config {
 - `@deepseek-ai/dsh-client-modules` — 需要 `webServer` · `loader`（[`packages/client/modules/src/index.ts`](../packages/client/modules/src/index.ts)）
 - `@deepseek-ai/dsh-client-runtime`（[`packages/client/runtime/src/index.ts`](../packages/client/runtime/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-agent-preset`（[`packages/client/ui-agent-preset/src/index.ts`](../packages/client/ui-agent-preset/src/index.ts)）
+- `@deepseek-ai/dsh-client-ui-agents`（[`packages/client/ui-agents/src/index.ts`](../packages/client/ui-agents/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-commands`（[`packages/client/ui-commands/src/index.ts`](../packages/client/ui-commands/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-conversation`（[`packages/client/ui-conversation/src/index.ts`](../packages/client/ui-conversation/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-cordis`（[`packages/extensions/ui-cordis/src/index.ts`](../packages/extensions/ui-cordis/src/index.ts)）
@@ -3046,6 +3364,8 @@ export interface Config {
 - `@deepseek-ai/dsh-client-ui-layout`（[`packages/client/ui-layout/src/index.ts`](../packages/client/ui-layout/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-message-feedback`（[`packages/client/ui-message-feedback/src/index.ts`](../packages/client/ui-message-feedback/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-model-selection`（[`packages/client/ui-model-selection/src/index.ts`](../packages/client/ui-model-selection/src/index.ts)）
+- `@deepseek-ai/dsh-client-ui-org-board`（[`packages/client/ui-org-board/src/index.ts`](../packages/client/ui-org-board/src/index.ts)）
+- `@deepseek-ai/dsh-client-ui-org-controls`（[`packages/client/ui-org-controls/src/index.ts`](../packages/client/ui-org-controls/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-permission-presets`（[`packages/client/ui-permission-presets/src/index.ts`](../packages/client/ui-permission-presets/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-plan`（[`packages/client/ui-plan/src/index.ts`](../packages/client/ui-plan/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-settings`（[`packages/client/ui-settings/src/index.ts`](../packages/client/ui-settings/src/index.ts)）
@@ -3062,7 +3382,7 @@ export interface Config {
 - `@deepseek-ai/dsh-client-ui-user-questions`（[`packages/client/ui-user-questions/src/index.ts`](../packages/client/ui-user-questions/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-workflow-run`（[`packages/client/ui-workflow-run/src/index.ts`](../packages/client/ui-workflow-run/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-workspace`（[`packages/client/ui-workspace/src/index.ts`](../packages/client/ui-workspace/src/index.ts)）
-- `@deepseek-ai/dsh-command-compact` — 需要 `commands` · `compact`（[`packages/compaction/command-compact/src/index.ts`](../packages/compaction/command-compact/src/index.ts)）
+- `@deepseek-ai/dsh-command-compact` — 需要 `commands` · `compaction`（[`packages/compaction/command-compact/src/index.ts`](../packages/compaction/command-compact/src/index.ts)）
 - `@deepseek-ai/dsh-command-feedback` — 需要 `commands`（[`packages/feedback/command-feedback/src/index.ts`](../packages/feedback/command-feedback/src/index.ts)）
 - `@deepseek-ai/dsh-command-goal` — 需要 `commands` · `goals`（[`packages/goal/command-goal/src/index.ts`](../packages/goal/command-goal/src/index.ts)）
 - `@deepseek-ai/dsh-commands`（[`packages/interaction/commands/src/index.ts`](../packages/interaction/commands/src/index.ts)）
@@ -3081,13 +3401,15 @@ export interface Config {
 - `@deepseek-ai/dsh-session-log-export` — 需要 `commands`（[`packages/session-query/session-log-export/src/index.ts`](../packages/session-query/session-log-export/src/index.ts)）
 - `@deepseek-ai/dsh-session-projection`（[`packages/session/session-projection/src/index.ts`](../packages/session/session-projection/src/index.ts)）
 - `@deepseek-ai/dsh-session-stats` — 需要 `sessionProjections`（[`packages/session/session-stats/src/index.ts`](../packages/session/session-stats/src/index.ts)）
+- `@deepseek-ai/dsh-session-turn-status` — 需要 `sessionProjections`（[`packages/session/session-turn-status/src/index.ts`](../packages/session/session-turn-status/src/index.ts)）
 - `@deepseek-ai/dsh-skill-badge` — 需要 `skills`（[`packages/skill/skill-badge/src/index.ts`](../packages/skill/skill-badge/src/index.ts)）
 - `@deepseek-ai/dsh-storage`（[`packages/storage/storage/src/index.ts`](../packages/storage/storage/src/index.ts)）
 - `@deepseek-ai/dsh-subagent`（[`packages/subagent/subagent/src/index.ts`](../packages/subagent/subagent/src/index.ts)）
 - `@deepseek-ai/dsh-subprocess-local`（[`packages/subprocess/subprocess-local/src/index.ts`](../packages/subprocess/subprocess-local/src/index.ts)）
 - `@deepseek-ai/dsh-terminal`（[`packages/terminal/terminal/src/index.ts`](../packages/terminal/terminal/src/index.ts)）
-- `@deepseek-ai/dsh-tool-ask-user` — 需要 `tools` · `userInteraction`（[`packages/interaction/tool-ask-user/src/index.ts`](../packages/interaction/tool-ask-user/src/index.ts)）
+- `@deepseek-ai/dsh-tool-ask-user` — 需要 `tools` · `userQuestions`（[`packages/interaction/tool-ask-user/src/index.ts`](../packages/interaction/tool-ask-user/src/index.ts)）
 - `@deepseek-ai/dsh-tool-call-timeout-policy` — 需要 `tools`（[`packages/guard/timeout-policy/src/index.ts`](../packages/guard/timeout-policy/src/index.ts)）
+- `@deepseek-ai/dsh-tool-compact` — 需要 `tools` · `compaction`（[`packages/compaction/tool-compact/src/index.ts`](../packages/compaction/tool-compact/src/index.ts)）
 - `@deepseek-ai/dsh-tool-cordis` — 需要 `tools` · `systemPrompt` · `dynamicCordisRunner` · `cordisInspect`（[`packages/extensions/tool-cordis/src/index.ts`](../packages/extensions/tool-cordis/src/index.ts)）
 - `@deepseek-ai/dsh-tool-subagent-control` — 需要 `tools` · `subagents`（[`packages/subagent/tool-subagent-control/src/index.ts`](../packages/subagent/tool-subagent-control/src/index.ts)）
 - `@deepseek-ai/dsh-user-questions`（[`packages/interaction/user-questions/src/index.ts`](../packages/interaction/user-questions/src/index.ts)）
@@ -3100,14 +3422,14 @@ export interface Config {
 - `@deepseek-ai/dsh-attachment` — 抽象 `AttachmentStore`（[`packages/attachment/attachment/src/index.ts`](../packages/attachment/attachment/src/index.ts)）
 - `@deepseek-ai/dsh-code-runtime` — 抽象 `CodeRuntime`（[`packages/code-runtime/code-runtime/src/index.ts`](../packages/code-runtime/code-runtime/src/index.ts)）
 - `@deepseek-ai/dsh-compaction` — 抽象 `CompactionEngine`（[`packages/compaction/compaction/src/index.ts`](../packages/compaction/compaction/src/index.ts)）
-- `@deepseek-ai/dsh-credentials` — 抽象 `Credentials`（[`packages/credentials/credentials/src/index.ts`](../packages/credentials/credentials/src/index.ts)）
+- `@deepseek-ai/dsh-credentials` — 抽象 `CredentialProvider`（[`packages/credentials/credentials/src/index.ts`](../packages/credentials/credentials/src/index.ts)）
 - `@deepseek-ai/dsh-fs` — 抽象 `FileSystem`（[`packages/fs/fs/src/index.ts`](../packages/fs/fs/src/index.ts)）
 - `@deepseek-ai/dsh-host-directory-picker` — 抽象 `DirectoryPicker`（[`packages/host/directory-picker/src/index.ts`](../packages/host/directory-picker/src/index.ts)）
 - `@deepseek-ai/dsh-jobs` — 抽象 `JobRegistry`（[`packages/jobs/jobs/src/index.ts`](../packages/jobs/jobs/src/index.ts)）
 - `@deepseek-ai/dsh-sandbox` — 抽象 `SandboxProvider`（[`packages/sandbox/sandbox/src/index.ts`](../packages/sandbox/sandbox/src/index.ts)）
 - `@deepseek-ai/dsh-session-persistence` — 抽象 `SessionPersistence`（[`packages/session/session-persistence/src/index.ts`](../packages/session/session-persistence/src/index.ts)）
 - `@deepseek-ai/dsh-session-query` — 抽象 `SessionQueryEngine`（[`packages/session-query/session-query/src/index.ts`](../packages/session-query/session-query/src/index.ts)）
-- `@deepseek-ai/dsh-settings` — 抽象 `Settings`（[`packages/settings/settings/src/index.ts`](../packages/settings/settings/src/index.ts)）
+- `@deepseek-ai/dsh-settings` — 抽象 `SettingsProvider`（[`packages/settings/settings/src/index.ts`](../packages/settings/settings/src/index.ts)）
 - `@deepseek-ai/dsh-shell` — 抽象 `ShellExecutor`（[`packages/shell/shell/src/index.ts`](../packages/shell/shell/src/index.ts)）
 - `@deepseek-ai/dsh-spill` — 抽象 `SpillStore`（[`packages/spill/spill/src/index.ts`](../packages/spill/spill/src/index.ts)）
 - `@deepseek-ai/dsh-subprocess` — 抽象 `SubprocessRuntime`（[`packages/subprocess/subprocess/src/index.ts`](../packages/subprocess/subprocess/src/index.ts)）
@@ -3136,8 +3458,12 @@ export interface Config {
 - `@deepseek-ai/dsh-launch-environment`（[`packages/util/launch-environment/src/index.ts`](../packages/util/launch-environment/src/index.ts)）
 - `@deepseek-ai/dsh-llm-mock-server`（[`packages/test-support/llm-mock-server/src/index.ts`](../packages/test-support/llm-mock-server/src/index.ts)）
 - `@deepseek-ai/dsh-loader-smoke`（[`packages/test-support/loader-smoke/src/index.ts`](../packages/test-support/loader-smoke/src/index.ts)）
+- `@deepseek-ai/dsh-mailbox`（[`packages/mailbox/mailbox/src/index.ts`](../packages/mailbox/mailbox/src/index.ts)）
+- `@deepseek-ai/dsh-memory`（[`packages/memory/memory/src/index.ts`](../packages/memory/memory/src/index.ts)）
+- `@deepseek-ai/dsh-named-sessions`（[`packages/session/named-sessions/src/index.ts`](../packages/session/named-sessions/src/index.ts)）
 - `@deepseek-ai/dsh-native-command`（[`packages/util/native-command/src/index.ts`](../packages/util/native-command/src/index.ts)）
 - `@deepseek-ai/dsh-output-retention`（[`packages/util/output-retention/src/index.ts`](../packages/util/output-retention/src/index.ts)）
+- `@deepseek-ai/dsh-port-allocator`（[`packages/util/port-allocator/src/index.ts`](../packages/util/port-allocator/src/index.ts)）
 - `@deepseek-ai/dsh-sandbox-windows-acl`（[`packages/sandbox/sandbox-windows-acl/src/index.ts`](../packages/sandbox/sandbox-windows-acl/src/index.ts)）
 - `@deepseek-ai/dsh-scope`（[`packages/core/scope/src/index.ts`](../packages/core/scope/src/index.ts)）
 - `@deepseek-ai/dsh-sdk-client`（[`packages/sdk/client/src/index.ts`](../packages/sdk/client/src/index.ts)）
@@ -3150,3 +3476,4 @@ export interface Config {
 - `@deepseek-ai/dsh-typert-generator`（[`packages/typert/generator/src/index.ts`](../packages/typert/generator/src/index.ts)）
 - `@deepseek-ai/dsh-typert-protocol`（[`packages/typert/protocol/src/index.ts`](../packages/typert/protocol/src/index.ts)）
 - `@deepseek-ai/dsh-typert-registry`（[`packages/typert/registry/src/index.ts`](../packages/typert/registry/src/index.ts)）
+- `@deepseek-ai/dsh-worktree`（[`packages/worktree/worktree/src/index.ts`](../packages/worktree/worktree/src/index.ts)）

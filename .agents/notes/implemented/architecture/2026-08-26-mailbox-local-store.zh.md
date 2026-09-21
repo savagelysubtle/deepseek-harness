@@ -18,7 +18,9 @@ Status: implemented
 - schema 归属依赖在打开事务内校验的 `mailbox_meta.schema_version` 戳记：空文件以 v1 初始化；非邮箱文件与任何外来版本都会让挂载响亮失败。单调递增，无迁移路径——预发布立场允许自由重构格式。
 - 插件一次性解析配置（`path?` → `<dsh home>/mailbox/mailbox.db`），同步打开使不兼容数据库自身失败挂载，并经 `ctx.effect` 注册提供方 `local`；卸载先注销再关闭句柄（storage-sqlite 顺序）。
 
-否决项：队列行内的 pid 工件（具名会话锁已拥有驻存活命性；在此复制会让本可由过期时间戳回收消解的租约楔死）；用 `PRAGMA user_version` 做 schema 戳（裸整数无法像命名 meta 表那样区分“版本错误的邮箱库”与“其他工具的文件”）；可配置 journal mode（尚无部署需要回退日志模式；WPL 保持固定直到有此需求）。
+## 曾考虑的替代方案
+
+否决项：队列行内的 pid 工件（具名会话锁已拥有驻存活命性；在此复制会让本可由过期时间戳回收消解的租约楔死）；用 `PRAGMA user_version` 做 schema 戳（裸整数无法像命名 meta 表那样区分“版本错误的邮箱库”与“其他工具的文件”）；可配置 journal mode（尚无部署需要回退日志模式；WAL 保持固定直到有此需求）。
 
 ## 验证
 

@@ -6,15 +6,6 @@ Status: implemented
 
 `dsh --profile headless` ran one fresh session per invocation. Automation that splits a long task across invocations had no way to land each run in the same durable session without minting and tracking session ids itself.
 
-Two designs were considered for naming:
-
-1. **A name→id map store** under the harness home, consulted on every run.
-2. **Derive the id from the name** so no extra durable state exists.
-
-The map store loses to derivation on every axis this bundle cares about. A map is one more file created, torn by SIGKILL between rename and content write, and corrupted when two invocations race their first run for the same name — exactly the concurrency named sessions exist to serve. Derivation (`named-<sha256(name)[0..32)>`) makes every process compute the same answer with zero shared mutable state; there is nothing to create, lock for its own integrity, or clean up. The cost is deliberate: names cannot be enumerated (the caller owns the name map), which is documented as a known limitation rather than hidden.
-
-**Declined alternative:** recording the human name on the `SessionHeader` and resuming by header lookup would couple the session format to a display concern. Adding a field to the header ripples through `SESSION_FORMAT_VERSION`, both persistence backends' validation, and every projection consumer — version-bump pressure from an optional convenience. It also still needs a lookup index over headers to resolve name → id, reintroducing the map problem at worse layering. If a future surface genuinely needs first-class names, that decision belongs to the session format's own change, not to a bundle patch.
-
 ## Decision
 
 - `sessionId = SessionId('named-' + sha256(name).hex[0..32))`. The 32-hex suffix doubles as the filename component of the lock artifact, so one hash serves identity and locking.
@@ -26,6 +17,11 @@ The map store loses to derivation on every axis this bundle cares about. A map i
 ## Verification
 
 Unit suites cover derivation determinism and pattern validation, lock acquire/release/takeover/live-holder rejection (liveness probe injected), create-vs-resume branching, NDJSON shape and firstSeq scoping, summary suppression, and lock release on failure paths. A real-composition Loader test boots the shipping loop over the JSONL backend twice against a scripted model: run one creates and streams well-formed NDJSON; run two resumes and its model request contains the prior conversation.
+
+## Alternatives considered
+
+- **A name→id map store under the harness home, consulted on every run**: rejected. It loses to derivation on every axis this bundle cares about. A map is one more file created, torn by SIGKILL between rename and content write, and corrupted when two invocations race their first run for the same name — exactly the concurrency named sessions exist to serve. Derivation (`named-<sha256(name)[0..32)>`) makes every process compute the same answer with zero shared mutable state instead; there is nothing to create, lock for its own integrity, or clean up. The cost is deliberate: names cannot be enumerated (the caller owns the name map), which is documented as a known limitation rather than hidden.
+- **Recording the human name on the `SessionHeader` and resuming by header lookup**: rejected. It would couple the session format to a display concern. Adding a field to the header ripples through `SESSION_FORMAT_VERSION`, both persistence backends' validation, and every projection consumer — version-bump pressure from an optional convenience. It also still needs a lookup index over headers to resolve name → id, reintroducing the map problem at worse layering. If a future surface genuinely needs first-class names, that decision belongs to the session format's own change, not to a bundle patch.
 
 ## Consequences
 
