@@ -6074,6 +6074,9 @@ importers:
       '@deepseek-ai/dsh-llm':
         specifier: workspace:^
         version: link:../../llm/llm
+      '@deepseek-ai/dsh-memory':
+        specifier: workspace:^
+        version: link:../../memory/memory
       '@deepseek-ai/dsh-scope':
         specifier: workspace:^
         version: link:../../core/scope

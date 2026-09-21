@@ -11,7 +11,9 @@
  * Extracting the group keeps the verification pointed at the REAL file while
  * staying within the mounted scope.
  */
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
@@ -65,26 +67,56 @@ function extractMemoryGroup(source: string): string | undefined {
 }
 
 /**
+ * Symlink the real `@deepseek-ai/dsh-memory` package into a throwaway
+ * `node_modules` inside `base`. The package is located via
+ * `import.meta.resolve` from THIS test file's own module graph — which works
+ * because the package is now a declared devDependency of this package — not
+ * through any ancestry in the repository's own dependency tree. Mirrors
+ * `linkZod` in packages/typert/loader/tests/loader.spec.ts.
+ * @param base - the throwaway tree's root directory.
+ */
+async function linkMemoryPackage(base: string): Promise<void> {
+  const scope = join(base, 'node_modules', '@deepseek-ai')
+  const target = join(scope, 'dsh-memory')
+  const source = fileURLToPath(new URL('.', import.meta.resolve('@deepseek-ai/dsh-memory/package.json')))
+  await mkdir(scope, { recursive: true })
+  await symlink(source, target, process.platform === 'win32' ? 'junction' : 'dir')
+}
+
+/**
  * Boot the harness registries exactly as mount.spec.ts does, plus one user
  * root carrying ONLY the extracted memory group as its `standard` preset.
  *
- * The temp root lives under `<repo>/node_modules/.cache/` deliberately: bare
- * plugin names resolve through Node's parent-directory walk from the config
- * file (the same mechanism `$DSH_HOME/profiles/node_modules` provides in real
- * deployments), and only a root inside the repo tree has the workspace link
- * in its ancestry.
+ * The temp root lives under the OS temp directory, never inside the
+ * repository, so nothing here depends on the repository's own dependency
+ * tree or on a scratch directory the repo happens to have created for
+ * something else. It gets its own throwaway `node_modules` holding a symlink
+ * to the real memory package (see `linkMemoryPackage`), and the Loader's
+ * `internal.import` is overridden to resolve bare specifiers through that
+ * throwaway tree via `createRequire`, rather than relying on Node's ordinary
+ * upward node_modules walk from `ctx.baseUrl` ever reaching a repository
+ * link that nothing declares. Mirrors `boot()` in
+ * packages/typert/loader/tests/loader.spec.ts.
  * @param groupYaml - the verbatim group block text.
  * @returns the booted context and the temp-root cleanup.
  */
 async function harnessWithMemoryPreset(groupYaml: string): Promise<{ ctx: Context; done(): Promise<void> }> {
-  const cacheRoot = join(REPO_ROOT, 'node_modules', '.cache')
-  const root = await mkdtemp(join(cacheRoot, 'dsh-preset-memory-'))
+  const root = await mkdtemp(join(tmpdir(), 'dsh-preset-memory-'))
   const presetDir = join(root, 'standard')
   await mkdir(presetDir)
   await writeFile(join(presetDir, COMPOSITION_FILE), `${groupYaml}\n`)
+  await linkMemoryPackage(root)
   const ctx = new Context()
   ctx.baseUrl = pathToFileURL(root).href + '/'
   await ctx.plugin(Loader)
+  const rootRequire = createRequire(ctx.baseUrl)
+  ctx.loader.internal = {
+    version: 'v2',
+    async import(specifier: string) {
+      const module: unknown = await import(pathToFileURL(rootRequire.resolve(specifier)).href)
+      return module
+    },
+  } as unknown as NonNullable<typeof ctx.loader.internal>
   ctx.loader.builtins.include = Include
   // Group rows (name: 'cordis:group') are a loader builtin in real
   // compositions — app-boot registers exactly this (mountRootInclude).
