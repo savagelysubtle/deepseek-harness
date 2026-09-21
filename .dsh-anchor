@@ -1,0 +1,10 @@
+# This directory keeps its own memory and its own session identity.
+#
+# Placed 2026-09-21 for SWD-98. Without this file the directory is
+# addressed by the repository it belongs to, which is how 366 notes across
+# eleven directories became unreachable on 2026-08-31. The file's contents are
+# never read - its presence is the whole signal - but it is not left empty, so
+# that whoever finds it understands it without having to go looking.
+#
+# Removing this file re-addresses this directory and its memory stops being
+# found. Do not delete it casually.
