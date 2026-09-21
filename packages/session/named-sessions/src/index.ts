@@ -22,7 +22,7 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { projectAnchor } from './anchor.ts'
 
-export { PROJECT_ANCHOR_GIT_TIMEOUT_MS, projectAnchor } from './anchor.ts'
+export { ANCHOR_MARKER_FILENAME, PROJECT_ANCHOR_GIT_TIMEOUT_MS, projectAnchor } from './anchor.ts'
 
 /** Prefix of every derived named-session id. */
 export const NAMED_SESSION_ID_PREFIX = 'named-'

@@ -4,19 +4,9 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { deriveNamedSessionId } from '@deepseek-ai/dsh-named-sessions'
+import { ANCHOR_MARKER_FILENAME as MARKER_FILENAME, deriveNamedSessionId } from '@deepseek-ai/dsh-named-sessions'
 import { afterEach, describe, expect, it } from 'vitest'
 import { projectSlug } from '../src/scope.ts'
-
-/**
- * Marker filename that makes a directory its own anchor root (see
- * `ANCHOR_MARKER_FILENAME` in `@deepseek-ai/dsh-named-sessions`'s
- * `src/anchor.ts`). Duplicated here as a literal, matching this file's
- * existing practice of duplicating small fixture helpers rather than
- * importing another package's internals; content is never read, so an
- * empty file is enough to plant one.
- */
-const MARKER_FILENAME = '.dsh-anchor'
 
 const created: string[] = []
 

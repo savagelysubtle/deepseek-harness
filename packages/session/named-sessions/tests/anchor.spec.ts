@@ -6,13 +6,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
+  ANCHOR_MARKER_FILENAME,
   deriveNamedSessionId,
   lockPathForToken,
   namedLockPath,
   namedSessionToken,
   projectAnchor,
 } from '../src/index.ts'
-import { ANCHOR_MARKER_FILENAME } from '../src/anchor.ts'
 
 const created: string[] = []
 
