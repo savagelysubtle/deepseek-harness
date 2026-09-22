@@ -106,7 +106,7 @@ let retentionSequence = 0
  * processes too — every entry write is serialized through
  * {@link acquireEntryLock} before this runs, so a same-millisecond collision
  * between two *different* entries' retentions is the only realistic case,
- * but the retained-copy move refuses to land on an existing name rather than
+ * but the retained-copy link refuses to land on an existing name rather than
  * trust the name alone.
  * @returns a stamp suitable for appending to a retained-copy file name.
  */
@@ -332,11 +332,17 @@ export class LocalMemoryProvider extends MemoryService {
    * write is allowed to replace it. Called only while the caller holds
    * `target`'s entry lock, so the existence check below cannot race another
    * writer. Retained copies land at
-   * `<scope>/.replaced/<relative dir>/<basename>.<timestamp>`, moved rather
-   * than copied — a copy-then-continue leaves a window (the original
-   * SWD-148 defect's shape) where content installed after the copy is never
-   * retained by anyone — then get pruned down to
-   * {@link MAX_RETAINED_VERSIONS} per entry, oldest first.
+   * `<scope>/.replaced/<relative dir>/<basename>.<timestamp>`, linked aside
+   * rather than copied — `link()` makes the retained path a second name for
+   * the SAME inode, so the previous content is safe the instant it succeeds,
+   * regardless of what happens to `target`'s own name afterward. `target` is
+   * deliberately left in place here (no unlink): {@link LocalMemoryProvider.read}
+   * is lock-free by design, so a name that resolved to something a moment ago must keep
+   * resolving to something — old content or new — until the write below
+   * renames the temp file over it; a window with no entry at all would be a
+   * new, false "no entry" failure for a concurrent reader. Retained copies
+   * then get pruned down to {@link MAX_RETAINED_VERSIONS} per entry, oldest
+   * first.
    * @param scope - resolved scope directory for this project.
    * @param jailed - normalized scope-relative entry path.
    * @param target - absolute path of the entry the write is about to replace.
@@ -361,14 +367,19 @@ export class LocalMemoryProvider extends MemoryService {
     const retainedPath = join(retainedDir, `${basename}.${retentionTimestamp()}`)
     try {
       await mkdir(retainedDir, { recursive: true })
-      // Hard-link then unlink, not rename: a rename would silently clobber
-      // an existing file at `retainedPath` (same defect this whole feature
-      // exists to close), but `link()` refuses with EEXIST instead of
-      // overwriting one. Same content, same mtime either way — a hard link
-      // is the same inode, not a copy — so this still can't lose the entry
-      // partway through.
+      // Hard-link only — do NOT also unlink `target`. Linking is enough: the
+      // retained path and `target` now name the same inode, so the previous
+      // content is preserved the instant this call returns, no matter what
+      // happens to either name afterward. Unlinking `target` here would open
+      // a real window where the entry has no name at all until the rename
+      // below lands the new content — and read() is intentionally lock-free
+      // (see its doc), so a concurrent reader in that window would get a
+      // false "no entry" error for content that still exists. Using link()
+      // rather than rename() to create the retained name still matters on
+      // its own: rename() would silently clobber an existing file at
+      // `retainedPath`, but link() refuses with EEXIST instead of
+      // overwriting one.
       await link(target, retainedPath)
-      await unlink(target)
     } catch (error) {
       throw new Error(`memory(${slug}): could not retain the previous "${jailed}" before replacing it — refusing to overwrite (${String(error instanceof Error ? error.message : error)})`)
     }

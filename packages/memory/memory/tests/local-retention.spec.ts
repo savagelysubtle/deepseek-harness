@@ -81,6 +81,44 @@ describe('write() retention (SWD-148)', () => {
     }
   })
 
+  it('a concurrent read of an entry mid-replacement never fails — it sees the old content or the new, never neither', async () => {
+    const booted = await boot()
+    try {
+      const oldContent = 'old content, still live until the rename lands'
+      const newContent = 'new content, live once the rename lands'
+      await booted.provider.write(PROJECT, 'racing-read.md', oldContent)
+      // read() is deliberately lock-free (see retainExisting's doc: it must
+      // stay that way), so the only guard against a reader ever seeing "no
+      // entry" for content that is genuinely still there is that write()
+      // never removes the entry's name before installing the replacement.
+      // This is a best-effort timing probe, not a deterministic proof — Node's
+      // fs calls are real async I/O with no seam to force a read into one
+      // exact instant of the write's critical section. Firing every read up
+      // front (e.g. Promise.all of 200 reads alongside the write) turned out
+      // NOT to catch the earlier, buggy unlink-before-rename version at all:
+      // every read had already resolved against the old content before the
+      // write's critical section even started. Reading one at a time in a
+      // loop that keeps going until the write settles spreads reads across
+      // the write's *entire* duration instead, which does reliably reproduce
+      // the regression — verified against the buggy version before writing
+      // this comment.
+      let writeSettled = false
+      const writePromise = booted.provider.write(PROJECT, 'racing-read.md', newContent)
+      void writePromise.finally(() => { writeSettled = true })
+      const seen: string[] = []
+      while (!writeSettled) {
+        seen.push(await booted.provider.read(PROJECT, 'racing-read.md'))
+      }
+      await writePromise
+      expect(seen.length).toBeGreaterThan(0)
+      for (const value of seen) {
+        expect([oldContent, newContent]).toContain(value)
+      }
+    } finally {
+      await booted.done()
+    }
+  })
+
   it('four genuinely overlapping writers racing one path leave every distinct content recoverable', async () => {
     const booted = await boot()
     try {
