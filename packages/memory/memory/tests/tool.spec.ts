@@ -92,6 +92,28 @@ describe('memory tool', () => {
     }
   })
 
+  it('surfaces a replaced entry to the model in both the rendered text and the structured result', async () => {
+    const { ctx, root } = await setup()
+    try {
+      await call(ctx, { action: 'write', path: 'anchor.md', content: 'first' })
+      const overwrite = await call(ctx, { action: 'write', path: 'anchor.md', content: 'second' })
+      expect(text(overwrite)).toMatch(/THIS REPLACED AN EXISTING ENTRY/)
+      expect(text(overwrite)).toMatch(/KEPT, not deleted/)
+      expect(text(overwrite)).toContain(`${String(Buffer.byteLength('first', 'utf8'))} bytes`)
+      expect(overwrite.isError).toBe(false)
+      const value = (overwrite as { value: { replaced?: { bytes: number; modifiedAt: string } } }).value
+      expect(value.replaced?.bytes).toBe(Buffer.byteLength('first', 'utf8'))
+      expect(typeof value.replaced?.modifiedAt).toBe('string')
+
+      // A fresh path still renders exactly the plain one-line confirmation.
+      const fresh = await call(ctx, { action: 'write', path: 'other.md', content: 'x' })
+      expect(text(fresh)).toBe('Saved other.md (1 bytes).')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('scopes storage by the calling session cwd; another workspace does not see it', async () => {
     const { ctx, root } = await setup()
     try {

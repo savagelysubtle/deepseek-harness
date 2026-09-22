@@ -38,6 +38,8 @@ interface MemoryToolOutput {
   content?: string
   entries?: JsonValue[]
   matches?: JsonValue[]
+  /** Present on `write` only when it replaced an existing entry. */
+  replaced?: { bytes: number; modifiedAt: string }
 }
 
 const TOOL_DESCRIPTION = [
@@ -101,6 +103,14 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
           content: { type: 'string' },
           entries: { type: 'array', items: { type: 'json' } },
           matches: { type: 'array', items: { type: 'json' } },
+          replaced: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              bytes: { type: 'integer' },
+              modifiedAt: { type: 'string' },
+            },
+          },
         },
       },
       render(_args, value) {
@@ -109,7 +119,17 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
           return [{ type: 'text', text: out.content ?? '' }]
         }
         if (out.action === 'write') {
-          return [{ type: 'text', text: `Saved ${String(out.path)} (${String(out.bytes)} bytes).` }]
+          const saved = `Saved ${String(out.path)} (${String(out.bytes)} bytes).`
+          if (out.replaced === undefined) {
+            return [{ type: 'text', text: saved }]
+          }
+          // Deliberately blunt: a caller that skims to the byte count must
+          // not read this as an ordinary confirmation — something else's
+          // content stood at this path and was about to be lost.
+          return [{
+            type: 'text',
+            text: `${saved} THIS REPLACED AN EXISTING ENTRY at that path (${String(out.replaced.bytes)} bytes, last modified ${out.replaced.modifiedAt}). The previous content was KEPT, not deleted — it is recoverable, not overwritten.`,
+          }]
         }
         if (out.action === 'list') {
           const entries = (out.entries ?? []) as Array<{ path: string; bytes: number }>
@@ -141,7 +161,9 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
       }
       if (action === 'write') {
         const result = await memory.write(cwd, requirePath(input.path), requireContent(input.content))
-        return { action, path: result.path, bytes: result.bytes }
+        return result.replaced === undefined
+          ? { action, path: result.path, bytes: result.bytes }
+          : { action, path: result.path, bytes: result.bytes, replaced: result.replaced }
       }
       if (action === 'list') {
         // Entries are JSON-safe records by construction; JsonValue asks for

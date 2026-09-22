@@ -3698,7 +3698,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'MemoryWriteResult',
-    declaration: 'export interface MemoryWriteResult {\n    readonly path: string;\n    readonly bytes: number;\n}',
+    declaration: 'export interface MemoryWriteResult {\n    readonly path: string;\n    readonly bytes: number;\n    readonly replaced?: {\n        readonly bytes: number;\n        readonly modifiedAt: string;\n    };\n}',
   },
   {
     name: 'Message',
