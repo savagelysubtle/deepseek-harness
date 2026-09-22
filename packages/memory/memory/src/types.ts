@@ -27,4 +27,16 @@ export interface MemoryWriteResult {
   readonly path: string
   /** Stored UTF-8 byte size. */
   readonly bytes: number
+  /**
+   * Present only when this write replaced an existing entry at the same
+   * path: that entry's size and last-modified time, before its content was
+   * moved into a bounded retained-version history rather than destroyed.
+   * Absent when the path was previously unused.
+   */
+  readonly replaced?: {
+    /** UTF-8 byte size of the content that was replaced. */
+    readonly bytes: number
+    /** ISO-8601 timestamp of the replaced content's last modification. */
+    readonly modifiedAt: string
+  }
 }
