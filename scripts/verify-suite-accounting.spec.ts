@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { formatAccountingFailure, verifySuiteAccounting } from './verify-suite-accounting.ts'
+import {
+  formatAccountingFailure,
+  formatAccountingSkippedNotice,
+  reporterWasOverridden,
+  verifySuiteAccounting,
+} from './verify-suite-accounting.ts'
 
 const PLUGIN_WARNING = 'The plugin "vite-tsconfig-paths" is detected. Vite now supports tsconfig paths '
   + 'resolution natively via the resolve.tsconfigPaths option. You can remove the plugin and set '
@@ -240,5 +245,94 @@ describe('formatAccountingFailure', () => {
     // reader vitest reported no failures when a `failed` segment says otherwise.
     expect(block).not.toContain('reported no failures')
     expect(block).not.toContain('no failure line is printed anywhere')
+  })
+})
+
+describe('verifySuiteAccounting — multi-word categories', () => {
+  it('counts a two-word "expected fail" category instead of failing to parse it', () => {
+    // Real shape from the installed runner's getStateString: a `.fails()` test that
+    // failed as expected renders as a literal two-word category, "expected fail".
+    const withExpectedFail = [
+      ' Test Files  885 passed | 8 skipped (893)',
+      '      Tests  14588 passed | 3 expected fail | 109 skipped (14700)',
+      '',
+    ].join('\n')
+
+    const verdict = verifySuiteAccounting(withExpectedFail)
+    expect(verdict.ok).toBe(true)
+    expect(verdict.tests.segments).toContainEqual({ count: 3, category: 'expected fail' })
+    expect(verdict.tests.accountedTotal).toBe(14700)
+  })
+})
+
+describe('verifySuiteAccounting — bare "no tests"', () => {
+  it('closes a line that is vitest\'s genuine zero-task "no tests" output, not a parse failure', () => {
+    // Real shape: a file that fails to collect any suite still gets a normal
+    // Test Files tally, but the Tests line has nothing to count and prints the
+    // bare word pair with no parenthesised total at all.
+    const zeroTasksOnTestsLine = [
+      ' Test Files  1 failed (1)',
+      '      Tests  no tests',
+      '',
+    ].join('\n')
+
+    const verdict = verifySuiteAccounting(zeroTasksOnTestsLine)
+    expect(verdict.ok).toBe(true)
+    expect(verdict.tests).toMatchObject({ ok: true, declaredTotal: 0, accountedTotal: 0, delta: 0, segments: [] })
+  })
+
+  it('closes both lines when both are genuinely empty', () => {
+    const bothEmpty = [
+      ' Test Files  no tests',
+      '      Tests  no tests',
+      '',
+    ].join('\n')
+
+    const verdict = verifySuiteAccounting(bothEmpty)
+    expect(verdict.ok).toBe(true)
+    expect(verdict.testFiles).toMatchObject({ ok: true, declaredTotal: 0, accountedTotal: 0 })
+    expect(verdict.tests).toMatchObject({ ok: true, declaredTotal: 0, accountedTotal: 0 })
+  })
+
+  it('does not treat other unparenthesised text as the empty case — only the exact "no tests" text', () => {
+    const notActuallyEmpty = [
+      ' Test Files  885 passed | 8 skipped (893)',
+      '      Tests  no things happened',
+      '',
+    ].join('\n')
+
+    const verdict = verifySuiteAccounting(notActuallyEmpty)
+    expect(verdict.ok).toBe(false)
+    expect(verdict.tests.ok).toBe(false)
+    expect(verdict.tests.reason).toContain('no parenthesised declared total')
+  })
+})
+
+describe('reporterWasOverridden', () => {
+  it('detects every real spelling of a reporter override', () => {
+    expect(reporterWasOverridden(['--reporter=json'])).toBe(true)
+    expect(reporterWasOverridden(['--reporter', 'dot'])).toBe(true)
+    expect(reporterWasOverridden(['--reporters=tap'])).toBe(true)
+    expect(reporterWasOverridden(['--reporters', 'junit'])).toBe(true)
+    expect(reporterWasOverridden(['run', '--reporter=json'])).toBe(true)
+  })
+
+  it('does not false-positive on ordinary runs or unrelated flags', () => {
+    expect(reporterWasOverridden([])).toBe(false)
+    expect(reporterWasOverridden(['run'])).toBe(false)
+    expect(reporterWasOverridden(['run', 'scripts/foo.spec.ts'])).toBe(false)
+    expect(reporterWasOverridden(['--coverage'])).toBe(false)
+    // Must match the whole flag, not merely start with it.
+    expect(reporterWasOverridden(['--reporterFoo'])).toBe(false)
+  })
+})
+
+describe('formatAccountingSkippedNotice', () => {
+  it('visibly says the check was skipped, why, and that the run is unchecked', () => {
+    const notice = formatAccountingSkippedNotice()
+
+    expect(notice).toContain('SUITE ACCOUNTING SKIPPED')
+    expect(notice).toContain('reporter')
+    expect(notice).toContain('NOT been checked')
   })
 })

@@ -37,7 +37,7 @@ export interface SuiteAccountingLineVerdict {
   readonly ok: boolean
   /** The line's text after the label, ANSI stripped and trimmed, when the line was found. */
   readonly raw: string | undefined
-  /** The parenthesised total vitest declared for this line, when found. */
+  /** The parenthesised total vitest declared for this line, when found (0 for vitest's bare "no tests"). */
   readonly declaredTotal: number | undefined
   /** Every `<count> <category>` segment parsed from before the declared total. Empty when parsing failed. */
   readonly segments: readonly SuiteAccountingSegment[]
@@ -68,7 +68,16 @@ function stripAnsi(text: string): string {
 }
 
 const DECLARED_TOTAL_PATTERN = /\((\d+)\)\s*$/
-const SEGMENT_PATTERN = /^(\d+)\s+([A-Za-z]+)$/
+// Vitest categories are not always one word: `.fails()` tests are reported as
+// a literal two-word "expected fail" category (installed runner, getStateString
+// in node_modules/vitest/dist/chunks/utils.BS4fH3nR.js). Accept any run of
+// space-separated words so a category like that is still counted.
+const SEGMENT_PATTERN = /^(\d+)\s+([A-Za-z]+(?: [A-Za-z]+)*)$/
+// Vitest's own zero-task branch (same getStateString) prints this bare word
+// pair with no parenthesised total at all when a line's task list is empty —
+// not "missing", genuinely nothing to account for. Recognised only as this
+// exact text, never as a general stand-in for "the line could not be parsed".
+const BARE_NO_TESTS = 'no tests'
 
 function findLastSummaryLine(cleanOutput: string, label: 'Test Files' | 'Tests'): string | undefined {
   const linePattern = new RegExp(`^\\s*${label}\\s+(.*)$`)
@@ -105,15 +114,29 @@ function unparsedLineVerdict(
  * segment generically instead of enumerating passed/failed/skipped/todo, so
  * a category this function has never heard of still gets counted rather
  * than silently dropped — that enumeration gap is the exact class of bug
- * this check exists to catch.
+ * this check exists to catch. A category may be more than one word (e.g.
+ * "expected fail"); that is still one segment, not a parse failure.
  * @param cleanOutput - vitest's captured stdout+stderr, ANSI already stripped.
  * @param label - which summary line to parse.
  * @returns the line's accounting verdict; a missing or malformed line is a failure, never a vacuous pass.
+ *   Vitest's own bare "no tests" (zero tasks, no parenthesised total) is the one exception: it closes with 0/0.
  */
 function parseSummaryLine(cleanOutput: string, label: 'Test Files' | 'Tests'): SuiteAccountingLineVerdict {
   const raw = findLastSummaryLine(cleanOutput, label)
   if (raw === undefined) {
     return unparsedLineVerdict(label, undefined, undefined, `could not find the ${label} line in the run output`)
+  }
+  if (raw === BARE_NO_TESTS) {
+    return {
+      label,
+      ok: true,
+      raw,
+      declaredTotal: 0,
+      segments: [],
+      accountedTotal: 0,
+      delta: 0,
+      reason: undefined,
+    }
   }
 
   const declaredMatch = DECLARED_TOTAL_PATTERN.exec(raw)
@@ -258,6 +281,47 @@ export function formatAccountingFailure(verdict: SuiteAccountingVerdict): string
   return lines.join('\n')
 }
 
+// Vitest's canonical flag is `--reporters`; `--reporter` is its own alias
+// (node_modules/vitest/dist/chunks/cac.C9xsMMkH.js), and either accepts
+// `=value` or a separate value argument. Any custom reporter (json, dot,
+// tap, junit, ...) replaces the default one, and the default reporter is the
+// only one that prints the "Test Files"/"Tests" lines this check parses.
+const REPORTER_OVERRIDE_PATTERN = /^--reporters?(=.*)?$/
+
+/**
+ * True when the caller passed an explicit reporter override, in which case
+ * vitest never prints the summary lines this check reads and the accounting
+ * check cannot run at all.
+ * @param vitestArgs - CLI arguments about to be forwarded to vitest.
+ * @returns whether a `--reporter`/`--reporters` flag is present, in any spelling.
+ */
+export function reporterWasOverridden(vitestArgs: readonly string[]): boolean {
+  return vitestArgs.some(arg => REPORTER_OVERRIDE_PATTERN.test(arg))
+}
+
+/**
+ * Render the notice printed when the accounting check could not run because
+ * the caller overrode vitest's reporter. This is a visible skip, never a
+ * silent one — a guard that quietly switches itself off is the same defect
+ * as a guard that quietly blocks a developer.
+ * @returns the formatted notice, ready to print to stderr.
+ */
+export function formatAccountingSkippedNotice(): string {
+  const border = '='.repeat(78)
+  return [
+    border,
+    'SUITE ACCOUNTING SKIPPED',
+    border,
+    '',
+    'A --reporter/--reporters override was passed, so vitest never printed the',
+    '"Test Files" / "Tests" summary lines this check reads.',
+    '',
+    'This run has NOT been checked for a worker silently dropping a test file.',
+    'Re-run with the default reporter if you need that protection.',
+    border,
+  ].join('\n')
+}
+
 /**
  * Exit code used when vitest itself exited 0 but the accounting check found
  * the summary numbers do not add up. Deliberately distinct from vitest's own
@@ -316,6 +380,16 @@ function runVitestTeed(vitestArgs: readonly string[]): Promise<TeedVitestRun> {
 async function main(): Promise<void> {
   const vitestArgs = process.argv.slice(2)
   const { exitCode: vitestExitCode, combinedOutput } = await runVitestTeed(vitestArgs)
+
+  if (reporterWasOverridden(vitestArgs)) {
+    // Nothing to parse with a custom reporter — say so loudly and defer to
+    // vitest's own exit code, rather than either faking a pass or blocking
+    // a run this check was never able to inspect.
+    console.error(`\n${formatAccountingSkippedNotice()}`)
+    process.exitCode = vitestExitCode
+    return
+  }
+
   const verdict = verifySuiteAccounting(combinedOutput)
 
   if (!verdict.ok) console.error(`\n${formatAccountingFailure(verdict)}`)
