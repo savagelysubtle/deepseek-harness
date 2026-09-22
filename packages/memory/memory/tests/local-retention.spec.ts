@@ -1,11 +1,15 @@
 /**
  * Regression coverage for SWD-148: `write()` must never silently destroy an
- * entry it replaces. Covers the retained-copy location and cap, the write
- * result's `replaced` reporting, invisibility to list()/search(), and the
- * fail-loud behavior when retention itself cannot happen.
+ * entry it replaces, even when several writers race one path. Covers the
+ * retained-copy location and cap, the write result's `replaced` reporting,
+ * invisibility to list()/search(), the fail-loud behavior when retention
+ * itself cannot happen, genuinely concurrent writers on one path (the actual
+ * shape of the 2026-08-26 incident, not just sequential overwrites), and the
+ * per-entry lock's stale-holder takeover so a dead process's lock cannot
+ * wedge a write forever.
  */
 import { describe, expect, it } from 'vitest'
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -77,21 +81,68 @@ describe('write() retention (SWD-148)', () => {
     }
   })
 
-  it('four writers racing one path in quick succession leave every earlier content recoverable', async () => {
+  it('four genuinely overlapping writers racing one path leave every distinct content recoverable', async () => {
     const booted = await boot()
     try {
-      // Mirrors the actual 2026-08-26 incident: four seats writing one fixed
-      // anchor path within seconds of each other, one path, no locking.
+      // Genuinely concurrent, not four awaited writes in a row: every write
+      // starts via Promise.all before any of the others is known to have
+      // finished, so this actually exercises the per-entry lock's contention
+      // path (one writer's retain-and-rename versus another's) the way the
+      // 2026-08-26 incident did across four separate seat processes. Which
+      // body ends up live is therefore not deterministic — only that none of
+      // the four is ever lost is asserted.
       const bodies = ['writer-a anchor', 'writer-b anchor', 'writer-c anchor', 'writer-d anchor']
-      for (const body of bodies) {
-        await booted.provider.write(PROJECT, 'shared/anchor.md', body)
-      }
+      await Promise.all(bodies.map(body => booted.provider.write(PROJECT, 'shared/anchor.md', body)))
+      const live = await booted.provider.read(PROJECT, 'shared/anchor.md')
       const retained = await retainedContents(booted.root, 'shared', 'anchor.md')
       expect(retained).toHaveLength(bodies.length - 1)
-      for (const body of bodies.slice(0, -1)) {
-        expect(retained).toContain(body)
+      const everRecoverable = new Set([live, ...retained])
+      for (const body of bodies) {
+        expect(everRecoverable.has(body)).toBe(true)
       }
-      expect(await booted.provider.read(PROJECT, 'shared/anchor.md')).toBe(bodies.at(-1))
+    } finally {
+      await booted.done()
+    }
+  })
+
+  it('two separately constructed providers over one root racing one path do not lose either write (cross-process proxy)', async () => {
+    const booted = await boot()
+    try {
+      // A second, independently constructed provider over the SAME root
+      // shares no in-memory state with the first — the only thing excluding
+      // one from the other is the filesystem lock, which is exactly what a
+      // second OS process would also depend on. This is the closest a
+      // single-process suite can get to the actual multi-seat incident
+      // without spawning a real child process.
+      const other = new LocalMemoryProvider(new Context(), { root: booted.root })
+      const bodyA = 'provider-a body'
+      const bodyB = 'provider-b body'
+      await Promise.all([
+        booted.provider.write(PROJECT, 'cross/anchor.md', bodyA),
+        other.write(PROJECT, 'cross/anchor.md', bodyB),
+      ])
+      const live = await booted.provider.read(PROJECT, 'cross/anchor.md')
+      const retained = await retainedContents(booted.root, 'cross', 'anchor.md')
+      expect(new Set([live, ...retained])).toEqual(new Set([bodyA, bodyB]))
+    } finally {
+      await booted.done()
+    }
+  })
+
+  it('takes over a lock whose recorded holder process is no longer alive, instead of wedging the write', async () => {
+    const booted = await boot()
+    try {
+      await booted.provider.write(PROJECT, 'stale-lock.md', 'first content')
+      const scope = await scopeDir(booted.root)
+      const lockPath = join(scope, '.locks', 'stale-lock.md.lock')
+      await mkdir(join(lockPath, '..'), { recursive: true })
+      // A pid this large can never name a real, live process on any real
+      // system — the write must treat it exactly like a holder that exited
+      // without releasing, not wait out the full acquire timeout for it.
+      await writeFile(lockPath, JSON.stringify({ pid: 2_147_483_647 }), 'utf8')
+      const result = await booted.provider.write(PROJECT, 'stale-lock.md', 'second content')
+      expect(result.replaced?.bytes).toBe(Buffer.byteLength('first content', 'utf8'))
+      expect(await booted.provider.read(PROJECT, 'stale-lock.md')).toBe('second content')
     } finally {
       await booted.done()
     }

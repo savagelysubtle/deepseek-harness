@@ -6,17 +6,21 @@
  * torn file. A write that would replace an existing entry retains that
  * entry's previous content first, under a bounded per-entry history that
  * stays invisible to {@link LocalMemoryProvider.list} and
- * {@link LocalMemoryProvider.search} — concurrent writers racing one path
+ * {@link LocalMemoryProvider.search}. The whole check-retain-rename sequence
+ * runs under a per-entry file lock (see {@link acquireEntryLock}), so two
+ * writers racing one path are fully serialized rather than merely each
+ * protecting what they individually saw — concurrent writers racing one path
  * lose the visible slot, never the content.
  * @module @deepseek-ai/dsh-memory/local
  */
 
-import { copyFile, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { link, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import type { Stats } from 'node:fs'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import { isLockHolderLive } from '@deepseek-ai/dsh-named-sessions'
 import { MemoryService } from './index.ts'
 import {
   MAX_ENTRY_BYTES,
@@ -88,21 +92,158 @@ export const MAX_RETAINED_VERSIONS = 5
  * cannot tell two retained copies from the same millisecond apart, and a
  * wall-clock-only stamp would then order them arbitrarily instead of by the
  * write order that actually produced them — this fixed-width, ever-increasing
- * suffix keeps that order exact.
+ * suffix keeps that order exact within this process. It says nothing about
+ * order across processes, which is why {@link retentionTimestamp} also mixes
+ * in this process's pid: two processes retaining in the same millisecond
+ * must never compute the same filename.
  */
 let retentionSequence = 0
 
 /**
- * Filesystem-safe, lexicographically time-ordered stamp for one retained
- * copy's filename. No colons (Windows rejects them in file names); the
- * trailing sequence number guarantees a strict, call-order-correct sort even
- * when two writes land in the same millisecond.
+ * Filesystem-safe, lexicographically time-ordered-within-one-process stamp
+ * for one retained copy's filename. No colons (Windows rejects them in file
+ * names). The pid plus a short random token make the name unique across
+ * processes too — every entry write is serialized through
+ * {@link acquireEntryLock} before this runs, so a same-millisecond collision
+ * between two *different* entries' retentions is the only realistic case,
+ * but the retained-copy move refuses to land on an existing name rather than
+ * trust the name alone.
  * @returns a stamp suitable for appending to a retained-copy file name.
  */
 function retentionTimestamp(): string {
   retentionSequence += 1
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-  return `${stamp}-${retentionSequence.toString(36).padStart(8, '0')}`
+  const sequence = retentionSequence.toString(36).padStart(8, '0')
+  const pid = process.pid.toString(36)
+  const nonce = Math.random().toString(36).slice(2, 8)
+  return `${stamp}-${sequence}-${pid}-${nonce}`
+}
+
+/**
+ * Directory (dot-prefixed, so {@link LocalMemoryProvider.list} and
+ * {@link LocalMemoryProvider.search} skip it like `.replaced`) holding one
+ * lock file per entry currently mid-write, mirrored by relative path under
+ * the scope root. Local to this package on purpose: a memory entry is not a
+ * named session, and this lock must never share a directory, a payload
+ * shape, or a takeover policy with `dsh-named-sessions`'s own per-session
+ * locks — only its holder-liveness check ({@link isLockHolderLive}) is
+ * reused, not its lock storage.
+ */
+const LOCK_DIR = '.locks'
+
+/**
+ * Longest {@link acquireEntryLock} will wait for a live holder to release
+ * before failing the write loudly. Generous next to how long one write's
+ * critical section actually takes (a handful of filesystem calls), so a
+ * write only ever burns this whole budget when something is genuinely
+ * wedged — never silently falls through to writing anyway.
+ */
+const LOCK_ACQUIRE_TIMEOUT_MS = 5_000
+
+/** Delay between polls while {@link acquireEntryLock} waits on a live holder. */
+const LOCK_POLL_INTERVAL_MS = 20
+
+/** One entry lock's on-disk payload: enough for {@link isLockHolderLive} to judge it. */
+interface EntryLockPayload {
+  readonly pid: number
+}
+
+/** A held per-entry lock. */
+interface EntryLock {
+  /** Release the lock, but only while it still records this holder. */
+  release(): Promise<void>
+}
+
+/** `setTimeout` as a promise, for {@link acquireEntryLock}'s poll loop. */
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/**
+ * Whether the lock file at `lockPath` names a holder that must still be
+ * honored: read failure, unparseable content, or a pid field that is not a
+ * plausible pid all read as "no provable live holder" — same fail-soft shape
+ * `dsh-named-sessions` itself uses for an abandoned lock file — so a torn or
+ * foreign artifact cannot wedge a write forever.
+ * @param lockPath - the contended lock file.
+ * @returns whether the recorded holder must be honored as live.
+ */
+async function entryLockHolderLive(lockPath: string): Promise<boolean> {
+  let raw: string
+  try {
+    raw = await readFile(lockPath, 'utf8')
+  } catch {
+    return false
+  }
+  let payload: { pid?: unknown }
+  try {
+    payload = JSON.parse(raw) as { pid?: unknown }
+  } catch {
+    return false
+  }
+  if (typeof payload.pid !== 'number' || !Number.isInteger(payload.pid) || payload.pid < 1) return false
+  return isLockHolderLive({ pid: payload.pid })
+}
+
+/**
+ * Take the exclusive per-entry lock guarding one write's whole
+ * check-retain-rename sequence, waiting up to {@link LOCK_ACQUIRE_TIMEOUT_MS}
+ * for a live holder to release before failing loud. An abandoned lock (dead
+ * holder, or unreadable/foreign content) is taken over immediately, same as
+ * `dsh-named-sessions`'s own steal semantics.
+ * @param lockPath - absolute path of this entry's lock file.
+ * @param jailed - normalized scope-relative entry path, for the timeout error.
+ * @param slug - project slug, for the timeout error.
+ * @returns the held lock; the caller must always release it.
+ * @throws when the lock cannot be taken within the timeout, naming the entry.
+ */
+async function acquireEntryLock(lockPath: string, jailed: string, slug: string): Promise<EntryLock> {
+  await mkdir(join(lockPath, '..'), { recursive: true })
+  const payload = JSON.stringify({ pid: process.pid } satisfies EntryLockPayload)
+  const deadline = Date.now() + LOCK_ACQUIRE_TIMEOUT_MS
+  for (;;) {
+    let handle
+    try {
+      handle = await open(lockPath, 'wx')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw new Error(`memory(${slug}): could not create the write lock for "${jailed}" (${String(error instanceof Error ? error.message : error)})`)
+      }
+      if (!await entryLockHolderLive(lockPath)) {
+        // Abandoned: no live holder to wait on. Another taker may win the
+        // unlink race first, which the next loop iteration's create resolves.
+        await unlink(lockPath).catch(() => {})
+        continue
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`memory(${slug}): could not acquire the write lock for "${jailed}" — another process is still writing it after waiting ${LOCK_ACQUIRE_TIMEOUT_MS}ms`)
+      }
+      await delay(LOCK_POLL_INTERVAL_MS)
+      continue
+    }
+    try {
+      await handle.writeFile(payload, 'utf8')
+    } finally {
+      await handle.close()
+    }
+    return {
+      async release(): Promise<void> {
+        let current: string
+        try {
+          current = await readFile(lockPath, 'utf8')
+        } catch (error) {
+          // An already-absent artifact leaves nothing behind to clean up.
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+          throw error
+        }
+        // A taken-over lock belongs to its successor; only remove our own.
+        if (current !== payload) return
+        await unlink(lockPath).catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        })
+      },
+    }
+  }
 }
 
 /**
@@ -152,41 +293,58 @@ export class LocalMemoryProvider extends MemoryService {
     }
     const scope = this.scopeDir(cwd)
     const target = join(scope, jailed)
+    const slug = projectSlug(cwd)
     await mkdir(join(target, '..'), { recursive: true })
-    // Retaining must happen before anything below touches `target`: once the
-    // temp file is renamed over it, whatever was there is gone. A failure
-    // here throws and the write never proceeds — falling through to the
-    // rename anyway would be exactly the silent-overwrite defect this guards
-    // against (SWD-148).
-    const replaced = await this.retainExisting(cwd, scope, jailed, target)
-    // Same-directory temp plus rename: co-editing readers see either the old
-    // or the new file, never a partial one.
-    const tmp = join(scope, jailed.split('/').slice(0, -1).join('/'), `${TEMP_PREFIX}${Date.now()}-${Math.random().toString(36).slice(2, 8)}`)
-    await writeFile(tmp, content, 'utf8')
+    // The whole check-retain-rename sequence runs under this entry's lock:
+    // two writers racing one path must be fully serialized, not merely each
+    // protect whatever they individually saw before starting. Without this,
+    // a writer that installs its content DURING another writer's retain step
+    // is never itself retained by anyone (SWD-148's actual failure shape).
+    const lockPath = join(scope, LOCK_DIR, `${jailed}.lock`)
+    const lock = await acquireEntryLock(lockPath, jailed, slug)
     try {
-      await rename(tmp, target)
-    } catch (error) {
-      await writeFile(target, content, 'utf8').catch(() => {
-        // Rename fallback also failed; surface the rename cause.
-        throw error
-      })
+      // Retaining must happen before anything below touches `target`: once
+      // the temp file is renamed over it, whatever was there is gone. A
+      // failure here throws and the write never proceeds — falling through
+      // to the rename anyway would be exactly the silent-overwrite defect
+      // this guards against.
+      const replaced = await this.retainExisting(scope, jailed, target, slug)
+      // Same-directory temp plus rename: co-editing readers see either the old
+      // or the new file, never a partial one.
+      const tmp = join(scope, jailed.split('/').slice(0, -1).join('/'), `${TEMP_PREFIX}${Date.now()}-${Math.random().toString(36).slice(2, 8)}`)
+      await writeFile(tmp, content, 'utf8')
+      try {
+        await rename(tmp, target)
+      } catch (error) {
+        await writeFile(target, content, 'utf8').catch(() => {
+          // Rename fallback also failed; surface the rename cause.
+          throw error
+        })
+      }
+      return replaced === undefined ? { path: jailed, bytes } : { path: jailed, bytes, replaced }
+    } finally {
+      await lock.release()
     }
-    return replaced === undefined ? { path: jailed, bytes } : { path: jailed, bytes, replaced }
   }
 
   /**
    * Preserve whatever currently lives at `target`, if anything, before a
-   * write is allowed to replace it. Retained copies land at
-   * `<scope>/.replaced/<relative dir>/<basename>.<timestamp>`, then get
-   * pruned down to {@link MAX_RETAINED_VERSIONS} per entry, oldest first.
-   * @param cwd - working directory; used only to name the project slug in errors.
+   * write is allowed to replace it. Called only while the caller holds
+   * `target`'s entry lock, so the existence check below cannot race another
+   * writer. Retained copies land at
+   * `<scope>/.replaced/<relative dir>/<basename>.<timestamp>`, moved rather
+   * than copied — a copy-then-continue leaves a window (the original
+   * SWD-148 defect's shape) where content installed after the copy is never
+   * retained by anyone — then get pruned down to
+   * {@link MAX_RETAINED_VERSIONS} per entry, oldest first.
    * @param scope - resolved scope directory for this project.
    * @param jailed - normalized scope-relative entry path.
    * @param target - absolute path of the entry the write is about to replace.
+   * @param slug - project slug, for error messages.
    * @returns the replaced content's size and last-modified time, or
    *   `undefined` when `target` did not exist yet.
    */
-  private async retainExisting(cwd: string, scope: string, jailed: string, target: string): Promise<MemoryWriteResult['replaced']> {
+  private async retainExisting(scope: string, jailed: string, target: string, slug: string): Promise<MemoryWriteResult['replaced']> {
     let previous: Stats
     try {
       previous = await stat(target)
@@ -195,7 +353,7 @@ export class LocalMemoryProvider extends MemoryService {
       // An existing entry we cannot even stat is not safe to assume absent —
       // guessing wrong here means writing over content we never confirmed we
       // preserved.
-      throw new Error(`memory(${projectSlug(cwd)}): could not check entry "${jailed}" before writing (${String(error instanceof Error ? error.message : error)})`)
+      throw new Error(`memory(${slug}): could not check entry "${jailed}" before writing (${String(error instanceof Error ? error.message : error)})`)
     }
     const segments = jailed.split('/')
     const basename = segments.at(-1) as string
@@ -203,9 +361,16 @@ export class LocalMemoryProvider extends MemoryService {
     const retainedPath = join(retainedDir, `${basename}.${retentionTimestamp()}`)
     try {
       await mkdir(retainedDir, { recursive: true })
-      await copyFile(target, retainedPath)
+      // Hard-link then unlink, not rename: a rename would silently clobber
+      // an existing file at `retainedPath` (same defect this whole feature
+      // exists to close), but `link()` refuses with EEXIST instead of
+      // overwriting one. Same content, same mtime either way — a hard link
+      // is the same inode, not a copy — so this still can't lose the entry
+      // partway through.
+      await link(target, retainedPath)
+      await unlink(target)
     } catch (error) {
-      throw new Error(`memory(${projectSlug(cwd)}): could not retain the previous "${jailed}" before replacing it — refusing to overwrite (${String(error instanceof Error ? error.message : error)})`)
+      throw new Error(`memory(${slug}): could not retain the previous "${jailed}" before replacing it — refusing to overwrite (${String(error instanceof Error ? error.message : error)})`)
     }
     await this.pruneRetained(retainedDir, basename)
     return { bytes: previous.size, modifiedAt: previous.mtime.toISOString() }
@@ -216,7 +381,9 @@ export class LocalMemoryProvider extends MemoryService {
    * {@link MAX_RETAINED_VERSIONS}, deleting the oldest first. Best-effort: a
    * copy that fails to delete is stale disk usage, not lost data, and must
    * never fail the write that already succeeded at the one thing that
-   * matters — retaining the previous content.
+   * matters — retaining the previous content. A failure is still surfaced
+   * with a `console.warn` (not thrown) so unbounded growth from a
+   * persistently undeletable directory does not go unnoticed forever.
    * @param retainedDir - the `.replaced` subdirectory holding this entry's versions.
    * @param basename - the entry's own file name (versions are `<basename>.<timestamp>`).
    */
@@ -232,11 +399,16 @@ export class LocalMemoryProvider extends MemoryService {
     const versions = names.filter(name => name.startsWith(prefix)).sort()
     const excess = versions.length - MAX_RETAINED_VERSIONS
     if (excess <= 0) return
+    let failed = 0
     for (const name of versions.slice(0, excess)) {
       await unlink(join(retainedDir, name)).catch(() => {
         // Losing one old retained copy is disk hygiene, not data loss —
         // never fail the write over it.
+        failed += 1
       })
+    }
+    if (failed > 0) {
+      console.warn(`memory: failed to prune ${String(failed)} retained version(s) of "${basename}" under ${retainedDir} — history for this entry may grow unbounded`)
     }
   }
 
