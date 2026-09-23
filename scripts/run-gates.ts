@@ -11,6 +11,16 @@ import { resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { COVERAGE_EXEMPT_ENV, coverageExemptHeavySuites } from './coverage-exempt.ts'
 
+// The two heaviest, most worker-parallel runs in the project (coverageGates,
+// below) are the ones most likely to lose a test file to a dead worker, so
+// they go through the same suite-accounting check as `pnpm run test` instead
+// of calling vitest directly. Everything after the checker's own `run` stays
+// unchanged — same order, same positions — the checker forwards it to vitest
+// verbatim. Declared here, ahead of the `import.meta.main` entry point below,
+// so it is initialized before that entry point can reach it through
+// gatesForMode -> coverageGates.
+const SUITE_ACCOUNTING_CLI = ['tsx', 'scripts/verify-suite-accounting.ts', 'run']
+
 /** A named aggregate exposed by the gate runner. */
 export type Mode =
   | 'ci-primary'
@@ -512,8 +522,7 @@ function coverageGates(): Gate[] {
   const timeouts = coverageTimeoutArgs()
   return [
     pnpmExec('coverage', [
-      'vitest',
-      'run',
+      ...SUITE_ACCOUNTING_CLI,
       '--coverage',
       ...workers.instrumented,
       ...timeouts,
@@ -522,8 +531,7 @@ function coverageGates(): Gate[] {
       env: { [COVERAGE_EXEMPT_ENV]: '1' },
     }),
     pnpmExec('coverage-exempt-heavy', [
-      'vitest',
-      'run',
+      ...SUITE_ACCOUNTING_CLI,
       ...coverageExemptHeavySuites.map(suite => suite.filter),
       ...workers.exempt,
       ...timeouts,

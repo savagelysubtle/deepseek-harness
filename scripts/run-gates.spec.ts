@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { coverageExemptHeavySuites } from './coverage-exempt.ts'
 import {
   defaultConcurrency,
   formatGateResultReason,
@@ -99,6 +100,48 @@ describe('gate graph validation', () => {
     expect(byId.get('coverage')?.allowFailure).not.toBe(true)
     expect(byId.get('coverage-exempt-heavy')?.allowFailure).not.toBe(true)
     expect(byId.get('duplication')?.allowFailure).toBe(true)
+  })
+
+  it('routes both coverage gates through the suite-accounting checker, not vitest directly', () => {
+    const gates = withPnpmEntrypoint(() => gatesForMode('ci-coverage'))
+    const coverage = gates.find(subject => subject.id === 'coverage')
+    const coverageExemptHeavy = gates.find(subject => subject.id === 'coverage-exempt-heavy')
+    const checkerHead = ['tsx', 'scripts/verify-suite-accounting.ts', 'run']
+
+    // `args` is [entrypoint, 'exec', ...]; the checker CLI comes right after
+    // `pnpm exec`, and `run` is vitest's own subcommand forwarded through
+    // unchanged — never `vitest run` directly.
+    expect(coverage?.args.slice(2, 2 + checkerHead.length)).toEqual(checkerHead)
+    expect(coverageExemptHeavy?.args.slice(2, 2 + checkerHead.length)).toEqual(checkerHead)
+
+    // `displayCommand` must describe what actually runs, not the raw vitest invocation
+    // it replaced.
+    expect(coverage?.displayCommand).toContain('verify-suite-accounting.ts')
+    expect(coverage?.displayCommand).not.toContain('vitest run')
+    expect(coverageExemptHeavy?.displayCommand).toContain('verify-suite-accounting.ts')
+    expect(coverageExemptHeavy?.displayCommand).not.toContain('vitest run')
+  })
+
+  it('forwards --coverage and every positional heavy-suite filter in their original order and position', () => {
+    const gates = withPnpmEntrypoint(() => gatesForMode('ci-coverage'))
+    const coverage = gates.find(subject => subject.id === 'coverage')
+    const coverageExemptHeavy = gates.find(subject => subject.id === 'coverage-exempt-heavy')
+
+    // `--coverage` is the coverage gate's very next argument after the checker's `run`.
+    const runIndex = coverage?.args.indexOf('run') ?? -1
+    expect(runIndex).toBeGreaterThan(-1)
+    expect(coverage?.args[runIndex + 1]).toBe('--coverage')
+
+    // Every filter lands, in coverage-exempt.ts's own declared order, immediately
+    // after `run` — a filter landing out of place would silently change which
+    // tests this gate actually runs while still reporting success.
+    const heavyRunIndex = coverageExemptHeavy?.args.indexOf('run') ?? -1
+    expect(heavyRunIndex).toBeGreaterThan(-1)
+    const filtersAfterRun = coverageExemptHeavy?.args.slice(
+      heavyRunIndex + 1,
+      heavyRunIndex + 1 + coverageExemptHeavySuites.length,
+    )
+    expect(filtersAfterRun).toEqual(coverageExemptHeavySuites.map(suite => suite.filter))
   })
 
   it('applies one configured test and polling timeout to both coverage gates', () => {
