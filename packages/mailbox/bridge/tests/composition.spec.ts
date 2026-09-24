@@ -166,11 +166,38 @@ function allSessionLogText(root: string): string {
     .join('')
 }
 
-/** Poll a condition until it holds or the budget expires. */
-async function until(holds: () => boolean, budgetMs = 120_000): Promise<void> {
+/**
+ * Poll a condition until it holds or the budget expires. On expiry the thrown
+ * error names what was being waited for and, when a snapshot is supplied,
+ * what was actually observed at the moment the budget ran out — otherwise a
+ * hang 120s later explains nothing about which wait failed or why.
+ * @param holds - the condition polled every 50ms.
+ * @param what - names the condition, for the timeout error.
+ * @param snapshot - optional cheap read of observed state, included on timeout.
+ *   Guarded: a throwing snapshot reports its own failure instead of masking
+ *   the timeout.
+ * @param budgetMs - total time allowed before throwing.
+ */
+async function until(
+  holds: () => boolean,
+  what: string,
+  snapshot?: () => unknown,
+  budgetMs = 120_000,
+): Promise<void> {
   const started = Date.now()
   while (!holds()) {
-    if (Date.now() - started > budgetMs) throw new Error('composition condition never settled')
+    const elapsed = Date.now() - started
+    if (elapsed > budgetMs) {
+      let observed = ''
+      if (snapshot !== undefined) {
+        try {
+          observed = `\nobserved: ${JSON.stringify(snapshot(), null, 2)}`
+        } catch (error) {
+          observed = `\nobserved: <snapshot failed: ${error instanceof Error ? error.message : String(error)}>`
+        }
+      }
+      throw new Error(`composition condition never settled: ${what} (after ${elapsed}ms)${observed}`)
+    }
     await new Promise<void>((resolve) => { setTimeout(resolve, 50) })
   }
 }
@@ -434,10 +461,16 @@ describe('mailbox delivery over real compositions', () => {
           // Admission settles before the delivered turn streams; wait for the
           // scripted model to record the woken exchange itself — a fixed beat
           // races teardown under aggregate-run contention.
-          await until(() => storedState(env.storePath, id) === 'done')
-          await until(() => secondAdapter.requests.some(request =>
-            request.messages.some(message =>
-              (message as { source?: { kind?: string } }).source?.kind === 'mailbox')))
+          await until(
+            () => storedState(env.storePath, id) === 'done',
+            `mailbox message ${id} to reach state 'done'`,
+          )
+          await until(
+            () => secondAdapter.requests.some(request =>
+              request.messages.some(message =>
+                (message as { source?: { kind?: string } }).source?.kind === 'mailbox')),
+            'a mailbox-sourced message to reach the scripted model',
+          )
         },
       })
 
@@ -482,7 +515,10 @@ describe('mailbox delivery over real compositions', () => {
           '    addresses: ["hook-gate"]',
           '    pollIntervalMs: 10',
         ],
-        settled: () => until(() => storedState(envA.storePath, rejectedId) === 'failed'),
+        settled: () => until(
+          () => storedState(envA.storePath, rejectedId) === 'failed',
+          `mailbox message ${rejectedId} to reach state 'failed'`,
+        ),
       })
       expect(storedState(envA.storePath, rejectedId)).toBe('failed')
 
@@ -511,10 +547,16 @@ describe('mailbox delivery over real compositions', () => {
         settled: async () => {
           // Same observed-delivery condition as the cold-resume case: settle
           // alone does not prove the resumed turn reached the scripted model.
-          await until(() => storedState(envB.storePath, admittedId) === 'done')
-          await until(() => secondAdapter.requests.some(request =>
-            request.messages.some(message =>
-              (message as { source?: { kind?: string } }).source?.kind === 'mailbox')))
+          await until(
+            () => storedState(envB.storePath, admittedId) === 'done',
+            `mailbox message ${admittedId} to reach state 'done'`,
+          )
+          await until(
+            () => secondAdapter.requests.some(request =>
+              request.messages.some(message =>
+                (message as { source?: { kind?: string } }).source?.kind === 'mailbox')),
+            'a mailbox-sourced message to reach the scripted model',
+          )
         },
       })
       const mailboxMessages = secondAdapter.requests
@@ -575,12 +617,18 @@ describe('mailbox delivery over real compositions', () => {
           // Nothing pre-published: against a session whose runner has not
           // registered yet, the inline mount drain would (correctly) settle
           // mail `unknown-address`. Hold first…
-          await until(() => heldAdapter.requests.length === 1)
+          await until(
+            () => heldAdapter.requests.length === 1,
+            'the held adapter to receive its first (user) request',
+          )
           // …then publish mid-generation; the next drain STEERs it into the
           // live turn within one poll beat even though the seat stays busy.
           const mailedId = await seed(env.storePath, 'steer-live')
           try {
-            await until(() => storedState(env.storePath, mailedId) === 'done')
+            await until(
+              () => storedState(env.storePath, mailedId) === 'done',
+              `mailbox message ${mailedId} to reach state 'done'`,
+            )
           } catch {
             const db = new DatabaseSync(env.storePath)
             const rows = db.prepare('SELECT state, result FROM messages WHERE id = ?').all(mailedId)
@@ -666,10 +714,19 @@ describe('mailbox delivery over real compositions', () => {
           '        sessionId: ' + JSON.stringify(String(aliasedId)),
         ],
         settled: async () => {
-          await until(() => storedState(env.storePath, id) === 'done')
-          await until(() => wakeAdapter.requests.some(request =>
-            request.messages.some(message =>
-              (message as { source?: { kind?: string } }).source?.kind === 'mailbox')))
+          await until(
+            () => storedState(env.storePath, id) === 'done',
+            `mailbox message ${id} to reach state 'done'`,
+            () => storedState(env.storePath, id),
+          )
+          await until(
+            () => wakeAdapter.requests.some(request =>
+              request.messages.some(message =>
+                (message as { source?: { kind?: string } }).source?.kind === 'mailbox')),
+            'a mailbox-sourced message to reach the scripted wake adapter',
+            () => wakeAdapter.requests.map(request =>
+              request.messages.map(message => (message as { source?: unknown }).source)),
+          )
         },
       })
 
@@ -734,8 +791,14 @@ describe('seat tool-restriction over a real tool registry', () => {
         awaitQuiescence: false,
         extraRows: toolSeatBridgeRows('tool-narrow'),
         settled: async () => {
-          await until(() => storedState(env.storePath, id) === 'done')
-          await until(() => adapter.requests.length >= 1)
+          await until(
+            () => storedState(env.storePath, id) === 'done',
+            `mailbox message ${id} to reach state 'done'`,
+          )
+          await until(
+            () => adapter.requests.length >= 1,
+            'the scripted adapter to receive at least one request',
+          )
         },
       })
       const toolNames = (adapter.requests[0]?.tools ?? []).map(tool => tool.name).sort()
@@ -759,8 +822,14 @@ describe('seat tool-restriction over a real tool registry', () => {
         awaitQuiescence: false,
         extraRows: toolSeatBridgeRows('tool-open'),
         settled: async () => {
-          await until(() => storedState(env.storePath, id) === 'done')
-          await until(() => adapter.requests.length >= 1)
+          await until(
+            () => storedState(env.storePath, id) === 'done',
+            `mailbox message ${id} to reach state 'done'`,
+          )
+          await until(
+            () => adapter.requests.length >= 1,
+            'the scripted adapter to receive at least one request',
+          )
         },
       })
       const toolNames = (adapter.requests[0]?.tools ?? []).map(tool => tool.name).sort()
@@ -790,8 +859,14 @@ describe('seat tool-restriction over a real tool registry', () => {
         awaitQuiescence: false,
         extraRows: toolSeatBridgeRows('tool-degraded', { residencyIdleMs: 0 }),
         settled: async () => {
-          await until(() => storedState(env.storePath, id) === 'failed')
-          await until(() => !existsSync(namedLockPath('tool-degraded')))
+          await until(
+            () => storedState(env.storePath, id) === 'failed',
+            `mailbox message ${id} to reach state 'failed'`,
+          )
+          await until(
+            () => !existsSync(namedLockPath('tool-degraded')),
+            "the muted seat's named lock file to be released",
+          )
         },
       })
 
@@ -845,8 +920,14 @@ describe('seat tool-restriction over a real tool registry', () => {
         awaitQuiescence: false,
         extraRows: toolSeatBridgeRows('tool-narrow'),
         settled: async (ctx) => {
-          await until(() => storedState(env.storePath, id) === 'done')
-          await until(() => adapter.requests.length >= 1)
+          await until(
+            () => storedState(env.storePath, id) === 'done',
+            `mailbox message ${id} to reach state 'done'`,
+          )
+          await until(
+            () => adapter.requests.length >= 1,
+            'the scripted adapter to receive at least one request',
+          )
           const agent = ctx.agents.get(deriveNamedSessionId('tool-narrow'))
           if (agent === undefined) {
             throw new Error('composition test bug: the restricted seat is not resident after delivery')
