@@ -171,11 +171,18 @@ describe('headless session workspace attachment (no restart, no registry re-open
     const lock = holdForeignLock('headless-sweep-seat')
     try {
       // The sweep polls the lock directory every FOLLOW_SWEEP_INTERVAL_MS
-      // (1000ms); poll for the attach to land instead of asserting on a
-      // fixed sleep, since this only proves the discovery is autonomous, not
-      // its exact latency.
+      // (1000ms), and workspace registration and session attach are two
+      // separate steps (the workspace entity is added to the registry
+      // synchronously, but its sessionIds are only populated once
+      // attachSession()'s async mutate() resolves) — so poll for the
+      // session to actually be attached, not merely for the workspace to
+      // exist, since this only proves the discovery is autonomous, not its
+      // exact latency.
       const deadline = Date.now() + 5000
-      while (ctx.workspaceRegistry.list().length === 0 && Date.now() < deadline) {
+      while (
+        !ctx.workspaceRegistry.list().some(workspace => workspace.sessionIds.includes(sessionId)) &&
+        Date.now() < deadline
+      ) {
         await new Promise(resolve => setTimeout(resolve, 100))
       }
     } finally {
