@@ -48,6 +48,14 @@ async function captureIdentities(inspector: ProcessInspector, state: TreeState):
   }, { interval: 10, timeout: scenarioTimeoutMs })
 }
 
+const hostDiagnosticCharLimit = 4_000
+
+function truncateForDiagnostic(text: string): string {
+  return text.length > hostDiagnosticCharLimit
+    ? `${text.slice(0, hostDiagnosticCharLimit)}… (truncated)`
+    : text
+}
+
 async function waitForGone(state: TreeState): Promise<void> {
   await Promise.all([state.root, state.descendant].map(pid => vi.waitFor(() => {
     if (processExists(pid)) throw new Error(`managed pid ${pid} is still alive`)
@@ -125,6 +133,23 @@ async function runScenario(kind: ManagedKind, trigger: ExitTrigger) {
       }
       : undefined
     return { outcome, disposeCounts }
+  } catch (error: unknown) {
+    if (!settled) {
+      // The host normally reports why it died on its own stdout/stderr, but the plain kill
+      // below discards that before anyone can see it. Kill it here instead, capture what it
+      // reported (reject: false means this always resolves, never throws), and chain it onto
+      // the real failure so the assertion error is self-documenting.
+      child.kill('SIGKILL')
+      const hostResult = await child
+      settled = true
+      throw new Error(
+        `host process did not settle (exitCode=${hostResult.exitCode}, signal=${hostResult.signal})\n`
+        + `stdout: ${truncateForDiagnostic(hostResult.stdout) || '<empty>'}\n`
+        + `stderr: ${truncateForDiagnostic(hostResult.stderr) || '<empty>'}`,
+        { cause: error },
+      )
+    }
+    throw error
   } finally {
     if (!settled) {
       child.kill('SIGKILL')
