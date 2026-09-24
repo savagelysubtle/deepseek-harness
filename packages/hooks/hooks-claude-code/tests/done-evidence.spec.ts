@@ -40,6 +40,14 @@ function sh(d: string, name: string, body: string): string {
 function hooks(d: string, h: unknown): string {
   writeFileSync(join(d, 'hooks.json'), JSON.stringify({ hooks: h })); return join(d, 'hooks.json')
 }
+/**
+ * The shell snippet a capture script uses to land its payload: write to a
+ * same-directory temp file, then `mv -f` it onto the final path so a
+ * concurrent reader never observes the file mid-write (empty or partial).
+ */
+function captureCmd(cap: string): string {
+  return `cat > "${cap}.tmp.$$"\nmv -f "${cap}.tmp.$$" "${cap}"`
+}
 
 async function harness(configPath: string, adapter: MockAdapter): Promise<Context> {
   const ctx = new Context()
@@ -83,7 +91,7 @@ describe('hooks-claude-code — Stop payload: last_assistant_message', () => {
   it('a completed turn\'s final assistant text reaches last_assistant_message', async () => {
     const d = dir()
     const cap = join(d, 'payload')
-    const s = sh(d, 'stop.sh', `#!/usr/bin/env bash\ncat > "${cap}"\n`)
+    const s = sh(d, 'stop.sh', `#!/usr/bin/env bash\n${captureCmd(cap)}\n`)
     const path = hooks(d, { Stop: [{ hooks: [{ type: 'command', command: s }] }] })
     const adapter = new MockAdapter([textResponse('the real answer, with a count of 3 tests passing')])
     const ctx = await harness(path, adapter)
@@ -98,7 +106,7 @@ describe('hooks-claude-code — Stop payload: last_assistant_message', () => {
   it('a step with no content blocks omits last_assistant_message (never the literal "undefined")', async () => {
     const d = dir()
     const cap = join(d, 'payload')
-    const s = sh(d, 'stop.sh', `#!/usr/bin/env bash\ncat > "${cap}"\n`)
+    const s = sh(d, 'stop.sh', `#!/usr/bin/env bash\n${captureCmd(cap)}\n`)
     const path = hooks(d, { Stop: [{ hooks: [{ type: 'command', command: s }] }] })
     const adapter = new MockAdapter([emptyResponse()])
     const ctx = await harness(path, adapter)
@@ -192,7 +200,7 @@ describe('hooks-claude-code — SubagentStop payload: last_assistant_message', (
   it('joins the end info\'s text content blocks into one plain string', async () => {
     const d = dir()
     const cap = join(d, 'payload')
-    const s = sh(d, 'sa.sh', `#!/usr/bin/env bash\ncat > "${cap}"\n`)
+    const s = sh(d, 'sa.sh', `#!/usr/bin/env bash\n${captureCmd(cap)}\n`)
     const path = hooks(d, { SubagentStop: [{ hooks: [{ type: 'command', command: s }] }] })
     const ctx = await harness(path, new MockAdapter([]))
     ctx.emit(subagentCarrier(ctx), 'subagent/end', {
@@ -214,7 +222,7 @@ describe('hooks-claude-code — SubagentStop payload: last_assistant_message', (
   it('omits last_assistant_message when the end info carries none', async () => {
     const d = dir()
     const cap = join(d, 'payload')
-    const s = sh(d, 'sa.sh', `#!/usr/bin/env bash\ncat > "${cap}"\n`)
+    const s = sh(d, 'sa.sh', `#!/usr/bin/env bash\n${captureCmd(cap)}\n`)
     const path = hooks(d, { SubagentStop: [{ hooks: [{ type: 'command', command: s }] }] })
     const ctx = await harness(path, new MockAdapter([]))
     ctx.emit(subagentCarrier(ctx), 'subagent/end', {
@@ -238,7 +246,7 @@ describe('hooks-claude-code — SubagentStop payload: last_assistant_message', (
   it('omits last_assistant_message when the end info has only non-text blocks (not stringified)', async () => {
     const d = dir()
     const cap = join(d, 'payload')
-    const s = sh(d, 'sa.sh', `#!/usr/bin/env bash\ncat > "${cap}"\n`)
+    const s = sh(d, 'sa.sh', `#!/usr/bin/env bash\n${captureCmd(cap)}\n`)
     const path = hooks(d, { SubagentStop: [{ hooks: [{ type: 'command', command: s }] }] })
     const ctx = await harness(path, new MockAdapter([]))
     ctx.emit(subagentCarrier(ctx), 'subagent/end', {

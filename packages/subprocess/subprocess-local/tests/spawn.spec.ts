@@ -60,7 +60,14 @@ function spec(command: string, overrides: SpecOverrides = {}) {
   }
 }
 
-/** Poll until a pid no longer exists, or is only a zombie on Linux. */
+/**
+ * Poll until a pid no longer exists, or is only a zombie on Linux.
+ *
+ * A process can exit between opening and reading /proc/<pid>/stat, so the
+ * read can fail with either ENOENT (the procfs entry is already gone) or
+ * ESRCH (the kernel found the entry but the process was gone by read time)
+ * — both mean the pid is gone and are treated the same way.
+ */
 async function waitGone(pid: number, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -75,7 +82,8 @@ async function waitGone(pid: number, timeoutMs = 5_000): Promise<void> {
         const state = stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3)
         if (state === 'Z' || state === 'X') return
       } catch (error: unknown) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+        const code = (error as NodeJS.ErrnoException).code
+        if (code === 'ENOENT' || code === 'ESRCH') return
         throw error
       }
     }
