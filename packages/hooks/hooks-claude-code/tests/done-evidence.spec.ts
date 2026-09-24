@@ -126,7 +126,8 @@ mkdir -p "${captureDir}"
 if [ -e "${counter}" ]; then N=$(cat "${counter}"); else N=0; fi
 N=$((N+1))
 echo "$N" > "${counter}"
-cat > "${captureDir}/stop-$N.json"
+cat > "${captureDir}/stop-$N.json.tmp.$$"
+mv -f "${captureDir}/stop-$N.json.tmp.$$" "${captureDir}/stop-$N.json"
 if [ "$N" -eq 1 ]; then
   echo "one more pass please" >&2
   exit 2
