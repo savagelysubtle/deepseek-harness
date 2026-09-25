@@ -331,6 +331,33 @@ export function formatAccountingSkippedNotice(): string {
  */
 export const ACCOUNTING_FAILURE_EXIT_CODE = 97
 
+/** Inputs to {@link resolveWrapperExitCode}. */
+export interface ResolveWrapperExitCodeInput {
+  /** Vitest's own exit code (a signal death is already folded to `1` by the caller). */
+  readonly vitestExitCode: number
+  /** Whether the caller passed a `--reporter`/`--reporters` override, per {@link reporterWasOverridden}. */
+  readonly reporterOverridden: boolean
+  /** Whether {@link verifySuiteAccounting}'s verdict closed. Ignored when `reporterOverridden` is true. */
+  readonly verdictOk: boolean
+}
+
+/**
+ * Decide this wrapper's own process exit code. Vitest's own failure always
+ * wins and is never masked by the accounting check. When the reporter was
+ * overridden, the accounting check never ran at all (no summary lines to
+ * parse), so the verdict is ignored entirely and vitest's exit code is used
+ * as-is. Otherwise, a clean vitest run whose accounting does not close fails
+ * with {@link ACCOUNTING_FAILURE_EXIT_CODE} instead of 0.
+ * @param input - vitest's exit code, whether its reporter was overridden, and the accounting verdict.
+ * @returns the exit code this process should use.
+ */
+export function resolveWrapperExitCode(input: ResolveWrapperExitCodeInput): number {
+  const { vitestExitCode, reporterOverridden, verdictOk } = input
+  if (reporterOverridden) return vitestExitCode
+  if (vitestExitCode !== 0) return vitestExitCode
+  return verdictOk ? 0 : ACCOUNTING_FAILURE_EXIT_CODE
+}
+
 const vitestCli = fileURLToPath(new URL('../node_modules/vitest/vitest.mjs', import.meta.url))
 const root = resolve(import.meta.dirname, '..')
 
@@ -380,13 +407,14 @@ function runVitestTeed(vitestArgs: readonly string[]): Promise<TeedVitestRun> {
 async function main(): Promise<void> {
   const vitestArgs = process.argv.slice(2)
   const { exitCode: vitestExitCode, combinedOutput } = await runVitestTeed(vitestArgs)
+  const reporterOverridden = reporterWasOverridden(vitestArgs)
 
-  if (reporterWasOverridden(vitestArgs)) {
+  if (reporterOverridden) {
     // Nothing to parse with a custom reporter — say so loudly and defer to
     // vitest's own exit code, rather than either faking a pass or blocking
     // a run this check was never able to inspect.
     console.error(`\n${formatAccountingSkippedNotice()}`)
-    process.exitCode = vitestExitCode
+    process.exitCode = resolveWrapperExitCode({ vitestExitCode, reporterOverridden, verdictOk: true })
     return
   }
 
@@ -394,12 +422,7 @@ async function main(): Promise<void> {
 
   if (!verdict.ok) console.error(`\n${formatAccountingFailure(verdict)}`)
 
-  if (vitestExitCode !== 0) {
-    // vitest's own failure always wins and is never masked by this check.
-    process.exitCode = vitestExitCode
-    return
-  }
-  process.exitCode = verdict.ok ? 0 : ACCOUNTING_FAILURE_EXIT_CODE
+  process.exitCode = resolveWrapperExitCode({ vitestExitCode, reporterOverridden, verdictOk: verdict.ok })
 }
 
 if (import.meta.main) await main()

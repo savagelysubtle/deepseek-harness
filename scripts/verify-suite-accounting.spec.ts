@@ -1,10 +1,20 @@
+import { spawnSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
+import { rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
+  ACCOUNTING_FAILURE_EXIT_CODE,
   formatAccountingFailure,
   formatAccountingSkippedNotice,
   reporterWasOverridden,
+  resolveWrapperExitCode,
   verifySuiteAccounting,
 } from './verify-suite-accounting.ts'
+
+const repositoryRoot = fileURLToPath(new URL('..', import.meta.url))
+const tsxCli = fileURLToPath(new URL('../node_modules/tsx/dist/cli.mjs', import.meta.url))
 
 const PLUGIN_WARNING = 'The plugin "vite-tsconfig-paths" is detected. Vite now supports tsconfig paths '
   + 'resolution natively via the resolve.tsconfigPaths option. You can remove the plugin and set '
@@ -334,5 +344,79 @@ describe('formatAccountingSkippedNotice', () => {
     expect(notice).toContain('SUITE ACCOUNTING SKIPPED')
     expect(notice).toContain('reporter')
     expect(notice).toContain('NOT been checked')
+  })
+})
+
+describe('resolveWrapperExitCode', () => {
+  it('passes vitest\'s failure through when the accounting closes', () => {
+    expect(resolveWrapperExitCode({ vitestExitCode: 1, reporterOverridden: false, verdictOk: true })).toBe(1)
+  })
+
+  it('lets vitest\'s failure win even when the accounting is also broken', () => {
+    expect(resolveWrapperExitCode({ vitestExitCode: 1, reporterOverridden: false, verdictOk: false })).toBe(1)
+  })
+
+  it('passes a clean vitest run through when the accounting closes', () => {
+    expect(resolveWrapperExitCode({ vitestExitCode: 0, reporterOverridden: false, verdictOk: true })).toBe(0)
+  })
+
+  it('fails a clean vitest run with the accounting exit code when the accounting is broken', () => {
+    expect(resolveWrapperExitCode({ vitestExitCode: 0, reporterOverridden: false, verdictOk: false }))
+      .toBe(ACCOUNTING_FAILURE_EXIT_CODE)
+  })
+
+  it('passes a clean vitest run through when the reporter was overridden, regardless of the verdict', () => {
+    expect(resolveWrapperExitCode({ vitestExitCode: 0, reporterOverridden: true, verdictOk: false })).toBe(0)
+  })
+
+  it('passes vitest\'s failure through when the reporter was overridden, ignoring the verdict', () => {
+    expect(resolveWrapperExitCode({ vitestExitCode: 1, reporterOverridden: true, verdictOk: true })).toBe(1)
+  })
+})
+
+describe('verify-suite-accounting CLI — end to end', () => {
+  it('exits 1 for a genuinely failing suite, proving the wrapper passes vitest\'s own exit code through', { timeout: 30_000 }, async () => {
+    // A real child process, not a mock: the property under test is that the
+    // wrapper's OWN process exit status reflects vitest's failure, which no
+    // unit test of resolveWrapperExitCode can prove by itself — a verifier
+    // once mis-reported "exit 0 despite a failure" by reading a `| tee`
+    // pipeline's exit instead of the wrapper's.
+    //
+    // The temp spec lives under scripts/ (not a mkdtemp dir outside the
+    // repo) because vitest.config.ts's include list only matches
+    // 'scripts/**/*.spec.ts' (and similar in-repo globs); a file outside the
+    // repo tree would never be collected regardless of the path filter
+    // passed on the command line.
+    const tempSpecPath = join(repositoryRoot, 'scripts', `tmp-always-failing-${randomUUID()}.spec.ts`)
+    const tempSpecRelPath = 'scripts/' + tempSpecPath.slice(tempSpecPath.lastIndexOf('/') + 1)
+
+    await writeFile(
+      tempSpecPath,
+      [
+        "import { expect, it } from 'vitest'",
+        '',
+        "it('deliberately fails to prove the wrapper propagates vitest\\'s exit code', () => {",
+        '  expect(true).toBe(false)',
+        '})',
+        '',
+      ].join('\n'),
+    )
+
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [tsxCli, 'scripts/verify-suite-accounting.ts', 'run', tempSpecRelPath],
+        {
+          cwd: repositoryRoot,
+          encoding: 'utf8',
+          env: { ...process.env, NO_COLOR: '1' },
+        },
+      )
+
+      expect(result.error).toBeUndefined()
+      expect(result.status, `${result.stdout}${result.stderr}`).toBe(1)
+    } finally {
+      await rm(tempSpecPath, { force: true })
+    }
   })
 })
