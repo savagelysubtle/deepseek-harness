@@ -10,7 +10,7 @@
 
 import { globSync, readFileSync } from 'node:fs'
 import { relative, resolve, sep } from 'node:path'
-import { computeInstallationClosure } from '@deepseek-ai/dsh-app-boot'
+import { computeInstallationClosure } from '../packages/boot/app-boot/src/profile.ts'
 
 interface RequiredManifest {
   name?: string
