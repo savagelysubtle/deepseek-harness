@@ -4,9 +4,9 @@
  * empty-root composition, and the installation module-fallback healing.
  */
 
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   composeEntries,
@@ -47,6 +47,40 @@ function stageInstallation(
   }
   writeFileSync(join(appDir, 'package.json'), JSON.stringify({ name: 'dsh-app', dependencies: appDeps }))
   return join(appDir, 'package.json')
+}
+
+/**
+ * Recursively list every path under `root`: relative path -> entry kind, plus
+ * enough per-file detail (size, mtime) to detect a rewrite of unchanged
+ * content, and enough per-symlink detail (target) to detect a re-point. A
+ * missing root snapshots as `{}`, matching a directory that is created only
+ * later in the test (e.g. a fresh temp `home` before `profiles/` exists).
+ */
+function snapshotTree(root: string): Record<string, { kind: string; size?: number; mtimeMs?: number; target?: string }> {
+  const entries: Record<string, { kind: string; size?: number; mtimeMs?: number; target?: string }> = {}
+  const walk = (dir: string): void => {
+    let names: string[]
+    try {
+      names = readdirSync(dir)
+    } catch {
+      return
+    }
+    for (const name of names) {
+      const full = join(dir, name)
+      const rel = relative(root, full)
+      const stat = lstatSync(full)
+      if (stat.isSymbolicLink()) {
+        entries[rel] = { kind: 'symlink', target: readlinkSync(full) }
+      } else if (stat.isDirectory()) {
+        entries[rel] = { kind: 'dir' }
+        walk(full)
+      } else {
+        entries[rel] = { kind: 'file', size: stat.size, mtimeMs: stat.mtimeMs }
+      }
+    }
+  }
+  walk(root)
+  return entries
 }
 
 describe('resolveProfileDir', () => {
@@ -297,12 +331,20 @@ describe('computeInstallationClosure', () => {
     const modules = join(anchor, '..', 'node_modules')
     mkdirSync(join(modules, 'dep-of-a'), { recursive: true })
     writeFileSync(join(modules, 'dep-of-a', 'package.json'), JSON.stringify({ name: 'dep-of-a', version: '0.0.0' }))
+    // No filesystem writes: snapshot the entire staged installation tree
+    // (the anchor's parent, i.e. the app + node_modules root) and a fresh
+    // home -- the profiles/node_modules location the old inline code would
+    // have written to -- before and after the call, and require them
+    // identical. This actually observes writes, unlike checking a single
+    // path the function could never have written to.
+    const installRoot = join(anchor, '..', '..')
+    const home = tmp()
+    const before = { install: snapshotTree(installRoot), home: snapshotTree(home) }
     const closure = computeInstallationClosure(anchor)
+    const after = { install: snapshotTree(installRoot), home: snapshotTree(home) }
     expect(closure.get('dsh-app')).toBe(join(anchor, '..'))
     expect(closure.get('bundle-a')).toBe(join(modules, 'bundle-a'))
     expect(closure.get('dep-of-a')).toBe(join(modules, 'dep-of-a'))
-    // No filesystem writes: the profiles module fallback is never created.
-    const home = tmp()
-    expect(existsSync(join(home, 'profiles', 'node_modules'))).toBe(false)
+    expect(after).toEqual(before)
   })
 })
