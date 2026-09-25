@@ -231,6 +231,16 @@
         "tests/**/*.tsx"
       ]
     },
+    "packages/client/ui-org-controls": {
+      "entry": [
+        "tests/**/*.spec.tsx"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "src/**/*.tsx",
+        "tests/**/*.tsx"
+      ]
+    },
     "website": {
       "project": [
         "**/*.ts"
@@ -775,7 +785,10 @@
     },
     "packages/bundle/headless": {
       "ignoreDependencies": [
-        "@deepseek-ai/dsh-code-runtime-worker-thread"
+        "@deepseek-ai/dsh-code-runtime-worker-thread",
+        "@deepseek-ai/dsh-mailbox",
+        "@deepseek-ai/dsh-mailbox-local",
+        "@deepseek-ai/dsh-tool-mailbox"
       ]
     },
     "packages/bundle/web-app": {

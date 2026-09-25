@@ -19,7 +19,7 @@ import {
 } from './loop-guard.ts'
 
 /** Stable machine-routable code for a loop-guard-triggered abort; route on this, never on message text. */
-export const LOOP_ABORTED_CODE = 'LOOP_ABORTED'
+const LOOP_ABORTED_CODE = 'LOOP_ABORTED'
 
 /**
  * Characters of the offending fragment kept for the abort event and error

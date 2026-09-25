@@ -10,7 +10,7 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http'
 
 /** Recorded token-endpoint request body (form fields). */
-export type TokenRequest = Record<string, string>
+type TokenRequest = Record<string, string>
 
 /** Live fixture handle. */
 export interface OAuthFixture {

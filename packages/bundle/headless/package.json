@@ -46,7 +46,6 @@
   "dependencies": {
     "@deepseek-ai/dsh-cmdline": "workspace:^",
     "@deepseek-ai/dsh-code-runtime-worker-thread": "workspace:^",
-    "@deepseek-ai/dsh-home-paths": "workspace:^",
     "@deepseek-ai/dsh-mailbox": "workspace:^",
     "@deepseek-ai/dsh-mailbox-local": "workspace:^",
     "@deepseek-ai/dsh-named-sessions": "workspace:^",
