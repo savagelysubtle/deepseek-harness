@@ -2,6 +2,8 @@
 
 Status: implemented
 
+English | [中文](2026-08-25-headless-named-sessions.zh.md)
+
 ## Problem
 
 `dsh --profile headless` ran one fresh session per invocation. Automation that splits a long task across invocations had no way to land each run in the same durable session without minting and tracking session ids itself.

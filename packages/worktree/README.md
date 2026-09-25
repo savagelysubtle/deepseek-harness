@@ -1,5 +1,7 @@
 # worktree/ — seat-scoped git worktree family
 
+English | [中文](README.zh.md)
+
 Isolated git worktrees for parallel agent rounds: the seam mints slugs, derives branch/session/path names, fences every state change behind loud reasons, and bootstraps the fresh worktree with the repository's copy list.
 
 | Package | Role | ctx key |

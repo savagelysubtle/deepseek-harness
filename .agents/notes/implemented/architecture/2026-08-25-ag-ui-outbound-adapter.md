@@ -2,6 +2,8 @@
 
 Status: implemented
 
+English | [中文](2026-08-25-ag-ui-outbound-adapter.zh.md)
+
 **Date:** 2026-08-25 · **Package:** `@deepseek-ai/dsh-ag-ui` · **Kind:** architecture/integration
 
 ## Problem

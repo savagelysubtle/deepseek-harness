@@ -2,6 +2,8 @@
 
 Status: implemented
 
+English | [中文](2026-08-26-mailbox-capability-seam.zh.md)
+
 ## Problem
 
 Harness residency is process-local by design: continuable-subagent Activations and inboxes do not coordinate across processes (`subagent` README, known limitation). Automation that addresses long-lived agents from outside — a Slack bot, a fleet dispatcher, another repository's agents — had exactly two options: shell out to headless runs (stateless between invocations until named sessions landed) or reach into persistence internals. Neither provides message durability, delivery-state tracking, or cross-project addressing. The opencode fork's equivalent feature shipped a peer-mailbox tool backed by a table its send path never writes (`session_peer_message`, 0 rows) — durable addressing without durable delivery.

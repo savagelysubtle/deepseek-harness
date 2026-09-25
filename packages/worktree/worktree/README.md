@@ -1,5 +1,7 @@
 # @deepseek-ai/dsh-worktree
 
+English | [中文](README.zh.md)
+
 The worktree capability seam: seat-scoped git worktrees for parallel agent rounds. This package owns all three roles of the seam as one concern — the **Service Definition** (`ctx.worktrees`, slug minting, fences, registry rows), the **provider contract** (`WorktreeProvider`), and the **local git provider** (`LocalGitWorktrees` / `LocalGitWorktreeProvider`). Consumers (the seat-spawning slices) inject the service and never touch git.
 
 ## Service API (`ctx.worktrees`)
@@ -79,4 +81,3 @@ None from the seam itself: worktree names enter a request only where a consumer 
 - Copy-list v1 copies literal files only; globs, negation, and directory entries refuse loudly instead of half-honoring.
 - `remove` leaves the branch behind; branch deletion is a separate explicit operation rather than silently destroying possibly-unmerged work.
 - Registry rows are not reconciled against `git worktree list` automatically: a worktree removed outside the seam stays as a stale row until the reconciliation slice lands.
-- README.zh.md pairing and the group's bilingual records are deferred to the docs slice.

@@ -2,6 +2,8 @@
 
 Status: implemented
 
+English | [中文](2026-08-25-named-sessions-extraction.zh.md)
+
 **Date:** 2026-08-25 · **Packages:** `@deepseek-ai/dsh-named-sessions` (new), `@deepseek-ai/dsh-headless` · **Kind:** architecture
 
 **Supersedes the in-package placement described in** [2026-08-25-headless-named-sessions.md](2026-08-25-headless-named-sessions.md): the derivation and lock contracts are unchanged; only their home moved (that note's "inside packages/bundle/headless" placement now lives here as a shared package).

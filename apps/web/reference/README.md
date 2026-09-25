@@ -1,5 +1,7 @@
 # UI reference captures
 
+English | [中文](README.zh.md)
+
 Screenshots of the running web UI, kept so anyone picking up front-end work can
 see what exists before changing it. Captured from a live host, not mocked.
 
