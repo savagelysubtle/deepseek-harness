@@ -475,7 +475,13 @@ describe('readTextForDiff', () => {
     const reached = Promise.withResolvers<undefined>()
     const release = Promise.withResolvers<undefined>()
     let statCalls = 0
-    const allocate = vi.spyOn(Buffer, 'allocUnsafe')
+    // Counts reads on THIS test's mocked file handle only, not the process-wide
+    // Buffer.allocUnsafe: that global is touched by unrelated Node/vitest activity
+    // in the same worker (streams, sockets, timers), which flakes an allocation
+    // count taken before the abort. Reading past the immediate-cancellation point
+    // is exactly what would call handle.read(), so counting that call directly
+    // proves "did not keep reading after cancel" without the process-wide noise.
+    let readCalls = 0
     vi.resetModules()
     vi.doMock('node:fs/promises', async (importOriginal) => {
       const actual = await importOriginal<typeof import('node:fs/promises')>()
@@ -489,7 +495,10 @@ describe('readTextForDiff', () => {
           }
           return {
             close: handle.close.bind(handle),
-            read: handle.read.bind(handle),
+            async read(...readArgs: Parameters<typeof handle.read>) {
+              readCalls += 1
+              return handle.read(...readArgs)
+            },
             async stat(...statArgs: Parameters<typeof handle.stat>) {
               statCalls += 1
               const info = await handle.stat(...statArgs)
@@ -509,15 +518,13 @@ describe('readTextForDiff', () => {
       const controller = new AbortController()
       const pending = isolatedReadTextForDiff(file, 8, controller.signal)
       await reached.promise
-      const allocationCalls = allocate.mock.calls.length
       controller.abort()
       release.resolve(undefined)
       await expect(pending).rejects.toMatchObject({ code: 'FS_ABORTED' })
       expect(statCalls).toBe(stage === 'open' ? 0 : 1)
-      expect(allocate).toHaveBeenCalledTimes(allocationCalls)
+      expect(readCalls).toBe(0)
     } finally {
       release.resolve(undefined)
-      allocate.mockRestore()
       vi.doUnmock('node:fs/promises')
       vi.resetModules()
     }
