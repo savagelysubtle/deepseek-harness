@@ -41,6 +41,18 @@ interface MemoryWriteResult {
   readonly path: string
   /** Stored UTF-8 byte size. */
   readonly bytes: number
+  /**
+   * Present only when this write replaced an existing entry at the same
+   * path: that entry's size and last-modified time, before its content was
+   * moved into a bounded retained-version history rather than destroyed.
+   * Absent when the path was previously unused.
+   */
+  readonly replaced?: {
+    /** UTF-8 byte size of the content that was replaced. */
+    readonly bytes: number
+    /** ISO-8601 timestamp of the replaced content's last modification. */
+    readonly modifiedAt: string
+  }
 }
 ```
 
@@ -63,7 +75,7 @@ Source: [`packages/memory/memory/src/types.ts`](../../packages/memory/memory/src
 [`MemoryService`](../../packages/memory/memory/src/index.ts) is the abstract Service Definition published as `ctx.memory`; providers implement four operations over one storage root, each resolving the project scope from its `cwd` argument:
 
 - `read(cwd, path)` returns one entry's full text verbatim, frontmatter included.
-- `write(cwd, path, content)` creates or completely replaces one entry, creating missing directories; the result reports the normalized path and stored byte size.
+- `write(cwd, path, content)` creates or completely replaces one entry, creating missing directories; the result reports the normalized path and stored byte size, plus `replaced` — the prior entry's size and last-modified time — when the write replaced an existing entry rather than creating a new one; that entry's content is retained, not destroyed.
 - `list(cwd)` walks the scope recursively and returns every entry sorted by path, with byte sizes.
 - `search(cwd, query, limit?)` runs a case-insensitive substring scan across the scoped entries' lines and returns matches ordered by path, then line number; empty queries reject, results never exceed `MAX_SEARCH_LIMIT`, and oversized or unreadable entries are skipped silently.
 

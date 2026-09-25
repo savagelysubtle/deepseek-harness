@@ -41,6 +41,18 @@ interface MemoryWriteResult {
   readonly path: string
   /** Stored UTF-8 byte size. */
   readonly bytes: number
+  /**
+   * Present only when this write replaced an existing entry at the same
+   * path: that entry's size and last-modified time, before its content was
+   * moved into a bounded retained-version history rather than destroyed.
+   * Absent when the path was previously unused.
+   */
+  readonly replaced?: {
+    /** UTF-8 byte size of the content that was replaced. */
+    readonly bytes: number
+    /** ISO-8601 timestamp of the replaced content's last modification. */
+    readonly modifiedAt: string
+  }
 }
 ```
 
@@ -63,7 +75,7 @@ interface MemoryWriteResult {
 [`MemoryService`](../../packages/memory/memory/src/index.ts) 是发布为 `ctx.memory` 的抽象 Service Definition；提供方在同一存储根上实现四个操作，每个都以自己的 `cwd` 参数解析项目作用域：
 
 - `read(cwd, path)` 原样返回一个条目的完整文本，frontmatter 一并包含。
-- `write(cwd, path, content)` 创建或完整替换一个条目并按需创建缺失目录；结果报告规范化路径与写入字节大小。
+- `write(cwd, path, content)` 创建或完整替换一个条目并按需创建缺失目录；结果报告规范化路径与写入字节大小，并在此次写入替换了已有条目而非新建条目时附带 `replaced`——即被替换条目的大小与最后修改时间；该条目的内容会被保留，而非销毁。
 - `list(cwd)` 递归遍历作用域，返回按路径排序、附带字节大小的全部条目。
 - `search(cwd, query, limit?)` 对作用域内条目的各行执行大小写不敏感的子串扫描，返回先按路径、再按行号排序的匹配；空查询拒绝，结果从不超过 `MAX_SEARCH_LIMIT`，超大或不可读条目被静默跳过。
 
