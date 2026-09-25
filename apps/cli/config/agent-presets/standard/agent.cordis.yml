@@ -269,3 +269,14 @@
   config:
     fetch: false
     searchTimeoutMs: 60000
+
+# The `sessionTitle` service stays in the host composition
+# (packages/bundle/base/cordis.patch.yml), mounted once, before any preset
+# joins: a running seat's own title write has exactly one legitimate writer
+# (itself), which is a host-plane concern, not a preset one. This row resolves
+# that shared instance via `ctx.get` at execute time — same soft-lookup shape
+# as tool-goal above — so it needs no realm: this preset publishes nothing
+# new, only registers the model-facing tool into the host tools registry's
+# preset layer.
+- id: tool-session-title
+  name: '@deepseek-ai/dsh-session-title/tool'
