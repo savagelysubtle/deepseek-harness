@@ -202,28 +202,21 @@ function ensureSymlink(link: string, target: string): void {
 }
 
 /**
- * Maintain the flat module fallback `$DSH_HOME/profiles/node_modules`: one
- * symlink per package in the dsh app's resolvable dependency CLOSURE (BFS
- * over `dependencies` from the app manifest), each resolved from its own
- * real location. Node's parent-directory walk from any profile finds this
- * directory after the profile's own `node_modules`, so every in-box plugin
- * resolves without pnpm ever managing it — the exact "bundles come from the
- * installation" contract. The closure (not just direct dependencies) is
- * required for out-of-tree plugins: their peer dependencies name Service
- * Definition packages (`dsh-compaction`, `dsh-invariants`, ...) that the app
- * reaches only through its Service Provider packages. Symlinked packages
- * resolve their own dependencies from their real directories (Node's default
- * symlink-following), so each package needs only its one flat link.
- * Idempotent: correct links are kept and moved installations are
- * re-pointed; a stale link to a vanished package stays until its name is
- * reused (dangling links are invisible to resolution).
+ * Compute the dsh app's resolvable dependency CLOSURE from its install
+ * anchor: BFS over `dependencies` AND `peerDependencies`, starting from the
+ * app manifest itself, resolving each name from the anchor of the package
+ * that first named it (first resolution wins, matching Node's own
+ * nearest-wins). Peer dependencies participate because out-of-tree plugins
+ * import Service Definition packages (`dsh-compaction`, `dsh-invariants`,
+ * ...) directly, and those are peers of their implementations, never plain
+ * dependencies. Reads manifests only; performs no filesystem writes. The
+ * profile-closure gate relies on this being the exact same walk
+ * {@link healProfilesModuleFallback} uses to populate the flat module
+ * fallback — the two must never diverge.
  * @param installAnchor - absolute path of the dsh app's package.json.
- * @param home - the Harness home; defaults to {@link resolveDshHome}.
+ * @returns a name → absolute package directory map, in BFS discovery order.
  */
-export function healProfilesModuleFallback(installAnchor: string, home: string = resolveDshHome()): void {
-  const profilesDir = join(home, PROFILES_DIR)
-  const modulesDir = join(profilesDir, 'node_modules')
-  mkdirSync(modulesDir, { recursive: true })
+export function computeInstallationClosure(installAnchor: string): ReadonlyMap<string, string> {
   const appManifest = JSON.parse(readFileSync(installAnchor, 'utf8')) as ProfileManifest
   const links = new Map<string, string>()
   /* v8 ignore next -- a real app manifest always declares its name */
@@ -247,6 +240,33 @@ export function healProfilesModuleFallback(installAnchor: string, home: string =
       queue.push({ anchor: manifestPath, manifest: JSON.parse(readFileSync(manifestPath, 'utf8')) as ProfileManifest })
     }
   }
+  return links
+}
+
+/**
+ * Maintain the flat module fallback `$DSH_HOME/profiles/node_modules`: one
+ * symlink per package in the dsh app's resolvable dependency CLOSURE
+ * ({@link computeInstallationClosure}), each resolved from its own real
+ * location. Node's parent-directory walk from any profile finds this
+ * directory after the profile's own `node_modules`, so every in-box plugin
+ * resolves without pnpm ever managing it — the exact "bundles come from the
+ * installation" contract. The closure (not just direct dependencies) is
+ * required for out-of-tree plugins: their peer dependencies name Service
+ * Definition packages (`dsh-compaction`, `dsh-invariants`, ...) that the app
+ * reaches only through its Service Provider packages. Symlinked packages
+ * resolve their own dependencies from their real directories (Node's default
+ * symlink-following), so each package needs only its one flat link.
+ * Idempotent: correct links are kept and moved installations are
+ * re-pointed; a stale link to a vanished package stays until its name is
+ * reused (dangling links are invisible to resolution).
+ * @param installAnchor - absolute path of the dsh app's package.json.
+ * @param home - the Harness home; defaults to {@link resolveDshHome}.
+ */
+export function healProfilesModuleFallback(installAnchor: string, home: string = resolveDshHome()): void {
+  const profilesDir = join(home, PROFILES_DIR)
+  const modulesDir = join(profilesDir, 'node_modules')
+  mkdirSync(modulesDir, { recursive: true })
+  const links = computeInstallationClosure(installAnchor)
   for (const [packageName, target] of links) {
     const link = join(modulesDir, packageName)
     mkdirSync(dirname(link), { recursive: true })

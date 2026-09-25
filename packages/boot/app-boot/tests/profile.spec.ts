@@ -4,12 +4,13 @@
  * empty-root composition, and the installation module-fallback healing.
  */
 
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   composeEntries,
+  computeInstallationClosure,
   healProfilesModuleFallback,
   initProfile,
   loadProfile,
@@ -24,7 +25,9 @@ import {
 const tmp = (): string => mkdtempSync(join(tmpdir(), 'dsh-profile-'))
 
 /** Stage a fake installed app: package.json with deps and a node_modules holding bundles. */
-function stageInstallation(bundles: Record<string, { patch?: string; deps?: Record<string, string> }>): string {
+function stageInstallation(
+  bundles: Record<string, { patch?: string; deps?: Record<string, string>; peerDeps?: Record<string, string> }>,
+): string {
   const root = tmp()
   const appDir = join(root, 'app')
   mkdirSync(join(appDir, 'node_modules'), { recursive: true })
@@ -37,6 +40,7 @@ function stageInstallation(bundles: Record<string, { patch?: string; deps?: Reco
       name,
       version: '0.0.0',
       dependencies: spec.deps ?? {},
+      peerDependencies: spec.peerDeps ?? {},
       ...spec.patch === undefined ? {} : { dsh: { bundle: { patch: './cordis.patch.yml' } } },
     }))
     if (spec.patch !== undefined) writeFileSync(join(dir, 'cordis.patch.yml'), spec.patch)
@@ -268,5 +272,37 @@ describe('healProfilesModuleFallback', () => {
     healProfilesModuleFallback(anchor, home) // second healer sees the correct link
     const fallback = join(home, 'profiles', 'node_modules')
     expect(lstatSync(join(fallback, 'dsh-app')).isSymbolicLink()).toBe(true)
+  })
+
+  it('links a package reachable only through a peerDependency', () => {
+    const anchor = stageInstallation({
+      'bundle-a': { patch: '[]\n', peerDeps: { 'peer-only': '0.0.0' } },
+    })
+    // peer-only lives in the installation's node_modules, never in bundle-a's dependencies.
+    const modules = join(anchor, '..', 'node_modules')
+    mkdirSync(join(modules, 'peer-only'), { recursive: true })
+    writeFileSync(join(modules, 'peer-only', 'package.json'), JSON.stringify({ name: 'peer-only', version: '0.0.0' }))
+    const home = tmp()
+    healProfilesModuleFallback(anchor, home)
+    const fallback = join(home, 'profiles', 'node_modules')
+    expect(lstatSync(join(fallback, 'peer-only')).isSymbolicLink()).toBe(true)
+  })
+})
+
+describe('computeInstallationClosure', () => {
+  it('resolves the app and bundle dependency closure by reading manifests only, writing nothing', () => {
+    const anchor = stageInstallation({
+      'bundle-a': { patch: '[]\n', deps: { 'dep-of-a': '0.0.0' } },
+    })
+    const modules = join(anchor, '..', 'node_modules')
+    mkdirSync(join(modules, 'dep-of-a'), { recursive: true })
+    writeFileSync(join(modules, 'dep-of-a', 'package.json'), JSON.stringify({ name: 'dep-of-a', version: '0.0.0' }))
+    const closure = computeInstallationClosure(anchor)
+    expect(closure.get('dsh-app')).toBe(join(anchor, '..'))
+    expect(closure.get('bundle-a')).toBe(join(modules, 'bundle-a'))
+    expect(closure.get('dep-of-a')).toBe(join(modules, 'dep-of-a'))
+    // No filesystem writes: the profiles module fallback is never created.
+    const home = tmp()
+    expect(existsSync(join(home, 'profiles', 'node_modules'))).toBe(false)
   })
 })
