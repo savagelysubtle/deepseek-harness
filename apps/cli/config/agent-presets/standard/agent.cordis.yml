@@ -102,9 +102,12 @@
 # The provider PUBLISHES `ctx.memory`, so it needs an entry-local realm like
 # every service row in this file; the tool consumes that service, so it shares
 # the realm (outside it, the instance would be invisible). The tool registers
-# into the host tools registry's preset layer, same as tool-fs above. Storage
-# is workspace-scoped under $DSH_HOME/memory; nothing is injected into prompts
-# — content enters context only through explicit `memory` calls.
+# into the host tools registry's preset layer, same as tool-fs above. `isolate`
+# here only gives this entry its own service instance — it does not isolate
+# storage. Storage is workspace-scoped under $DSH_HOME/memory, keyed by the
+# session's cwd, so every session in that workspace shares it regardless of
+# realm; nothing is injected into prompts — content enters context only
+# through explicit `memory` calls.
 - id: memory
   name: cordis:group
   group: true

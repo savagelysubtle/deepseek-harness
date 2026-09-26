@@ -136,6 +136,8 @@ function validateClientHalvesDeclared(): string[] {
  * behind an `isolate` realm shadows the host's for its own consumers, so a host
  * contributor to that service reaches nobody; a row that registers into a host
  * singleton registers once per live session, so the second one collides.
+ * (`isolate` only splits which SERVICE INSTANCE a group sees — the underlying
+ * data a provider persists, if any, is scoped by the provider itself.)
  *
  * Both have happened. `shell-env` in a preset realm left `DSH_WEB_URL` reaching
  * no shell, and `tool-subagent-report` handed every child `report` once per live

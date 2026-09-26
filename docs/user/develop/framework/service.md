@@ -138,6 +138,8 @@ This prevents a plugin from calling a service that no longer exists.
 
 `plugin-a` and `plugin-b` each see the Bash instance in their own group, with no cross-group effect.
 
+`isolate` only splits which service *instance* a group sees — it does not by itself isolate the data behind that service. Whether state is shared across groups (or sessions) is decided by the service's own provider: a provider that persists to a shared store, keyed by something other than the realm, stays shared no matter how `isolate` is configured.
+
 ## Built-in Harness services
 
 The repository generates the service names, public methods, and source locations into each service's [subsystem page](../../../subsystems/core.md). Use those generated regions and the service's TypeScript interface while developing a plugin; do not maintain a second static list.

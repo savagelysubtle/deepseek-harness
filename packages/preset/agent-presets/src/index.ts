@@ -423,6 +423,10 @@ export class AgentPresets extends Service {
    * caller holding the agent reads one anyway: a request that is ABOUT a
    * session but arrives from outside it, which is every browser RPC.
    *
+   * The realm isolates the service INSTANCE, not necessarily the data behind
+   * it — a provider that persists somewhere shared (e.g. memory, keyed by
+   * workspace) can still be visible to other sessions through that store.
+   *
    * Read addressing only. A host row that `inject`s a service cannot use this,
    * because injection resolves before any session exists and has no agent to
    * key by; such a service belongs on the host plane instead.
