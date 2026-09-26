@@ -17,6 +17,7 @@ coverage/
 .oxlintrc.contract-*.json
 oxlint-contract-*.ts
 scripts/tmp-always-failing-*.spec.ts
+packages/typert/generator/tests/.generated-model-*/
 .humanize/
 tmp/
 .claude/commands/
