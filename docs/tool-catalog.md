@@ -5,9 +5,9 @@
 
 Every model-facing tool a shipped plugin contributes to `ctx.tools`: the `name`, `description`, and JSON-Schema `parameters` the model receives via the system-prompt assembly. It complements the [subsystem pages](subsystems/core.md) (the types plus each page's generated Cordis API region) — this page is the *tools* the agent is offered.
 
-This file is GENERATED and verified fresh by `pnpm run verify-tool-catalog` (part of `doc-sync`) — do not edit it by hand. Unlike the cordis catalog (a pure source-AST pass), this generator BOOTS each tool plugin on a real context and reads `ctx.tools.schemas()`, because a tool schema is not statically knowable (runtime-spread enums, concatenated descriptions, config-driven names, raw-JSON-Schema MCP tools). A completeness guard globs `packages/*/tool-*` and fails if any package is missing from the generator's boot manifest, so a new tool cannot be silently undocumented. See [the tool-schema-catalog Agent Note](../.agents/notes/implemented/process/2026-07-02-tool-schema-catalog.md).
+This file is GENERATED and verified fresh by `pnpm run verify-tool-catalog` (part of `doc-sync`) — do not edit it by hand. Unlike the cordis catalog (a pure source-AST pass), this generator BOOTS each tool plugin on a real context and reads `ctx.tools.schemas()`, because a tool schema is not statically knowable (runtime-spread enums, concatenated descriptions, config-driven names, raw-JSON-Schema MCP tools). A completeness guard matches the on-disk union of `packages/*/tool-*` directories and every package.json `exports` subpath ending in `/tool` against the generator's boot manifest and fails on either kind of miss, so a new tool — directory-shaped or subpath-exported — cannot be silently undocumented. See [the tool-schema-catalog Agent Note](../.agents/notes/implemented/process/2026-07-02-tool-schema-catalog.md).
 
-Scope: shipped product tools under `packages/*/tool-*`, each booted with its DEFAULT config, except where a Config field is REQUIRED with no default — there the generator must choose, and the per-package note records which branch this page shows. The registered tool NAME can be a load-time config (e.g. `tool-subagent`'s `toolName`), so a deployment may expose a package under a different or additional name — a per-package note records those shipped aliases where they exist. The `examples/` demo tools (e.g. `echo`) are excluded, matching the cordis catalog's packages-only scope.
+Scope: shipped product tools under `packages/*/tool-*` directories, plus tools exposed at a package.json `exports` subpath ending in `/tool` on a package named for its domain rather than its kind (e.g. `@deepseek-ai/dsh-session-title/tool`) — each booted with its DEFAULT config, except where a Config field is REQUIRED with no default — there the generator must choose, and the per-package note records which branch this page shows. The registered tool NAME can be a load-time config (e.g. `tool-subagent`'s `toolName`), so a deployment may expose a package under a different or additional name — a per-package note records those shipped aliases where they exist. The `examples/` demo tools (e.g. `echo`) are excluded, matching the cordis catalog's packages-only scope.
 
 ## Tool Package Map
 
@@ -41,6 +41,8 @@ This table connects model-visible tool names to the plugin package and service s
 | `@deepseek-ai/dsh-tool-compact` | `compact` | `ctx.tools`, `ctx.compaction (engine takes llm, tokenMeter, sessions)` | `tool/call`, `tool/result`, `compaction/start once the current turn ends` | - | Scheduling is accept-immediately: the request arms process-local state and real condensation claims the next idle boundary through the engine's compaction/start lock. |
 | `@deepseek-ai/dsh-tool-workflow` | `workflow` | `ctx.tools`, `ctx.workflowEngine`, `ctx.systemPrompt`, `a calling Agent (exec.agent parents the script children)` | `tool/call`, `tool/result` | - | - |
 | `@deepseek-ai/dsh-tool-web` | `web_fetch`, `web_search` | `ctx.tools`, `ctx.web`, `ctx.systemPrompt` | `tool/call`, `tool/result` | - | web_search and web_fetch keep provider selection behind ctx.web so model-visible schemas stay stable across backend swaps. |
+| `@deepseek-ai/dsh-memory` | `memory` | `ctx.tools`, `ctx.memory`, `an agent session with a cwd (execution time)` | `tool/call`, `tool/result` | - | Subpath-exported (`@deepseek-ai/dsh-memory/tool`), so the completeness guard's directory glob cannot see it on its own — discovery also matches package.json `exports` subpaths named `.../tool`. Mounted only in the `standard` preset, in a `cordis:group` realm alongside `@deepseek-ai/dsh-memory/local-plugin` (`apps/cli/config/agent-presets/standard/agent.cordis.yml`). Storage is workspace-scoped under the harness home by default; content enters context only through explicit `memory` calls, never background injection. |
+| `@deepseek-ai/dsh-session-title` | `session_title` | `ctx.tools`, `ctx.sessionTitle`, `a live agent session (execution time)` | `tool/call`, `session/title`, `tool/result` | - | Subpath-exported (`@deepseek-ai/dsh-session-title/tool`), so the completeness guard's directory glob cannot see it on its own — same discovery gap as `@deepseek-ai/dsh-memory/tool` above. The `sessionTitle` service is mounted once in the host composition (`packages/bundle/base/cordis.patch.yml`), before any preset joins; this entry boots it locally with the host's own config only to harvest the schema. Only a running session may title itself: `session.rename` over the host API answers `agent-busy` against the session's own pid while it holds its one-writer log lock. |
 
 <a id="deepseek-aidsh-tool-mailbox"></a>
 
@@ -1985,3 +1987,89 @@ Search the web for current information. Returns an optional summary answer and a
 Source: [`packages/web/tool-web/src/index.ts`](../packages/web/tool-web/src/index.ts)
 
 web_search and web_fetch keep provider selection behind ctx.web so model-visible schemas stay stable across backend swaps.
+
+<a id="deepseek-aidsh-memory"></a>
+
+## `@deepseek-ai/dsh-memory`
+
+### `memory`
+
+Read, write, list, and search DURABLE project memory: plain-markdown notes scoped to
+the current workspace that persist across sessions, restarts, and seats — yours and
+your teammates' co-edit them on disk.
+Use write() to record decisions, environment gotchas, session state worth carrying
+forward, or canonical locations; use read()/list()/search() instead of asking the user
+to repeat context the memory already holds. Paths are scope-relative with forward
+slashes (`todo/auth.md`, `spec/decisions.md`); parent traversal is rejected.
+Content costs prompt tokens only when you read or search it, so prefer list() first,
+then read() the specific entries you need.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "description": "What to do: read one entry, write/replace one entry, list every entry, or substring-search all entries.",
+      "enum": [
+        "read",
+        "write",
+        "list",
+        "search"
+      ]
+    },
+    "path": {
+      "type": "string",
+      "description": "Entry path, scope-relative with forward slashes (required for read/write). No leading `/`, no `..` segments."
+    },
+    "content": {
+      "type": "string",
+      "description": "Complete replacement text in UTF-8, up to 256 KiB (required for write). Plain markdown; frontmatter optional."
+    },
+    "query": {
+      "type": "string",
+      "description": "Case-insensitive substring to find across entry lines (required for search)."
+    }
+  },
+  "required": [
+    "action"
+  ]
+}
+```
+
+Source: [`packages/memory/memory/src/tool.ts`](../packages/memory/memory/src/tool.ts)
+
+Subpath-exported (`@deepseek-ai/dsh-memory/tool`), so the completeness guard's directory glob cannot see it on its own — discovery also matches package.json `exports` subpaths named `.../tool`. Mounted only in the `standard` preset, in a `cordis:group` realm alongside `@deepseek-ai/dsh-memory/local-plugin` (`apps/cli/config/agent-presets/standard/agent.cordis.yml`). Storage is workspace-scoped under the harness home by default; content enters context only through explicit `memory` calls, never background injection.
+
+<a id="deepseek-aidsh-session-title"></a>
+
+## `@deepseek-ai/dsh-session-title`
+
+### `session_title`
+
+Set the title of your own conversation — the name it shows under in the session list.
+
+Use it when your session has a name that does not describe it: a seat whose title is still
+the first line of its kickoff prompt, or a session whose subject has moved on. Prefer a short
+noun phrase; for a named seat, its own name is usually right.
+
+The title you set is pinned: automatic title generation stops replacing it.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "The title to set. Must contain visible characters; long values are truncated by the service."
+    }
+  },
+  "required": [
+    "title"
+  ]
+}
+```
+
+Source: [`packages/session/session-title/src/tool.ts`](../packages/session/session-title/src/tool.ts)
+
+Subpath-exported (`@deepseek-ai/dsh-session-title/tool`), so the completeness guard's directory glob cannot see it on its own — same discovery gap as `@deepseek-ai/dsh-memory/tool` above. The `sessionTitle` service is mounted once in the host composition (`packages/bundle/base/cordis.patch.yml`), before any preset joins; this entry boots it locally with the host's own config only to harvest the schema. Only a running session may title itself: `session.rename` over the host API answers `agent-busy` against the session's own pid while it holds its one-writer log lock.

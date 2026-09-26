@@ -1,13 +1,16 @@
 /**
  * Generate `docs/tool-catalog.md` from schemas collected by booting each tool
  * plugin. Runtime registration is the source of truth for computed schemas;
- * the manifest is checked against every on-disk `tool-*` package. `--check`
- * verifies the committed artifact. Rationale and ownership live in
+ * the manifest is checked against every on-disk `tool-*` package directory
+ * UNION every package whose `exports` map declares a subpath ending in
+ * `/tool` (how a tool package that is not itself named `tool-*` is actually
+ * mounted, e.g. `@deepseek-ai/dsh-session-title/tool`). `--check` verifies
+ * the committed artifact. Rationale and ownership live in
  * `.agents/notes/implemented/process/2026-07-02-tool-schema-catalog.md`.
  */
 
 import { globSync, readFileSync, writeFileSync } from 'node:fs'
-import { basename, resolve } from 'node:path'
+import { basename, dirname, resolve } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
@@ -70,6 +73,10 @@ import * as ToolWorkflow from '@deepseek-ai/dsh-tool-workflow'
 import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import * as ToolCompact from '@deepseek-ai/dsh-tool-compact'
+import * as MemoryLocalPlugin from '@deepseek-ai/dsh-memory/local-plugin'
+import * as ToolMemory from '@deepseek-ai/dsh-memory/tool'
+import SessionTitleService from '@deepseek-ai/dsh-session-title'
+import * as ToolSessionTitle from '@deepseek-ai/dsh-session-title/tool'
 import { githubSlug } from './verify-md-links.ts'
 
 /** Attachment seam marker that makes the attachments-conditional `read_image` schema harvestable. */
@@ -147,7 +154,11 @@ async function mountCatalogChildScope(
 export interface ToolPackage {
   /** The npm package name, used as the catalog section heading. */
   pkg: string
-  /** The `packages/<group>/<dir>` leaf name — matched by the completeness guard. */
+  /**
+   * The owning `packages/<group>/<dir>` leaf name — matched by the
+   * completeness guard against either an on-disk `tool-*` directory or a
+   * package whose `exports` map declares a subpath ending in `/tool`.
+   */
   dir: string
   /**
    * Repo-relative implementation source linked per harvested tool. Packages
@@ -184,9 +195,12 @@ export interface ToolPackage {
 }
 
 /**
- * The boot manifest: every shipped tool package (a `tool-*` leaf under
- * `packages/`). Ordered by package name (the render order); the completeness
- * guard proves it is exhaustive against the on-disk glob.
+ * The boot manifest: every shipped tool package — a `tool-*` leaf under
+ * `packages/`, or a package whose `exports` map a subpath ending in `/tool`
+ * (e.g. `@deepseek-ai/dsh-session-title/tool`, mounted by preset rows naming
+ * that subpath rather than a `tool-*` package). Ordered by package name (the
+ * render order); the completeness guard proves it is exhaustive against the
+ * on-disk union of both discovery kinds.
  */
 const TOOL_PACKAGES: ToolPackage[] = [
   {
@@ -594,6 +608,44 @@ const TOOL_PACKAGES: ToolPackage[] = [
     note:
       'web_search and web_fetch keep provider selection behind ctx.web so model-visible schemas stay stable across backend swaps.',
   },
+  {
+    pkg: '@deepseek-ai/dsh-memory',
+    dir: 'memory',
+    source: 'packages/memory/memory/src/tool.ts',
+    requires: ['ctx.tools', 'ctx.memory', 'an agent session with a cwd (execution time)'],
+    writes: ['tool/call', 'tool/result'],
+    async mount(ctx) {
+      // Subpath-exported (`@deepseek-ai/dsh-memory/tool`), not a `tool-*`
+      // directory — the directory glob alone cannot see it. The tool injects
+      // only `tools` and reads `ctx.memory` at execute time, so a real local
+      // provider is not required to harvest its schema; it is mounted anyway
+      // (an isolated tmp root, matching the tool-skill entry's pattern above)
+      // so this recipe stays an honest boot of what the standard preset mounts.
+      await ctx.plugin(MemoryLocalPlugin, { root: resolve(root, '.tmp/tool-catalog/memory') })
+      await ctx.plugin(ToolMemory)
+    },
+    note:
+      'Subpath-exported (`@deepseek-ai/dsh-memory/tool`), so the completeness guard\'s directory glob cannot see it on its own — discovery also matches package.json `exports` subpaths named `.../tool`. Mounted only in the `standard` preset, in a `cordis:group` realm alongside `@deepseek-ai/dsh-memory/local-plugin` (`apps/cli/config/agent-presets/standard/agent.cordis.yml`). Storage is workspace-scoped under the harness home by default; content enters context only through explicit `memory` calls, never background injection.',
+  },
+  {
+    pkg: '@deepseek-ai/dsh-session-title',
+    dir: 'session-title',
+    source: 'packages/session/session-title/src/tool.ts',
+    requires: ['ctx.tools', 'ctx.sessionTitle', 'a live agent session (execution time)'],
+    writes: ['tool/call', 'session/title', 'tool/result'],
+    async mount(ctx) {
+      // Subpath-exported (`@deepseek-ai/dsh-session-title/tool`), same
+      // discovery gap as dsh-memory above. The tool injects only `tools` and
+      // reads `ctx.sessionTitle` at execute time via a soft ctx.get lookup, so
+      // the service is not required to harvest the schema; it is mounted with
+      // the host's own config anyway so this recipe boots a real instance.
+      await ctx.plugin(SessionStore)
+      await ctx.plugin(SessionTitleService, { fallbackMaxWords: 5, fallbackMaxBytes: 40, maxTitleBytes: 80 })
+      await ctx.plugin(ToolSessionTitle)
+    },
+    note:
+      'Subpath-exported (`@deepseek-ai/dsh-session-title/tool`), so the completeness guard\'s directory glob cannot see it on its own — same discovery gap as `@deepseek-ai/dsh-memory/tool` above. The `sessionTitle` service is mounted once in the host composition (`packages/bundle/base/cordis.patch.yml`), before any preset joins; this entry boots it locally with the host\'s own config only to harvest the schema. Only a running session may title itself: `session.rename` over the host API answers `agent-busy` against the session\'s own pid while it holds its one-writer log lock.',
+  },
 ]
 
 /** One package's contribution to the catalog: its schemas plus attribution. */
@@ -612,17 +664,60 @@ interface CatalogPackage {
 export type ToolCatalog = CatalogPackage[]
 
 /**
- * Assert the boot manifest covers every shipped tool package on disk (a
- * `tool-*` leaf under `packages/`).
- * Booting has no source declaration to enumerate, so this glob restores the
- * "a new tool cannot be silently undocumented" guarantee: an unlisted package
- * fails the generator (and the freshness gate) until it is added to
- * {@link TOOL_PACKAGES}. Exported for a direct negative test.
+ * Read one package.json's `exports` map and report whether it declares a
+ * subpath (anything but the bare `.` main entry) ending in `/tool` — the
+ * shape a subpath-exported tool takes on disk (e.g. `./tool` in
+ * `@deepseek-ai/dsh-session-title`'s `exports`). A package that cannot be
+ * read or parsed as JSON is not a tool package by this test.
+ * @param manifestPath - absolute path to the candidate `package.json`.
+ */
+function hasToolExportSubpath(manifestPath: string): boolean {
+  let manifest: { exports?: Record<string, unknown> }
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as typeof manifest
+  } catch {
+    // Unreadable or malformed package.json is not this generator's concern —
+    // other gates own package.json validity.
+    return false
+  }
+  return Object.keys(manifest.exports ?? {}).some(subpath => subpath !== '.' && subpath.endsWith('/tool'))
+}
+
+/**
+ * Discover every on-disk tool-package boot target, by owning package
+ * directory leaf name: the UNION of (a) every `tool-*` leaf directory under
+ * `packages/<group>/` (back-compat — a tool package named for its own kind)
+ * and (b) every package under `packages/<group>/<name>/` whose `exports` map
+ * declares a subpath ending in `/tool` (a tool riding along in a package
+ * named for its DOMAIN, e.g.
+ * `@deepseek-ai/dsh-memory`, exposed at `./tool` and mounted by preset rows
+ * naming that subpath directly rather than a `tool-*` package). Neither kind
+ * can see the other's targets, which is exactly the gap that let
+ * `@deepseek-ai/dsh-session-title/tool` and `@deepseek-ai/dsh-memory/tool`
+ * go undocumented — mounted in the standard preset, absent from this glob.
+ * @param scanRoot - repo root (or a fixture tree root) to scan from.
+ */
+function discoverToolPackageDirs(scanRoot: string): string[] {
+  const dirGlob = globSync('packages/*/tool-*', { cwd: scanRoot }).map(p => basename(p))
+  const subpathDirs = globSync('packages/*/*/package.json', { cwd: scanRoot })
+    .filter(manifestPath => hasToolExportSubpath(resolve(scanRoot, manifestPath)))
+    .map(manifestPath => basename(dirname(manifestPath)))
+  return [...new Set([...dirGlob, ...subpathDirs])].sort()
+}
+
+/**
+ * Assert the boot manifest covers every shipped tool package on disk: a
+ * `tool-*` leaf under `packages/`, UNION a package whose `exports` map
+ * declares a subpath ending in `/tool`.
+ * Booting has no source declaration to enumerate, so this discovery restores
+ * the "a new tool cannot be silently undocumented" guarantee: an unlisted
+ * package of EITHER kind fails the generator (and the freshness gate) until
+ * it is added to {@link TOOL_PACKAGES}. Exported for a direct negative test.
  *
  * `scanRoot` defaults to the repo root; a test may point it at a fixture tree.
  */
 export function assertManifestComplete(packages: ToolPackage[] = TOOL_PACKAGES, scanRoot: string = root): void {
-  const onDisk = globSync('packages/*/tool-*', { cwd: scanRoot }).map(p => basename(p)).sort()
+  const onDisk = discoverToolPackageDirs(scanRoot)
   const listed = new Set(packages.map(p => p.dir))
   const missing = onDisk.filter(dir => !listed.has(dir))
   if (missing.length > 0) {
@@ -734,9 +829,9 @@ export function render(catalog: ToolCatalog): string {
     '',
     'Every model-facing tool a shipped plugin contributes to `ctx.tools`: the `name`, `description`, and JSON-Schema `parameters` the model receives via the system-prompt assembly. It complements the [subsystem pages](subsystems/core.md) (the types plus each page\'s generated Cordis API region) — this page is the *tools* the agent is offered.',
     '',
-    'This file is GENERATED and verified fresh by `pnpm run verify-tool-catalog` (part of `doc-sync`) — do not edit it by hand. Unlike the cordis catalog (a pure source-AST pass), this generator BOOTS each tool plugin on a real context and reads `ctx.tools.schemas()`, because a tool schema is not statically knowable (runtime-spread enums, concatenated descriptions, config-driven names, raw-JSON-Schema MCP tools). A completeness guard globs `packages/*/tool-*` and fails if any package is missing from the generator\'s boot manifest, so a new tool cannot be silently undocumented. See [the tool-schema-catalog Agent Note](../.agents/notes/implemented/process/2026-07-02-tool-schema-catalog.md).',
+    'This file is GENERATED and verified fresh by `pnpm run verify-tool-catalog` (part of `doc-sync`) — do not edit it by hand. Unlike the cordis catalog (a pure source-AST pass), this generator BOOTS each tool plugin on a real context and reads `ctx.tools.schemas()`, because a tool schema is not statically knowable (runtime-spread enums, concatenated descriptions, config-driven names, raw-JSON-Schema MCP tools). A completeness guard matches the on-disk union of `packages/*/tool-*` directories and every package.json `exports` subpath ending in `/tool` against the generator\'s boot manifest and fails on either kind of miss, so a new tool — directory-shaped or subpath-exported — cannot be silently undocumented. See [the tool-schema-catalog Agent Note](../.agents/notes/implemented/process/2026-07-02-tool-schema-catalog.md).',
     '',
-    'Scope: shipped product tools under `packages/*/tool-*`, each booted with its DEFAULT config, except where a Config field is REQUIRED with no default — there the generator must choose, and the per-package note records which branch this page shows. The registered tool NAME can be a load-time config (e.g. `tool-subagent`\'s `toolName`), so a deployment may expose a package under a different or additional name — a per-package note records those shipped aliases where they exist. The `examples/` demo tools (e.g. `echo`) are excluded, matching the cordis catalog\'s packages-only scope.',
+    'Scope: shipped product tools under `packages/*/tool-*` directories, plus tools exposed at a package.json `exports` subpath ending in `/tool` on a package named for its domain rather than its kind (e.g. `@deepseek-ai/dsh-session-title/tool`) — each booted with its DEFAULT config, except where a Config field is REQUIRED with no default — there the generator must choose, and the per-package note records which branch this page shows. The registered tool NAME can be a load-time config (e.g. `tool-subagent`\'s `toolName`), so a deployment may expose a package under a different or additional name — a per-package note records those shipped aliases where they exist. The `examples/` demo tools (e.g. `echo`) are excluded, matching the cordis catalog\'s packages-only scope.',
     '',
     '## Tool Package Map',
     '',

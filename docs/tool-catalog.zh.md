@@ -7,9 +7,9 @@
 
 已发布插件向 `ctx.tools` 提供的所有面向模型的工具：模型通过系统提示词组装获得的 `name`、`description` 和 JSON Schema `parameters`。本目录是[子系统页面](subsystems/core.md)（类型及每页生成的 `cordis-surface` 接线区域）的补充；本页列出的是向 agent（智能体）提供的*工具*。
 
-英文源文件由系统**生成**，并通过 `pnpm run verify-tool-catalog`（`doc-sync`（文档同步门禁）的一部分）验证新鲜度；本中文文件作为经评审对侧通过双语配对维护。与 Cordis 目录（纯源码 AST 处理）不同，英文生成器会在真实上下文中**启动**每个工具插件并读取 `ctx.tools.schemas()`，因为工具 schema 无法通过静态分析完全确定，例如运行时展开的枚举、拼接的描述、由配置决定的名称以及使用原始 JSON Schema 的 MCP 工具。完整性守卫会 glob 匹配 `packages/*/tool-*`；如果生成器的启动 manifest（元数据清单）遗漏任何包，检查就会失败，因此新工具不会在无人察觉的情况下缺少文档。参见[工具 schema 目录 Agent Note](../.agents/notes/implemented/process/2026-07-02-tool-schema-catalog.md)。
+英文源文件由系统**生成**，并通过 `pnpm run verify-tool-catalog`（`doc-sync`（文档同步门禁）的一部分）验证新鲜度；本中文文件作为经评审对侧通过双语配对维护。与 Cordis 目录（纯源码 AST 处理）不同，英文生成器会在真实上下文中**启动**每个工具插件并读取 `ctx.tools.schemas()`，因为工具 schema 无法通过静态分析完全确定，例如运行时展开的枚举、拼接的描述、由配置决定的名称以及使用原始 JSON Schema 的 MCP 工具。完整性守卫会将磁盘上 `packages/*/tool-*` 目录与每个声明了以 `/tool` 结尾的 package.json `exports` 子路径的包取并集，与生成器的启动 manifest（元数据清单）比对，两种缺失方式都会导致检查失败，因此新工具——无论是目录形态还是子路径导出——都不会在无人察觉的情况下缺少文档。参见[工具 schema 目录 Agent Note](../.agents/notes/implemented/process/2026-07-02-tool-schema-catalog.md)。
 
-范围：`packages/*/tool-*` 下已发布的产品工具，每个工具均使用其**默认**配置启动；但如果某个 Config 字段是**必填项**且没有默认值，生成器就必须作出选择，对应包的说明会记录本页展示的是哪个分支。注册的工具**名称**可以是加载时配置，例如 `tool-subagent` 的 `toolName`，因此部署可能以不同名称或额外名称提供某个包；如果存在随产品发布的别名，对应包的说明会予以记录。`examples/` 中的演示工具（例如 `echo`）不在范围内，这与 Cordis 目录仅涵盖包的范围一致。
+范围：`packages/*/tool-*` 目录下已发布的产品工具，以及挂载在按领域命名（而非按种类命名为 `tool-*`）的包上、通过以 `/tool` 结尾的 package.json `exports` 子路径暴露的工具（例如 `@deepseek-ai/dsh-session-title/tool`）——每个工具均使用其**默认**配置启动；但如果某个 Config 字段是**必填项**且没有默认值，生成器就必须作出选择，对应包的说明会记录本页展示的是哪个分支。注册的工具**名称**可以是加载时配置，例如 `tool-subagent` 的 `toolName`，因此部署可能以不同名称或额外名称提供某个包；如果存在随产品发布的别名，对应包的说明会予以记录。`examples/` 中的演示工具（例如 `echo`）不在范围内，这与 Cordis 目录仅涵盖包的范围一致。
 
 ## 工具包映射
 
@@ -43,6 +43,8 @@
 | `@deepseek-ai/dsh-tool-todo` | `todo_write` | `ctx.tools`、`owning Agent session` | `tool/call`、`todo/write`、`tool/result` | - | todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为检查清单。`allowParallelInProgress` 是没有默认值的必填项，因此本目录明确选择 `true`，对应描述允许同时存在多个 `in_progress` 项。选择 `false` 的部署会获得同一工具，但描述会要求只能有 1 个活动任务。 |
 | `@deepseek-ai/dsh-tool-workflow` | `workflow` | `ctx.tools`、`ctx.workflowEngine`、`ctx.systemPrompt`、`a calling Agent (exec.agent parents the script children)` | `tool/call`、`tool/result` | - | - |
 | `@deepseek-ai/dsh-tool-web` | `web_fetch`、`web_search` | `ctx.tools`、`ctx.web`、`ctx.systemPrompt` | `tool/call`、`tool/result` | - | web_search 和 web_fetch 将提供方选择置于 ctx.web 之后，使模型可见 schema 在更换后端时保持稳定。 |
+| `@deepseek-ai/dsh-memory` | `memory` | `ctx.tools`、`ctx.memory`、`an agent session with a cwd (execution time)` | `tool/call`、`tool/result` | - | 子路径导出（`@deepseek-ai/dsh-memory/tool`），因此完整性守卫单靠目录 glob 无法发现它——发现规则现在也会匹配名为 `.../tool` 的 package.json `exports` 子路径。仅在 `standard` 预设中挂载，位于与 `@deepseek-ai/dsh-memory/local-plugin` 同一个 `cordis:group` realm 中（`apps/cli/config/agent-presets/standard/agent.cordis.yml`）。存储默认作用域限定在 harness home 下的工作区；内容只通过显式的 `memory` 调用进入上下文，绝不做后台注入。 |
+| `@deepseek-ai/dsh-session-title` | `session_title` | `ctx.tools`、`ctx.sessionTitle`、`a live agent session (execution time)` | `tool/call`、`session/title`、`tool/result` | - | 子路径导出（`@deepseek-ai/dsh-session-title/tool`），因此完整性守卫单靠目录 glob 无法发现它——与上面 `@deepseek-ai/dsh-memory/tool` 相同的发现缺口。`sessionTitle` 服务在宿主组合（`packages/bundle/base/cordis.patch.yml`）中挂载一次，先于任何预设加入；本条目使用宿主自身的配置在本地启动它，仅用于收集 schema。只有正在运行的会话才能给自己命名：会话持有自己的单写者日志锁时，宿主 API 上的 `session.rename` 会针对该会话自身的 pid 返回 `agent-busy`。 |
 
 <a id="deepseek-aidsh-tool-mailbox"></a>
 
@@ -1991,3 +1993,87 @@ todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为
 来源：[`packages/web/tool-web/src/index.ts`](../packages/web/tool-web/src/index.ts)
 
 web_search 和 web_fetch 将提供方选择置于 ctx.web 之后，使模型可见 schema 在更换后端时保持稳定。
+
+<a id="deepseek-aidsh-memory"></a>
+
+## `@deepseek-ai/dsh-memory`
+
+### `memory`
+
+读取、写入、列出和搜索 DURABLE（持久）项目内存：纯 Markdown 笔记，作用域限定在当前工作区，
+跨会话、重启和席位持久保存——你和你的队友可以在磁盘上协作编辑它们。
+使用 write() 记录决策、环境注意事项、值得延续的会话状态或规范位置；
+使用 read()／list()／search()，而不是让用户重复内存中已有的上下文。
+路径是作用域相对的，使用正斜杠（`todo/auth.md`、`spec/decisions.md`）；拒绝上级目录穿越。
+只有在你读取或搜索内容时才会消耗提示词 token，因此优先调用 list()，
+再 read() 具体需要的条目。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "description": "What to do: read one entry, write/replace one entry, list every entry, or substring-search all entries.",
+      "enum": [
+        "read",
+        "write",
+        "list",
+        "search"
+      ]
+    },
+    "path": {
+      "type": "string",
+      "description": "Entry path, scope-relative with forward slashes (required for read/write). No leading `/`, no `..` segments."
+    },
+    "content": {
+      "type": "string",
+      "description": "Complete replacement text in UTF-8, up to 256 KiB (required for write). Plain markdown; frontmatter optional."
+    },
+    "query": {
+      "type": "string",
+      "description": "Case-insensitive substring to find across entry lines (required for search)."
+    }
+  },
+  "required": [
+    "action"
+  ]
+}
+```
+
+来源：[`packages/memory/memory/src/tool.ts`](../packages/memory/memory/src/tool.ts)
+
+子路径导出（`@deepseek-ai/dsh-memory/tool`），因此完整性守卫单靠目录 glob 无法发现它——发现规则现在也会匹配名为 `.../tool` 的 package.json `exports` 子路径。仅在 `standard` 预设中挂载，位于与 `@deepseek-ai/dsh-memory/local-plugin` 同一个 `cordis:group` realm 中（`apps/cli/config/agent-presets/standard/agent.cordis.yml`）。存储默认作用域限定在 harness home 下的工作区；内容只通过显式的 `memory` 调用进入上下文，绝不做后台注入。
+
+<a id="deepseek-aidsh-session-title"></a>
+
+## `@deepseek-ai/dsh-session-title`
+
+### `session_title`
+
+设置你自己对话的标题——它在会话列表中显示的名称。
+
+当你的会话标题名不副实时使用它：一个席位的标题仍然是其启动提示词的第一行，
+或者会话主题已经发生变化。优先使用简短的名词短语；对于已命名的席位，
+使用它自己的名字通常是合适的。
+
+你设置的标题会被固定：自动标题生成将停止替换它。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "The title to set. Must contain visible characters; long values are truncated by the service."
+    }
+  },
+  "required": [
+    "title"
+  ]
+}
+```
+
+来源：[`packages/session/session-title/src/tool.ts`](../packages/session/session-title/src/tool.ts)
+
+子路径导出（`@deepseek-ai/dsh-session-title/tool`），因此完整性守卫单靠目录 glob 无法发现它——与上面 `@deepseek-ai/dsh-memory/tool` 相同的发现缺口。`sessionTitle` 服务在宿主组合中挂载一次（`packages/bundle/base/cordis.patch.yml`），先于任何预设加入；本条目使用宿主自身的配置在本地启动它，仅用于收集 schema。只有正在运行的会话才能给自己命名：会话持有自己的单写者日志锁时，宿主 API 上的 `session.rename` 会针对该会话自身的 pid 返回 `agent-busy`。
