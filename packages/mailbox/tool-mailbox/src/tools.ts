@@ -261,7 +261,7 @@ function callerIdentity(mounted: IdentitySources, agentSessionId: string | undef
 function formatInboxEntries(messages: readonly InboxEntry[]): string {
   return messages.map((entry, index) => {
     const head = `${index + 1}. from ${entry.from}${entry.blocking === true ? ' [BLOCKING]' : ''}`
-      + `${entry.subject !== undefined ? `: ${entry.subject}` : ''}`
+      + (entry.subject !== undefined ? `: ${entry.subject}` : '')
     return entry.body === '' ? head : `${head}\n${entry.body}`
   }).join('\n\n')
 }
@@ -666,6 +666,23 @@ export function clampAwaitDeadlineMs(deadlineMs: number | undefined): number {
 }
 
 /**
+ * Normalize an `AbortSignal`'s reason into a real `Error` for rejection: the
+ * reason may be any thrown value (a `DOMException`, a string, ...), but a
+ * promise rejection should always carry an Error. An already-Error reason is
+ * passed through unchanged so its identity (and any subclass behavior) survives.
+ * @param reason - the signal's abort reason.
+ * @returns `reason` itself when it is already an Error, else an Error wrapping it.
+ */
+function abortReasonAsError(reason: unknown): Error {
+  if (reason instanceof Error) return reason
+  const message = typeof reason === 'object' && reason !== null && 'message' in reason
+    && typeof reason.message === 'string'
+    ? reason.message
+    : String(reason)
+  return new Error(message, { cause: reason })
+}
+
+/**
  * Sleep one poll interval, ending early when the caller aborts. The rejection
  * carries the abort reason: the registry's cancellation contract, not the
  * wait, decides how a stopped seat's call is reported. The timer is cleared
@@ -679,7 +696,7 @@ function waitPollInterval(ms: number, signal: AbortSignal): Promise<void> {
     // Read here, not at function entry: a signal aborted LATER carries the
     // reason only once abort() ran, so an early read would reject `undefined`.
     const reason: unknown = signal.reason
-    return Promise.reject(reason)
+    return Promise.reject(abortReasonAsError(reason))
   }
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -689,7 +706,7 @@ function waitPollInterval(ms: number, signal: AbortSignal): Promise<void> {
     function onAbort(): void {
       clearTimeout(timer)
       const reason: unknown = signal.reason
-      reject(reason)
+      reject(abortReasonAsError(reason))
     }
     signal.addEventListener('abort', onAbort, { once: true })
   })

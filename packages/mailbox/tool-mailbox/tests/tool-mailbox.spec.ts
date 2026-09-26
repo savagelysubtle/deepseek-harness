@@ -161,15 +161,15 @@ describe('mailbox_send', () => {
     if (result.isError) throw new Error('expected mailbox_send success')
     const value = result.value as { messageId: string; to: string; from: string; traceId: string; deliveryState: string }
     expect(value).toEqual({
-      messageId: expect.any(String),
+      messageId: expect.any(String) as unknown,
       to: 'alfred',
       from: 'batman',
-      traceId: expect.any(String),
+      traceId: expect.any(String) as unknown,
       deliveryState: 'pending',
     })
-    expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('Stored for alfred') }])
-    expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('delivery pending — not yet confirmed') }])
-    expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining(`mailbox_await traceId ${value.traceId}`) }])
+    expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('Stored for alfred') as unknown }])
+    expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('delivery pending — not yet confirmed') as unknown }])
+    expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining(`mailbox_await traceId ${value.traceId}`) as unknown }])
     const rows = storedRows(dbPath, 'alfred')
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({ from_address: 'batman', state: 'pending', subject: 'patrol', blocking: null, trace_id: value.traceId })
@@ -187,7 +187,7 @@ describe('mailbox_send', () => {
     // The result hands back the thread's id, not a fresh one: the replying
     // seat's own later await correlates on the same chain.
     expect(result.value).toEqual({
-      messageId: expect.any(String),
+      messageId: expect.any(String) as unknown,
       to: 'batman',
       from: 'alfred',
       traceId: 'awaited-trace',
@@ -470,10 +470,10 @@ describe('mailbox_send delivery state', () => {
       messageId: 'msg-1',
       to: 'alfred',
       from: 'batman',
-      traceId: expect.any(String),
+      traceId: expect.any(String) as unknown,
       deliveryState: 'accepted',
     })
-    const blocks = send.output!.render(args, value as never)
+    const blocks = send.output.render(args, value as never)
     expect((blocks[0] as { text: string }).text).toContain('Delivered to alfred')
   })
 
@@ -484,11 +484,11 @@ describe('mailbox_send delivery state', () => {
       messageId: 'msg-1',
       to: 'alfred',
       from: 'batman',
-      traceId: expect.any(String),
+      traceId: expect.any(String) as unknown,
       deliveryState: 'refused',
       refusalReason: 'org-registry-denied',
     })
-    const blocks = send.output!.render(args, value as never)
+    const blocks = send.output.render(args, value as never)
     expect((blocks[0] as { text: string }).text).toContain('REFUSED')
     expect((blocks[0] as { text: string }).text).toContain('org-registry-denied')
   })
@@ -509,7 +509,7 @@ describe('mailbox_send delivery state', () => {
     const value = (await runOnce(send)) as { deliveryState: string; refusalReason?: string }
     expect(value.deliveryState).toBe('pending')
     expect(value.refusalReason).toBeUndefined()
-    const blocks = send.output!.render(args, value as never)
+    const blocks = send.output.render(args, value)
     expect((blocks[0] as { text: string }).text).toContain('delivery pending — not yet confirmed')
   })
 })
@@ -530,29 +530,29 @@ describe('mailbox_check_inbox', () => {
     expect(result.value).toEqual({
       messages: [
         {
-          messageId: expect.any(String),
+          messageId: expect.any(String) as unknown,
           from: 'batman',
           subject: 'for alfred',
           body: 'cave, 9pm',
-          claimedAt: expect.any(Number),
+          claimedAt: expect.any(Number) as unknown,
         },
         {
-          messageId: expect.any(String),
+          messageId: expect.any(String) as unknown,
           from: 'yoda',
           subject: 'note only',
           body: '',
-          claimedAt: expect.any(Number),
+          claimedAt: expect.any(Number) as unknown,
         },
       ],
       count: 2,
     })
     expect(result.content).toEqual([{
       type: 'text',
-      text: expect.stringContaining('1. from batman: for alfred'),
+      text: expect.stringContaining('1. from batman: for alfred') as unknown,
     }])
     expect(result.content).toEqual([{
       type: 'text',
-      text: expect.stringContaining('\n\n2. from yoda: note only'),
+      text: expect.stringContaining('\n\n2. from yoda: note only') as unknown,
     }])
     // Alfred's mail is delivered (never claimable again); Carol's is untouched.
     expect(storedRows(dbPath, 'alfred')[0]?.state).toBe('done')
@@ -572,11 +572,11 @@ describe('mailbox_check_inbox', () => {
     if (result.isError) throw new Error('expected mailbox_check_inbox success')
     expect(result.value).toEqual({
       messages: [{
-        messageId: expect.any(String),
+        messageId: expect.any(String) as unknown,
         from: 'robin',
         blocking: true,
         body: JSON.stringify({ op: 'task', detail: 'scan the docks' }, null, 2),
-        claimedAt: expect.any(Number),
+        claimedAt: expect.any(Number) as unknown,
       }],
       count: 1,
     })
@@ -656,12 +656,12 @@ describe('mailbox_await', () => {
     if (result.isError) throw new Error('expected mailbox_await success')
     expect(result.value).toEqual({
       outcome: 'reply',
-      messages: [{ messageId: expect.any(String), from: 'batman', subject: 'answer', body: 'gate code is 4-1', claimedAt: expect.any(Number) }],
+      messages: [{ messageId: expect.any(String) as unknown, from: 'batman', subject: 'answer', body: 'gate code is 4-1', claimedAt: expect.any(Number) as unknown }],
       count: 1,
-      waitedMs: expect.any(Number),
+      waitedMs: expect.any(Number) as unknown,
     })
-    expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('Reply arrived after') }])
-    expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('1. from batman: answer') }])
+    expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('Reply arrived after') as unknown }])
+    expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('1. from batman: answer') as unknown }])
     expect(storedRows(dbPath, 'alfred')[0]?.state).toBe('done')
     await ctx.fiber.dispose()
   })
@@ -682,11 +682,11 @@ describe('mailbox_await', () => {
     if (result.isError) throw new Error('expected mailbox_await success')
     expect(result.value).toEqual({
       outcome: 'reply',
-      messages: [{ messageId: expect.any(String), from: 'alfred', subject: 'answer', body: 'all clear', claimedAt: expect.any(Number) }],
+      messages: [{ messageId: expect.any(String) as unknown, from: 'alfred', subject: 'answer', body: 'all clear', claimedAt: expect.any(Number) as unknown }],
       count: 1,
-      waitedMs: expect.any(Number),
+      waitedMs: expect.any(Number) as unknown,
     })
-    expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('1. from alfred: answer') }])
+    expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('1. from alfred: answer') as unknown }])
     // Back well inside one poll interval — the reply was read, never waited out.
     expect(Date.now() - started).toBeLessThan(AWAIT_POLL_INTERVAL_MS)
     // Detection is a read: the delivered row stays exactly as the bridge left it.
@@ -793,11 +793,11 @@ describe('mailbox_await', () => {
       messages: [],
       count: 0,
       refusalReason: 'sender-not-admitted',
-      waitedMs: expect.any(Number),
+      waitedMs: expect.any(Number) as unknown,
     })
     // Back well inside one poll interval — the refusal was read, never waited out.
     expect(Date.now() - started).toBeLessThan(AWAIT_POLL_INTERVAL_MS)
-    expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('Reason: sender-not-admitted') }])
+    expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('Reason: sender-not-admitted') as unknown }])
     expect(storedRows(dbPath, 'alfred')[0]?.state).toBe('failed')
     await ctx.fiber.dispose()
   })
@@ -836,11 +836,11 @@ describe('mailbox_await', () => {
         messages: [],
         count: 0,
         sentState: 'delivered',
-        deliveredAt: expect.any(Number),
-        waitedMs: expect.any(Number),
+        deliveredAt: expect.any(Number) as unknown,
+        waitedMs: expect.any(Number) as unknown,
       })
       expect((result.value as { waitedMs: number }).waitedMs).toBeGreaterThanOrEqual(AWAIT_MIN_DEADLINE_MS)
-      expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('WAS delivered') }])
+      expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('WAS delivered') as unknown }])
       expect(storedRows(dbPath, 'alfred')[0]?.state).toBe('done')
       vi.useRealTimers()
       await ctx.fiber.dispose()
@@ -865,9 +865,9 @@ describe('mailbox_await', () => {
         messages: [],
         count: 0,
         sentState: 'pending',
-        waitedMs: expect.any(Number),
+        waitedMs: expect.any(Number) as unknown,
       })
-      expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('NEVER picked up') }])
+      expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('NEVER picked up') as unknown }])
       expect(storedRows(dbPath, 'alfred')[0]?.state).toBe('pending')
       vi.useRealTimers()
       await ctx.fiber.dispose()
@@ -890,9 +890,9 @@ describe('mailbox_await', () => {
         messages: [],
         count: 0,
         sentState: 'unknown',
-        waitedMs: expect.any(Number),
+        waitedMs: expect.any(Number) as unknown,
       })
-      expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('no traceId was supplied') }])
+      expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('no traceId was supplied') as unknown }])
       vi.useRealTimers()
       await ctx.fiber.dispose()
     } finally {
@@ -917,9 +917,9 @@ describe('mailbox_await', () => {
       if (result.isError) throw new Error('expected mailbox_await success')
       expect(result.value).toEqual({
         outcome: 'reply',
-        messages: [{ messageId: expect.any(String), from: 'batman', subject: 'answer', body: 'it is 4-1', claimedAt: expect.any(Number) }],
+        messages: [{ messageId: expect.any(String) as unknown, from: 'batman', subject: 'answer', body: 'it is 4-1', claimedAt: expect.any(Number) as unknown }],
         count: 1,
-        waitedMs: expect.any(Number),
+        waitedMs: expect.any(Number) as unknown,
       })
       expect(storedRows(dbPath, 'alfred')[0]?.state).toBe('done')
       vi.useRealTimers()
