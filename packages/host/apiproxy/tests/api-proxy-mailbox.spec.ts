@@ -98,7 +98,7 @@ type PublishResult =
   | { ok: false; error: { code: string; message: string; details: { reason: string } } }
 
 async function publish(ctx: ContextType, rpcId: string, payload: Record<string, unknown>): Promise<PublishResult> {
-  const response = await api(ctx).mailbox.publish({ rpcId: `${rpcId}` as never, payload: payload as never })
+  const response = await api(ctx).mailbox.publish({ rpcId: rpcId as never, payload: payload as never })
   return response.result as unknown as PublishResult
 }
 

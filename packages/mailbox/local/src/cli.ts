@@ -274,8 +274,8 @@ export async function runMailboxCli(argv: readonly string[]): Promise<number> {
         ...args.payload !== undefined ? { payload: args.payload } : {},
         ...args.traceId !== undefined ? { traceId: args.traceId } : {},
       })
-      const body = args.json ? { stored: true, to: args.to } : `stored for ${args.to}`
-      internals.stdout.write(`${args.json ? JSON.stringify(body) : String(body)}\n`)
+      const line = args.json ? JSON.stringify({ stored: true, to: args.to }) : `stored for ${args.to}`
+      internals.stdout.write(`${line}\n`)
       return 0
     }
     const leases = await store.claim({ addresses: [args.address as never], limit: args.limit, staleClaimMs: INBOX_STALE_CLAIM_MS })

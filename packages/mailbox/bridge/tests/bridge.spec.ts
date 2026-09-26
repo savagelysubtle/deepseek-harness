@@ -231,7 +231,11 @@ async function makeHarness(options: {
     ctx.provide('sessionPersistence', {
       list: async () => {
         if (options.persisted === true) return [{ id: deriveNamedSessionId('target') }]
-        return Array.isArray(options.persisted) ? options.persisted.map(name => ({ id: deriveNamedSessionId(name) })) : []
+        const persisted = options.persisted
+        // Array.isArray's predicate is `arg is any[]`, so narrowing through it
+        // alone would type each element `any`; the explicit parameter
+        // annotation keeps the callback's argument a checked `string` instead.
+        return Array.isArray(persisted) ? persisted.map((name: string) => ({ id: deriveNamedSessionId(name) })) : []
       },
     } as never)
   }
@@ -268,6 +272,17 @@ async function rowState(storePath: string, messageId: string): Promise<{
   } finally {
     db.close()
   }
+}
+
+/**
+ * Parse a settled row's stored `result` JSON and read its `reason` field —
+ * `MailboxOutcome`'s `failed` variant always carries `{ reason: string }`, so
+ * every failed-outcome assertion in this file narrows through here instead of
+ * accessing `.reason` on `JSON.parse`'s untyped return directly.
+ */
+function resultReason(result: string | null): string {
+  const parsed = JSON.parse(result ?? '{}') as { reason?: string }
+  return parsed.reason ?? ''
 }
 
 describe('spec resolution', () => {
@@ -575,7 +590,7 @@ describe('routing outcomes', () => {
   it('disposes and releases the lock at the idle bound when residency is zero', async () => {
     const h = await makeHarness({ persisted: true })
     const id = await publishHello(h.ctx)
-    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec({ ...targetSpec(), residencyIdleMs: 0 }))
+    await bridge.internals.drainOnce(h.ctx, residencySpec(0))
     expect(h.resumeCalls()).toBe(1)
     await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'done' })
     // Immediate-retire mode: flush and dispose ran before the drain returned.
@@ -593,7 +608,7 @@ describe('routing outcomes', () => {
     const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
 
     await publishHello(h.ctx)
-    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec({ ...targetSpec(), residencyIdleMs: 5 }))
+    await bridge.internals.drainOnce(h.ctx, residencySpec(5))
 
     await vi.waitFor(() => {
       expect(h.disposeCalls()).toBe(1)
@@ -696,7 +711,7 @@ describe('routing outcomes', () => {
     await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec(['target', 'other'])))
     const badRow = await rowState(h.storePath, bad)
     expect(badRow.state).toBe('failed')
-    expect(JSON.parse(badRow.result ?? '{}').reason).toContain('boom')
+    expect(resultReason(badRow.result)).toContain('boom')
     await expect(rowState(h.storePath, good)).resolves.toMatchObject({ state: 'done' })
   })
 
@@ -1675,7 +1690,8 @@ describe('durable refusal notices (the sender-side outlet)', () => {
     await expect(rowState(h.storePath, repeat)).resolves.toMatchObject({ state: 'failed' })
     const [type, data] = sender.append.mock.calls[0] as [string, { source: Record<string, unknown> }]
     expect(type).toBe('user/message')
-    expect(data.source).toMatchObject({ kind: 'mailbox', form: 'notice', reason: expect.stringContaining('duplicate-suppressed') })
+    expect(data.source).toMatchObject({ kind: 'mailbox', form: 'notice' })
+    expect((data.source as { reason?: unknown }).reason).toEqual(expect.stringContaining('duplicate-suppressed'))
   })
 })
 
@@ -1799,7 +1815,7 @@ describe('guest admission (the outside-operator channel)', () => {
     })
     await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specWith({ addresses: ['tt-ping'], orgRegistryPath: path, maxMessageChars: 10 })))
     const row = await rowState(h.storePath, oversized)
-    expect(JSON.parse(row.result ?? '{}').reason as string).toContain('message-too-large')
+    expect(resultReason(row.result)).toContain('message-too-large')
   })
 })
 
@@ -1822,7 +1838,7 @@ describe('org registry topology enforcement', () => {
     expect(live.steer).not.toHaveBeenCalled()
     const row = await rowState(h.storePath, id)
     expect(row.state).toBe('failed')
-    const reason = JSON.parse(row.result ?? '{}').reason as string
+    const reason = resultReason(row.result)
     expect(reason).toContain('org-registry-denied')
     // The bounce tells the sender the path it should have used.
     expect(reason).toContain('alice -> ghost -> other')
@@ -1834,7 +1850,7 @@ describe('org registry topology enforcement', () => {
     const id = await h.ctx.mailbox.publish({ to: formatMailboxAddress('island'), from: 'alice', subject: 'unreachable' })
     await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specFor(['island'], ['alice'])))
     const row = await rowState(h.storePath, id)
-    expect(JSON.parse(row.result ?? '{}').reason as string).toContain('no route connects them')
+    expect(resultReason(row.result)).toContain('no route connects them')
   })
 
   it('delivers seat-to-seat mail along a declared edge', async () => {
@@ -1881,7 +1897,7 @@ describe('test:true boundary enforcement', () => {
 
   async function failedReason(storePath: string, messageId: string): Promise<string> {
     const row = await rowState(storePath, messageId)
-    return JSON.parse(row.result ?? '{}').reason as string
+    return resultReason(row.result)
   }
 
   it('refuses a test seat mailing a live seat even when both are admitted', async () => {
@@ -2010,7 +2026,7 @@ describe('loop guards', () => {
     await bridge.internals.drainOnce(h.ctx, spec)
     const overRow = await rowState(h.storePath, over)
     expect(overRow.state).toBe('failed')
-    const reason = JSON.parse(overRow.result ?? '{}').reason as string
+    const reason = resultReason(overRow.result)
     expect(reason).toContain('message-too-large')
     expect(reason).toContain('rendered 50 chars')
     expect(reason).toContain('10 char cap')
@@ -2034,7 +2050,7 @@ describe('loop guards', () => {
     await expect(rowState(h.storePath, first)).resolves.toMatchObject({ state: 'done' })
     await expect(rowState(h.storePath, second)).resolves.toMatchObject({ state: 'done' })
     const thirdRow = await rowState(h.storePath, third)
-    expect(JSON.parse(thirdRow.result ?? '{}').reason as string).toContain('address-depth-exceeded')
+    expect(resultReason(thirdRow.result)).toContain('address-depth-exceeded')
     // The window slides past every recorded admission: ordinary volume resumes.
     clock.at += 1_001
     const fourth = await h.ctx.mailbox.publish({ to: TARGET, from: 'd', subject: 'four' })
@@ -2059,7 +2075,7 @@ describe('loop guards', () => {
     await expect(rowState(h.storePath, original)).resolves.toMatchObject({ state: 'done' })
     const resendRow = await rowState(h.storePath, resend)
     expect(resendRow.state).toBe('failed')
-    const reason = JSON.parse(resendRow.result ?? '{}').reason as string
+    const reason = resultReason(resendRow.result)
     expect(reason).toContain('duplicate-suppressed')
     expect(reason).toContain(`repeats message ${original}`)
     expect(reason).toContain('do not resend')
@@ -2082,7 +2098,7 @@ describe('loop guards', () => {
     await bridge.internals.drainOnce(h.ctx, spec)
     await expect(rowState(h.storePath, x1)).resolves.toMatchObject({ state: 'done' })
     await expect(rowState(h.storePath, y1)).resolves.toMatchObject({ state: 'done' })
-    expect(JSON.parse((await rowState(h.storePath, x2)).result ?? '{}').reason as string).toContain('duplicate-suppressed')
+    expect(resultReason((await rowState(h.storePath, x2)).result)).toContain('duplicate-suppressed')
     clock.at += 1_001
     const x3 = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'x' })
     await bridge.internals.drainOnce(h.ctx, spec)
@@ -2105,7 +2121,7 @@ describe('loop guards', () => {
     await bridge.internals.drainOnce(h.ctx, spec)
     await expect(rowState(h.storePath, hop1)).resolves.toMatchObject({ state: 'done' })
     await expect(rowState(h.storePath, hop2)).resolves.toMatchObject({ state: 'done' })
-    expect(JSON.parse((await rowState(h.storePath, hop3)).result ?? '{}').reason as string).toContain('hop-limit-exceeded')
+    expect(resultReason((await rowState(h.storePath, hop3)).result)).toContain('hop-limit-exceeded')
     expect(live.steer).toHaveBeenCalledTimes(2)
   })
 
@@ -2166,7 +2182,7 @@ describe('loop guards', () => {
     await expect(rowState(h.storePath, ids[49]!)).resolves.toMatchObject({ state: 'done' })
     const refused = await rowState(h.storePath, ids[50]!)
     expect(refused.state).toBe('failed')
-    const reason = JSON.parse(refused.result ?? '{}').reason as string
+    const reason = resultReason(refused.result)
     expect(reason).toContain('hop-limit-exceeded')
     expect(reason).toContain('already carried 50 admitted hops today')
     expect(reason).toContain('cap 50')
@@ -2189,7 +2205,7 @@ describe('loop guards', () => {
     await bridge.internals.drainOnce(h.ctx, spec)
     await expect(rowState(h.storePath, day1[0]!)).resolves.toMatchObject({ state: 'done' })
     await expect(rowState(h.storePath, day1[1]!)).resolves.toMatchObject({ state: 'done' })
-    expect(JSON.parse((await rowState(h.storePath, day1[2]!)).result ?? '{}').reason as string).toContain('hop-limit-exceeded')
+    expect(resultReason((await rowState(h.storePath, day1[2]!)).result)).toContain('hop-limit-exceeded')
 
     clock.at += 86_400_000 // next UTC day: the counter must read as zero again
     const day2: string[] = []
@@ -2199,7 +2215,7 @@ describe('loop guards', () => {
     await bridge.internals.drainOnce(h.ctx, spec)
     await expect(rowState(h.storePath, day2[0]!)).resolves.toMatchObject({ state: 'done' })
     await expect(rowState(h.storePath, day2[1]!)).resolves.toMatchObject({ state: 'done' })
-    expect(JSON.parse((await rowState(h.storePath, day2[2]!)).result ?? '{}').reason as string).toContain('resets daily')
+    expect(resultReason((await rowState(h.storePath, day2[2]!)).result)).toContain('resets daily')
     expect(live.steer).toHaveBeenCalledTimes(4)
   })
 
@@ -2275,7 +2291,7 @@ describe('loop guards', () => {
     expect([first.state, second.state].sort()).toEqual(['done', 'failed'])
     // Whichever lost the race was suppressed as a repeat of the winner.
     const loser = first.state === 'failed' ? first : second
-    expect(JSON.parse(loser.result ?? '{}').reason as string).toContain('duplicate-suppressed')
+    expect(resultReason(loser.result)).toContain('duplicate-suppressed')
   })
 
   it('keeps the recent-fingerprint memory bounded per pair', async () => {

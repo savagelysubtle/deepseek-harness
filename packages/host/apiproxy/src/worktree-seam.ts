@@ -168,11 +168,14 @@ export function adaptWorktreeService(service: WorktreeService): WorktreeSeam {
       }
     },
 
-    async list(): Promise<WorktreeRow[]> {
+    // Synchronous under the hood (the mounted service's list() is not async),
+    // so a thrown refusal is folded into an explicit rejection rather than a
+    // synchronous throw — callers await this alongside the other seam calls.
+    list(): Promise<WorktreeRow[]> {
       try {
-        return service.list().map(seamRow)
+        return Promise.resolve(service.list().map(seamRow))
       } catch (error: unknown) {
-        throw seamRefusal(error)
+        return Promise.reject(seamRefusal(error))
       }
     },
 

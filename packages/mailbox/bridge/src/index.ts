@@ -403,7 +403,7 @@ export function resolveBridgeSpec(config: Config): BridgeSpec {
     if (seatAliases.has(address)) {
       throw new Error(`mailbox-bridge: seat alias for "${alias.address}" declared more than once`)
     }
-    seatAliases.set(address, String(alias.sessionId) as SessionId)
+    seatAliases.set(address, alias.sessionId as SessionId)
   }
   return {
     addresses: rawAddresses.map(address => parseMailboxAddress(address)),
@@ -932,7 +932,7 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
   // registry keeps that id through a rename; derivation is only the bootstrap
   // for a seat that has never run. Resolving by name alone is what made the
   // name the identity, so a rename orphaned the log.
-  const sessionId = spec.seatAliases.get(lease.message.to as MailboxAddress)
+  const sessionId = spec.seatAliases.get(lease.message.to)
     ?? await seatSessionId(spec, name)
 
   // Host-resident delivery: an agent this process already owns takes the
@@ -1907,7 +1907,7 @@ export const internals = {
         const result = await deliverLease(ctx, spec, lease)
         onSettled?.(String(lease.message.id), result)
       } catch (error) {
-        const reason = error instanceof Error ? `${error.message}` : String(error)
+        const reason = error instanceof Error ? error.message : String(error)
         await failTerminal(ctx, lease, reason)
         onSettled?.(String(lease.message.id), { kind: 'failed', reason })
       }

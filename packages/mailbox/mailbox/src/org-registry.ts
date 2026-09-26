@@ -168,7 +168,8 @@ export function parseOrgRegistry(text: string, options: OrgRegistryParseOptions 
     if (!Array.isArray(document.callUp) || document.callUp.some(name => typeof name !== 'string')) {
       throw new Error('org registry field "callUp" must be a list of seat names')
     }
-    for (const name of document.callUp) {
+    for (const raw of document.callUp) {
+      const name = raw as string
       if (!(name in seats)) throw new Error(`org registry callUp names unknown seat ${JSON.stringify(name)}`)
       callUp.push(name)
     }

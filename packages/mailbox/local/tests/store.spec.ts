@@ -458,7 +458,7 @@ describe('lookupInboundSince', () => {
     // delivered row reads in whatever state it is in — the scan is the read
     // half of reply detection, not a second queue.
     await expect(store.lookupInboundSince(OPS, 1_000_000)).resolves.toEqual([
-      { id: before, from: 'gotham:robin', to: OPS, sentAt: 1_000_000, state: 'done', subject: 'older', deliveredAt: expect.any(Number) },
+      { id: before, from: 'gotham:robin', to: OPS, sentAt: 1_000_000, state: 'done', subject: 'older', deliveredAt: expect.any(Number) as unknown },
       { id: atFloor, from: 'gotham:batman', to: OPS, sentAt: 1_000_010, state: 'pending', subject: 'at the floor' },
       { id: after, from: 'gotham:batman', to: OPS, sentAt: 1_000_020, state: 'pending', subject: 'after' },
     ])

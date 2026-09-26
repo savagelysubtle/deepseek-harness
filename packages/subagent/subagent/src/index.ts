@@ -440,9 +440,12 @@ export class SubagentRuntime extends Service {
     if (request.outputSchema !== undefined) assertObjectJsonSchema(request.outputSchema)
     // Same resolved-route convention as the continuable snapshot in
     // continuation.ts: the declared override, else the parent's own route.
-    // Direct service callers may supply minimal agents without options.
-    const agentProvider = request.agentOptions?.provider ?? request.parent.options?.provider
-    const agentModel = request.agentOptions?.model ?? request.parent.options?.model
+    // Direct service callers may supply minimal agents without options — a
+    // deliberate mismatch with Agent's declared (non-optional) `options`
+    // field, so the read is retyped honestly here instead of trusting it.
+    const parentOptions = (request.parent as { options?: Agent['options'] }).options
+    const agentProvider = request.agentOptions?.provider ?? parentOptions?.provider
+    const agentModel = request.agentOptions?.model ?? parentOptions?.model
     const descriptor = snapshotSubagentDescriptor({
       mode: 'one-shot',
       provider: name,

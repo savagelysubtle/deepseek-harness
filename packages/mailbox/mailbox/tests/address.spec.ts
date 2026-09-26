@@ -24,7 +24,7 @@ describe('mailbox address grammar', () => {
     ['sl/ash', 'must match'],
     ['double:colon', 'must match'],
     ['batman:alfred', 'must match'],
-    [`${'x'.repeat(65)}`, 'must match'],
+    ['x'.repeat(65), 'must match'],
   ])('rejects %j loudly', (raw) => {
     expect(() => parseMailboxAddress(raw)).toThrow()
   })

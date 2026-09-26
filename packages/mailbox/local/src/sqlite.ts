@@ -284,27 +284,35 @@ export class SqliteMailboxStore implements MailboxProvider {
    */
   constructor(private readonly db: DatabaseSync, private readonly clock: MailboxClock = Date.now) {}
 
-  async publish(message: MailboxPublishInput, signal?: AbortSignal): Promise<MailboxMessageId> {
-    signal?.throwIfAborted()
-    const id = randomUUID() as MailboxMessageId
-    // JSON.stringify throws on circular payloads before any write happens, so
-    // a non-serializable body never lands half-stored.
-    const payload = message.payload === undefined ? null : JSON.stringify(message.payload)
-    this.db.prepare(`
-      INSERT INTO messages (id, to_address, from_address, type, subject, payload, trace_id, blocking, state, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-    `).run(
-      id,
-      message.to,
-      message.from,
-      message.type ?? null,
-      message.subject ?? null,
-      payload,
-      message.traceId ?? null,
-      message.blocking === true ? 1 : null,
-      this.clock(),
-    )
-    return id
+  // Synchronous under the hood (DatabaseSync offers no async surface), but the
+  // interface is Promise-typed for future non-local providers, so a thrown
+  // error is folded into a rejection explicitly rather than escaping as a
+  // synchronous throw — callers rely on catching this as a rejected promise.
+  publish(message: MailboxPublishInput, signal?: AbortSignal): Promise<MailboxMessageId> {
+    try {
+      signal?.throwIfAborted()
+      const id = randomUUID() as MailboxMessageId
+      // JSON.stringify throws on circular payloads before any write happens, so
+      // a non-serializable body never lands half-stored.
+      const payload = message.payload === undefined ? null : JSON.stringify(message.payload)
+      this.db.prepare(`
+        INSERT INTO messages (id, to_address, from_address, type, subject, payload, trace_id, blocking, state, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+      `).run(
+        id,
+        message.to,
+        message.from,
+        message.type ?? null,
+        message.subject ?? null,
+        payload,
+        message.traceId ?? null,
+        message.blocking === true ? 1 : null,
+        this.clock(),
+      )
+      return Promise.resolve(id)
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)))
+    }
   }
 
   async claim(filter: MailboxClaimFilter, signal?: AbortSignal): Promise<readonly MailboxLease[]> {
@@ -372,39 +380,47 @@ export class SqliteMailboxStore implements MailboxProvider {
     }
   }
 
-  async settle(leaseRef: MailboxLease['leaseRef'], outcome: MailboxOutcome, signal?: AbortSignal): Promise<void> {
-    signal?.throwIfAborted()
-    const { id, token } = parseLeaseRef(leaseRef)
-    let updateSql: string
-    let updateParams: readonly (string | null)[]
-    switch (outcome.state) {
-      case 'done': {
-        if (outcome.result.messageId !== id) {
-          throw new Error(`mailbox settlement names message ${outcome.result.messageId}, but the lease belongs to "${id}"`)
+  // See the note on publish(): synchronous under the hood, Promise-typed for
+  // the interface, so thrown errors are folded into an explicit rejection —
+  // callers (e.g. the bridge's settleFailed) rely on `.catch()` seeing this.
+  settle(leaseRef: MailboxLease['leaseRef'], outcome: MailboxOutcome, signal?: AbortSignal): Promise<void> {
+    try {
+      signal?.throwIfAborted()
+      const { id, token } = parseLeaseRef(leaseRef)
+      let updateSql: string
+      let updateParams: readonly (string | null)[]
+      switch (outcome.state) {
+        case 'done': {
+          if (outcome.result.messageId !== id) {
+            throw new Error(`mailbox settlement names message ${outcome.result.messageId}, but the lease belongs to "${id}"`)
+          }
+          updateSql = 'UPDATE messages SET state = \'done\', settle_state = \'done\', result = ?, claimed_at = NULL, claim_token = NULL'
+          updateParams = [JSON.stringify({ deliveredAt: outcome.result.deliveredAt, messageId: outcome.result.messageId })]
+          break
         }
-        updateSql = 'UPDATE messages SET state = \'done\', settle_state = \'done\', result = ?, claimed_at = NULL, claim_token = NULL'
-        updateParams = [JSON.stringify({ deliveredAt: outcome.result.deliveredAt, messageId: outcome.result.messageId })]
-        break
+        case 'failed': {
+          updateSql = 'UPDATE messages SET state = \'failed\', settle_state = \'failed\', result = ?, claimed_at = NULL, claim_token = NULL'
+          updateParams = [JSON.stringify({ reason: outcome.result.reason })]
+          break
+        }
+        case 'pending': {
+          updateSql = 'UPDATE messages SET state = \'pending\', settle_state = NULL, result = NULL, claimed_at = NULL, claim_token = NULL'
+          updateParams = []
+          break
+        }
+        default: {
+          const unreachable: never = outcome
+          throw new Error(`unreachable mailbox outcome ${JSON.stringify(unreachable)}`)
+        }
       }
-      case 'failed': {
-        updateSql = 'UPDATE messages SET state = \'failed\', settle_state = \'failed\', result = ?, claimed_at = NULL, claim_token = NULL'
-        updateParams = [JSON.stringify({ reason: outcome.result.reason })]
-        break
+      const changes = this.db.prepare(`${updateSql} WHERE id = ? AND claim_token = ? AND state = 'claimed'`)
+        .run(...updateParams, id, token).changes
+      if (changes !== 1) {
+        throw new Error(`mailbox settlement rejected: the lease for message "${id}" is unknown, already settled, or was reclaimed after going stale`)
       }
-      case 'pending': {
-        updateSql = 'UPDATE messages SET state = \'pending\', settle_state = NULL, result = NULL, claimed_at = NULL, claim_token = NULL'
-        updateParams = []
-        break
-      }
-      default: {
-        const unreachable: never = outcome
-        throw new Error(`unreachable mailbox outcome ${JSON.stringify(unreachable)}`)
-      }
-    }
-    const changes = this.db.prepare(`${updateSql} WHERE id = ? AND claim_token = ? AND state = 'claimed'`)
-      .run(...updateParams, id, token).changes
-    if (changes !== 1) {
-      throw new Error(`mailbox settlement rejected: the lease for message "${id}" is unknown, already settled, or was reclaimed after going stale`)
+      return Promise.resolve()
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)))
     }
   }
 
@@ -414,16 +430,22 @@ export class SqliteMailboxStore implements MailboxProvider {
    * clause exactly, so a wake driver's discovery and the claim's admission
    * can never disagree about what counts as work.
    */
-  async claimableAddresses(filter: MailboxStalenessFilter, signal?: AbortSignal): Promise<readonly MailboxAddress[]> {
-    signal?.throwIfAborted()
-    const cutoff = this.clock() - filter.staleClaimMs
-    const rows = this.db.prepare(`
-      SELECT DISTINCT to_address
-      FROM messages
-      WHERE state = 'pending' OR (state = 'claimed' AND claimed_at <= ?)
-      ORDER BY to_address
-    `).all(cutoff) as unknown as Array<{ to_address: string }>
-    return rows.map(row => row.to_address as MailboxAddress)
+  // See the note on publish(): synchronous under the hood, Promise-typed for
+  // the interface, so a thrown error is folded into an explicit rejection.
+  claimableAddresses(filter: MailboxStalenessFilter, signal?: AbortSignal): Promise<readonly MailboxAddress[]> {
+    try {
+      signal?.throwIfAborted()
+      const cutoff = this.clock() - filter.staleClaimMs
+      const rows = this.db.prepare(`
+        SELECT DISTINCT to_address
+        FROM messages
+        WHERE state = 'pending' OR (state = 'claimed' AND claimed_at <= ?)
+        ORDER BY to_address
+      `).all(cutoff) as unknown as Array<{ to_address: string }>
+      return Promise.resolve(rows.map(row => row.to_address as MailboxAddress))
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)))
+    }
   }
 
   /**
@@ -431,15 +453,21 @@ export class SqliteMailboxStore implements MailboxProvider {
    * regardless of claim or settlement state. A single `SELECT`: the store
    * claims nothing, settles nothing, and writes nothing on this path.
    */
-  async lookupByTraceId(traceId: string, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]> {
-    signal?.throwIfAborted()
-    const rows = this.db.prepare(`
-      SELECT id, to_address, from_address, subject, payload, blocking, created_at, claimed_at, state, result
-      FROM messages
-      WHERE trace_id = ?
-      ORDER BY created_at, id
-    `).all(traceId) as unknown as TraceRow[]
-    return rows.map(rowToTraceEntry)
+  // See the note on publish(): synchronous under the hood, Promise-typed for
+  // the interface, so a thrown error is folded into an explicit rejection.
+  lookupByTraceId(traceId: string, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]> {
+    try {
+      signal?.throwIfAborted()
+      const rows = this.db.prepare(`
+        SELECT id, to_address, from_address, subject, payload, blocking, created_at, claimed_at, state, result
+        FROM messages
+        WHERE trace_id = ?
+        ORDER BY created_at, id
+      `).all(traceId) as unknown as TraceRow[]
+      return Promise.resolve(rows.map(rowToTraceEntry))
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)))
+    }
   }
 
   /**
@@ -448,15 +476,21 @@ export class SqliteMailboxStore implements MailboxProvider {
    * state. A single `SELECT` on the claim-scan index's address half — the
    * store claims nothing, settles nothing, and writes nothing on this path.
    */
-  async lookupInboundSince(address: MailboxAddress, sinceMs: number, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]> {
-    signal?.throwIfAborted()
-    const rows = this.db.prepare(`
-      SELECT id, to_address, from_address, subject, payload, blocking, created_at, claimed_at, state, result
-      FROM messages
-      WHERE to_address = ? AND created_at >= ?
-      ORDER BY created_at, id
-    `).all(address, sinceMs) as unknown as TraceRow[]
-    return rows.map(rowToTraceEntry)
+  // See the note on publish(): synchronous under the hood, Promise-typed for
+  // the interface, so a thrown error is folded into an explicit rejection.
+  lookupInboundSince(address: MailboxAddress, sinceMs: number, signal?: AbortSignal): Promise<readonly MailboxTraceEntry[]> {
+    try {
+      signal?.throwIfAborted()
+      const rows = this.db.prepare(`
+        SELECT id, to_address, from_address, subject, payload, blocking, created_at, claimed_at, state, result
+        FROM messages
+        WHERE to_address = ? AND created_at >= ?
+        ORDER BY created_at, id
+      `).all(address, sinceMs) as unknown as TraceRow[]
+      return Promise.resolve(rows.map(rowToTraceEntry))
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)))
+    }
   }
 
   /** Release the database handle; the store is unusable afterwards. */

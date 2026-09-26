@@ -660,7 +660,7 @@ describe('mailbox delivery over real compositions', () => {
       // NOTHING aborted: held generation completed on its own terms. The
       // jsonl root mixes files and per-session directories — read files only.
       const logText = readdirSync(env.sessionsRoot)
-        .map(entry => join(env.sessionsRoot, String(entry)))
+        .map(entry => join(env.sessionsRoot, entry))
         .filter(path => statSync(path).isFile())
         .map(path => readFileSync(path, 'utf8'))
         .join('')
