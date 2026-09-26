@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { rm, writeFile } from 'node:fs/promises'
+import { readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -372,6 +372,14 @@ describe('resolveWrapperExitCode', () => {
   it('passes vitest\'s failure through when the reporter was overridden, ignoring the verdict', () => {
     expect(resolveWrapperExitCode({ vitestExitCode: 1, reporterOverridden: true, verdictOk: true })).toBe(1)
   })
+
+  it('passes a clean vitest run through when the reporter was overridden, even with a closing verdict', () => {
+    expect(resolveWrapperExitCode({ vitestExitCode: 0, reporterOverridden: true, verdictOk: true })).toBe(0)
+  })
+
+  it('passes vitest\'s failure through when the reporter was overridden, even with a broken verdict', () => {
+    expect(resolveWrapperExitCode({ vitestExitCode: 1, reporterOverridden: true, verdictOk: false })).toBe(1)
+  })
 })
 
 describe('verify-suite-accounting CLI — end to end', () => {
@@ -387,6 +395,18 @@ describe('verify-suite-accounting CLI — end to end', () => {
     // 'scripts/**/*.spec.ts' (and similar in-repo globs); a file outside the
     // repo tree would never be collected regardless of the path filter
     // passed on the command line.
+    // Sweep any sibling left behind by a previous run of this same test that got
+    // SIGKILLed before its own `finally` could run (observed for real with the
+    // sibling oxlint-contract-*.ts probes: leaked files dated 09-16, 09-21, 09-23,
+    // 09-25). Self-healing here means a killed run does not fail every later
+    // suite run just because an orphan sits in the vitest.config.ts include glob.
+    const scriptsDir = join(repositoryRoot, 'scripts')
+    for (const entry of await readdir(scriptsDir)) {
+      if (/^tmp-always-failing-.*\.spec\.ts$/.test(entry)) {
+        await rm(join(scriptsDir, entry), { force: true })
+      }
+    }
+
     const tempSpecPath = join(repositoryRoot, 'scripts', `tmp-always-failing-${randomUUID()}.spec.ts`)
     const tempSpecRelPath = 'scripts/' + tempSpecPath.slice(tempSpecPath.lastIndexOf('/') + 1)
 
