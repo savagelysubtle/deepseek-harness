@@ -80,6 +80,11 @@ export const apply = (ctx: Context): (() => void) => {
         throw new Error('session_title requires an agent session: only a live session can title itself')
       }
       const { title } = args as { title?: unknown }
+      /* v8 ignore next -- unreachable via the registered dispatch: defineTool's
+       * own schema validation already requires "title" to be a string before
+       * this body runs; this guards only a direct, non-schema-validated call
+       * (same guard shape as the memory tool's unknown-action check in
+       * packages/memory/memory/src/tool.ts). */
       if (typeof title !== 'string') {
         throw new TypeError('session_title requires a string "title"')
       }
