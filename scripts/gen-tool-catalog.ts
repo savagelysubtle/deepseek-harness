@@ -78,6 +78,7 @@ import * as ToolMemory from '@deepseek-ai/dsh-memory/tool'
 import SessionTitleService from '@deepseek-ai/dsh-session-title'
 import * as ToolSessionTitle from '@deepseek-ai/dsh-session-title/tool'
 import { githubSlug } from './verify-md-links.ts'
+import { parseMarkdown, visitMarkdown } from './markdown.ts'
 
 /** Attachment seam marker that makes the attachments-conditional `read_image` schema harvestable. */
 class CatalogAttachmentStore extends AttachmentStore {
@@ -802,31 +803,51 @@ function toolSource(entry: ToolPackage, toolName: string): string {
   return source
 }
 
-/** A line that opens a Markdown list item (`-`/`*`/`+`, or `1.`/`1)`). */
-const LIST_ITEM_LINE = /^(?:[-*+]\s|\d+[.)]\s)/
-
 /**
  * Un-hard-wrap a schema description for the doc's one-physical-line-per-
  * paragraph convention (`scripts/verify-md-wrap.ts`). A tool's `description`
  * is arbitrary runtime data, not doc prose written against that convention —
  * a source built from a `.join('\n')` of wrapped sentences (rather than one
- * line, or `.join(' ')`) carries real line breaks mid-paragraph. Blank lines
- * between blocks are meaningful and kept. Within a blank-line-delimited
- * block, a lone `\n` is collapsed to a space UNLESS the block contains a
- * Markdown list item — list text already spans physical lines by design
- * (mdast's `paragraph` node, which the wrap check guards, excludes list
- * items) and must not be flattened into running prose.
+ * line, or `.join(' ')`) carries real line breaks mid-paragraph.
+ *
+ * Uses the exact rule `verify-md-wrap.ts` checks, via the same parser
+ * (`parseMarkdown`/`visitMarkdown` from `./markdown.ts`): a `paragraph` node
+ * whose `position.start.line !== position.end.line` is a hard-wrapped
+ * paragraph. Every such node's source slice has its internal newlines (and
+ * surrounding whitespace) collapsed to a single space; everything outside a
+ * paragraph node — fenced code, headings, list/blockquote structure, blank
+ * lines — is untouched by construction, because only `paragraph` node ranges
+ * are ever replaced. A list-item's own paragraph and a lazy continuation
+ * line after a list both collapse correctly for the same reason: they ARE
+ * `paragraph` nodes (a line heuristic reading for list-marker lines cannot
+ * tell these apart from ordinary hard-wrapped prose, and gets both wrong —
+ * see `.agents/notes` history on this generator). Replacements are applied
+ * back-to-front (descending start offset) so an earlier replacement's offsets
+ * stay valid after a later one edits the string.
  * @param description - the schema's raw description text.
  */
-function unwrapDescription(description: string): string {
-  return description
-    .split(/\n{2,}/)
-    .map((block) => {
-      const lines = block.split('\n')
-      if (lines.some(line => LIST_ITEM_LINE.test(line.trim()))) return block
-      return lines.map(line => line.trim()).join(' ').trim()
-    })
-    .join('\n\n')
+export function unwrapDescription(description: string): string {
+  const violations: Array<{ start: number; end: number }> = []
+  visitMarkdown(parseMarkdown(description), (node) => {
+    if (node.type !== 'paragraph') return
+    const { position } = node
+    if (
+      position !== undefined
+      && position.end.line > position.start.line
+      && position.start.offset !== undefined
+      && position.end.offset !== undefined
+    ) {
+      violations.push({ start: position.start.offset, end: position.end.offset })
+    }
+    // Paragraph children are inline, so no further paragraph can be nested.
+    return false
+  })
+  let out = description
+  for (const { start, end } of violations.sort((left, right) => right.start - left.start)) {
+    const collapsed = out.slice(start, end).replace(/\s*\n\s*/g, ' ')
+    out = out.slice(0, start) + collapsed + out.slice(end)
+  }
+  return out
 }
 
 /** Render one tool's entry: name, description, JSON-Schema parameters, source. */
