@@ -952,6 +952,59 @@ describe('mailbox_await', () => {
     await ctx.fiber.dispose()
   })
 
+  it('wraps a plain-string abort reason in an Error carrying that message', async () => {
+    const { ctx } = await setup('alfred')
+    const controller = new AbortController()
+    const pending = ctx.tools.execute({
+      signal: controller.signal,
+      callId: CallId('call-abort-string-reason'),
+      name: 'mailbox_await',
+      arguments: { deadlineMs: AWAIT_MAX_DEADLINE_MS },
+    })
+    // Past every microtask of the dispatch pipeline and inside the poll sleep.
+    await new Promise(resolve => setTimeout(resolve, 20))
+    controller.abort('plain reason')
+    const result = await pending
+    expect(result.isError).toBe(true)
+    if (!result.isError) throw new Error('expected aborted result')
+    // A bare string reason is not an Error, so this exercises
+    // abortReasonAsError's wrapping branch (`new Error(String(reason), { cause: reason })`)
+    // instead of the pass-through branch the DOMException case above takes.
+    expect(result.error.message).toBe('plain reason')
+    await ctx.fiber.dispose()
+  })
+
+  it('wraps a plain-object abort reason in an Error carrying its message', async () => {
+    const { ctx } = await setup('alfred')
+    const controller = new AbortController()
+    const pending = ctx.tools.execute({
+      signal: controller.signal,
+      callId: CallId('call-abort-object-reason'),
+      name: 'mailbox_await',
+      arguments: { deadlineMs: AWAIT_MAX_DEADLINE_MS },
+    })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    // A plain object (not an Error) carrying a `message` property: same
+    // wrapping branch as the string case, but sourcing the wrapped message
+    // from `reason.message` instead of `String(reason)`.
+    controller.abort({ message: 'seat evicted mid-wait' })
+    const result = await pending
+    expect(result.isError).toBe(true)
+    if (!result.isError) throw new Error('expected aborted result')
+    expect(result.error.message).toBe('seat evicted mid-wait')
+    // NOTE: abortReasonAsError also sets `{ cause: reason }` on the wrapped
+    // Error, but that Error never reaches this assertion boundary — the tool
+    // registry normalizes every rejection into a `ToolFailure` (`{ message,
+    // info? }`, see packages/core/tools/src/index.ts's `toolErrorResult`)
+    // before it becomes `result.error`, and that shape carries no `cause`
+    // field. Asserting `cause` here is not possible without either exporting
+    // `abortReasonAsError`/`waitPollInterval` from src/tools.ts (out of scope
+    // for this test-only change) or bypassing the registry to call the tool's
+    // `execute` directly. Flagging this rather than asserting something the
+    // types cannot support.
+    await ctx.fiber.dispose()
+  })
+
   it('fails loud on an anonymous run like the other tools', async () => {
     const { ctx } = await setup(undefined)
     const result = await call(ctx, 'mailbox_await')

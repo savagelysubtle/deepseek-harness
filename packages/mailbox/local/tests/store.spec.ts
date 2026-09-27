@@ -475,6 +475,82 @@ describe('lookupInboundSince', () => {
   })
 })
 
+describe('abort handling and rejection normalization', () => {
+  // publish, settle, claimableAddresses, lookupByTraceId, and lookupInboundSince
+  // are plain (non-`async`) methods that read `signal?.throwIfAborted()` before
+  // any work, then fold whatever the synchronous body throws into a rejection
+  // via `error instanceof Error ? error : new Error(String(error))`. An
+  // already-aborted signal's reason is exactly such a synchronous throw, and
+  // `throwIfAborted()` throws the reason value itself (not an Error) when the
+  // caller aborted with a non-Error reason.
+  it('rejects publish with the aborted reason instead of throwing synchronously', async () => {
+    const store = storeWith(fakeClock().clock)
+    const controller = new AbortController()
+    controller.abort('plain reason')
+    await expect(store.publish({ to: OPS, from: 'gotham:alfred' }, controller.signal))
+      .rejects.toThrow('plain reason')
+    store.close()
+  })
+
+  it('rejects settle with the aborted reason instead of throwing synchronously', async () => {
+    const store = storeWith(fakeClock().clock)
+    const controller = new AbortController()
+    controller.abort('plain reason')
+    await expect(store.settle('irrelevant:token' as never, { state: 'pending', result: undefined }, controller.signal))
+      .rejects.toThrow('plain reason')
+    store.close()
+  })
+
+  it('rejects claimableAddresses with the aborted reason instead of throwing synchronously', async () => {
+    const store = storeWith(fakeClock().clock)
+    const controller = new AbortController()
+    controller.abort('plain reason')
+    await expect(store.claimableAddresses({ staleClaimMs: 30_000 }, controller.signal))
+      .rejects.toThrow('plain reason')
+    store.close()
+  })
+
+  it('rejects lookupByTraceId with the aborted reason instead of throwing synchronously', async () => {
+    const store = storeWith(fakeClock().clock)
+    const controller = new AbortController()
+    controller.abort('plain reason')
+    await expect(store.lookupByTraceId('trace-1', controller.signal))
+      .rejects.toThrow('plain reason')
+    store.close()
+  })
+
+  it('rejects lookupInboundSince with the aborted reason instead of throwing synchronously', async () => {
+    const store = storeWith(fakeClock().clock)
+    const controller = new AbortController()
+    controller.abort('plain reason')
+    await expect(store.lookupInboundSince(OPS, 0, controller.signal))
+      .rejects.toThrow('plain reason')
+    store.close()
+  })
+
+  // `claim` is the fifth method the SQL surface exposes, but it stayed
+  // `async claim(...)` in the lint cleanup (see sqlite.ts) rather than moving
+  // to the plain-method-plus-explicit-Promise shape the other five took, so
+  // its rejection path is not this normalization branch and is out of scope
+  // here.
+
+  it('returns a rejected promise rather than throwing synchronously on a validation failure', async () => {
+    // Distinct from the abort cases above: this proves the general
+    // try/catch-to-rejection shape holds for ANY synchronous throw in the
+    // body, not only ones sourced from an aborted signal. `store.settle(...)`
+    // itself must not throw before returning its promise — the `expect(() =>
+    // ...).not.toThrow()` below is what proves that, separately from the
+    // rejection assertion that follows.
+    const store = storeWith(fakeClock().clock)
+    let pending: Promise<void> | undefined
+    expect(() => {
+      pending = store.settle('not-a-ref' as never, { state: 'pending', result: undefined })
+    }).not.toThrow()
+    await expect(pending).rejects.toThrow(/lease ref/)
+    store.close()
+  })
+})
+
 describe('config resolution', () => {
   it('defaults to the harness home, resolves configured paths absolutely, keeps the memory sentinel, rejects blanks', () => {
     expect(resolveMailboxPath()).toMatch(/mailbox[/\\]mailbox\.db$/)
