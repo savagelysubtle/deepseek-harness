@@ -20,6 +20,7 @@ scripts/tmp-always-failing-*.spec.ts
 packages/typert/generator/tests/.generated-model-*/
 .humanize/
 tmp/
+.tmp/
 .claude/commands/
 .claude/launch.json
 .claude/settings.json
