@@ -802,10 +802,37 @@ function toolSource(entry: ToolPackage, toolName: string): string {
   return source
 }
 
+/** A line that opens a Markdown list item (`-`/`*`/`+`, or `1.`/`1)`). */
+const LIST_ITEM_LINE = /^(?:[-*+]\s|\d+[.)]\s)/
+
+/**
+ * Un-hard-wrap a schema description for the doc's one-physical-line-per-
+ * paragraph convention (`scripts/verify-md-wrap.ts`). A tool's `description`
+ * is arbitrary runtime data, not doc prose written against that convention —
+ * a source built from a `.join('\n')` of wrapped sentences (rather than one
+ * line, or `.join(' ')`) carries real line breaks mid-paragraph. Blank lines
+ * between blocks are meaningful and kept. Within a blank-line-delimited
+ * block, a lone `\n` is collapsed to a space UNLESS the block contains a
+ * Markdown list item — list text already spans physical lines by design
+ * (mdast's `paragraph` node, which the wrap check guards, excludes list
+ * items) and must not be flattened into running prose.
+ * @param description - the schema's raw description text.
+ */
+function unwrapDescription(description: string): string {
+  return description
+    .split(/\n{2,}/)
+    .map((block) => {
+      const lines = block.split('\n')
+      if (lines.some(line => LIST_ITEM_LINE.test(line.trim()))) return block
+      return lines.map(line => line.trim()).join(' ').trim()
+    })
+    .join('\n\n')
+}
+
 /** Render one tool's entry: name, description, JSON-Schema parameters, source. */
 function renderTool(schema: ToolSchema, source: string): string[] {
   const out = [`### \`${schema.name}\``, '']
-  if (schema.description) out.push(schema.description, '')
+  if (schema.description) out.push(unwrapDescription(schema.description), '')
   out.push('```json', JSON.stringify(schema.parameters, null, 2), '```', '')
   out.push(`Source: [\`${source}\`](../${source})`, '')
   return out

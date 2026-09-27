@@ -1994,15 +1994,7 @@ web_search and web_fetch keep provider selection behind ctx.web so model-visible
 
 ### `memory`
 
-Read, write, list, and search DURABLE project memory: plain-markdown notes scoped to
-the current workspace that persist across sessions, restarts, and seats — yours and
-your teammates' co-edit them on disk.
-Use write() to record decisions, environment gotchas, session state worth carrying
-forward, or canonical locations; use read()/list()/search() instead of asking the user
-to repeat context the memory already holds. Paths are scope-relative with forward
-slashes (`todo/auth.md`, `spec/decisions.md`); parent traversal is rejected.
-Content costs prompt tokens only when you read or search it, so prefer list() first,
-then read() the specific entries you need.
+Read, write, list, and search DURABLE project memory: plain-markdown notes scoped to the current workspace that persist across sessions, restarts, and seats — yours and your teammates' co-edit them on disk. Use write() to record decisions, environment gotchas, session state worth carrying forward, or canonical locations; use read()/list()/search() instead of asking the user to repeat context the memory already holds. Paths are scope-relative with forward slashes (`todo/auth.md`, `spec/decisions.md`); parent traversal is rejected. Content costs prompt tokens only when you read or search it, so prefer list() first, then read() the specific entries you need.
 
 ```json
 {
@@ -2049,9 +2041,7 @@ Subpath-exported (`@deepseek-ai/dsh-memory/tool`), so the completeness guard's d
 
 Set the title of your own conversation — the name it shows under in the session list.
 
-Use it when your session has a name that does not describe it: a seat whose title is still
-the first line of its kickoff prompt, or a session whose subject has moved on. Prefer a short
-noun phrase; for a named seat, its own name is usually right.
+Use it when your session has a name that does not describe it: a seat whose title is still the first line of its kickoff prompt, or a session whose subject has moved on. Prefer a short noun phrase; for a named seat, its own name is usually right.
 
 The title you set is pinned: automatic title generation stops replacing it.
 
