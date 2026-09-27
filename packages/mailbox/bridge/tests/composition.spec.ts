@@ -556,6 +556,8 @@ describe('mailbox delivery over real compositions', () => {
               request.messages.some(message =>
                 (message as { source?: { kind?: string } }).source?.kind === 'mailbox')),
             'a mailbox-sourced message to reach the scripted model',
+            () => secondAdapter.requests.map(request =>
+              request.messages.map(message => (message as { source?: unknown }).source)),
           )
         },
       })
