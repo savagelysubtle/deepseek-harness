@@ -683,6 +683,11 @@ export class ReactLoopAgent implements Agent {
           ...assembler.replayState !== undefined ? { replayState: assembler.replayState } : {},
         },
       })
+      // The effort actually dispatched to the provider for this step, after
+      // adapter-default resolution (`request.reasoningEffort` is the resolved
+      // value from `header.config`, not merely the caller's proposal) — with
+      // whether it came from explicit call config or an adapter-owned default.
+      const reasoningEffort = request.reasoningEffort
       this.session.append(
         'assistant/message',
         {
@@ -690,6 +695,12 @@ export class ReactLoopAgent implements Agent {
           step,
           message,
           ...assembler.usage === undefined ? {} : { usage: assembler.usage },
+          ...reasoningEffort === undefined ? {} : {
+            reasoningEffort,
+            reasoningEffortSource: preparedCall?.adapterDefaults.reasoningEffort === true
+              ? 'adapter-default' as const
+              : 'config' as const,
+          },
         },
         { surfaceOp: 'append', sourceEventSeqs: chunkSeqs },
       )

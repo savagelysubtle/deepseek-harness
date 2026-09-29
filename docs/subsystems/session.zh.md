@@ -59,9 +59,20 @@ interface SessionEventMap {
    * Assembled assistant message for one step (derived history uses this).
    * Carries the step's `usage` when the adapter reported token accounting, so
    * the model output and its accounting travel together (there is no separate
-   * usage record). `usage` is absent when the adapter reported none.
+   * usage record). `usage` is absent when the adapter reported none. Carries
+   * the `reasoningEffort` actually sent to the provider for this step (after
+   * adapter-default resolution) with its `reasoningEffortSource`; both are
+   * absent when the route has no configured or resolvable effort.
    */
-  'assistant/message': { turn: number; step: number; message: AssistantMessage; usage?: TokenUsage }
+  'assistant/message': {
+    turn: number
+    step: number
+    message: AssistantMessage
+    usage?: TokenUsage
+    reasoningEffort?: ReasoningEffortId
+    /** Whether `reasoningEffort` came from an explicit call config or an adapter-resolved default. */
+    reasoningEffortSource?: 'config' | 'adapter-default'
+  }
   /**
    * The model requested one tool invocation: `name` with the raw `arguments`
    * JSON string exactly as the model produced it (unparsed). `callId` pairs the

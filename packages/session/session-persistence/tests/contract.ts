@@ -11,7 +11,7 @@
 import { describe, expect, it } from 'vitest'
 import { SESSION_FORMAT_VERSION, Session, SessionId, TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader, SurfaceEventType, SurfaceIntent } from '@deepseek-ai/dsh-session'
-import { CallId, MessageId, createMessage, freezeMessage } from '@deepseek-ai/dsh-llm'
+import { CallId, MessageId, ReasoningEffortId, createMessage, freezeMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionPersistence } from '../src/index.ts'
 
 /** A backend under test plus its teardown. */
@@ -51,6 +51,9 @@ export function oneTurnLog(): SessionEvent[] {
           ...{ provider: 'mock', model: 'mock' },
         },
       }),
+      // SWD-112: the resolved effort actually dispatched, round-tripped verbatim.
+      reasoningEffort: ReasoningEffortId('high'),
+      reasoningEffortSource: 'adapter-default',
     }, surfaceOp: 'append' },
     { type: 'step/end', seq: 4, time: 5, data: { turn: 1, step: 1 } },
     { type: 'turn/end', seq: 5, time: 6, data: { turn: 1, reason: { kind: 'completed' } } },

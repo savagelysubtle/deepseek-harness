@@ -181,6 +181,20 @@ describe('request stability across the loop', () => {
     ])
     expect(headers.map(event => event.data.reason)).toEqual(['initial', 'change'])
 
+    // Every assistant/message event carries the effort actually dispatched
+    // for that step and whether it came from an adapter default or explicit
+    // config — SWD-112: this is per-event evidence, not a reconstruction from
+    // the last request/header snapshot.
+    const assistantMessages = agent.session.events.filter(event => event.type === 'assistant/message')
+    expect(assistantMessages.map(event => event.data.reasoningEffort)).toEqual([
+      ReasoningEffortId('high'),
+      ReasoningEffortId('max'),
+    ])
+    expect(assistantMessages.map(event => event.data.reasoningEffortSource)).toEqual([
+      'adapter-default',
+      'config',
+    ])
+
     for (const [model, effort] of [
       ['mock', ReasoningEffortId('max')],
       ['replacement', ReasoningEffortId('high')],
@@ -201,6 +215,21 @@ describe('request stability across the loop', () => {
       expect(resumedHeaders.at(-1)?.data.header.config.reasoningEffort).toBe(effort)
       expect(resumedHeaders.at(-1)?.data.reason).toBe('resume')
     }
+  })
+
+  it('omits reasoningEffort from assistant/message when the route has none configured or resolvable', async () => {
+    const adapter = new MockAdapter([textResponse('plain')])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('no-effort'), { provider: 'mock', model: 'mock' })
+
+    send(agent, 'go')
+    await waitForIdle(ctx, agent)
+
+    expect(adapter.requests[0]?.reasoningEffort).toBeUndefined()
+    const assistantMessage = agent.session.events.find(event => event.type === 'assistant/message')
+    expect(assistantMessage?.type === 'assistant/message' && assistantMessage.data.reasoningEffort).toBeUndefined()
+    expect(assistantMessage?.type === 'assistant/message' && assistantMessage.data.reasoningEffortSource).toBeUndefined()
+    expect(assistantMessage && 'reasoningEffort' in assistantMessage.data).toBe(false)
   })
 
   it('logs an adapter-owned maxTokens default before dispatch', async () => {

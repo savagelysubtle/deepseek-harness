@@ -1,4 +1,4 @@
-import { MessageId, createUserMessage, createMessage } from '@deepseek-ai/dsh-llm'
+import { MessageId, ReasoningEffortId, createUserMessage, createMessage } from '@deepseek-ai/dsh-llm'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { appendFile, mkdtemp, mkdir, rm, readFile, writeFile, readdir, stat, symlink } from 'node:fs/promises'
@@ -300,6 +300,88 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     expect(raw!.content.split('\n')[0]).toBe(JSON.stringify(toHeaderLine(m)))
     const scanned = scanLog(Buffer.from(raw!.content))
     expect(scanned.events.map(event => event.type)).toEqual(oneTurnLog().map(event => event.type))
+  })
+
+  // SWD-112: prove what actually lands on disk for the resolved reasoning
+  // effort, on both the request/header snapshot and the per-step
+  // assistant/message event — the fact the ticket's evidential claim rests on.
+  it('persists the resolved reasoningEffort on-disk, on both request/header and every assistant/message', async () => {
+    const m = meta('reasoning-effort-on-disk', '/work')
+    const session = ctx.sessions.create(m.id, { meta: { cwd: '/work' } })
+    session.append('turn/start', { turn: 1 })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'hi' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    session.append('request/header', {
+      header: { config: { provider: 'mock', model: 'mock', reasoningEffort: ReasoningEffortId('max') } },
+      reason: 'initial',
+    })
+    session.append('step/start', { turn: 1, step: 1 })
+    session.append('assistant/message', {
+      turn: 1,
+      step: 1,
+      message: createMessage({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'hello' }],
+        source: { kind: 'model', provider: 'mock', model: 'mock' },
+      }),
+      reasoningEffort: ReasoningEffortId('max'),
+      reasoningEffortSource: 'adapter-default',
+    }, { surfaceOp: 'append' })
+    session.append('step/end', { turn: 1, step: 1 })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    await ctx.sessions.flush(session)
+
+    const raw = (await readFile(rawLogPath(root, '/work', m.id), 'utf8')).split('\n').filter(Boolean)
+    const records = raw.map(line => JSON.parse(line) as { type: string; data: Record<string, unknown> })
+
+    const header = records.find(record => record.type === 'request/header')
+    expect((header?.data.header as { config: { reasoningEffort: string } })?.config.reasoningEffort).toBe('max')
+
+    const assistant = records.find(record => record.type === 'assistant/message')
+    expect(assistant?.data.reasoningEffort).toBe('max')
+    expect(assistant?.data.reasoningEffortSource).toBe('adapter-default')
+
+    // Round-trips through load() identically, not just readable as raw bytes.
+    const loaded = await ctx.sessionPersistence.load(m.id)
+    const loadedAssistant = loaded.events.find(event => event.type === 'assistant/message')
+    expect(loadedAssistant?.type === 'assistant/message' && loadedAssistant.data.reasoningEffort).toBe('max')
+    expect(loadedAssistant?.type === 'assistant/message' && loadedAssistant.data.reasoningEffortSource)
+      .toBe('adapter-default')
+  })
+
+  it('loads a pre-existing assistant/message log line with no reasoningEffort field (compat)', async () => {
+    const m = meta('reasoning-effort-legacy-compat', '/work')
+    const path = rawLogPath(root, m.cwd, m.id)
+    await mkdir(sessionDir(root, m.cwd, m.id), { recursive: true })
+    await writeFile(path, [
+      JSON.stringify(toHeaderLine(m)),
+      JSON.stringify({ type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } }),
+      JSON.stringify({ type: 'user/message', seq: 1, time: 2, surfaceOp: 'append', data: {
+        id: 'legacy-user', role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' },
+      } }),
+      JSON.stringify({ type: 'step/start', seq: 2, time: 3, data: { turn: 1, step: 1 } }),
+      // Pre-SWD-112 shape: no reasoningEffort / reasoningEffortSource fields at all.
+      JSON.stringify({ type: 'assistant/message', seq: 3, time: 4, surfaceOp: 'append', data: {
+        turn: 1, step: 1,
+        message: {
+          id: 'legacy-assistant', role: 'assistant',
+          content: [{ type: 'text', text: 'hello' }],
+          source: { kind: 'model', provider: 'mock', model: 'mock' },
+        },
+      } }),
+      JSON.stringify({ type: 'step/end', seq: 4, time: 5, data: { turn: 1, step: 1 } }),
+      JSON.stringify({ type: 'turn/end', seq: 5, time: 6, data: { turn: 1, reason: { kind: 'completed' } } }),
+      '',
+    ].join('\n'))
+
+    const loaded = await ctx.sessionPersistence.load(m.id)
+    const assistantMessage = loaded.events.find(event => event.type === 'assistant/message')
+    expect(assistantMessage).toBeDefined()
+    expect(assistantMessage?.type === 'assistant/message' && assistantMessage.data.reasoningEffort).toBeUndefined()
+    expect(assistantMessage?.type === 'assistant/message' && assistantMessage.data.reasoningEffortSource)
+      .toBeUndefined()
   })
 
   it('readRaw is undefined for an absent session', async () => {
