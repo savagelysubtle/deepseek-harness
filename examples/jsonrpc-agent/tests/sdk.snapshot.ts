@@ -19,6 +19,7 @@ import {
   normalizeSessionLog,
   normalizeStdout,
   refreshFixtureReplacements,
+  scrubNowLine,
   scrubRequestHeaders,
   stabilizeFixtureMessageIds,
   stabilizeRefreshLog,
@@ -39,6 +40,17 @@ const runtimeBin = fileURLToPath(new URL('../../../packages/examples/jsonrpc-dem
 const repoTsconfig = fileURLToPath(new URL('../../../tsconfig.json', import.meta.url))
 
 const MINIMAL_SYSTEM_PROMPT = 'You are the environment-selected minimal software engineer.'
+/**
+ * The persona prompt above plus the built-in `harness:now` (SWD-113) section
+ * every assembly appends, with its volatile clock line reduced to the
+ * `{{now}}` placeholder `scrubNowLine` produces — matched against
+ * `assembledSystem(parent)` after the same scrub, never a live timestamp.
+ */
+const MINIMAL_SYSTEM_PROMPT_WITH_NOW = `${MINIMAL_SYSTEM_PROMPT}
+
+Current date and time: {{now}}
+
+This is the time this prompt was assembled — it advances between turns, so read elapsed time from here rather than assuming it.`
 const MINIMAL_BASH_DESCRIPTION = `Run commands in a bash shell
 * When invoking this tool, the contents of the "command" parameter does NOT need to be XML-escaped.
 * You don't have access to the internet via this tool.
@@ -109,7 +121,7 @@ const SCENARIOS: SdkScenario[] = [
     environment: { DSH_SYSTEM_PROMPT: MINIMAL_SYSTEM_PROMPT },
     expectedFiles: { 'note.txt': 'target:\n\tnew\n' },
     expectedTools: { bash: ['command'], str_replace_editor: ['command', 'path'] },
-    expectedSystem: MINIMAL_SYSTEM_PROMPT,
+    expectedSystem: MINIMAL_SYSTEM_PROMPT_WITH_NOW,
     expectedToolDescriptions: { bash: MINIMAL_BASH_DESCRIPTION },
     runtimeContext: false,
   },
@@ -435,7 +447,7 @@ describe('TypeScript SDK snapshots over the jsonrpc runtime', () => {
       if (scenario.expectedSystem !== undefined) {
         const parent = ordered[0]
         if (parent === undefined) throw new Error(`${scenario.name} has no parent session log`)
-        expect(assembledSystem(parent)).toBe(scenario.expectedSystem)
+        expect(scrubNowLine(assembledSystem(parent))).toBe(scenario.expectedSystem)
       }
       if (scenario.expectedToolDescriptions !== undefined) {
         const parent = ordered[0]
