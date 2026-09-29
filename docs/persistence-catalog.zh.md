@@ -92,7 +92,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 }[T]
 ```
 
-来源：[`packages/core/session/src/types.ts:354`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:361`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:390`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:422`](../packages/core/session/src/types.ts)
+来源：[`packages/core/session/src/types.ts:348`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:355`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:384`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:416`](../packages/core/session/src/types.ts)
 
 ## 事件
 
@@ -556,7 +556,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'request/context': RequestContext
 ```
 
-来源：[`packages/core/session/src/types.ts:327`](../packages/core/session/src/types.ts)
+来源：[`packages/core/session/src/types.ts:321`](../packages/core/session/src/types.ts)
 
 <a id="requestheader--log-only"></a>
 
@@ -565,18 +565,12 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 ```ts persistence-catalog
 /**
  * Full header for the next request, appended inside its step before dispatch.
- * It is log-only; the latest snapshot reconstructs the request header. The
- * persisted `header.system` carries the exact `harness:now` (SWD-113) clock
- * reading in force at that moment — `headerEquals` ignores only that one
- * line when deciding whether a NEW snapshot is needed (see
- * `dsh-session/request-header`'s `scrubNowLine`), so a replay reconstructs
- * a step's request with THAT snapshot's real clock text, not a clock
- * re-read for the step being replayed.
+ * It is log-only; the latest snapshot reconstructs the request header.
  */
 'request/header': { header: EpochHeader; reason: RequestHeaderReason }
 ```
 
-来源：[`packages/core/session/src/types.ts:322`](../packages/core/session/src/types.ts)
+来源：[`packages/core/session/src/types.ts:316`](../packages/core/session/src/types.ts)
 
 ### `sandbox/*`
 
@@ -651,7 +645,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'session/end-seed': Record<string, never>
 ```
 
-来源：[`packages/core/session/src/types.ts:350`](../packages/core/session/src/types.ts)
+来源：[`packages/core/session/src/types.ts:344`](../packages/core/session/src/types.ts)
 
 <a id="sessiontitle--log-only"></a>
 

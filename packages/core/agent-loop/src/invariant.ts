@@ -4,27 +4,29 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { isAgentLoopRequest, type GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { isAgentLoopRequest, type GenerateOptions, type Message } from '@deepseek-ai/dsh-llm'
 import type { InvariantFailure, InvariantInstaller } from '@deepseek-ai/dsh-invariants'
-import { foldRequestHeader, scrubNowLine } from '@deepseek-ai/dsh-session'
+import { foldRequestHeader } from '@deepseek-ai/dsh-session'
+import { isClockMessage } from './clock.ts'
 
 const PACKAGE_NAME = '@deepseek-ai/dsh-agent-loop'
 
 /**
- * `system` equality tolerant of the `harness:now` (SWD-113) clock line alone
- * — the same exemption `headerEquals` applies when deciding whether to log a
- * NEW `request/header` snapshot. A dispatched request always carries the
- * step's freshly-assembled system text (current clock); the folded header is
- * only as fresh as its last LOGGED snapshot. Once `headerEquals` stops
- * logging a snapshot for a clock-only difference, those two texts
- * legitimately diverge in that one line on every step the clock has ticked
- * since — this reconstructability check must ignore the same line or every
- * multi-step turn would fail it as soon as a minute rolled over.
+ * Whether `dispatched` (a request's `messages`) reconstructs from `expected`
+ * (`session.deriveMessages()` at dispatch time): byte-equal, OR byte-equal
+ * once one trailing message recognized as the unconditional per-request
+ * clock tail (SWD-113, see `./clock.ts`) is set aside. `buildRequest` appends
+ * that one message WITHOUT ever logging it, so a dispatched request
+ * legitimately carries exactly one message `expected` has no counterpart
+ * for — never more, and never anywhere but the very end.
+ * @param dispatched - the frozen request's `messages` array.
+ * @param expected - `session.deriveMessages()` at dispatch time.
+ * @returns whether `dispatched` reconstructs from `expected` under that rule.
  */
-function systemReconstructs(dispatched: string | undefined, folded: string | undefined): boolean {
-  if (dispatched === folded) return true
-  if (dispatched === undefined || folded === undefined) return false
-  return scrubNowLine(dispatched) === scrubNowLine(folded)
+function messagesReconstruct(dispatched: readonly Message[], expected: readonly Message[]): boolean {
+  const last = dispatched[dispatched.length - 1]
+  const withoutClock = last !== undefined && isClockMessage(last) ? dispatched.slice(0, -1) : dispatched
+  return JSON.stringify(withoutClock) === JSON.stringify(expected)
 }
 
 /** Cordis companion plugin name. */
@@ -54,12 +56,12 @@ const install: InvariantInstaller = Object.assign((ctx: Context, fail: Invariant
       return fail('a loop-built request with no request/header event in its session log')
     }
     const expected = session.deriveMessages()
-    if (JSON.stringify(options.messages) !== JSON.stringify(expected)) {
+    if (!messagesReconstruct(options.messages, expected)) {
       fail(`llm request for session "${String(session.id)}" diverges from the dispatch-time durable derivation (log-reconstruction desync)`)
     }
 
     const headerMatches = options.model === header.config.model
-      && systemReconstructs(options.system, header.system)
+      && options.system === header.system
       && options.temperature === header.config.temperature
       && options.maxTokens === header.config.maxTokens
       && JSON.stringify(options.stop) === JSON.stringify(header.config.stop)

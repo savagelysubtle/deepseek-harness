@@ -33,6 +33,7 @@ import { canonicalHeader, headerEquals } from '@deepseek-ai/dsh-session'
 import { joinContextSections, renderContextSections, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import type { Context } from '@deepseek-ai/cordis'
+import { buildClockMessage } from './clock.ts'
 import { TOOL_SNAPSHOT_SETTLE_MS } from './constants.ts'
 import { RuntimeContextProjection } from './runtime-context.ts'
 import { executeToolCalls } from './tool-calls.ts'
@@ -191,6 +192,14 @@ export class ReactLoopAgent implements Agent {
    */
   private readonly toolRepeatGuard: ToolRepeatDetector
 
+  /**
+   * Clock the unconditional per-request clock tail message (SWD-113, see
+   * `./clock.ts`) reads from — the function itself, captured once at
+   * construction; {@link buildRequest} calls it fresh for every dispatched
+   * request. Test-injectable via `AgentLoop.Config.now`.
+   */
+  private readonly now: () => Date
+
   constructor(
     private loopCtx: Context,
     public readonly id: SessionId,
@@ -223,6 +232,7 @@ export class ReactLoopAgent implements Agent {
       }
     }, 'agent.toolSnapshotRecheck()')
     this.toolRepeatGuard = new ToolRepeatDetector(loopCtx.agentLoop.config.loopGuard.toolRepeatThreshold)
+    this.now = loopCtx.agentLoop.config.now
   }
 
   get status(): AgentStatus {
@@ -807,9 +817,13 @@ export class ReactLoopAgent implements Agent {
     }
     signal.throwIfAborted()
 
+    // Unconditional per-request clock tail (SWD-113, see `./clock.ts`):
+    // appended here — never through `session.append` — so it is fresh on
+    // every dispatch without ever entering the session log or perturbing
+    // `boundaryMessages`' own reconstructability from `session.deriveMessages()`.
     const request = markAgentLoopRequest(deepFreeze({
       ...header.config,
-      messages: boundaryMessages,
+      messages: [...boundaryMessages, buildClockMessage(this.now)],
       ...header.system !== undefined ? { system: header.system } : {},
       ...header.tools !== undefined ? { tools: header.tools } : {},
       sessionId: this.session.id,

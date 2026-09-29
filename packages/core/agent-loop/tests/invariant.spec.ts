@@ -4,6 +4,7 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import * as AgentLoopInvariant from '@deepseek-ai/dsh-agent-loop/invariant'
 import { createUserMessage, markAgentLoopRequest, type GenerateOptions  } from '@deepseek-ai/dsh-llm'
+import { buildClockMessage } from '../src/clock.ts'
 
 async function setup(): Promise<Context> {
   const ctx = new Context()
@@ -75,53 +76,43 @@ describe('request-reconstruction invariant', () => {
       .toThrow(/diverges from the folded request header/)
   })
 
-  describe('the harness:now (SWD-113) clock line', () => {
-    const nowBlock = (stamp: string): string =>
-      `Current date and time: ${stamp}\n\nThis is the time this prompt was assembled — it advances between turns, so read elapsed time from here rather than assuming it.`
-
-    async function systemRequestSetup(system: string) {
-      const ctx = await setup()
-      const session = ctx.sessions.create(SessionId('req-system'))
-      session.append('turn/start', { turn: 1 })
-      session.append('user/message', createUserMessage({
-        content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' },
-      }), { surfaceOp: 'append' })
-      const boundary = session.deriveMessages()
-      session.append('step/start', { turn: 1, step: 1 })
-      session.append('request/header', {
-        header: { config: { provider: 'mock', model: 'm' }, system },
-        reason: 'initial',
-      })
-      return { ctx, session, boundary }
-    }
-
-    it('accepts a dispatched request whose system differs from the folded header only in the clock line', async () => {
-      const { ctx, session, boundary } = await systemRequestSetup(
-        nowBlock('Monday 2026-09-29 09:12 America/Los_Angeles (UTC-07:00) — 2026-09-29T16:12Z'),
-      )
-      // A later step's freshly-assembled system carries the CURRENT clock —
-      // the folded header still carries the 'initial' snapshot's clock, since
-      // headerEquals never logged a new snapshot for a clock-only change.
+  describe('the unconditional clock tail message (SWD-113)', () => {
+    it('accepts a dispatched request whose messages are the boundary plus one trailing clock message', async () => {
+      const { ctx, session, boundary } = await requestSetup()
       const options = loopRequest({
         model: 'm',
-        system: nowBlock('Monday 2026-09-29 09:13 America/Los_Angeles (UTC-07:00) — 2026-09-29T16:13Z'),
-        messages: Object.freeze(boundary),
+        messages: Object.freeze([...boundary, buildClockMessage(() => new Date('2026-09-29T16:13:00Z'))]),
         sessionId: session.id,
       })
       expect(() => { dispatch(ctx, options) }).not.toThrow()
     })
 
-    it('still rejects a dispatched request whose system diverges beyond the clock line', async () => {
-      const { ctx, session, boundary } = await systemRequestSetup(
-        nowBlock('Monday 2026-09-29 09:12 America/Los_Angeles (UTC-07:00) — 2026-09-29T16:12Z'),
-      )
+    it('still rejects a trailing message that is not the recognized clock message', async () => {
+      const { ctx, session, boundary } = await requestSetup()
+      const notTheClock = createUserMessage({
+        content: [{ type: 'text', text: 'Current date and time: not really' }],
+        source: { kind: 'plugin', plugin: 'someone-else' },
+      })
       const options = loopRequest({
         model: 'm',
-        system: `new guidance\n\n${nowBlock('Monday 2026-09-29 09:13 America/Los_Angeles (UTC-07:00) — 2026-09-29T16:13Z')}`,
-        messages: Object.freeze(boundary),
+        messages: Object.freeze([...boundary, notTheClock]),
         sessionId: session.id,
       })
-      expect(() => { dispatch(ctx, options) }).toThrow(/diverges from the folded request header/)
+      expect(() => { dispatch(ctx, options) }).toThrow(/diverges from the dispatch-time durable derivation/)
+    })
+
+    it('still rejects two trailing clock-shaped messages (only the very last may be discounted)', async () => {
+      const { ctx, session, boundary } = await requestSetup()
+      const options = loopRequest({
+        model: 'm',
+        messages: Object.freeze([
+          ...boundary,
+          buildClockMessage(() => new Date('2026-09-29T16:12:00Z')),
+          buildClockMessage(() => new Date('2026-09-29T16:13:00Z')),
+        ]),
+        sessionId: session.id,
+      })
+      expect(() => { dispatch(ctx, options) }).toThrow(/diverges from the dispatch-time durable derivation/)
     })
   })
 

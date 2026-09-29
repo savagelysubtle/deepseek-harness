@@ -401,7 +401,16 @@ describe('dsh-agent-spine-demo bundle', () => {
       handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
       await waitForIdle(ctx, handle.agent)
 
-      expect(adapter.requests[0]?.messages).toEqual([{
+      // The dispatched request's LAST message is the agent loop's
+      // unconditional clock tail (SWD-113) — never logged, so it has no
+      // counterpart in session-derived history; check it separately, then
+      // compare the rest exactly.
+      const dispatchedMessages = adapter.requests[0]?.messages ?? []
+      expect(dispatchedMessages.at(-1)?.source).toEqual({
+        kind: 'plugin',
+        plugin: '@deepseek-ai/dsh-agent-loop/clock',
+      })
+      expect(dispatchedMessages.slice(0, -1)).toEqual([{
         id: expect.any(String) as unknown,
         role: 'user',
         content: [{ type: 'text', text: 'hi' }],
@@ -722,15 +731,9 @@ describe('dsh-agent-spine-demo bundle', () => {
 
     expect(ctx.tools.schemas()).toEqual([])
     ctx.systemPrompt.context({ name: 'policy', order: 0, text: 'hidden policy' })
-    const assembly = await ctx.systemPrompt.assemble()
-    expect(assembly.contexts).toEqual([])
-    // This bundle does not forward SystemPrompt's `now` clock override, so
-    // `harness:now` (SWD-113) still renders the live instant here — pull its
-    // own rendered text from the assembly rather than hardcoding a timestamp.
-    const nowSection = assembly.sections.find(s => s.name === 'harness:now')
-    expect(nowSection?.text).toMatch(/^Current date and time: /)
-    expect(renderPrompt(assembly))
-      .toBe(`You are a helpful software engineer assistant.\n\n${nowSection?.text}`)
+    expect((await ctx.systemPrompt.assemble()).contexts).toEqual([])
+    expect(renderPrompt(await ctx.systemPrompt.assemble()))
+      .toBe('You are a helpful software engineer assistant.')
 
     await ctx.fiber.dispose()
   })

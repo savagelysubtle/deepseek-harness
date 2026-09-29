@@ -103,12 +103,11 @@ export interface Config {
   /** The explicit model-facing tool order (see dsh-system-prompt's `Config`). */
   toolOrder?: SystemPromptConfig['toolOrder']
   /**
-   * The `harness:now` clock override (see dsh-system-prompt's `Config`).
+   * The `now` variable's clock override (see dsh-system-prompt's `Config`).
    * Declared only so the config-catalog cross-check accepts the schema key
    * the `SystemPrompt.Config` intersection below brings in; `apply()` never
    * forwards it — this bundle always mounts `SystemPrompt` on the live
-   * clock, so `harness:now` renders the real instant (a code-only override
-   * has no representation this bundle's own config surface accepts).
+   * clock, so the opt-in `{{now}}` prompt variable renders the real instant.
    */
   now?: SystemPromptConfig['now']
   /** The tool registry's config — its presentation `mode` (see dsh-tools' `Config`). */

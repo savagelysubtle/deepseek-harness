@@ -12,7 +12,7 @@ System prompt assembly registry. Plugins contribute ordered sections, tool schem
 | `includeRuntimeContext` | `true` | Include ordered dynamic contexts in assembly. When false, context providers are not evaluated and contexts added by `system-prompt/assemble` listeners are discarded after the waterfall; other services and their enforcement remain active. |
 | `persona` | `''` | The global deployment-persona default: the ONE config-authored prompt fragment, rendered as the order-0 `deployment:persona` section unless an agent-scoped contribution shadows it. A template — complete `{{…}}` groups are interpreted strictly against the registered variables (the shipped loop registers `{{model}}`/`{{cwd}}`), with no escape syntax for literal braces yet. Empty ⇒ the section is dropped at render. |
 | `toolOrder` | — | Explicit model-facing tool order, as a list of `ToolSchema.name`s with one `'<unlisted-tools>'` rest entry (`TOOL_ORDER_REST`): listed tools take their listed position, unlisted tools land at the rest entry in lexicographic name order. Absent ⇒ plain lexicographic name order. Applied to the collected tools BEFORE the `system-prompt/assemble` waterfall — like the sections' `order` sort, it canonicalizes what the registry contributed (registration order is a plugin-load artifact), and a waterfall listener that mutates the list owns the determinism of what it emits. Misconfiguration fails loud: a list without exactly one rest entry, or with duplicates, throws at load; a listed name with no registered tool rejects every `assemble()`; a tool provider returning the reserved rest-entry name also rejects. Under the shipped loop the turn fails before any model request. Why a central list and not per-plugin weights: [Explicit model-facing tool order](../../../.agents/notes/implemented/feature/2026-07-06-explicit-tool-order.md). |
-| `now` | `() => new Date()` | Clock the built-in order-1 `harness:now` section and the `now` variable read from, called once per assembly (SWD-113: so an agent reading a stale-feeling snapshot can check the prompt's own timestamp instead of assuming elapsed time from memory). Overridable so tests can fix the instant without depending on `process.env.TZ`, which does not reliably update a long-running process. The rendered zone is always the process's own resolved zone (`Intl.DateTimeFormat().resolvedOptions().timeZone`) — not configurable here; format an explicit zone directly with the exported `formatDateTime(date, timeZone)`. |
+| `now` | `() => new Date()` | Clock the opt-in `now` variable reads from, called once per assembly. Overridable so tests can fix the instant without depending on `process.env.TZ`, which does not reliably update a long-running process. The rendered zone is always the process's own resolved zone (`Intl.DateTimeFormat().resolvedOptions().timeZone`) — not configurable here; format an explicit zone directly with the exported `formatDateTime(date, timeZone)`. |
 
 ## Service: `SystemPrompt` (ctx key: `systemPrompt`)
 
@@ -40,8 +40,8 @@ Merge-extensible: plugins can declare extra fields on `PromptAssembly` and `Asse
 
 ### Extension points
 
-- Section providers: tool packages own their cross-call guidance (`tool:bash`, `tool:read`, …); this plugin owns `harness:identity`, `deployment:persona`, and `harness:now`.
-- Variable providers: the agent loop registers `model` and `cwd`; this plugin registers `now` (the same ISO instant as the `harness:now` section); any plugin can register the facts it owns (git state, …).
+- Section providers: tool packages own their cross-call guidance (`tool:bash`, `tool:read`, …); this plugin owns `harness:identity` and `deployment:persona`.
+- Variable providers: the agent loop registers `model` and `cwd`; this plugin registers `now` (an ISO instant, for a persona that wants a timestamp inline); any plugin can register the facts it owns (git state, …).
 - Tool schema providers: `ToolRuntime` registers itself as a tool provider automatically.
 - The [`system-prompt/assemble` waterfall](#live-events): cooperatively mutate or replace the assembly per caller before any complete-section constraint is enforced.
 
@@ -53,7 +53,7 @@ Design rationale: [the prompt-variables Agent Note](../../../.agents/notes/imple
 
 #### What the model sees
 
-By default every assembly starts with the harness identity below, then the configured persona and ordered plugin sections after strict variable interpolation. `includeHarnessIdentity: false` omits only that fixed opener. Empty sections disappear; scoped sections and variables can shadow globals for one agent. The `system-prompt/assemble` waterfall determines the delivered prompt and tool schemas unless one effective section declares itself complete; that exact section then becomes the whole system prompt while the waterfall's contexts, tools, and variables remain. Ordered dynamic contexts are separate from system-prompt sections and become sourced user-role snapshots only when present. `includeRuntimeContext: false` or a scoped suppressor removes all such contexts, including listener additions, without disabling the services that own the underlying policy or state. Order-1 `harness:now`, immediately after the persona and before any tool guidance (SWD-113: every prompt carries the current date and time, freshly read from `now`/`Intl.DateTimeFormat().resolvedOptions().timeZone` at each assembly — a plugin cannot opt out), renders as two paragraphs: a minute-resolution clock line — weekday, date, time, and UTC offset computed for the process's own resolved zone, with a trailing minute-resolution UTC ISO-8601 instant (no seconds, so a multi-step turn's request headers stay comparison-stable within a minute) — then the fixed advisory sentence below. Format an explicit zone directly with the exported `formatDateTime(date, timeZone)`.
+By default every assembly starts with the harness identity below, then the configured persona and ordered plugin sections after strict variable interpolation. `includeHarnessIdentity: false` omits only that fixed opener. Empty sections disappear; scoped sections and variables can shadow globals for one agent. The `system-prompt/assemble` waterfall determines the delivered prompt and tool schemas unless one effective section declares itself complete; that exact section then becomes the whole system prompt while the waterfall's contexts, tools, and variables remain. Ordered dynamic contexts are separate from system-prompt sections and become sourced user-role snapshots only when present. `includeRuntimeContext: false` or a scoped suppressor removes all such contexts, including listener additions, without disabling the services that own the underlying policy or state. The current date and time is NOT part of this assembly (SWD-113): instead `@deepseek-ai/dsh-agent-loop` appends a freshly-read clock message to the very end of every dispatched request, after the section/context/variable content this module assembles, so everything this plugin renders stays byte-stable across steps — see [that package's README](../agent-loop/README.md) for the exact tail-message shape; the same `formatDateTime(date, timeZone)` export used to render it lives here.
 
 ##### Harness identity
 
@@ -61,21 +61,13 @@ By default every assembly starts with the harness identity below, then the confi
 You are an AI agent powered by DeepSeek Harness.
 ```
 
-##### Current date and time
-
-```markdown
-Current date and time: Monday 2026-09-29 09:12 America/Los_Angeles (UTC-07:00) — 2026-09-29T16:12Z
-
-This is the time this prompt was assembled — it advances between turns, so read elapsed time from here rather than assuming it.
-```
-
 #### Token effect
 
-Identity is a fixed per-request cost when enabled. Persona and plugin text are repeated per request and scale with their rendered content. The current-date-and-time line is a small additional fixed cost on every request, present whenever `systemPrompt` is mounted.
+Identity is a fixed per-request cost when enabled. Persona and plugin text are repeated per request and scale with their rendered content.
 
 #### KV Cache effect
 
-Prefix-stable while identity, persona, variables, section text, and order render identically. Any change may invalidate reuse from the first changed system-prompt token. `harness:now` is a deliberate exception: because it renders the current instant, its text differs on essentially every assembly, so the prefix is unstable from that section on for every request — expected and intentional (SWD-113 wants the timestamp fresh every turn), not a cache regression to chase.
+Prefix-stable while identity, persona, variables, section text, and order render identically. Any change may invalidate reuse from the first changed system-prompt token.
 
 ### Tool schemas
 

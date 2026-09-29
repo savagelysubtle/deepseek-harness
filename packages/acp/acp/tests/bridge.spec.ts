@@ -63,7 +63,10 @@ describe('automation-only ACP bridge', () => {
       content: { type: 'text', text: 'hello there' },
     }])
     expect(harness.ctx.agents.get(SessionId(sessionId))?.session.header.cwd).toBe(process.cwd())
-    expect(harness.adapter.requests[0]?.messages.at(-1)?.content).toEqual([{ type: 'text', text: 'say hello' }])
+    // The dispatched request's very last message is the agent loop's
+    // unconditional clock tail (SWD-113); the real user message sits just
+    // before it.
+    expect(harness.adapter.requests[0]?.messages.at(-2)?.content).toEqual([{ type: 'text', text: 'say hello' }])
   })
 
   it('leaves absent agent targets for request listeners to supply', async () => {
@@ -86,7 +89,8 @@ describe('automation-only ACP bridge', () => {
       ],
     })
 
-    expect(harness.adapter.requests[0]?.messages.at(-1)?.content).toEqual([{ type: 'text', text: 'first second' }])
+    // The last message is the agent loop's unconditional clock tail (SWD-113).
+    expect(harness.adapter.requests[0]?.messages.at(-2)?.content).toEqual([{ type: 'text', text: 'first second' }])
   })
 
   it('admits mixed text/image prompts in wire order and logs references only', async () => {
@@ -108,7 +112,8 @@ describe('automation-only ACP bridge', () => {
 
     expect(resolve).toHaveBeenCalledWith('mock', 'mock', expect.any(AbortSignal))
     expect(harness.attachments?.saved.map(input => [...input.data])).toEqual([[1], [2]])
-    const requestContent = harness.adapter.requests[0]?.messages.at(-1)?.content
+    // The last message is the agent loop's unconditional clock tail (SWD-113).
+    const requestContent = harness.adapter.requests[0]?.messages.at(-2)?.content
     expect(requestContent?.map(block => block.type)).toEqual(['text', 'image', 'text', 'image', 'text'])
     expect(requestContent?.[0]).toEqual({ type: 'text', text: 'before' })
     expect(requestContent?.[2]).toEqual({ type: 'text', text: 'between' })
@@ -211,7 +216,8 @@ describe('automation-only ACP bridge', () => {
         { type: 'resource_link', name: 'notes.txt', uri: 'file:///tmp/notes.txt' },
       ],
     })
-    expect(harness.adapter.requests[0]?.messages.at(-1)?.content).toEqual([{
+    // The last message is the agent loop's unconditional clock tail (SWD-113).
+    expect(harness.adapter.requests[0]?.messages.at(-2)?.content).toEqual([{
       type: 'text',
       text: 'summarize\n[resource_link name="notes.txt" uri="file:///tmp/notes.txt"]\n',
     }])

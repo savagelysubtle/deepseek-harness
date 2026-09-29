@@ -2,33 +2,23 @@ import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, { createUserMessage, CallId, LlmError, StreamChunk  } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, TurnEndReason } from '@deepseek-ai/dsh-session'
-import SystemPrompt, { formatDateTime } from '@deepseek-ai/dsh-system-prompt'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import { isClockMessage } from '../src/clock.ts'
 import { MockAdapter, maxTokensResponse, textResponse, toolCallResponse } from './mock-adapter.ts'
 
 function driverDone(agent: Agent): Promise<void> {
   return (agent as Agent & { done: Promise<void> }).done
 }
 
-/**
- * `harness()` fixes the `harness:now` clock so exact `request.system`
- * comparisons stay stable (SWD-113: the built-in section reads a live clock
- * by default, which would otherwise roll over mid-test). The expected text is
- * built with the exact same `Intl` call the source uses, never a hardcoded
- * zone, so it is correct on any machine's system zone.
- */
-const NOW_INSTANT = new Date('2026-01-01T00:00:00Z')
-const NOW_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone
-const NOW_TEXT = formatDateTime(NOW_INSTANT, NOW_ZONE)
-
 async function harness(adapter: MockAdapter, persona = '') {
   const ctx = new Context()
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SessionStore)
-  await ctx.plugin(SystemPrompt, { persona, now: () => NOW_INSTANT })
+  await ctx.plugin(SystemPrompt, { persona })
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
@@ -263,7 +253,7 @@ describe('agent loop', () => {
     await waitForIdle(ctx, agent)
 
     const request = adapter.requests[0]
-    expect(request!.system).toBe(`You are an AI agent powered by DeepSeek Harness.\n\nYou are a test agent on mock.\n\n${NOW_TEXT}\n\nUse the noop tool wisely.`)
+    expect(request!.system).toBe('You are an AI agent powered by DeepSeek Harness.\n\nYou are a test agent on mock.\n\nUse the noop tool wisely.')
     expect(request!.tools?.map(t => t.name)).toEqual(['noop'])
   })
 
@@ -280,7 +270,7 @@ describe('agent loop', () => {
     send(agent, 'hi')
     await waitForIdle(ctx, agent)
 
-    expect(adapter.requests[0]!.system).toBe(`You are an AI agent powered by DeepSeek Harness.\n\nWorking in /work/space.\n\n${NOW_TEXT}`)
+    expect(adapter.requests[0]!.system).toBe('You are an AI agent powered by DeepSeek Harness.\n\nWorking in /work/space.')
   })
 
   it('contains a strict-variable render failure: the turn errors, the loop keeps serving turns', async () => {
@@ -316,7 +306,7 @@ describe('agent loop', () => {
     await waitForIdle(ctx, agent)
 
     expect(adapter.requests).toHaveLength(1)
-    expect(adapter.requests[0]!.system).toBe(`You are an AI agent powered by DeepSeek Harness.\n\nIn /rescued.\n\n${NOW_TEXT}`)
+    expect(adapter.requests[0]!.system).toBe('You are an AI agent powered by DeepSeek Harness.\n\nIn /rescued.')
     const turnEnds = agent.session.events.filter(e => e.type === 'turn/end')
     expect(turnEnds).toHaveLength(2)
     expect(turnEnds[1]?.type === 'turn/end' && turnEnds[1].data.reason.kind).toBe('completed')
@@ -346,7 +336,7 @@ describe('agent loop', () => {
 
     expect(adapter.requests).toHaveLength(1)
     expect(adapter.requests[0]!.model).toBe('mock')
-    expect(adapter.requests[0]!.system).toBe(`You are an AI agent powered by DeepSeek Harness.\n\nYou run on mock.\n\n${NOW_TEXT}`)
+    expect(adapter.requests[0]!.system).toBe('You are an AI agent powered by DeepSeek Harness.\n\nYou run on mock.')
   })
 
   it('omits the system field when system-prompt/assemble short-circuits with an empty assembly', async () => {
@@ -1019,7 +1009,13 @@ describe('agent loop', () => {
 
     expect(steps).toBe(2)
     expect(adapter.requests).toHaveLength(2)
-    expect(adapter.requests[1]!.messages).toEqual([
+    // The dispatched request's LAST message is the unconditional clock tail
+    // (SWD-113, see `../src/clock.ts`) — never logged, so it has no
+    // counterpart in the session-derived history below; check it separately.
+    const dispatchedMessages = adapter.requests[1]!.messages
+    const clockTail = dispatchedMessages[dispatchedMessages.length - 1]
+    expect(clockTail !== undefined && isClockMessage(clockTail)).toBe(true)
+    expect(dispatchedMessages.slice(0, -1)).toEqual([
       {
         id: expect.any(String) as unknown,
         role: 'user',

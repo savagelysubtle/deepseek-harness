@@ -642,8 +642,10 @@ describe('mailbox delivery over real compositions', () => {
       })
       expect(run.code).toBe(0)
 
+      // Each request's very last message is the agent loop's unconditional
+      // clock tail (SWD-113); the real user/mailbox message sits just before it.
       const kinds = heldAdapter.requests.map(request =>
-        ((request.messages.at(-1) as { source?: { kind?: string } }).source?.kind ?? 'user'))
+        ((request.messages.at(-2) as { source?: { kind?: string } }).source?.kind ?? 'user'))
       expect(kinds).toEqual(['user', 'mailbox'])
 
       const mail = heldAdapter.requests

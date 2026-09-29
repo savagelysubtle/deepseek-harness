@@ -4,43 +4,37 @@ import SystemPrompt, { AssembleContext, PromptAssembly, formatDateTime, renderCo
 
 /**
  * Every assembly carries the plugin's own built-ins — `harness:identity`
- * (order −100), `deployment:persona` (order 0, from config), and
- * `harness:now` (order 1, SWD-113: the current date/time, read fresh from the
- * configured clock at every assembly). Tests about registry MECHANICS strip
- * them with {@link contributed} to stay focused on their own sections; the
- * built-ins' behavior is pinned by its own describe.
+ * (order −100) and `deployment:persona` (order 0, from config). Tests about
+ * registry MECHANICS strip them with {@link contributed} to stay focused on
+ * their own sections; the built-ins' behavior is pinned by its own describe.
  */
-const BUILT_IN = ['harness:identity', 'deployment:persona', 'harness:now']
+const BUILT_IN = ['harness:identity', 'deployment:persona']
 const IDENTITY = 'You are an AI agent powered by DeepSeek Harness.'
 function contributed(assembly: PromptAssembly): PromptAssembly['sections'] {
   return assembly.sections.filter(section => !BUILT_IN.includes(section.name))
 }
 
 /**
- * `harness:now` always renders the PROCESS'S OWN resolved zone — never
- * configurable — so expected text here is built with the exact same `Intl`
- * call the source uses, never a hardcoded zone name. That keeps these
- * assertions correct on any machine or CI runner's system zone.
+ * `now` (the opt-in `{{now}}` template variable) reads the SAME configured
+ * clock as `formatDateTime`'s own callers — fixed here so the one test that
+ * asserts its exact rendered value stays deterministic.
  */
 const NOW_INSTANT = new Date('2026-03-15T18:34:56Z')
-const NOW_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone
-const NOW_TEXT = formatDateTime(NOW_INSTANT, NOW_ZONE)
 const NOW_ISO = NOW_INSTANT.toISOString().replace(/\.\d{3}Z$/, 'Z')
 const fixedNow = { now: () => NOW_INSTANT }
 
 describe('SystemPrompt', () => {
   describe('built-in sections', () => {
-    it('registers the harness identity, the configured deployment persona, and the current date/time', async () => {
+    it('registers the harness identity and the configured deployment persona', async () => {
       const ctx = new Context()
-      await ctx.plugin(SystemPrompt, { persona: 'You are DeepSeek Harness.', ...fixedNow })
+      await ctx.plugin(SystemPrompt, { persona: 'You are DeepSeek Harness.' })
 
       const assembly = await ctx.systemPrompt.assemble()
       expect(assembly.sections.map(s => s.name)).toEqual([
         'harness:identity',
         'deployment:persona',
-        'harness:now',
       ])
-      expect(renderPrompt(assembly)).toBe(`${IDENTITY}\n\nYou are DeepSeek Harness.\n\n${NOW_TEXT}`)
+      expect(renderPrompt(assembly)).toBe(`${IDENTITY}\n\nYou are DeepSeek Harness.`)
       // The names are reserved by the plugin — one owner per section.
       expect(() => ctx.systemPrompt.section({ name: 'deployment:persona', order: 0, text: 'imposter' }))
         .toThrow('prompt section "deployment:persona" is already registered')
@@ -48,8 +42,8 @@ describe('SystemPrompt', () => {
 
     it('renders no persona section for a persona-less deployment (empty default)', async () => {
       const ctx = new Context()
-      await ctx.plugin(SystemPrompt, fixedNow)
-      expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(`${IDENTITY}\n\n${NOW_TEXT}`)
+      await ctx.plugin(SystemPrompt)
+      expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(IDENTITY)
     })
 
     it('can omit the harness identity for a deployment that owns the complete persona', async () => {
@@ -57,12 +51,11 @@ describe('SystemPrompt', () => {
       await ctx.plugin(SystemPrompt, {
         includeHarnessIdentity: false,
         persona: 'You are a helpful software engineer assistant.',
-        ...fixedNow,
       })
 
       const assembly = await ctx.systemPrompt.assemble()
-      expect(assembly.sections.map(section => section.name)).toEqual(['deployment:persona', 'harness:now'])
-      expect(renderPrompt(assembly)).toBe(`You are a helpful software engineer assistant.\n\n${NOW_TEXT}`)
+      expect(assembly.sections.map(section => section.name)).toEqual(['deployment:persona'])
+      expect(renderPrompt(assembly)).toBe('You are a helpful software engineer assistant.')
     })
 
     it('can suppress runtime context without evaluating providers or accepting waterfall additions', async () => {
@@ -88,8 +81,8 @@ describe('SystemPrompt', () => {
       // ctx.plugin validates + defaults the config first; a direct construction
       // skips the schema, so the ctor's `?? ''` narrowing is what fires.
       const ctx = new Context()
-      const service = new SystemPrompt(ctx, { now: () => NOW_INSTANT })
-      expect(renderPrompt(await service.assemble())).toBe(`${IDENTITY}\n\n${NOW_TEXT}`)
+      const service = new SystemPrompt(ctx, {})
+      expect(renderPrompt(await service.assemble())).toBe(IDENTITY)
     })
   })
 
@@ -104,15 +97,15 @@ describe('SystemPrompt', () => {
     ctx.systemPrompt.tools(() => ({ schemas: [{ name: 'echo', description: 'echo back', parameters: {} }] }))
 
     const assembly = await ctx.systemPrompt.assemble()
-    expect(assembly.sections.map(s => s.name)).toEqual(['harness:identity', 'deployment:persona', 'harness:now', 'rules', 'cwd'])
-    expect(assembly.sections.map(s => s.text)).toEqual([IDENTITY, 'You are DeepSeek Harness.', NOW_TEXT, 'Be precise.', 'cwd: /tmp'])
+    expect(assembly.sections.map(s => s.name)).toEqual(['harness:identity', 'deployment:persona', 'rules', 'cwd'])
+    expect(assembly.sections.map(s => s.text)).toEqual([IDENTITY, 'You are DeepSeek Harness.', 'Be precise.', 'cwd: /tmp'])
     expect(assembly.contexts).toEqual([
       { name: 'earlier', text: 'context 1' },
       { name: 'later', text: 'context 2' },
     ])
     expect(assembly.tools).toEqual([{ name: 'echo', description: 'echo back', parameters: {} }])
     expect(assembly.variables).toEqual({ now: NOW_ISO })
-    expect(renderPrompt(assembly)).toBe(`${IDENTITY}\n\nYou are DeepSeek Harness.\n\n${NOW_TEXT}\n\nBe precise.\n\ncwd: /tmp`)
+    expect(renderPrompt(assembly)).toBe(`${IDENTITY}\n\nYou are DeepSeek Harness.\n\nBe precise.\n\ncwd: /tmp`)
     expect(renderContextSnapshot(assembly)).toBe('Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\ncontext 1\n\ncontext 2')
   })
 
@@ -283,8 +276,8 @@ describe('SystemPrompt', () => {
 
     const passed: AssembleContext = {}
     const assembly = await ctx.systemPrompt.assemble(passed)
-    expect(seen).toEqual([['harness:identity', 'deployment:persona', 'base', 'harness:now', 'from-a']])
-    expect(assembly.sections.map(s => s.name)).toEqual(['harness:identity', 'deployment:persona', 'base', 'harness:now', 'from-a'])
+    expect(seen).toEqual([['harness:identity', 'deployment:persona', 'base', 'from-a']])
+    expect(assembly.sections.map(s => s.name)).toEqual(['harness:identity', 'deployment:persona', 'base', 'from-a'])
     expect(contexts[0]).toBe(passed) // the caller's context reaches listeners
   })
 
@@ -344,7 +337,7 @@ describe('SystemPrompt', () => {
     firstParameters.properties['leak'] = { type: 'string' }
 
     const second = await ctx.systemPrompt.assemble()
-    expect(second.sections.map(section => section.name)).toEqual(['harness:identity', 'deployment:persona', 'base', 'harness:now'])
+    expect(second.sections.map(section => section.name)).toEqual(['harness:identity', 'deployment:persona', 'base'])
     expect(second.sections[0]!.text).toBe(IDENTITY)
     expect(second.contexts).toEqual([])
     expect(second.tools).toEqual([{ name: 't', description: 'tool', parameters: { type: 'object', properties: {} } }])
@@ -498,22 +491,22 @@ describe('SystemPrompt', () => {
 
     it('interpolates {{name}} references in section text at render — the persona included', async () => {
       const ctx = new Context()
-      await ctx.plugin(SystemPrompt, { persona: 'You run on {{model}} in {{cwd}}.', ...fixedNow })
+      await ctx.plugin(SystemPrompt, { persona: 'You run on {{model}} in {{cwd}}.' })
       ctx.systemPrompt.variable('model', () => 'deepseek-v4')
       ctx.systemPrompt.variable('cwd', () => '/work')
 
-      expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(`${IDENTITY}\n\nYou run on deepseek-v4 in /work.\n\n${NOW_TEXT}`)
+      expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(`${IDENTITY}\n\nYou run on deepseek-v4 in /work.`)
     })
 
     it('lets a waterfall listener add or override variables before render', async () => {
       const ctx = new Context()
-      await ctx.plugin(SystemPrompt, fixedNow)
+      await ctx.plugin(SystemPrompt)
       ctx.systemPrompt.section({ name: 's', order: 0, text: '{{extra}}' })
       ctx.on('system-prompt/assemble', async (assembly: PromptAssembly, _context, next) => {
         assembly.variables['extra'] = 'from-waterfall'
         return next()
       })
-      expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(`${IDENTITY}\n\nfrom-waterfall\n\n${NOW_TEXT}`)
+      expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(`${IDENTITY}\n\nfrom-waterfall`)
     })
 
     it('throws on a reference to an unregistered variable, listing what exists', async () => {
@@ -583,10 +576,10 @@ describe('SystemPrompt', () => {
 
     it('a variable NAMED like a prototype property works once actually registered', async () => {
       const ctx = new Context()
-      await ctx.plugin(SystemPrompt, fixedNow)
+      await ctx.plugin(SystemPrompt)
       ctx.systemPrompt.section({ name: 's', order: 0, text: '{{constructor}}' })
       ctx.systemPrompt.variable('constructor', () => 'own-value')
-      expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(`${IDENTITY}\n\nown-value\n\n${NOW_TEXT}`)
+      expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(`${IDENTITY}\n\nown-value`)
     })
 
     it('never re-scans substituted values (a value containing {{sneaky}} stays literal)', () => {
@@ -600,8 +593,14 @@ describe('SystemPrompt', () => {
     })
   })
 
-  describe('harness:now (SWD-113)', () => {
-    it('formatDateTime renders the exact line for a fixed date and zone', () => {
+  // `formatDateTime` no longer backs a built-in section (SWD-113 moved the
+  // current-date-and-time block off the system prompt into
+  // `@deepseek-ai/dsh-agent-loop`'s per-request clock tail message — see that
+  // package's `clock.ts` and tests), but stays exported and covered here
+  // since it is still the shared formatter both that tail message and the
+  // opt-in `{{now}}` variable's callers can reach for.
+  describe('formatDateTime', () => {
+    it('renders the exact line for a fixed date and zone', () => {
       // A deliberately "nice" instant (no seconds-rollover ambiguity) in a
       // zone distinct from whatever the test runner's own zone is.
       const date = new Date('2024-06-10T13:05:00Z')
@@ -610,23 +609,6 @@ describe('SystemPrompt', () => {
         'Current date and time: Monday 2024-06-10 09:05 America/New_York (UTC-04:00) — 2024-06-10T13:05Z\n\n'
         + 'This is the time this prompt was assembled — it advances between turns, so read elapsed time from here rather than assuming it.',
       )
-    })
-
-    it('renders different text for two assemblies as the injected clock advances (per-turn freshness)', async () => {
-      const ctx = new Context()
-      let tick = new Date('2025-01-01T00:00:00Z')
-      await ctx.plugin(SystemPrompt, { now: () => tick })
-
-      const first = await ctx.systemPrompt.assemble()
-      tick = new Date('2025-01-01T00:05:30Z')
-      const second = await ctx.systemPrompt.assemble()
-
-      const nowSection = (assembly: PromptAssembly) => assembly.sections.find(s => s.name === 'harness:now')!.text
-      expect(nowSection(first)).not.toBe(nowSection(second))
-      expect(nowSection(first)).toContain('2025-01-01T00:00Z')
-      // Minute resolution (the header-bloat fix): the seconds component (:30) is
-      // dropped, so the assertion targets the minute the clock actually advanced to.
-      expect(nowSection(second)).toContain('2025-01-01T00:05Z')
     })
 
     it('formats a DST-crossing date on each side of the transition', () => {

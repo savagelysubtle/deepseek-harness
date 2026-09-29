@@ -12,7 +12,6 @@ const SYSTEM = '{{system}}'
 const TOOLS = '{{tools}}'
 const EVENT_TIME = '{{eventTime}}'
 const EVENT_OMITTED_BYTES = '{{eventOmittedBytes}}'
-const NOW = '{{now}}'
 
 /** A cwd-rooted path after volatile cwd replacement, through its last separator-delimited segment. */
 const CWD_ROOTED_PATH_RE = /\{\{cwd\}\}(?:[\\/][^\s<>"'`]+)+/g
@@ -24,14 +23,6 @@ const EVENT_READ_TARGET_REGION_RE
   = /^Session [^\r\n]+ — [^\r\n]+\r?\nTarget event seq \d+:\r?\n```json\r?\n\{\r?\n[\s\S]*?(?=\r?\n```(?:\r?\n|$)|\r?\n\r?\n\(Omitted )/
 const PATH_TEXT_BOUNDARY_RE = /[\s<>'"`()\[\]{},;:!?=]/
 const FILE_URI_PATH_PREFIX_RE = /(?:^|[^a-z0-9+.-])file:\/\/\/?$/i
-
-/**
- * The built-in `harness:now` (SWD-113) section's first line — the volatile
- * weekday/date/time/zone/offset/ISO-instant stamp. The fixed second sentence
- * (`This is the time this prompt was assembled…`) is left untouched, since it
- * carries no run-specific value.
- */
-const NOW_LINE_RE = /^Current date and time: .*$/gm
 
 /** A UUID v4 string, the shape `randomUUID()` produces for session ids. */
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
@@ -175,27 +166,7 @@ function scrubString(value: string, ctx: NormalizeContext, cwdPathMode: CwdPathM
   }
   for (const id of ctx.sessionIds) out = out.split(id).join(SESSION_ID)
   out = out.replace(UUID_RE, SESSION_ID)
-  out = scrubNowLine(out)
   return out
-}
-
-/**
- * Replace the built-in `harness:now` (SWD-113) section's volatile first line
- * — the live weekday/date/time/zone/offset/ISO-instant stamp — with a stable
- * placeholder, leaving the fixed second sentence (`This is the time this
- * prompt was assembled…`) intact. Exported standalone (beyond its use inside
- * {@link scrubString}) for callers that scrub a raw prompt slice rather than a
- * full session JSONL log, e.g. the Web e2e system-prompt golden.
- * Accepted risk: the underlying regex matches ANY line in the scrubbed text
- * starting with `Current date and time: `, not just the `harness:now`
- * section specifically — a persona or plugin emitting a line with that exact
- * prefix would be scrubbed too, hiding a real difference from a snapshot
- * diff. Only `@deepseek-ai/dsh-system-prompt` emits this line today.
- * @param value - text that may contain the rendered `harness:now` block.
- * @returns `value` with the volatile stamp line replaced by a stable token.
- */
-export function scrubNowLine(value: string): string {
-  return value.replace(NOW_LINE_RE, `Current date and time: ${NOW}`)
 }
 
 /** Recursively scrub a parsed JSON value (strings replaced; structure kept). */

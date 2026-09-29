@@ -21,7 +21,12 @@ class RetrySnapshotAdapter extends LlmAdapter {
   }
 
   async * stream(options) {
-    const messages = JSON.stringify(options.messages)
+    // Every dispatched request's very last message is the agent loop's
+    // unconditional clock tail (SWD-113): freshly built (and freshly
+    // identified) on every dispatch, so it legitimately differs between the
+    // original request and its immediate retry. Compare everything BEFORE
+    // it — that is what this fixture's context-isolation check is about.
+    const messages = JSON.stringify(options.messages.slice(0, -1))
     this.requests++
     if (this.requests === 1) {
       this.firstMessages = messages

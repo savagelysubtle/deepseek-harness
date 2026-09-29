@@ -130,21 +130,6 @@ export const PERSONA_SECTION = 'deployment:persona'
 /** Prompt order of the persona slot; the first section a model reads. */
 export const PERSONA_ORDER = 0
 
-/**
- * The built-in current-date-and-time section's name and order. Exported so a
- * caller can identify or (via a scoped section of the same name) shadow it,
- * the same way {@link PERSONA_SECTION} works.
- */
-export const NOW_SECTION = 'harness:now'
-
-/**
- * Prompt order of the current-date-and-time section: after the identity and
- * persona openers (`-100`, `0`) so it never precedes them, before tool
- * guidance (`100`–`199`) so it stays with the other short harness-owned
- * facts rather than the tool-specific sections that follow.
- */
-export const NOW_ORDER = 1
-
 /** Valid variable names: how they are written between the braces. */
 const VARIABLE_NAME = /^[a-z][a-z0-9_]*$/
 
@@ -236,14 +221,15 @@ function isoMinutes(date: Date): string {
 const NOW_ADVISORY = 'This is the time this prompt was assembled — it advances between turns, so read elapsed time from here rather than assuming it.'
 
 /**
- * Format the built-in `{@link NOW_SECTION}` block for one instant in one IANA
- * zone: a plain-text timestamp line, then {@link NOW_ADVISORY} as a second
- * paragraph. Pure and zone-injectable by design — `process.env.TZ` does not
- * reliably update a long-running process, so neither this function nor its
- * caller reads it; the caller resolves a zone once (typically via
+ * Format the unconditional per-request clock block (SWD-113,
+ * `@deepseek-ai/dsh-agent-loop`'s clock tail message) for one instant in one
+ * IANA zone: a plain-text timestamp line, then {@link NOW_ADVISORY} as a
+ * second paragraph. Pure and zone-injectable by design — `process.env.TZ`
+ * does not reliably update a long-running process, so neither this function
+ * nor its caller reads it; the caller resolves a zone once (typically via
  * `Intl.DateTimeFormat().resolvedOptions().timeZone`) and passes it in,
  * which also makes the function directly unit-testable against any zone.
- * @param date - the instant to format (typically an assembly's resolved clock reading).
+ * @param date - the instant to format (typically a request's freshly-read clock reading).
  * @param timeZone - an IANA zone name.
  * @returns two paragraphs separated by a blank line — the clock line, then
  *   the fixed advisory sentence — each one physical line.
@@ -316,13 +302,13 @@ export interface Config {
    */
   toolOrder?: string[]
   /**
-   * Clock the built-in {@link NOW_SECTION} section and `now` variable read
-   * from, called once per assembly (default `() => new Date()`). Overridable
-   * so tests can fix the instant without depending on `process.env.TZ`, which
-   * does not reliably update a long-running process. The zone is always the
-   * process's own resolved zone (`Intl.DateTimeFormat().resolvedOptions().timeZone`)
-   * and is not configurable here — see {@link formatDateTime} to format an
-   * explicit zone directly.
+   * Clock the `now` variable reads from, called once per assembly (default
+   * `() => new Date()`). Overridable so tests can fix the instant without
+   * depending on `process.env.TZ`, which does not reliably update a
+   * long-running process. The zone is always the process's own resolved zone
+   * (`Intl.DateTimeFormat().resolvedOptions().timeZone`) and is not
+   * configurable here — see {@link formatDateTime} to format an explicit
+   * zone directly.
    */
   now?: () => Date
 }
@@ -497,13 +483,12 @@ export class SystemPrompt extends Service {
       // The fallback narrows the optional input type; the schema already defaults it.
       text: config.persona ?? '',
     })
-    // Fresh every assembly (SWD-113): preStep() calls assemble() before every
-    // model request, so this reads the clock — not a value captured at boot.
-    this.section({
-      name: NOW_SECTION,
-      order: NOW_ORDER,
-      text: () => formatDateTime(this.now(), Intl.DateTimeFormat().resolvedOptions().timeZone),
-    })
+    // The current-date-and-time block moved off the system prompt (SWD-113):
+    // it now rides as `@deepseek-ai/dsh-agent-loop`'s unconditional per-request
+    // clock tail message, built fresh with formatDateTime()/this module's own
+    // clock-injection story, so it never invalidates the provider's prefix
+    // cache on the (otherwise stable) system text. The `now` template
+    // variable stays — an unrelated, opt-in fact a persona can reference.
     this.variable('now', () => isoSeconds(this.now()))
     if (!(config.includeRuntimeContext ?? true)) this.suppressRuntimeContext()
   }

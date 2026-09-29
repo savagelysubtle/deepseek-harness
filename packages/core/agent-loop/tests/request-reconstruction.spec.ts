@@ -9,12 +9,13 @@ import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, { createUserMessage, LlmError, ReasoningEffortId  } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmModelReasoningInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
-import SessionStore, { Session, SessionId, foldRequestHeader, scrubNowLine } from '@deepseek-ai/dsh-session'
-import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import SessionStore, { Session, SessionId, foldRequestHeader } from '@deepseek-ai/dsh-session'
+import SystemPrompt, { formatDateTime } from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import { isClockMessage } from '../src/clock.ts'
 import { TOOL_SNAPSHOT_SETTLE_MS } from '../src/constants.ts'
 import { MockAdapter, textResponse, toolCallResponse } from './mock-adapter.ts'
 
@@ -74,10 +75,22 @@ function send(agent: Agent, text: string) {
   agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
 }
 
-/** Assert `previous` is a strict value-prefix of `current`. */
+/**
+ * Assert `previous` is a strict value-prefix of `current`, once each request's
+ * own unconditional clock tail message (SWD-113, see `../src/clock.ts`) is set
+ * aside: that tail is never persisted, so it never appears anywhere in a LATER
+ * request's own session-derived messages, and comparing the raw arrays would
+ * see it as a divergence rather than the append-only extension it actually is.
+ */
 function expectPrefixExtension(previous: GenerateOptions, current: GenerateOptions) {
-  expect(current.messages.length).toBeGreaterThan(previous.messages.length)
-  expect(current.messages.slice(0, previous.messages.length)).toEqual([...previous.messages])
+  const previousTail = previous.messages[previous.messages.length - 1]
+  const currentTail = current.messages[current.messages.length - 1]
+  expect(previousTail !== undefined && isClockMessage(previousTail)).toBe(true)
+  expect(currentTail !== undefined && isClockMessage(currentTail)).toBe(true)
+  const previousMessages = previous.messages.slice(0, -1)
+  const currentMessages = current.messages.slice(0, -1)
+  expect(currentMessages.length).toBeGreaterThan(previousMessages.length)
+  expect(currentMessages.slice(0, previousMessages.length)).toEqual([...previousMessages])
   expect(current.system).toEqual(previous.system)
   expect(current.tools).toEqual(previous.tools)
 }
@@ -553,12 +566,12 @@ describe('request stability across the loop', () => {
     expect(adapter.requests[2]!.messages.length).toBeGreaterThan(adapter.requests[1]!.messages.length)
   })
 
-  it('an advancing harness:now (SWD-113) clock across one turn\'s steps does not by itself log a header change', async () => {
+  it('every dispatched request ends with the unconditional clock tail message (SWD-113), never logged to the session', async () => {
     // Two steps in ONE turn (a tool call, then the concluding text), with the
     // injected clock crossing a minute boundary between them — proving the
-    // clock line alone (see dsh-session's headerEquals/scrubNowLine) never
-    // triggers a 'change' snapshot, even though the rendered system text
-    // genuinely differs step to step.
+    // clock is fresh on every dispatch while the system prompt (which no
+    // longer carries it at all) stays byte-identical, and the tail message
+    // never becomes part of the durable session log.
     const adapter = new MockAdapter([
       toolCallResponse('c1', 'echo', { text: 'one' }, 'first'),
       textResponse('done'),
@@ -566,22 +579,21 @@ describe('request stability across the loop', () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(SessionStore)
-    let tick = new Date('2026-01-01T00:00:30Z')
-    await ctx.plugin(SystemPrompt, { persona: 'stable base', now: () => tick })
+    await ctx.plugin(SystemPrompt, { persona: 'stable base' })
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(AgentRegistry)
-    await ctx.plugin(AgentLoop, { agents: [] })
+    let tick = new Date('2026-01-01T00:00:30Z')
+    await ctx.plugin(AgentLoop, { agents: [], now: () => tick })
     ctx.llm.registerAdapter(['mock'], adapter)
     registerEcho(ctx)
-    const agent = ctx.agentLoop.create(SessionId('now-clock-stable'), { provider: 'mock', model: 'mock' })
+    const agent = ctx.agentLoop.create(SessionId('clock-tail'), { provider: 'mock', model: 'mock' })
 
-    // 'agent/pre-step' fires once per step, right after that step's own
-    // system-prompt assembly — bumping the clock here after step 1 lands
-    // before step 2's OWN assembly (which happens at the top of its own
-    // preStep call), unlike 'agent/request' which fires too late in the step
-    // to affect that step's already-assembled system text.
+    // 'agent/pre-step' fires once per step, before that step's own
+    // buildRequest() reads the clock — bumping it on step 2's own pre-step
+    // event happens before step 2's request is built, but after step 1's
+    // was already dispatched (untouched, at the original tick).
     ctx.on('agent/pre-step', async (payload, next) => {
-      if (payload.step === 1) tick = new Date('2026-01-01T00:01:30Z')
+      if (payload.step === 2) tick = new Date('2026-01-01T00:01:30Z')
       return next()
     })
 
@@ -589,49 +601,27 @@ describe('request stability across the loop', () => {
     await waitForIdle(ctx, agent)
 
     expect(adapter.requests).toHaveLength(2)
-    // The clock line really did advance (minute rolled from :00 to :01)...
-    expect(adapter.requests[0]!.system).not.toEqual(adapter.requests[1]!.system)
-    // ...yet only the anchoring snapshot was ever logged.
+    // The system prompt no longer carries the clock at all — fully stable
+    // across both steps, unlike before SWD-113 moved it off `system`.
+    expect(adapter.requests[0]!.system).toEqual(adapter.requests[1]!.system)
+
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
+    const lastMessageOf = (options: GenerateOptions) => options.messages[options.messages.length - 1]!
+    const first = lastMessageOf(adapter.requests[0]!)
+    const second = lastMessageOf(adapter.requests[1]!)
+    expect(isClockMessage(first)).toBe(true)
+    expect(isClockMessage(second)).toBe(true)
+    expect(first.content).toEqual([{ type: 'text', text: formatDateTime(new Date('2026-01-01T00:00:30Z'), zone) }])
+    expect(second.content).toEqual([{ type: 'text', text: formatDateTime(new Date('2026-01-01T00:01:30Z'), zone) }])
+
+    // Never written to the session log: no persisted user/message is the clock.
+    expect(agent.session.events.some(e => e.type === 'user/message' && isClockMessage(e.data))).toBe(false)
+
+    // The clock changing is not, by itself, a header change — it never
+    // touches `system` at all now, so only the anchoring snapshot is logged.
     const headerEvents = agent.session.events.filter(e => e.type === 'request/header')
     expect(headerEvents).toHaveLength(1)
     expect(headerEvents[0]?.type === 'request/header' && headerEvents[0].data.reason).toBe('initial')
-  })
-
-  it('a genuine header change is still logged while the harness:now clock is also advancing', async () => {
-    const reasoning = {
-      efforts: [
-        { id: ReasoningEffortId('high'), name: 'High' },
-        { id: ReasoningEffortId('max'), name: 'Max' },
-      ],
-      defaultEffort: ReasoningEffortId('high'),
-    }
-    const adapter = new MockAdapter([textResponse('one'), textResponse('two')], reasoning)
-    const ctx = new Context()
-    await ctx.plugin(LlmRuntime)
-    await ctx.plugin(SessionStore)
-    let tick = new Date('2026-01-01T00:00:30Z')
-    await ctx.plugin(SystemPrompt, { persona: 'stable base', now: () => tick })
-    await ctx.plugin(ToolRuntime)
-    await ctx.plugin(AgentRegistry)
-    await ctx.plugin(AgentLoop, { agents: [] })
-    ctx.llm.registerAdapter(['mock'], adapter)
-    const agent = ctx.agentLoop.create(SessionId('now-clock-change'), { provider: 'mock', model: 'mock' })
-
-    send(agent, 'first')
-    await waitForIdle(ctx, agent)
-    // Advance the clock AND force a real config change (an effort override,
-    // as the sibling "logs adapter defaults" test above does) on turn 2.
-    tick = new Date('2026-01-01T00:01:30Z')
-    ctx.on('agent/request', async ({ turn }, next) => {
-      const config = await next()
-      return turn === 2 ? { ...config, reasoningEffort: ReasoningEffortId('max') } : config
-    })
-    send(agent, 'second')
-    await waitForIdle(ctx, agent)
-
-    expect(adapter.requests[0]!.system).not.toEqual(adapter.requests[1]!.system)
-    const headers = agent.session.events.filter(event => event.type === 'request/header')
-    expect(headers.map(event => event.data.reason)).toEqual(['initial', 'change'])
   })
 
   it('an inject() during the agent/request waterfall joins the NEXT request (the step/start boundary)', async () => {
@@ -775,22 +765,25 @@ describe('request stability across the loop', () => {
         && e.data.step === stepStart.data.step,
       )!
       // Messages: the entered batch is logged after step/start, so rebuild the
-      // complete dispatch prefix through a completely fresh Session.
+      // complete dispatch prefix through a completely fresh Session. The
+      // dispatched request's LAST message is the unconditional clock tail
+      // (SWD-113, see `../src/clock.ts`) — never logged, so it has no
+      // counterpart in the rebuilt session; verify it separately, then
+      // compare the rest byte-equal.
       const rebuilt = Session.create(SessionId(`rebuild-${index}`), structuredClone(events.slice(0, firstChunk.seq)))
-      expect(structuredClone(request.messages)).toEqual(rebuilt.deriveMessages())
+      const dispatchedMessages = structuredClone(request.messages)
+      const clockTail = dispatchedMessages.pop()!
+      expect(isClockMessage(clockTail)).toBe(true)
+      expect(dispatchedMessages).toEqual(rebuilt.deriveMessages())
 
       // Header: the latest request/header snapshot up to this step's dispatch
       // (its header event sits between step/start and the first chunk).
       const header = foldRequestHeader(events.slice(0, firstChunk.seq))!
       expect(request.model).toBe(header.config.model)
       expect(request.reasoningEffort).toBe(header.config.reasoningEffort)
-      // The dispatched system carries THIS step's freshly-read harness:now
-      // (SWD-113) clock; the folded header is only as fresh as its last
-      // LOGGED snapshot. headerEquals's clock exemption means these can
-      // legitimately differ in that one line alone (invariant.ts applies the
-      // same exemption), so compare with it scrubbed rather than raw.
-      expect(request.system === undefined ? undefined : scrubNowLine(request.system))
-        .toEqual(header.system === undefined ? undefined : scrubNowLine(header.system))
+      // The clock no longer lives in `system` at all, so the dispatched and
+      // folded system text are byte-exact — no scrub needed.
+      expect(request.system).toEqual(header.system)
       expect(structuredClone(request.tools ?? [])).toEqual(structuredClone(header.tools ?? []))
       expect(request.temperature).toBe(header.config.temperature)
       expect(request.maxTokens).toBe(header.config.maxTokens)

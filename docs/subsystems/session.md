@@ -101,13 +101,7 @@ interface SessionEventMap {
   'todo/write': { todos: TodoItem[] }
   /**
    * Full header for the next request, appended inside its step before dispatch.
-   * It is log-only; the latest snapshot reconstructs the request header. The
-   * persisted `header.system` carries the exact `harness:now` (SWD-113) clock
-   * reading in force at that moment — `headerEquals` ignores only that one
-   * line when deciding whether a NEW snapshot is needed (see
-   * `dsh-session/request-header`'s `scrubNowLine`), so a replay reconstructs
-   * a step's request with THAT snapshot's real clock text, not a clock
-   * re-read for the step being replayed.
+   * It is log-only; the latest snapshot reconstructs the request header.
    */
   'request/header': { header: EpochHeader; reason: RequestHeaderReason }
   /**
@@ -170,7 +164,7 @@ interface TodoItem {
 
 ### The request header event: `request/header`
 
-The request envelope — the `EpochHeader` (call config + markers for adapter-supplied defaults + rendered system prompt + assembled tool schemas) — is logged session state, so every conversation request is a pure function of the log (the reconstructability Agent Note). A full `request/header` snapshot with reason `'initial'` or `'resume'` records each loop-instance boundary; a later changed request records another full snapshot with reason `'change'`. `foldRequestHeader(events)` reconstructs the header by selecting the latest snapshot. The event is not a `SurfaceEventType`: it produces no LLM message. The persisted `header.system` carries the exact `harness:now` (SWD-113) clock reading in force at that moment — `headerEquals` ignores only that one line when deciding whether a NEW snapshot is needed (`dsh-session/request-header`'s `scrubNowLine`), so a replay reconstructs a step's request with THAT snapshot's real clock text, not a clock re-read for the step being replayed.
+The request envelope — the `EpochHeader` (call config + markers for adapter-supplied defaults + rendered system prompt + assembled tool schemas) — is logged session state, so every conversation request is a pure function of the log (the reconstructability Agent Note). A full `request/header` snapshot with reason `'initial'` or `'resume'` records each loop-instance boundary; a later changed request records another full snapshot with reason `'change'`. `foldRequestHeader(events)` reconstructs the header by selecting the latest snapshot. The event is not a `SurfaceEventType`: it produces no LLM message. The current date and time is NOT part of `header.system` (SWD-113): `@deepseek-ai/dsh-agent-loop` appends it as an unconditional, never-persisted clock tail message after the request-reconstruction boundary instead, so `header.system` and `headerEquals` need no clock-aware handling at all.
 
 ```ts type-equiv
 /**

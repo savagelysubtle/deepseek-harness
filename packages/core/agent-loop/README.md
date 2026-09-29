@@ -88,15 +88,15 @@ Everything that goes beyond "call the model, run the tools, repeat" belongs to p
 
 #### What the model sees
 
-For each step, the loop sends the rendered per-agent system prompt, visible tool schemas, and the session's derived messages. It supplies `provider`, `model`, and `cwd` variable values but no additional fixed prose.
+For each step, the loop sends the rendered per-agent system prompt, visible tool schemas, and the session's derived messages, followed by one unconditional clock tail message — the current date and time, freshly read from `Config.now`/`Intl.DateTimeFormat().resolvedOptions().timeZone` (SWD-113, see `./src/clock.ts`) — appended after the session boundary on every dispatched request. It supplies `provider`, `model`, and `cwd` variable values but no additional fixed prose. Unlike the system prompt, tool schemas, and history above it, the clock tail message is never written to the session log: `buildRequest` appends it only to the outgoing request, so it costs nothing to keep fresh and never grows retained history or a compaction region.
 
 #### Token effect
 
-System text and schemas are paid again on every step. Per-agent scoping chooses the contributions, while the authoritative assembly waterfall can alter the final request and makes its listener responsible for protocol coherence.
+System text and schemas are paid again on every step. Per-agent scoping chooses the contributions, while the authoritative assembly waterfall can alter the final request and makes its listener responsible for protocol coherence. The clock tail message is a small additional fixed cost on every request, present on every dispatch regardless of configuration.
 
 #### KV Cache effect
 
-Append-only only while system text, schemas, and earlier history remain byte-identical under the same provider and model route. A token-bearing assembly rewrite or composition change may invalidate reuse from the first altered request token.
+Append-only only while system text, schemas, and earlier history remain byte-identical under the same provider and model route. A token-bearing assembly rewrite or composition change may invalidate reuse from the first altered request token. The clock tail message is a deliberate exception to that story in the other direction: because it is the very LAST message in every request and is never persisted, it never itself invalidates a prefix — everything before it, including the now-clock-free system prompt, stays byte-stable and reusable across steps (SWD-113's actual goal), even though the tail message's own bytes differ on every request.
 
 ### Retained message history
 

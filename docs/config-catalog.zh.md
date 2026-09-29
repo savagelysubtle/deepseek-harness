@@ -184,6 +184,15 @@ export interface Config {
    * takes the detectors' own sane defaults — see {@link resolveLoopGuardConfig}.
    */
   loopGuard?: LoopGuardConfig
+  /**
+   * Clock the unconditional per-request clock tail message (SWD-113, see
+   * `./clock.ts`) reads from, called once per dispatched request (default
+   * `() => new Date()`). Overridable so tests can fix the instant instead of
+   * depending on `process.env.TZ`, which does not reliably update a
+   * long-running process. A code-only override — like {@link loopGuard}, not
+   * schema-validated, since a `cordis.yml` entry cannot express a function.
+   */
+  now?: () => Date
   /** Agents created or resumed at plugin startup. */
   agents: (AgentOptions & {
     /** Stable config label used in logs and as the fresh combined-id prefix. */
@@ -294,12 +303,11 @@ export interface Config {
   /** The explicit model-facing tool order (see dsh-system-prompt's `Config`). */
   toolOrder?: SystemPromptConfig['toolOrder']
   /**
-   * The `harness:now` clock override (see dsh-system-prompt's `Config`).
+   * The `now` variable's clock override (see dsh-system-prompt's `Config`).
    * Declared only so the config-catalog cross-check accepts the schema key
    * the `SystemPrompt.Config` intersection below brings in; `apply()` never
    * forwards it — this bundle always mounts `SystemPrompt` on the live
-   * clock, so `harness:now` renders the real instant (a code-only override
-   * has no representation this bundle's own config surface accepts).
+   * clock, so the opt-in `{{now}}` prompt variable renders the real instant.
    */
   now?: SystemPromptConfig['now']
   /** The tool registry's config — its presentation `mode` (see dsh-tools' `Config`). */
@@ -2520,19 +2528,19 @@ export interface Config {
    */
   toolOrder?: string[]
   /**
-   * Clock the built-in {@link NOW_SECTION} section and `now` variable read
-   * from, called once per assembly (default `() => new Date()`). Overridable
-   * so tests can fix the instant without depending on `process.env.TZ`, which
-   * does not reliably update a long-running process. The zone is always the
-   * process's own resolved zone (`Intl.DateTimeFormat().resolvedOptions().timeZone`)
-   * and is not configurable here — see {@link formatDateTime} to format an
-   * explicit zone directly.
+   * Clock the `now` variable reads from, called once per assembly (default
+   * `() => new Date()`). Overridable so tests can fix the instant without
+   * depending on `process.env.TZ`, which does not reliably update a
+   * long-running process. The zone is always the process's own resolved zone
+   * (`Intl.DateTimeFormat().resolvedOptions().timeZone`) and is not
+   * configurable here — see {@link formatDateTime} to format an explicit
+   * zone directly.
    */
   now?: () => Date
 }
 ```
 
-来源：[`packages/core/system-prompt/src/index.ts:302`](../packages/core/system-prompt/src/index.ts)
+来源：[`packages/core/system-prompt/src/index.ts:288`](../packages/core/system-prompt/src/index.ts)
 
 <a id="deepseek-aidsh-terminal-bash"></a>
 

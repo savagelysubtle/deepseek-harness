@@ -311,13 +311,7 @@ export interface SessionEventMap {
   'todo/write': { todos: TodoItem[] }
   /**
    * Full header for the next request, appended inside its step before dispatch.
-   * It is log-only; the latest snapshot reconstructs the request header. The
-   * persisted `header.system` carries the exact `harness:now` (SWD-113) clock
-   * reading in force at that moment — `headerEquals` ignores only that one
-   * line when deciding whether a NEW snapshot is needed (see
-   * `dsh-session/request-header`'s `scrubNowLine`), so a replay reconstructs
-   * a step's request with THAT snapshot's real clock text, not a clock
-   * re-read for the step being replayed.
+   * It is log-only; the latest snapshot reconstructs the request header.
    */
   'request/header': { header: EpochHeader; reason: RequestHeaderReason }
   /**

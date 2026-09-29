@@ -14,7 +14,6 @@ import { fileURLToPath } from 'node:url'
 import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
-import { scrubNowLine } from '@deepseek-ai/dsh-acp-snapshot'
 import { CallId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import {
@@ -86,11 +85,7 @@ describe('web e2e: fresh round trip through the real assembly', () => {
     if (agent === undefined) throw new Error(`the settled Web agent ${settledSessionId} is no longer live`)
     const system = agent.session.requestHeader()?.system
     if (system === undefined) throw new Error('the settled Web request has no system prompt')
-    // The pinned prefix currently ends at the deployment persona (order 0), one
-    // section before the built-in harness:now (order 1, SWD-113), so this scrub
-    // is a no-op today — kept so a future prefix-boundary change cannot leak the
-    // live clock into the golden.
-    const prefix = scrubNowLine(system).split('\n\n').slice(0, 4).join('\n\n')
+    const prefix = system.split('\n\n').slice(0, 4).join('\n\n')
       .split(REPO_ROOT).join('{{sourceRoot}}')
       .split(join(scaffold.workspaceCwd, 'workspace')).join('{{cwd}}')
       .split(scaffold.baseUrl).join('{{webUrl}}')

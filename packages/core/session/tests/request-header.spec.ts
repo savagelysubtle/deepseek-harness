@@ -62,39 +62,6 @@ describe('headerEquals', () => {
   it('treats absent and empty tool arrays as equivalent canonical absence', () => {
     expect(headerEquals({ config: CONFIG }, { config: CONFIG, tools: [] })).toBe(true)
   })
-
-  describe('the harness:now (SWD-113) clock line', () => {
-    const persona = 'You are a test agent.'
-    const nowBlock = (stamp: string): string =>
-      `Current date and time: ${stamp}\n\nThis is the time this prompt was assembled — it advances between turns, so read elapsed time from here rather than assuming it.`
-    const withClock = (stamp: string): EpochHeader => canonicalHeader({
-      config: CONFIG,
-      system: `${persona}\n\n${nowBlock(stamp)}`,
-    })
-
-    it('treats two headers differing only in the clock line as equal', () => {
-      const a = withClock('Monday 2026-09-29 09:12 America/Los_Angeles (UTC-07:00) — 2026-09-29T16:12Z')
-      const b = withClock('Monday 2026-09-29 09:13 America/Los_Angeles (UTC-07:00) — 2026-09-29T16:13Z')
-      expect(a).not.toEqual(b)
-      expect(headerEquals(a, b)).toBe(true)
-    })
-
-    it('still reports a real difference elsewhere in the system text', () => {
-      const a = withClock('Monday 2026-09-29 09:12 America/Los_Angeles (UTC-07:00) — 2026-09-29T16:12Z')
-      const b = canonicalHeader({
-        config: CONFIG,
-        system: `${persona}\n\nnew guidance\n\n${nowBlock('Monday 2026-09-29 09:13 America/Los_Angeles (UTC-07:00) — 2026-09-29T16:13Z')}`,
-      })
-      expect(headerEquals(a, b)).toBe(false)
-    })
-
-    it('still distinguishes a present clock-bearing system from an absent one', () => {
-      const withSystem = withClock('Monday 2026-09-29 09:12 America/Los_Angeles (UTC-07:00) — 2026-09-29T16:12Z')
-      const withoutSystem = canonicalHeader({ config: CONFIG })
-      expect(headerEquals(withSystem, withoutSystem)).toBe(false)
-      expect(headerEquals(withoutSystem, withSystem)).toBe(false)
-    })
-  })
 })
 
 describe('foldRequestHeader', () => {

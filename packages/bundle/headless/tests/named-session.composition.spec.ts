@@ -192,7 +192,10 @@ describe('named sessions over the real composition', () => {
     expect(line.type).toBe('text')
     expect(line.sessionID).toMatch(/^named-[0-9a-f]{32}$/)
     expect(line.part).toEqual({ type: 'text', text: 'first answer' })
-    const firstLastMessage = first.requests.at(-1)?.messages.at(-1)
+    // The dispatched request's very last message is the agent loop's
+    // unconditional clock tail (SWD-113); the real user message sits just
+    // before it.
+    const firstLastMessage = first.requests.at(-1)?.messages.at(-2)
     if (firstLastMessage === undefined) throw new Error('the first run produced no model message')
     expect(firstLastMessage).toMatchObject({
       role: 'user',
@@ -206,7 +209,8 @@ describe('named sessions over the real composition', () => {
     const conversation = JSON.stringify(second.requests[0]?.messages)
     expect(conversation).toContain('first task')
     expect(conversation).toContain('first answer')
-    const lastMessage = second.requests.at(-1)?.messages.at(-1)
+    // The last message is the agent loop's unconditional clock tail (SWD-113).
+    const lastMessage = second.requests.at(-1)?.messages.at(-2)
     if (lastMessage === undefined) throw new Error('the resumed run produced no model message')
     expect(lastMessage).toMatchObject({
       role: 'user',

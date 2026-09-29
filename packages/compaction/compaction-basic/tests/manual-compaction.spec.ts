@@ -275,7 +275,10 @@ describe('compactNow through the real loop', () => {
       .map(block => block.type === 'text' ? block.text : '')
       .join(''))
     expect(second[0]).toContain('checkpoint')
-    expect(second.at(-1)).toBe('after compaction')
+    // The dispatched request's very last message is the agent loop's
+    // unconditional clock tail (SWD-113); the real trailing user message
+    // sits just before it.
+    expect(second.at(-2)).toBe('after compaction')
     expect(second.some(text => text.includes(PROMPT))).toBe(false)
   })
 
