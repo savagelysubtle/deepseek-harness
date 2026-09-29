@@ -135,7 +135,7 @@ describe('session-telemetry-otel through a real headless cordis.yml', () => {
 
   it('keeps disabled feedback local and prints the stable warning', async () => {
     let output!: FixtureOutput
-    const { stdout } = await runLoaderSmoke({
+    const { stderr } = await runLoaderSmoke({
       label: 'session-telemetry-otel disabled loader smoke',
       tempDirPrefix: 'telemetry-otel-disabled-e2e-',
       binScript: driver,
@@ -148,7 +148,8 @@ describe('session-telemetry-otel through a real headless cordis.yml', () => {
 
     expect(output.captures).toEqual([])
     expect(output.logContent).toContain('fixture feedback')
-    expect(stdout.match(/session telemetry is DISABLED; nothing will be shared and this feedback remains local/)?.[0])
+    // SWD-151: console-exported logs go to stderr, not stdout.
+    expect(stderr.match(/session telemetry is DISABLED; nothing will be shared and this feedback remains local/)?.[0])
       .toMatchInlineSnapshot('"session telemetry is DISABLED; nothing will be shared and this feedback remains local"')
   }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 })

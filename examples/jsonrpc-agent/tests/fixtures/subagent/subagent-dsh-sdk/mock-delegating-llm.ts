@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { CallId, LlmAdapter } from '@deepseek-ai/dsh-llm'
+import { findLastToolResult } from '@deepseek-ai/dsh-loader-smoke'
 
 /**
  * Test adapter for the `mock-delegate` model: the first request calls the
@@ -10,12 +11,7 @@ import { CallId, LlmAdapter } from '@deepseek-ai/dsh-llm'
  */
 class MockDelegatingAdapter extends LlmAdapter {
   async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const toolResultText = options.messages.at(-1)?.content
-      .filter(block => block.type === 'tool-result')
-      .flatMap(block => block.content)
-      .filter(block => block.type === 'text')
-      .map(block => block.text)
-      .join('') ?? ''
+    const toolResultText = findLastToolResult(options.messages)
 
     if (toolResultText.length === 0) {
       const args = JSON.stringify({ description: 'cwd probe', prompt: 'report your workspace' })

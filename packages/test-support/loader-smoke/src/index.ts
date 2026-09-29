@@ -22,6 +22,8 @@ export {
   type FixtureTurnResult,
 } from './agent-turn.ts'
 
+export { findLastToolResult } from './scripted-messages.ts'
+
 const DEFAULT_PROCESS_TIMEOUT_MS = 30_000
 
 /** Vitest deadline that leaves room for the subprocess-owned 30-second diagnostic timeout. */
