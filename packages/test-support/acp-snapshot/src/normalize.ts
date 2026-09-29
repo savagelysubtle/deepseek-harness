@@ -186,6 +186,11 @@ function scrubString(value: string, ctx: NormalizeContext, cwdPathMode: CwdPathM
  * prompt was assembled…`) intact. Exported standalone (beyond its use inside
  * {@link scrubString}) for callers that scrub a raw prompt slice rather than a
  * full session JSONL log, e.g. the Web e2e system-prompt golden.
+ * Accepted risk: the underlying regex matches ANY line in the scrubbed text
+ * starting with `Current date and time: `, not just the `harness:now`
+ * section specifically — a persona or plugin emitting a line with that exact
+ * prefix would be scrubbed too, hiding a real difference from a snapshot
+ * diff. Only `@deepseek-ai/dsh-system-prompt` emits this line today.
  * @param value - text that may contain the rendered `harness:now` block.
  * @returns `value` with the volatile stamp line replaced by a stable token.
  */

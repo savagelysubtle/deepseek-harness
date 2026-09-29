@@ -6,9 +6,26 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { isAgentLoopRequest, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { InvariantFailure, InvariantInstaller } from '@deepseek-ai/dsh-invariants'
-import { foldRequestHeader } from '@deepseek-ai/dsh-session'
+import { foldRequestHeader, scrubNowLine } from '@deepseek-ai/dsh-session'
 
 const PACKAGE_NAME = '@deepseek-ai/dsh-agent-loop'
+
+/**
+ * `system` equality tolerant of the `harness:now` (SWD-113) clock line alone
+ * — the same exemption `headerEquals` applies when deciding whether to log a
+ * NEW `request/header` snapshot. A dispatched request always carries the
+ * step's freshly-assembled system text (current clock); the folded header is
+ * only as fresh as its last LOGGED snapshot. Once `headerEquals` stops
+ * logging a snapshot for a clock-only difference, those two texts
+ * legitimately diverge in that one line on every step the clock has ticked
+ * since — this reconstructability check must ignore the same line or every
+ * multi-step turn would fail it as soon as a minute rolled over.
+ */
+function systemReconstructs(dispatched: string | undefined, folded: string | undefined): boolean {
+  if (dispatched === folded) return true
+  if (dispatched === undefined || folded === undefined) return false
+  return scrubNowLine(dispatched) === scrubNowLine(folded)
+}
 
 /** Cordis companion plugin name. */
 export const name = 'agent-loop-invariant'
@@ -42,7 +59,7 @@ const install: InvariantInstaller = Object.assign((ctx: Context, fail: Invariant
     }
 
     const headerMatches = options.model === header.config.model
-      && options.system === header.system
+      && systemReconstructs(options.system, header.system)
       && options.temperature === header.config.temperature
       && options.maxTokens === header.config.maxTokens
       && JSON.stringify(options.stop) === JSON.stringify(header.config.stop)

@@ -55,7 +55,7 @@
 
 #### 模型看到的内容
 
-默认情况下，每次组装都从下方 harness 身份开始，然后在严格变量插值后追加已配置 persona 与有序插件段。`includeHarnessIdentity: false` 仅省略这个固定开场白。空段会消失；带作用域的段和变量可以为一个 agent 遮蔽全局项。`system-prompt/assemble` waterfall 决定交付的提示词与工具 schema，除非一个有效段声明自身为 complete；此时，该确切段会成为完整的系统提示词，而 waterfall 得到的上下文、工具和变量保持不变。有序动态上下文与系统提示词段分离，只在存在时才会成为带来源的 user 角色快照。`includeRuntimeContext: false` 或带作用域的抑制器会移除所有这类上下文，包括监听器添加的内容，但不会禁用拥有底层策略或状态的服务。
+默认情况下，每次组装都从下方 harness 身份开始，然后在严格变量插值后追加已配置 persona 与有序插件段。`includeHarnessIdentity: false` 仅省略这个固定开场白。空段会消失；带作用域的段和变量可以为一个 agent 遮蔽全局项。`system-prompt/assemble` waterfall 决定交付的提示词与工具 schema，除非一个有效段声明自身为 complete；此时，该确切段会成为完整的系统提示词，而 waterfall 得到的上下文、工具和变量保持不变。有序动态上下文与系统提示词段分离，只在存在时才会成为带来源的 user 角色快照。`includeRuntimeContext: false` 或带作用域的抑制器会移除所有这类上下文，包括监听器添加的内容，但不会禁用拥有底层策略或状态的服务。顺序为 1 的 `harness:now`，紧随 persona 之后、任何工具引导之前（SWD-113：每次提示词都携带当前日期与时间，在每次组装时从 `now`／`Intl.DateTimeFormat().resolvedOptions().timeZone` 中新鲜读取——插件无法选择退出），渲染为两段：一段分钟精度的时钟行——星期、日期、时间与 UTC 偏移量按进程自身解析出的时区计算，末尾附带同一瞬间的分钟精度 UTC ISO-8601 表示（不含秒，这样多步骤轮次的请求头在同一分钟内保持比较稳定）——随后是下方固定的提示句。如需针对显式时区格式化，请直接使用导出的 `formatDateTime(date, timeZone)`。
 
 ##### harness 身份
 
@@ -65,10 +65,9 @@ You are an AI agent powered by DeepSeek Harness.
 
 ##### 当前日期与时间
 
-顺序为 1 的 `harness:now`，紧随 persona 之后、任何工具引导之前（SWD-113：每次提示词都携带当前日期与时间，在每次组装时从 `now`／`Intl.DateTimeFormat().resolvedOptions().timeZone` 中新鲜读取——插件无法选择退出）。该行的星期、日期、时间与 UTC 偏移量按进程自身解析出的时区计算；末尾的值是同一瞬间的 UTC ISO-8601 表示。如需针对显式时区格式化，请直接使用导出的 `formatDateTime(date, timeZone)`。
-
 ```markdown
-Current date and time: Monday 2026-09-29 09:12 America/Los_Angeles (UTC-07:00) — 2026-09-29T16:12:00Z
+Current date and time: Monday 2026-09-29 09:12 America/Los_Angeles (UTC-07:00) — 2026-09-29T16:12Z
+
 This is the time this prompt was assembled — it advances between turns, so read elapsed time from here rather than assuming it.
 ```
 

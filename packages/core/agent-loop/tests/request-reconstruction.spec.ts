@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, { createUserMessage, LlmError, ReasoningEffortId  } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmModelReasoningInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
-import SessionStore, { Session, SessionId, foldRequestHeader } from '@deepseek-ai/dsh-session'
+import SessionStore, { Session, SessionId, foldRequestHeader, scrubNowLine } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
@@ -553,6 +553,87 @@ describe('request stability across the loop', () => {
     expect(adapter.requests[2]!.messages.length).toBeGreaterThan(adapter.requests[1]!.messages.length)
   })
 
+  it('an advancing harness:now (SWD-113) clock across one turn\'s steps does not by itself log a header change', async () => {
+    // Two steps in ONE turn (a tool call, then the concluding text), with the
+    // injected clock crossing a minute boundary between them — proving the
+    // clock line alone (see dsh-session's headerEquals/scrubNowLine) never
+    // triggers a 'change' snapshot, even though the rendered system text
+    // genuinely differs step to step.
+    const adapter = new MockAdapter([
+      toolCallResponse('c1', 'echo', { text: 'one' }, 'first'),
+      textResponse('done'),
+    ])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionStore)
+    let tick = new Date('2026-01-01T00:00:30Z')
+    await ctx.plugin(SystemPrompt, { persona: 'stable base', now: () => tick })
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(AgentLoop, { agents: [] })
+    ctx.llm.registerAdapter(['mock'], adapter)
+    registerEcho(ctx)
+    const agent = ctx.agentLoop.create(SessionId('now-clock-stable'), { provider: 'mock', model: 'mock' })
+
+    // 'agent/pre-step' fires once per step, right after that step's own
+    // system-prompt assembly — bumping the clock here after step 1 lands
+    // before step 2's OWN assembly (which happens at the top of its own
+    // preStep call), unlike 'agent/request' which fires too late in the step
+    // to affect that step's already-assembled system text.
+    ctx.on('agent/pre-step', async (payload, next) => {
+      if (payload.step === 1) tick = new Date('2026-01-01T00:01:30Z')
+      return next()
+    })
+
+    send(agent, 'go')
+    await waitForIdle(ctx, agent)
+
+    expect(adapter.requests).toHaveLength(2)
+    // The clock line really did advance (minute rolled from :00 to :01)...
+    expect(adapter.requests[0]!.system).not.toEqual(adapter.requests[1]!.system)
+    // ...yet only the anchoring snapshot was ever logged.
+    const headerEvents = agent.session.events.filter(e => e.type === 'request/header')
+    expect(headerEvents).toHaveLength(1)
+    expect(headerEvents[0]?.type === 'request/header' && headerEvents[0].data.reason).toBe('initial')
+  })
+
+  it('a genuine header change is still logged while the harness:now clock is also advancing', async () => {
+    const reasoning = {
+      efforts: [
+        { id: ReasoningEffortId('high'), name: 'High' },
+        { id: ReasoningEffortId('max'), name: 'Max' },
+      ],
+      defaultEffort: ReasoningEffortId('high'),
+    }
+    const adapter = new MockAdapter([textResponse('one'), textResponse('two')], reasoning)
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionStore)
+    let tick = new Date('2026-01-01T00:00:30Z')
+    await ctx.plugin(SystemPrompt, { persona: 'stable base', now: () => tick })
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(AgentLoop, { agents: [] })
+    ctx.llm.registerAdapter(['mock'], adapter)
+    const agent = ctx.agentLoop.create(SessionId('now-clock-change'), { provider: 'mock', model: 'mock' })
+
+    send(agent, 'first')
+    await waitForIdle(ctx, agent)
+    // Advance the clock AND force a real config change (an effort override,
+    // as the sibling "logs adapter defaults" test above does) on turn 2.
+    tick = new Date('2026-01-01T00:01:30Z')
+    ctx.on('agent/request', async ({ turn }, next) => {
+      const config = await next()
+      return turn === 2 ? { ...config, reasoningEffort: ReasoningEffortId('max') } : config
+    })
+    send(agent, 'second')
+    await waitForIdle(ctx, agent)
+
+    expect(adapter.requests[0]!.system).not.toEqual(adapter.requests[1]!.system)
+    const headers = agent.session.events.filter(event => event.type === 'request/header')
+    expect(headers.map(event => event.data.reason)).toEqual(['initial', 'change'])
+  })
+
   it('an inject() during the agent/request waterfall joins the NEXT request (the step/start boundary)', async () => {
     const adapter = new MockAdapter([textResponse('one'), textResponse('two')])
     const ctx = await harness(adapter)
@@ -703,7 +784,13 @@ describe('request stability across the loop', () => {
       const header = foldRequestHeader(events.slice(0, firstChunk.seq))!
       expect(request.model).toBe(header.config.model)
       expect(request.reasoningEffort).toBe(header.config.reasoningEffort)
-      expect(request.system).toEqual(header.system)
+      // The dispatched system carries THIS step's freshly-read harness:now
+      // (SWD-113) clock; the folded header is only as fresh as its last
+      // LOGGED snapshot. headerEquals's clock exemption means these can
+      // legitimately differ in that one line alone (invariant.ts applies the
+      // same exemption), so compare with it scrubbed rather than raw.
+      expect(request.system === undefined ? undefined : scrubNowLine(request.system))
+        .toEqual(header.system === undefined ? undefined : scrubNowLine(header.system))
       expect(structuredClone(request.tools ?? [])).toEqual(structuredClone(header.tools ?? []))
       expect(request.temperature).toBe(header.config.temperature)
       expect(request.maxTokens).toBe(header.config.maxTokens)

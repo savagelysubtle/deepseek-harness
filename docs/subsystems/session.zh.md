@@ -101,7 +101,13 @@ interface SessionEventMap {
   'todo/write': { todos: TodoItem[] }
   /**
    * Full header for the next request, appended inside its step before dispatch.
-   * It is log-only; the latest snapshot reconstructs the request header.
+   * It is log-only; the latest snapshot reconstructs the request header. The
+   * persisted `header.system` carries the exact `harness:now` (SWD-113) clock
+   * reading in force at that moment — `headerEquals` ignores only that one
+   * line when deciding whether a NEW snapshot is needed (see
+   * `dsh-session/request-header`'s `scrubNowLine`), so a replay reconstructs
+   * a step's request with THAT snapshot's real clock text, not a clock
+   * re-read for the step being replayed.
    */
   'request/header': { header: EpochHeader; reason: RequestHeaderReason }
   /**
@@ -164,7 +170,7 @@ interface TodoItem {
 
 ### 请求头事件：`request/header`
 
-请求信封（即 `EpochHeader`：调用配置 + 适配器所提供默认值的标记 + 渲染后的系统提示词 + 已组装的工具 schema）会作为会话状态写入日志，因此每个对话请求都是日志的纯函数（见可重建性 Agent Note）。带有 reason `'initial'` 或 `'resume'` 的完整 `request/header` 快照记录每个 agent loop 实例的边界；之后请求发生变化时，系统会以 reason `'change'` 记录另一份完整快照。`foldRequestHeader(events)` 通过选择最新快照重建请求头。该事件不是 `SurfaceEventType`，不产生 LLM 消息。
+请求信封（即 `EpochHeader`：调用配置 + 适配器所提供默认值的标记 + 渲染后的系统提示词 + 已组装的工具 schema）会作为会话状态写入日志，因此每个对话请求都是日志的纯函数（见可重建性 Agent Note）。带有 reason `'initial'` 或 `'resume'` 的完整 `request/header` 快照记录每个 agent loop 实例的边界；之后请求发生变化时，系统会以 reason `'change'` 记录另一份完整快照。`foldRequestHeader(events)` 通过选择最新快照重建请求头。该事件不是 `SurfaceEventType`，不产生 LLM 消息。已持久化的 `header.system` 携带的是该时刻实际生效的 `harness:now`（SWD-113）时钟读数——`headerEquals` 在判断是否需要记录新快照时只忽略这一行（见 `dsh-session/request-header` 的 `scrubNowLine`），因此回放会使用该快照自身真实的时钟文本来重建某个步骤的请求，而不是为被回放的步骤重新读取时钟。
 
 ```ts type-equiv
 /**

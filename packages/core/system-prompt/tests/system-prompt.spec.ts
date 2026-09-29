@@ -607,7 +607,7 @@ describe('SystemPrompt', () => {
       const date = new Date('2024-06-10T13:05:00Z')
       const text = formatDateTime(date, 'America/New_York')
       expect(text).toBe(
-        'Current date and time: Monday 2024-06-10 09:05 America/New_York (UTC-04:00) — 2024-06-10T13:05:00Z\n'
+        'Current date and time: Monday 2024-06-10 09:05 America/New_York (UTC-04:00) — 2024-06-10T13:05Z\n\n'
         + 'This is the time this prompt was assembled — it advances between turns, so read elapsed time from here rather than assuming it.',
       )
     })
@@ -623,8 +623,10 @@ describe('SystemPrompt', () => {
 
       const nowSection = (assembly: PromptAssembly) => assembly.sections.find(s => s.name === 'harness:now')!.text
       expect(nowSection(first)).not.toBe(nowSection(second))
-      expect(nowSection(first)).toContain('2025-01-01T00:00:00Z')
-      expect(nowSection(second)).toContain('2025-01-01T00:05:30Z')
+      expect(nowSection(first)).toContain('2025-01-01T00:00Z')
+      // Minute resolution (the header-bloat fix): the seconds component (:30) is
+      // dropped, so the assertion targets the minute the clock actually advanced to.
+      expect(nowSection(second)).toContain('2025-01-01T00:05Z')
     })
 
     it('formats a DST-crossing date on each side of the transition', () => {

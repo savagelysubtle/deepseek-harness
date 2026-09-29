@@ -215,29 +215,44 @@ function isoSeconds(date: Date): string {
 }
 
 /**
- * Fixed second line of {@link formatDateTime}: why the timestamp is there and
- * how a reader should use it, rather than assuming from memory how much time
- * has passed.
+ * `date` as a whole-MINUTE UTC ISO-8601 string (`YYYY-MM-DDTHH:mmZ`, no
+ * seconds). Used only by {@link formatDateTime}'s stamp line: minute
+ * resolution keeps the clock line stable within a minute, so a multi-step
+ * turn does not re-log its full `request/header` on every step merely
+ * because a second rolled over (the `now` prompt variable stays
+ * second-resolution via {@link isoSeconds} — it is opt-in template text, not
+ * part of the always-on header-bloat path this trims).
+ */
+function isoMinutes(date: Date): string {
+  return `${date.getUTCFullYear()}-${pad2(date.getUTCMonth() + 1)}-${pad2(date.getUTCDate())}`
+    + `T${pad2(date.getUTCHours())}:${pad2(date.getUTCMinutes())}Z`
+}
+
+/**
+ * Fixed second paragraph of {@link formatDateTime}: why the timestamp is
+ * there and how a reader should use it, rather than assuming from memory how
+ * much time has passed.
  */
 const NOW_ADVISORY = 'This is the time this prompt was assembled — it advances between turns, so read elapsed time from here rather than assuming it.'
 
 /**
  * Format the built-in `{@link NOW_SECTION}` block for one instant in one IANA
- * zone: a plain-text timestamp line, then {@link NOW_ADVISORY}. Pure and
- * zone-injectable by design — `process.env.TZ` does not reliably update a
- * long-running process, so neither this function nor its caller reads it;
- * the caller resolves a zone once (typically via
+ * zone: a plain-text timestamp line, then {@link NOW_ADVISORY} as a second
+ * paragraph. Pure and zone-injectable by design — `process.env.TZ` does not
+ * reliably update a long-running process, so neither this function nor its
+ * caller reads it; the caller resolves a zone once (typically via
  * `Intl.DateTimeFormat().resolvedOptions().timeZone`) and passes it in,
  * which also makes the function directly unit-testable against any zone.
  * @param date - the instant to format (typically an assembly's resolved clock reading).
  * @param timeZone - an IANA zone name.
- * @returns the two-line block; never more than two lines.
+ * @returns two paragraphs separated by a blank line — the clock line, then
+ *   the fixed advisory sentence — each one physical line.
  */
 export function formatDateTime(date: Date, timeZone: string): string {
   const p = dateTimeParts(date, timeZone)
   const offset = formatOffset(offsetMinutes(date, timeZone))
-  const stamp = `Current date and time: ${p.weekday} ${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute} ${timeZone} (UTC${offset}) — ${isoSeconds(date)}`
-  return `${stamp}\n${NOW_ADVISORY}`
+  const stamp = `Current date and time: ${p.weekday} ${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute} ${timeZone} (UTC${offset}) — ${isoMinutes(date)}`
+  return `${stamp}\n\n${NOW_ADVISORY}`
 }
 
 /**

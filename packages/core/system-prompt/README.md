@@ -53,7 +53,7 @@ Design rationale: [the prompt-variables Agent Note](../../../.agents/notes/imple
 
 #### What the model sees
 
-By default every assembly starts with the harness identity below, then the configured persona and ordered plugin sections after strict variable interpolation. `includeHarnessIdentity: false` omits only that fixed opener. Empty sections disappear; scoped sections and variables can shadow globals for one agent. The `system-prompt/assemble` waterfall determines the delivered prompt and tool schemas unless one effective section declares itself complete; that exact section then becomes the whole system prompt while the waterfall's contexts, tools, and variables remain. Ordered dynamic contexts are separate from system-prompt sections and become sourced user-role snapshots only when present. `includeRuntimeContext: false` or a scoped suppressor removes all such contexts, including listener additions, without disabling the services that own the underlying policy or state.
+By default every assembly starts with the harness identity below, then the configured persona and ordered plugin sections after strict variable interpolation. `includeHarnessIdentity: false` omits only that fixed opener. Empty sections disappear; scoped sections and variables can shadow globals for one agent. The `system-prompt/assemble` waterfall determines the delivered prompt and tool schemas unless one effective section declares itself complete; that exact section then becomes the whole system prompt while the waterfall's contexts, tools, and variables remain. Ordered dynamic contexts are separate from system-prompt sections and become sourced user-role snapshots only when present. `includeRuntimeContext: false` or a scoped suppressor removes all such contexts, including listener additions, without disabling the services that own the underlying policy or state. Order-1 `harness:now`, immediately after the persona and before any tool guidance (SWD-113: every prompt carries the current date and time, freshly read from `now`/`Intl.DateTimeFormat().resolvedOptions().timeZone` at each assembly — a plugin cannot opt out), renders as two paragraphs: a minute-resolution clock line — weekday, date, time, and UTC offset computed for the process's own resolved zone, with a trailing minute-resolution UTC ISO-8601 instant (no seconds, so a multi-step turn's request headers stay comparison-stable within a minute) — then the fixed advisory sentence below. Format an explicit zone directly with the exported `formatDateTime(date, timeZone)`.
 
 ##### Harness identity
 
@@ -63,10 +63,9 @@ You are an AI agent powered by DeepSeek Harness.
 
 ##### Current date and time
 
-Order-1 `harness:now`, immediately after the persona and before any tool guidance (SWD-113: every prompt carries the current date and time, freshly read from `now`/`Intl.DateTimeFormat().resolvedOptions().timeZone` at each assembly — a plugin cannot opt out). The line's weekday, date, time, and UTC offset are computed for the process's own resolved zone; the trailing value is the same instant as UTC ISO-8601. Format an explicit zone directly with the exported `formatDateTime(date, timeZone)`.
-
 ```markdown
-Current date and time: Monday 2026-09-29 09:12 America/Los_Angeles (UTC-07:00) — 2026-09-29T16:12:00Z
+Current date and time: Monday 2026-09-29 09:12 America/Los_Angeles (UTC-07:00) — 2026-09-29T16:12Z
+
 This is the time this prompt was assembled — it advances between turns, so read elapsed time from here rather than assuming it.
 ```
 

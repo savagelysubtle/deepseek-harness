@@ -293,6 +293,15 @@ export interface Config {
   persona?: SystemPromptConfig['persona']
   /** The explicit model-facing tool order (see dsh-system-prompt's `Config`). */
   toolOrder?: SystemPromptConfig['toolOrder']
+  /**
+   * The `harness:now` clock override (see dsh-system-prompt's `Config`).
+   * Declared only so the config-catalog cross-check accepts the schema key
+   * the `SystemPrompt.Config` intersection below brings in; `apply()` never
+   * forwards it — this bundle always mounts `SystemPrompt` on the live
+   * clock, so `harness:now` renders the real instant (a code-only override
+   * has no representation this bundle's own config surface accepts).
+   */
+  now?: SystemPromptConfig['now']
   /** The tool registry's config — its presentation `mode` (see dsh-tools' `Config`). */
   tools?: ToolsConfig
   /** DeepSeek Harness home directory shared by shell context and local skill discovery. */
@@ -2510,10 +2519,20 @@ export interface Config {
    * hidden in one scope may be absent there. Omitted means lexicographic order.
    */
   toolOrder?: string[]
+  /**
+   * Clock the built-in {@link NOW_SECTION} section and `now` variable read
+   * from, called once per assembly (default `() => new Date()`). Overridable
+   * so tests can fix the instant without depending on `process.env.TZ`, which
+   * does not reliably update a long-running process. The zone is always the
+   * process's own resolved zone (`Intl.DateTimeFormat().resolvedOptions().timeZone`)
+   * and is not configurable here — see {@link formatDateTime} to format an
+   * explicit zone directly.
+   */
+  now?: () => Date
 }
 ```
 
-来源：[`packages/core/system-prompt/src/index.ts:186`](../packages/core/system-prompt/src/index.ts)
+来源：[`packages/core/system-prompt/src/index.ts:302`](../packages/core/system-prompt/src/index.ts)
 
 <a id="deepseek-aidsh-terminal-bash"></a>
 

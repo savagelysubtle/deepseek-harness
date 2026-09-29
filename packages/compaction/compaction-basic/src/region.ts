@@ -490,7 +490,12 @@ function completeCompaction(
  * region: its system prompt and tool schemas, then the region's own derived
  * messages in surface order. The summarizer appends only the compaction
  * instruction after this, so the call is a genuine prefix of the conversation
- * and reuses the provider's KV cache.
+ * and reuses the provider's KV cache. `session.requestHeader()` is the folded
+ * LOGGED header, which since SWD-113 may lag the last dispatched request by
+ * the `harness:now` clock line alone (a clock-only change is not re-logged as
+ * a new header) — so the rebuilt prefix is byte-exact except possibly that
+ * one line, which costs a provider cache miss on that request, not a
+ * correctness problem.
  * @param session - session supplying the request header and per-node projection.
  * @param shadowedSeqs - the surface-node seqs, in order, being compacted.
  * @returns the replayed conversation prefix to condense.
