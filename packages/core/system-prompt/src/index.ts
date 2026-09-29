@@ -130,6 +130,21 @@ export const PERSONA_SECTION = 'deployment:persona'
 /** Prompt order of the persona slot; the first section a model reads. */
 export const PERSONA_ORDER = 0
 
+/**
+ * The built-in current-date-and-time section's name and order. Exported so a
+ * caller can identify or (via a scoped section of the same name) shadow it,
+ * the same way {@link PERSONA_SECTION} works.
+ */
+export const NOW_SECTION = 'harness:now'
+
+/**
+ * Prompt order of the current-date-and-time section: after the identity and
+ * persona openers (`-100`, `0`) so it never precedes them, before tool
+ * guidance (`100`–`199`) so it stays with the other short harness-owned
+ * facts rather than the tool-specific sections that follow.
+ */
+export const NOW_ORDER = 1
+
 /** Valid variable names: how they are written between the braces. */
 const VARIABLE_NAME = /^[a-z][a-z0-9_]*$/
 
@@ -138,6 +153,92 @@ const GROUP_AT = /^\{\{([^{}]*)\}\}/
 
 /** Reserved {@link Config.toolOrder} marker for unlisted tools. */
 export const TOOL_ORDER_REST = '<unlisted-tools>'
+
+/** Zero-pad a non-negative integer to at least two digits. */
+function pad2(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
+/**
+ * One `en-US` `Intl.DateTimeFormat` reading of `date` in `timeZone`, keyed by
+ * part type. `en-US` is used only to get stable, unambiguous part values
+ * (e.g. a plain `"Monday"`, digits for the rest) — the output text is not a
+ * localization, and `2-digit`/`h23` keep every numeric part zero-padded.
+ */
+function dateTimeParts(date: Date, timeZone: string): Record<string, string> {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    weekday: 'long',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+  const map: Record<string, string> = {}
+  for (const part of formatter.formatToParts(date)) {
+    if (part.type !== 'literal') map[part.type] = part.value
+  }
+  return map
+}
+
+/**
+ * `timeZone`'s UTC offset for `date`, in minutes (positive when the zone
+ * runs ahead of UTC). Computed by re-reading the zone's local wall-clock
+ * digits for `date` as if they were themselves UTC, then diffing that
+ * against the real instant — the standard `Intl`-only technique for an
+ * offset, correct across a DST transition and for fractional-hour zones,
+ * with no date library.
+ */
+function offsetMinutes(date: Date, timeZone: string): number {
+  const p = dateTimeParts(date, timeZone)
+  const asUtc = Date.UTC(
+    Number(p.year), Number(p.month) - 1, Number(p.day),
+    Number(p.hour), Number(p.minute), Number(p.second),
+  )
+  return Math.round((asUtc - date.getTime()) / 60_000)
+}
+
+/** Format minutes-from-UTC as a signed `±HH:mm` offset (`0` renders `+00:00`). */
+function formatOffset(minutes: number): string {
+  const sign = minutes < 0 ? '-' : '+'
+  const abs = Math.abs(minutes)
+  return `${sign}${pad2(Math.floor(abs / 60))}:${pad2(abs % 60)}`
+}
+
+/** `date` as a whole-second UTC ISO-8601 string (`YYYY-MM-DDTHH:mm:ssZ`, no milliseconds). */
+function isoSeconds(date: Date): string {
+  return `${date.getUTCFullYear()}-${pad2(date.getUTCMonth() + 1)}-${pad2(date.getUTCDate())}`
+    + `T${pad2(date.getUTCHours())}:${pad2(date.getUTCMinutes())}:${pad2(date.getUTCSeconds())}Z`
+}
+
+/**
+ * Fixed second line of {@link formatDateTime}: why the timestamp is there and
+ * how a reader should use it, rather than assuming from memory how much time
+ * has passed.
+ */
+const NOW_ADVISORY = 'This is the time this prompt was assembled — it advances between turns, so read elapsed time from here rather than assuming it.'
+
+/**
+ * Format the built-in `{@link NOW_SECTION}` block for one instant in one IANA
+ * zone: a plain-text timestamp line, then {@link NOW_ADVISORY}. Pure and
+ * zone-injectable by design — `process.env.TZ` does not reliably update a
+ * long-running process, so neither this function nor its caller reads it;
+ * the caller resolves a zone once (typically via
+ * `Intl.DateTimeFormat().resolvedOptions().timeZone`) and passes it in,
+ * which also makes the function directly unit-testable against any zone.
+ * @param date - the instant to format (typically an assembly's resolved clock reading).
+ * @param timeZone - an IANA zone name.
+ * @returns the two-line block; never more than two lines.
+ */
+export function formatDateTime(date: Date, timeZone: string): string {
+  const p = dateTimeParts(date, timeZone)
+  const offset = formatOffset(offsetMinutes(date, timeZone))
+  const stamp = `Current date and time: ${p.weekday} ${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute} ${timeZone} (UTC${offset}) — ${isoSeconds(date)}`
+  return `${stamp}\n${NOW_ADVISORY}`
+}
 
 /**
  * Validate duplicate names and the required {@link TOOL_ORDER_REST} marker.
@@ -199,6 +300,16 @@ export interface Config {
    * hidden in one scope may be absent there. Omitted means lexicographic order.
    */
   toolOrder?: string[]
+  /**
+   * Clock the built-in {@link NOW_SECTION} section and `now` variable read
+   * from, called once per assembly (default `() => new Date()`). Overridable
+   * so tests can fix the instant without depending on `process.env.TZ`, which
+   * does not reliably update a long-running process. The zone is always the
+   * process's own resolved zone (`Intl.DateTimeFormat().resolvedOptions().timeZone`)
+   * and is not configurable here — see {@link formatDateTime} to format an
+   * explicit zone directly.
+   */
+  now?: () => Date
 }
 
 /**
@@ -342,6 +453,8 @@ export class SystemPrompt extends Service {
     persona: z.string().default(''),
     // Preserve omission because an explicit empty order lacks the rest marker.
     toolOrder: z.array(z.string()).default(undefined as unknown as string[]),
+    // Same omission-preserving default as toolOrder: falls through to the ctor's `?? (() => new Date())`.
+    now: z.function().default(undefined as unknown as () => Date),
   })
 
   private readonly layers = new ScopedLayers(
@@ -349,10 +462,12 @@ export class SystemPrompt extends Service {
     () => { this.ctx.emit('system-prompt/change') },
   )
   private readonly toolOrder: string[] | undefined
+  private readonly now: () => Date
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'systemPrompt')
     this.toolOrder = validateToolOrder(config.toolOrder)
+    this.now = config.now ?? (() => new Date())
     // Keep harness-owned openers independent of the selected loop plugin.
     if (config.includeHarnessIdentity ?? true) {
       this.section({
@@ -367,6 +482,14 @@ export class SystemPrompt extends Service {
       // The fallback narrows the optional input type; the schema already defaults it.
       text: config.persona ?? '',
     })
+    // Fresh every assembly (SWD-113): preStep() calls assemble() before every
+    // model request, so this reads the clock — not a value captured at boot.
+    this.section({
+      name: NOW_SECTION,
+      order: NOW_ORDER,
+      text: () => formatDateTime(this.now(), Intl.DateTimeFormat().resolvedOptions().timeZone),
+    })
+    this.variable('now', () => isoSeconds(this.now()))
     if (!(config.includeRuntimeContext ?? true)) this.suppressRuntimeContext()
   }
 

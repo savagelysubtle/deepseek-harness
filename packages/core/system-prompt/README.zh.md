@@ -12,6 +12,7 @@
 | `includeRuntimeContext` | `true` | 是否在组装中包含有序动态上下文。设为 false 时不会求值上下文提供方，并会在 waterfall 后丢弃 `system-prompt/assemble` 监听器添加的上下文；其他服务及其强制机制仍然生效。 |
 | `persona` | `''` | 全局部署 persona 默认值：唯一由配置提供的提示词片段，渲染为顺序为 0 的 `deployment:persona` 段，除非 agent 作用域的贡献将其遮蔽。它是模板，完整的 `{{…}}` 组会严格按已注册变量解释（随附循环注册 `{{model}}`/`{{cwd}}`），目前没有表达字面量花括号的转义语法。为空 ⇒ 渲染时删除该段。 |
 | `toolOrder` | 无 | 显式指定面向模型的工具顺序。该列表由 `ToolSchema.name` 组成，并且必须恰好包含一个 `'<unlisted-tools>'` 其余项标记（`TOOL_ORDER_REST`）：已列工具按列表位置排列，未列工具则按名称字典序插入该标记所在的位置。缺席 ⇒ 直接按名称字典序排列。该顺序会在 `system-prompt/assemble` waterfall（瀑布式事件）之前应用于已收集的工具。与段的 `order` 排序一样，它会规范化注册表贡献的内容；注册顺序只是插件加载时序的产物。修改列表的 waterfall 监听器对其输出的确定性负责。配置错误会明确失败：列表没有恰好一个其余项或存在重复项，会在加载时抛出；已列名称没有对应已注册工具，会使每次 `assemble()` 被拒绝；工具提供方返回保留的其余项名称也会被拒绝。在随附循环下，轮次会在任何模型请求前失败。为何采用中心列表而非每插件权重，见[显式面向模型工具顺序](../../../.agents/notes/implemented/feature/2026-07-06-explicit-tool-order.md)。 |
+| `now` | `() => new Date()` | 内置的顺序为 1 的 `harness:now` 段与 `now` 变量所读取的时钟，每次组装调用一次（SWD-113：这样 agent 读到「感觉陈旧」的快照时，可以查看提示词自带的时间戳，而不是凭记忆假设经过了多久）。可覆盖，便于测试固定该瞬间，而不必依赖对长期运行进程并不可靠的 `process.env.TZ`。渲染所用的时区始终是进程自身解析出的时区（`Intl.DateTimeFormat().resolvedOptions().timeZone`）——此处不可配置；如需针对显式时区格式化，请直接使用导出的 `formatDateTime(date, timeZone)`。 |
 
 ## 服务：`SystemPrompt`（ctx 键：`systemPrompt`）
 
@@ -41,8 +42,8 @@
 
 ### 扩展点
 
-- 段提供方：工具包拥有自身的跨调用指导（`tool:bash`、`tool:read` 等）；此插件拥有 `harness:identity` 与 `deployment:persona`。
-- 变量提供方：agent loop（智能体循环）注册 `model` 与 `cwd`；任何插件都可以注册自己拥有的事实（未来的 `date`、git 状态等）。
+- 段提供方：工具包拥有自身的跨调用指导（`tool:bash`、`tool:read` 等）；此插件拥有 `harness:identity`、`deployment:persona` 与 `harness:now`。
+- 变量提供方：agent loop（智能体循环）注册 `model` 与 `cwd`；此插件注册 `now`（与 `harness:now` 段相同的 ISO 时刻）；任何插件都可以注册自己拥有的事实（git 状态等）。
 - 工具 schema 提供方：`ToolRuntime` 自动将自身注册为工具提供方。
 - [`system-prompt/assemble` waterfall](#live-events)：按调用方协作式修改或替换组装结果，之后再实施 complete 段约束。
 
@@ -62,13 +63,22 @@
 You are an AI agent powered by DeepSeek Harness.
 ```
 
+##### 当前日期与时间
+
+顺序为 1 的 `harness:now`，紧随 persona 之后、任何工具引导之前（SWD-113：每次提示词都携带当前日期与时间，在每次组装时从 `now`／`Intl.DateTimeFormat().resolvedOptions().timeZone` 中新鲜读取——插件无法选择退出）。该行的星期、日期、时间与 UTC 偏移量按进程自身解析出的时区计算；末尾的值是同一瞬间的 UTC ISO-8601 表示。如需针对显式时区格式化，请直接使用导出的 `formatDateTime(date, timeZone)`。
+
+```markdown
+Current date and time: Monday 2026-09-29 09:12 America/Los_Angeles (UTC-07:00) — 2026-09-29T16:12:00Z
+This is the time this prompt was assembled — it advances between turns, so read elapsed time from here rather than assuming it.
+```
+
 #### Token 影响
 
-启用时，身份是每次请求的固定成本。Persona 与插件文本在每次请求中重复，成本随渲染内容增长。
+启用时，身份是每次请求的固定成本。Persona 与插件文本在每次请求中重复，成本随渲染内容增长。当前日期与时间行是每次请求上一笔额外的小额固定成本，只要挂载了 `systemPrompt` 就会出现。
 
 #### KV Cache 影响
 
-只要身份、persona、变量、段文本与顺序的渲染完全相同，前缀就保持稳定。任何变更都可能从第一个变化的系统提示词 token 起使复用失效。
+只要身份、persona、变量、段文本与顺序的渲染完全相同，前缀就保持稳定。任何变更都可能从第一个变化的系统提示词 token 起使复用失效。`harness:now` 是刻意的例外：因为它渲染的是当前瞬间，其文本在几乎每次组装时都不同，所以从该段起，每次请求的前缀都不稳定——这是预期且刻意的（SWD-113 要求时间戳每轮都保持新鲜），不是需要排查的缓存退化。
 
 ### 工具 schema
 

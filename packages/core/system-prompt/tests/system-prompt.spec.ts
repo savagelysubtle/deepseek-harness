@@ -1,31 +1,46 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import SystemPrompt, { AssembleContext, PromptAssembly, renderContextSnapshot, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
+import SystemPrompt, { AssembleContext, PromptAssembly, formatDateTime, renderContextSnapshot, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 
 /**
  * Every assembly carries the plugin's own built-ins — `harness:identity`
- * (order −100) and `deployment:persona` (order 0, from config). Tests about
- * registry MECHANICS strip them with {@link contributed} to stay focused on
- * their own sections; the built-ins' behavior is pinned by its own describe.
+ * (order −100), `deployment:persona` (order 0, from config), and
+ * `harness:now` (order 1, SWD-113: the current date/time, read fresh from the
+ * configured clock at every assembly). Tests about registry MECHANICS strip
+ * them with {@link contributed} to stay focused on their own sections; the
+ * built-ins' behavior is pinned by its own describe.
  */
-const BUILT_IN = ['harness:identity', 'deployment:persona']
+const BUILT_IN = ['harness:identity', 'deployment:persona', 'harness:now']
 const IDENTITY = 'You are an AI agent powered by DeepSeek Harness.'
 function contributed(assembly: PromptAssembly): PromptAssembly['sections'] {
   return assembly.sections.filter(section => !BUILT_IN.includes(section.name))
 }
 
+/**
+ * `harness:now` always renders the PROCESS'S OWN resolved zone — never
+ * configurable — so expected text here is built with the exact same `Intl`
+ * call the source uses, never a hardcoded zone name. That keeps these
+ * assertions correct on any machine or CI runner's system zone.
+ */
+const NOW_INSTANT = new Date('2026-03-15T18:34:56Z')
+const NOW_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone
+const NOW_TEXT = formatDateTime(NOW_INSTANT, NOW_ZONE)
+const NOW_ISO = NOW_INSTANT.toISOString().replace(/\.\d{3}Z$/, 'Z')
+const fixedNow = { now: () => NOW_INSTANT }
+
 describe('SystemPrompt', () => {
   describe('built-in sections', () => {
-    it('registers the harness identity and the configured deployment persona', async () => {
+    it('registers the harness identity, the configured deployment persona, and the current date/time', async () => {
       const ctx = new Context()
-      await ctx.plugin(SystemPrompt, { persona: 'You are DeepSeek Harness.' })
+      await ctx.plugin(SystemPrompt, { persona: 'You are DeepSeek Harness.', ...fixedNow })
 
       const assembly = await ctx.systemPrompt.assemble()
       expect(assembly.sections.map(s => s.name)).toEqual([
         'harness:identity',
         'deployment:persona',
+        'harness:now',
       ])
-      expect(renderPrompt(assembly)).toBe(`${IDENTITY}\n\nYou are DeepSeek Harness.`)
+      expect(renderPrompt(assembly)).toBe(`${IDENTITY}\n\nYou are DeepSeek Harness.\n\n${NOW_TEXT}`)
       // The names are reserved by the plugin — one owner per section.
       expect(() => ctx.systemPrompt.section({ name: 'deployment:persona', order: 0, text: 'imposter' }))
         .toThrow('prompt section "deployment:persona" is already registered')
@@ -33,8 +48,8 @@ describe('SystemPrompt', () => {
 
     it('renders no persona section for a persona-less deployment (empty default)', async () => {
       const ctx = new Context()
-      await ctx.plugin(SystemPrompt)
-      expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(IDENTITY)
+      await ctx.plugin(SystemPrompt, fixedNow)
+      expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(`${IDENTITY}\n\n${NOW_TEXT}`)
     })
 
     it('can omit the harness identity for a deployment that owns the complete persona', async () => {
@@ -42,11 +57,12 @@ describe('SystemPrompt', () => {
       await ctx.plugin(SystemPrompt, {
         includeHarnessIdentity: false,
         persona: 'You are a helpful software engineer assistant.',
+        ...fixedNow,
       })
 
       const assembly = await ctx.systemPrompt.assemble()
-      expect(assembly.sections.map(section => section.name)).toEqual(['deployment:persona'])
-      expect(renderPrompt(assembly)).toBe('You are a helpful software engineer assistant.')
+      expect(assembly.sections.map(section => section.name)).toEqual(['deployment:persona', 'harness:now'])
+      expect(renderPrompt(assembly)).toBe(`You are a helpful software engineer assistant.\n\n${NOW_TEXT}`)
     })
 
     it('can suppress runtime context without evaluating providers or accepting waterfall additions', async () => {
@@ -72,14 +88,14 @@ describe('SystemPrompt', () => {
       // ctx.plugin validates + defaults the config first; a direct construction
       // skips the schema, so the ctor's `?? ''` narrowing is what fires.
       const ctx = new Context()
-      const service = new SystemPrompt(ctx, {})
-      expect(renderPrompt(await service.assemble())).toBe(IDENTITY)
+      const service = new SystemPrompt(ctx, { now: () => NOW_INSTANT })
+      expect(renderPrompt(await service.assemble())).toBe(`${IDENTITY}\n\n${NOW_TEXT}`)
     })
   })
 
   it('assembles sections in order with context-resolved text and collected tools', async () => {
     const ctx = new Context()
-    await ctx.plugin(SystemPrompt, { persona: 'You are DeepSeek Harness.' })
+    await ctx.plugin(SystemPrompt, { persona: 'You are DeepSeek Harness.', ...fixedNow })
 
     ctx.systemPrompt.section({ name: 'cwd', order: 20, text: () => 'cwd: /tmp' })
     ctx.systemPrompt.section({ name: 'rules', order: 10, text: 'Be precise.' })
@@ -88,15 +104,15 @@ describe('SystemPrompt', () => {
     ctx.systemPrompt.tools(() => ({ schemas: [{ name: 'echo', description: 'echo back', parameters: {} }] }))
 
     const assembly = await ctx.systemPrompt.assemble()
-    expect(assembly.sections.map(s => s.name)).toEqual(['harness:identity', 'deployment:persona', 'rules', 'cwd'])
-    expect(assembly.sections.map(s => s.text)).toEqual([IDENTITY, 'You are DeepSeek Harness.', 'Be precise.', 'cwd: /tmp'])
+    expect(assembly.sections.map(s => s.name)).toEqual(['harness:identity', 'deployment:persona', 'harness:now', 'rules', 'cwd'])
+    expect(assembly.sections.map(s => s.text)).toEqual([IDENTITY, 'You are DeepSeek Harness.', NOW_TEXT, 'Be precise.', 'cwd: /tmp'])
     expect(assembly.contexts).toEqual([
       { name: 'earlier', text: 'context 1' },
       { name: 'later', text: 'context 2' },
     ])
     expect(assembly.tools).toEqual([{ name: 'echo', description: 'echo back', parameters: {} }])
-    expect(assembly.variables).toEqual({})
-    expect(renderPrompt(assembly)).toBe(`${IDENTITY}\n\nYou are DeepSeek Harness.\n\nBe precise.\n\ncwd: /tmp`)
+    expect(assembly.variables).toEqual({ now: NOW_ISO })
+    expect(renderPrompt(assembly)).toBe(`${IDENTITY}\n\nYou are DeepSeek Harness.\n\n${NOW_TEXT}\n\nBe precise.\n\ncwd: /tmp`)
     expect(renderContextSnapshot(assembly)).toBe('Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\ncontext 1\n\ncontext 2')
   })
 
@@ -130,7 +146,7 @@ describe('SystemPrompt', () => {
     const before = await ctx.systemPrompt.assemble()
     expect(contributed(before)).toHaveLength(1)
     expect(before.contexts).toHaveLength(1)
-    expect(before.variables).toEqual({ scoped_var: 'v' })
+    expect(before.variables).toEqual({ now: expect.any(String) as unknown, scoped_var: 'v' })
     await fiber.dispose()
     const assembly = await ctx.systemPrompt.assemble()
     expect(contributed(assembly)).toHaveLength(0)
@@ -138,7 +154,8 @@ describe('SystemPrompt', () => {
     // The built-ins belong to the service fiber, so they survive the plugin's disposal.
     expect(assembly.sections.map(s => s.name)).toEqual(BUILT_IN)
     expect(assembly.tools).toHaveLength(0)
-    expect(assembly.variables).toEqual({})
+    // `now` is always registered by the plugin itself — nothing else leaked.
+    expect(assembly.variables).toEqual({ now: expect.any(String) as unknown })
   })
 
   it('rejects a duplicate section name (a double-loaded plugin must fail, not double its text)', async () => {
@@ -237,11 +254,12 @@ describe('SystemPrompt', () => {
     })
 
     expect(() => ctx.systemPrompt.variable('v', () => 'x')).toThrow('boom change listener')
-    expect((await ctx.systemPrompt.assemble()).variables).toEqual({}) // nothing leaked
+    // `now` is always registered by the plugin itself — nothing else leaked.
+    expect((await ctx.systemPrompt.assemble()).variables).toEqual({ now: expect.any(String) as unknown })
 
     off()
     ctx.systemPrompt.variable('v', () => 'x')
-    expect((await ctx.systemPrompt.assemble()).variables).toEqual({ v: 'x' })
+    expect((await ctx.systemPrompt.assemble()).variables).toEqual({ now: expect.any(String) as unknown, v: 'x' })
   })
 
   it('composes multiple system-prompt/assemble waterfall listeners in order, with the context', async () => {
@@ -265,8 +283,8 @@ describe('SystemPrompt', () => {
 
     const passed: AssembleContext = {}
     const assembly = await ctx.systemPrompt.assemble(passed)
-    expect(seen).toEqual([['harness:identity', 'deployment:persona', 'base', 'from-a']])
-    expect(assembly.sections.map(s => s.name)).toEqual(['harness:identity', 'deployment:persona', 'base', 'from-a'])
+    expect(seen).toEqual([['harness:identity', 'deployment:persona', 'base', 'harness:now', 'from-a']])
+    expect(assembly.sections.map(s => s.name)).toEqual(['harness:identity', 'deployment:persona', 'base', 'harness:now', 'from-a'])
     expect(contexts[0]).toBe(passed) // the caller's context reaches listeners
   })
 
@@ -326,7 +344,7 @@ describe('SystemPrompt', () => {
     firstParameters.properties['leak'] = { type: 'string' }
 
     const second = await ctx.systemPrompt.assemble()
-    expect(second.sections.map(section => section.name)).toEqual(['harness:identity', 'deployment:persona', 'base'])
+    expect(second.sections.map(section => section.name)).toEqual(['harness:identity', 'deployment:persona', 'base', 'harness:now'])
     expect(second.sections[0]!.text).toBe(IDENTITY)
     expect(second.contexts).toEqual([])
     expect(second.tools).toEqual([{ name: 't', description: 'tool', parameters: { type: 'object', properties: {} } }])
@@ -437,13 +455,14 @@ describe('SystemPrompt', () => {
       const dispose = ctx.systemPrompt.variable('who', context => (context as { who?: string }).who)
       expect(changeCount).toBe(1)
 
-      expect((await ctx.systemPrompt.assemble({ who: 'alice' } as AssembleContext)).variables).toEqual({ who: 'alice' })
+      expect((await ctx.systemPrompt.assemble({ who: 'alice' } as AssembleContext)).variables).toEqual({ now: expect.any(String) as unknown, who: 'alice' })
       // A provider returning undefined records "registered but no value here".
-      expect((await ctx.systemPrompt.assemble()).variables).toEqual({ who: undefined })
+      expect((await ctx.systemPrompt.assemble()).variables).toEqual({ now: expect.any(String) as unknown, who: undefined })
 
       dispose()
       expect(changeCount).toBe(2)
-      expect((await ctx.systemPrompt.assemble()).variables).toEqual({})
+      // `now` is always registered by the plugin itself — nothing else leaked.
+      expect((await ctx.systemPrompt.assemble()).variables).toEqual({ now: expect.any(String) as unknown })
     })
 
     it('live-iterates variables registered by an earlier provider', async () => {
@@ -459,6 +478,7 @@ describe('SystemPrompt', () => {
       })
 
       expect((await ctx.systemPrompt.assemble()).variables).toEqual({
+        now: expect.any(String) as unknown,
         first: 'first value',
         late: 'second value',
       })
@@ -473,27 +493,27 @@ describe('SystemPrompt', () => {
       expect(() => ctx.systemPrompt.variable('Not Valid', () => 'x'))
         .toThrow('invalid prompt variable name "Not Valid"')
       // Neither failed registration leaked.
-      expect((await ctx.systemPrompt.assemble()).variables).toEqual({ model: 'm1' })
+      expect((await ctx.systemPrompt.assemble()).variables).toEqual({ now: expect.any(String) as unknown, model: 'm1' })
     })
 
     it('interpolates {{name}} references in section text at render — the persona included', async () => {
       const ctx = new Context()
-      await ctx.plugin(SystemPrompt, { persona: 'You run on {{model}} in {{cwd}}.' })
+      await ctx.plugin(SystemPrompt, { persona: 'You run on {{model}} in {{cwd}}.', ...fixedNow })
       ctx.systemPrompt.variable('model', () => 'deepseek-v4')
       ctx.systemPrompt.variable('cwd', () => '/work')
 
-      expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(`${IDENTITY}\n\nYou run on deepseek-v4 in /work.`)
+      expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(`${IDENTITY}\n\nYou run on deepseek-v4 in /work.\n\n${NOW_TEXT}`)
     })
 
     it('lets a waterfall listener add or override variables before render', async () => {
       const ctx = new Context()
-      await ctx.plugin(SystemPrompt)
+      await ctx.plugin(SystemPrompt, fixedNow)
       ctx.systemPrompt.section({ name: 's', order: 0, text: '{{extra}}' })
       ctx.on('system-prompt/assemble', async (assembly: PromptAssembly, _context, next) => {
         assembly.variables['extra'] = 'from-waterfall'
         return next()
       })
-      expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(`${IDENTITY}\n\nfrom-waterfall`)
+      expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(`${IDENTITY}\n\nfrom-waterfall\n\n${NOW_TEXT}`)
     })
 
     it('throws on a reference to an unregistered variable, listing what exists', async () => {
@@ -502,7 +522,7 @@ describe('SystemPrompt', () => {
       ctx.systemPrompt.section({ name: 'persona', order: 0, text: 'on {{modle}}' })
       ctx.systemPrompt.variable('model', () => 'm')
       await expect(async () => renderPrompt(await ctx.systemPrompt.assemble()))
-        .rejects.toThrow('unknown prompt variable "{{modle}}" in section "persona"; registered variables: model')
+        .rejects.toThrow('unknown prompt variable "{{modle}}" in section "persona"; registered variables: now, model')
     })
 
     it('names "(none)" when no variables are registered at all', () => {
@@ -563,10 +583,10 @@ describe('SystemPrompt', () => {
 
     it('a variable NAMED like a prototype property works once actually registered', async () => {
       const ctx = new Context()
-      await ctx.plugin(SystemPrompt)
+      await ctx.plugin(SystemPrompt, fixedNow)
       ctx.systemPrompt.section({ name: 's', order: 0, text: '{{constructor}}' })
       ctx.systemPrompt.variable('constructor', () => 'own-value')
-      expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(`${IDENTITY}\n\nown-value`)
+      expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(`${IDENTITY}\n\nown-value\n\n${NOW_TEXT}`)
     })
 
     it('never re-scans substituted values (a value containing {{sneaky}} stays literal)', () => {
@@ -577,6 +597,48 @@ describe('SystemPrompt', () => {
         variables: { model: 'literal {{sneaky}} inside' },
       })
       expect(text).toBe('v = literal {{sneaky}} inside!')
+    })
+  })
+
+  describe('harness:now (SWD-113)', () => {
+    it('formatDateTime renders the exact line for a fixed date and zone', () => {
+      // A deliberately "nice" instant (no seconds-rollover ambiguity) in a
+      // zone distinct from whatever the test runner's own zone is.
+      const date = new Date('2024-06-10T13:05:00Z')
+      const text = formatDateTime(date, 'America/New_York')
+      expect(text).toBe(
+        'Current date and time: Monday 2024-06-10 09:05 America/New_York (UTC-04:00) — 2024-06-10T13:05:00Z\n'
+        + 'This is the time this prompt was assembled — it advances between turns, so read elapsed time from here rather than assuming it.',
+      )
+    })
+
+    it('renders different text for two assemblies as the injected clock advances (per-turn freshness)', async () => {
+      const ctx = new Context()
+      let tick = new Date('2025-01-01T00:00:00Z')
+      await ctx.plugin(SystemPrompt, { now: () => tick })
+
+      const first = await ctx.systemPrompt.assemble()
+      tick = new Date('2025-01-01T00:05:30Z')
+      const second = await ctx.systemPrompt.assemble()
+
+      const nowSection = (assembly: PromptAssembly) => assembly.sections.find(s => s.name === 'harness:now')!.text
+      expect(nowSection(first)).not.toBe(nowSection(second))
+      expect(nowSection(first)).toContain('2025-01-01T00:00:00Z')
+      expect(nowSection(second)).toContain('2025-01-01T00:05:30Z')
+    })
+
+    it('formats a DST-crossing date on each side of the transition', () => {
+      // America/New_York switches to daylight time at 2024-03-10T07:00:00Z.
+      const before = formatDateTime(new Date('2024-03-10T06:59:00Z'), 'America/New_York')
+      const after = formatDateTime(new Date('2024-03-10T07:01:00Z'), 'America/New_York')
+      expect(before).toContain('(UTC-05:00)')
+      expect(after).toContain('(UTC-04:00)')
+    })
+
+    it('formats a half-hour-offset zone correctly', () => {
+      const text = formatDateTime(new Date('2024-06-10T13:05:00Z'), 'Asia/Kolkata')
+      expect(text).toContain('(UTC+05:30)')
+      expect(text).toContain('18:35 Asia/Kolkata')
     })
   })
 })
