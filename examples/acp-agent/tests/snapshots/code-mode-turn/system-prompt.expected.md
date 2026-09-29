@@ -6,6 +6,7 @@ Verify your work by running the code or tests. Keep answers brief and factual.
 
 
 Current date and time: {{now}}
+
 This is the time this prompt was assembled — it advances between turns, so read elapsed time from here rather than assuming it.
 
 `run_code` is the only tool you can call directly — a tool call naming any other tool fails. Reach every tool the SDK declares below from inside the program.
@@ -329,6 +330,8 @@ interface ToolOutputMap {
     id: string;
     label: string;
     status: "running" | "idle" | "ready";
+    provider?: string;
+    model?: string;
     parent?: string;
     depth?: number;
   } | {
