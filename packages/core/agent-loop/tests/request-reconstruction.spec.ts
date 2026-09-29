@@ -466,6 +466,42 @@ describe('request stability across the loop', () => {
     })
   })
 
+  it('attributes an explicit reasoningEffort to "config" when preparedCall stays undefined '
+    + '(NO_ADAPTER, owned by a short-circuiting llm/stream listener)', async () => {
+    // Reachability for the fallback branch at agent.ts's terminal
+    // `this.loopCtx.llm.stream(request)` call: no adapter is ever registered
+    // for "listener", so `prepareCall` throws NO_ADAPTER and `preparedCall`
+    // stays undefined — but the `llm/stream` waterfall listener below serves
+    // the response itself without reaching the adapter registry, so the step
+    // still completes. That is the one combination `reasoningEffortSource`'s
+    // 'config' fallback exists for: an explicit effort dispatched with no
+    // adapter-default resolution having happened to attribute it to.
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SystemPrompt, { persona: 'stable base' })
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(AgentLoop, { agents: [] })
+    ctx.on('agent/request', async (_payload, next) => ({ ...await next(), reasoningEffort: ReasoningEffortId('high') }))
+    ctx.on('llm/stream', () => (async function* () {
+      yield* textResponse('owned')
+    })())
+    const agent = ctx.agentLoop.create(SessionId('listener-owned-effort'), {
+      provider: 'listener',
+      model: 'virtual',
+    })
+
+    send(agent, 'go')
+    await waitForIdle(ctx, agent)
+
+    const assistantMessage = agent.session.events.find(event => event.type === 'assistant/message')
+    expect(assistantMessage?.type === 'assistant/message' && assistantMessage.data.reasoningEffort)
+      .toBe(ReasoningEffortId('high'))
+    expect(assistantMessage?.type === 'assistant/message' && assistantMessage.data.reasoningEffortSource)
+      .toBe('config')
+  })
+
   it('a compaction replace rewrites the resend, and the log explains it', async () => {
     const adapter = new MockAdapter([textResponse('one'), textResponse('two')])
     const ctx = await harness(adapter)
