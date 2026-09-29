@@ -19,7 +19,8 @@ describe('installModelSelection()', () => {
     const seed: LlmCallConfig = { provider: 'seed', model: 'seed', temperature: 0.2 }
     const signal = new AbortController().signal
 
-    // `now` (SWD-113: harness:now) is always registered by the SystemPrompt plugin itself.
+    // The `now` template variable is always registered by the SystemPrompt plugin itself
+    // (the SWD-113 clock message lives at the request tail, not here).
     expect((await ctx.systemPrompt.assemble()).variables).toEqual({ now: expect.any(String) as unknown })
     await expect(agentEvents(ctx, agent).waterfall(
       'agent/request', { turn: 1, step: 0, signal }, () => Promise.resolve(seed),
