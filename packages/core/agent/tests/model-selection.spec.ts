@@ -19,7 +19,8 @@ describe('installModelSelection()', () => {
     const seed: LlmCallConfig = { provider: 'seed', model: 'seed', temperature: 0.2 }
     const signal = new AbortController().signal
 
-    expect((await ctx.systemPrompt.assemble()).variables).toEqual({})
+    // `now` (SWD-113: harness:now) is always registered by the SystemPrompt plugin itself.
+    expect((await ctx.systemPrompt.assemble()).variables).toEqual({ now: expect.any(String) as unknown })
     await expect(agentEvents(ctx, agent).waterfall(
       'agent/request', { turn: 1, step: 0, signal }, () => Promise.resolve(seed),
     )).resolves.toBe(seed)
@@ -52,7 +53,7 @@ describe('installModelSelection()', () => {
     )).resolves.toEqual({ provider: 'beta', model: 'b1', temperature: 0.2 })
 
     dispose()
-    expect((await ctx.systemPrompt.assemble()).variables).toEqual({})
+    expect((await ctx.systemPrompt.assemble()).variables).toEqual({ now: expect.any(String) as unknown })
     await expect(agentEvents(ctx, agent).waterfall(
       'agent/request', { turn: 2, step: 0, signal }, () => Promise.resolve(seed),
     )).resolves.toBe(seed)

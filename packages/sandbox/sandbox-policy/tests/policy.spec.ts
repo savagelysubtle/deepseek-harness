@@ -144,7 +144,9 @@ describe('SandboxPolicyService', () => {
 describe('sandbox:policy request context', () => {
   async function promptMounted(config: { mode?: 'read-only' | 'workspace-write' | 'danger-full-access'; workspaceRoot?: string } = {}): Promise<Context> {
     const ctx = new Context()
-    await ctx.plugin(SystemPrompt)
+    // Fix the harness:now (SWD-113) clock so the "byte-stable" assertion below
+    // does not flake on a second boundary between the two live renders it compares.
+    await ctx.plugin(SystemPrompt, { now: () => new Date('2026-01-01T00:00:00Z') })
     await ctx.plugin(SandboxPolicyService, config)
     return ctx
   }

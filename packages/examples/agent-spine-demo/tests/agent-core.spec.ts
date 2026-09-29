@@ -722,9 +722,15 @@ describe('dsh-agent-spine-demo bundle', () => {
 
     expect(ctx.tools.schemas()).toEqual([])
     ctx.systemPrompt.context({ name: 'policy', order: 0, text: 'hidden policy' })
-    expect((await ctx.systemPrompt.assemble()).contexts).toEqual([])
-    expect(renderPrompt(await ctx.systemPrompt.assemble()))
-      .toBe('You are a helpful software engineer assistant.')
+    const assembly = await ctx.systemPrompt.assemble()
+    expect(assembly.contexts).toEqual([])
+    // This bundle does not forward SystemPrompt's `now` clock override, so
+    // `harness:now` (SWD-113) still renders the live instant here — pull its
+    // own rendered text from the assembly rather than hardcoding a timestamp.
+    const nowSection = assembly.sections.find(s => s.name === 'harness:now')
+    expect(nowSection?.text).toMatch(/^Current date and time: /)
+    expect(renderPrompt(assembly))
+      .toBe(`You are a helpful software engineer assistant.\n\n${nowSection?.text}`)
 
     await ctx.fiber.dispose()
   })
