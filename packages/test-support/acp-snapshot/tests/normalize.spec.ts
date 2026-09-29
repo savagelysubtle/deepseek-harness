@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   type NormalizeContext,
   extractSnapshotSpillPaths,
+  normalizeConsoleExporterStderr,
   normalizeSessionLog,
   normalizeStdout,
   scrubRequestHeaders,
@@ -638,5 +639,60 @@ describe('scrubToolSchemas', () => {
     expect(out).toContain('new prompt')
     expect(out.split('\n')[2]).toBe(systemOnly)
     expect(scrubToolSchemas(out)).toBe(out)
+  })
+})
+
+describe('normalizeConsoleExporterStderr', () => {
+  const logLine = (time: string, level: string, name: string, message: string): string =>
+    `${time} [${level}] ${name} ${message}`
+
+  it('replaces the render() timestamp and any embedded UUID with stable tokens, leaving severity/name/message verbatim', () => {
+    const raw = logLine(
+      '2026-09-29 10:00:00',
+      'W',
+      'session-title-service',
+      'session "session-11111111-2222-3333-4444-555555555555": automatic title generation failed',
+    )
+    expect(normalizeConsoleExporterStderr(raw)).toBe(
+      '{{logTime}} [W] session-title-service session "session-{{sessionId}}": automatic title generation failed',
+    )
+  })
+
+  it('canonicalizes one contiguous run of racing boot-log lines by logger name, stable within a logger', () => {
+    const raw = [
+      logLine('2026-09-29 10:00:00', 'I', 'tool-mailbox', 'mailbox tools mounted'),
+      logLine('2026-09-29 10:00:00', 'I', 'tool-subagent', 'subagent provider "spawn" not registered yet'),
+      logLine('2026-09-29 10:00:00', 'I', 'tool-subagent', 'subagent provider "fork" not registered yet'),
+      logLine('2026-09-29 10:00:00', 'I', 'hmr', 'watching []'),
+    ].join('\n')
+    const out = normalizeConsoleExporterStderr(raw)
+    expect(out.split('\n')).toEqual([
+      '{{logTime}} [I] hmr watching []',
+      '{{logTime}} [I] tool-mailbox mailbox tools mounted',
+      '{{logTime}} [I] tool-subagent subagent provider "spawn" not registered yet',
+      '{{logTime}} [I] tool-subagent subagent provider "fork" not registered yet',
+    ])
+  })
+
+  it('scopes the sort to each contiguous run: a literal line resets the group, so a [W] logged right before a later fatal line stays adjacent to it instead of being pooled into an earlier cluster', () => {
+    const raw = [
+      logLine('2026-09-29 10:00:00', 'I', 'b-logger', 'first cluster, out of alpha order'),
+      logLine('2026-09-29 10:00:00', 'I', 'a-logger', 'first cluster, out of alpha order'),
+      'dsh: SERVER: boom',
+      logLine('2026-09-29 10:00:01', 'W', 'z-logger', 'warned right before the fatal line — must stay put'),
+    ].join('\n')
+    const out = normalizeConsoleExporterStderr(raw)
+    // First cluster sorted internally (a-logger now before b-logger)...
+    expect(out.split('\n')).toEqual([
+      '{{logTime}} [I] a-logger first cluster, out of alpha order',
+      '{{logTime}} [I] b-logger first cluster, out of alpha order',
+      // ...the literal line passes through untouched, still separating the
+      // two clusters...
+      'dsh: SERVER: boom',
+      // ...and the second cluster's one line stays exactly where it was:
+      // never pooled with the first cluster, never relocated ahead of the
+      // literal line it is meant to sit beside.
+      '{{logTime}} [W] z-logger warned right before the fatal line — must stay put',
+    ])
   })
 })

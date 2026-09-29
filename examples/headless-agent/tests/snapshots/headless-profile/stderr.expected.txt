@@ -1,1 +1,6 @@
+{{logTime}} [I] hmr watching []
+{{logTime}} [W] session-title-service session "session-{{sessionId}}": automatic title generation failed: Error: CLI mock provider failed
+{{logTime}} [I] tool-mailbox mailbox tools: mounted with no served roster (`addresses` is empty or absent), which is normal for a single-seat deployment — mailbox_send admits recipients against the org registry instead, refusing a name that is not a seat. It cannot tell that a real seat is currently unserved; configure `addresses` with this deployment's served roster (the same list `mailbox-bridge` mounts with) to get that stronger check.
+{{logTime}} [I] tool-subagent subagent provider "spawn" not registered yet; the "subagent" tool will register when it appears
+{{logTime}} [I] tool-subagent subagent provider "fork" not registered yet; the "subagent_fork" tool will register when it appears
 dsh: SERVER: CLI mock provider failed

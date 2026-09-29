@@ -1,6 +1,10 @@
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
+import {
+  LOADER_SMOKE_TEST_TIMEOUT_MS,
+  nonConsoleExporterStderrLines,
+  runLoaderSmoke,
+} from '@deepseek-ai/dsh-loader-smoke'
 const binScript = fileURLToPath(new URL('./fixtures/dsh-badge/snapshot.ts', import.meta.url))
 const configPath = fileURLToPath(new URL('./fixtures/dsh-badge/cordis.yml', import.meta.url))
 const defaultConfigPath = fileURLToPath(new URL('./fixtures/dsh-badge/default.cordis.yml', import.meta.url))
@@ -30,8 +34,14 @@ describe('dsh badge assembled snapshot', () => {
       enabled.stdout.replaceAll(badgeAssetsPath, '{{badgeAssetsPath}}'),
     ) as unknown
 
-    expect(disabled.stderr).toBe('')
-    expect(enabled.stderr).toBe('')
+    // SWD-151: the console log exporter writes every level to stderr, not
+    // stdout, so the assembled app's own operator-facing boot logs (e.g.
+    // "hmr watching [...]") legitimately land there — stderr is no longer a
+    // proxy for "nothing went wrong". Assert instead that stderr carries
+    // nothing BUT the exporter's own rendered lines; stdout parsing as clean
+    // JSON below is the other proof this snapshot cares about.
+    expect(nonConsoleExporterStderrLines(disabled.stderr)).toEqual([])
+    expect(nonConsoleExporterStderrLines(enabled.stderr)).toEqual([])
     expect(disabledSnapshot).toMatchInlineSnapshot(`
       {
         "catalog": null,

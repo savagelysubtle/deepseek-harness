@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  normalizeConsoleExporterStderr,
   normalizeSessionLog,
   normalizeStdout,
   refreshFixtureReplacements,
@@ -13,7 +14,11 @@ import {
   type HarvestedLog,
   type NormalizeContext,
 } from '@deepseek-ai/dsh-acp-snapshot'
-import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
+import {
+  LOADER_SMOKE_TEST_TIMEOUT_MS,
+  nonConsoleExporterStderrLines,
+  runLoaderSmoke,
+} from '@deepseek-ai/dsh-loader-smoke'
 import {
   decompressZstdFrame,
   scanZstdFrames,
@@ -249,7 +254,18 @@ describe('headless stream-json snapshots', () => {
     })
 
     expect(result.stdout).toBe('CLI tool round trip complete: CLI_TOOL_ROUND_TRIP\n')
-    expect(result.stderr).toBe('')
+    // SWD-151: the console exporter writes every accepted log level to
+    // stderr now, so this profile's own [I] boot logs (tool-subagent,
+    // tool-mailbox, hmr) legitimately land there — stderr is no longer a
+    // proxy for "nothing went wrong". `allow: ['I', 'W']` is ALSO needed
+    // here (not just on the model-failure scenario below): this scenario's
+    // cli-mock adapter has no configured contextWindow, so
+    // basic-compaction-engine and context-pressure always warn about it, and
+    // session-title-service's own background call to the same cli-mock
+    // adapter gets a tool-call response the title service rejects,
+    // producing a third warning — all three are structural to this
+    // scenario's cli-mock composition, not a real failure.
+    expect(nonConsoleExporterStderrLines(result.stderr, { allow: ['I', 'W'] })).toEqual([])
   }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
   it('prints a terminal model failure through the product headless profile command', async () => {
@@ -270,7 +286,13 @@ describe('headless stream-json snapshots', () => {
     })
 
     expect(result.stdout).toBe('\n')
-    await expect(result.stderr).toMatchFileSnapshot(headlessFailureExpected)
+    // SWD-151: the console exporter's boot logs (tool-subagent,
+    // tool-mailbox, hmr, session-title-service) now legitimately land on
+    // stderr ahead of the terminal failure line this golden pins. Their
+    // render() timestamp (and any embedded session id) is not byte-stable
+    // across runs, so normalize both to stable tokens before comparing;
+    // severity, logger name, and message text stay verbatim.
+    await expect(normalizeConsoleExporterStderr(result.stderr)).toMatchFileSnapshot(headlessFailureExpected)
   }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
   it('prints the original Loader activation error through the assembled one-shot app', async () => {

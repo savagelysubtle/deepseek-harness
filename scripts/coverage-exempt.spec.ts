@@ -18,6 +18,7 @@ const allSpecs = new Set([
   ...globSync('packages/*/*/tests/**/*.spec.tsx', { cwd: root }),
   ...globSync('apps/*/tests/**/*.spec.ts', { cwd: root }),
   ...globSync('examples/*/tests/**/*.spec.ts', { cwd: root }),
+  ...globSync('vendor/*/tests/**/*.spec.ts', { cwd: root }),
   ...globSync('scripts/**/*.spec.ts', { cwd: root }),
 ].map(path => path.replaceAll('\\', '/')))
 

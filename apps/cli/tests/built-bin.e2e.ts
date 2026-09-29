@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { startMockLlmServer } from '@deepseek-ai/dsh-llm-mock-server'
+import { nonConsoleExporterStderrLines } from '@deepseek-ai/dsh-loader-smoke'
 import { execa } from 'execa'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
@@ -334,7 +335,11 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
         DSH_TELEMETRY_DISABLED: '1',
       })
       expect(web.code).toBe(0)
-      expect(web.stderr).toBe('')
+      // SWD-151: the console exporter writes every accepted log level to
+      // stderr now, so a real profile's own [I] boot logs legitimately land
+      // there even for --help — assert instead that stderr carries nothing
+      // BUT the exporter's own rendered [I] lines.
+      expect(nonConsoleExporterStderrLines(web.stderr)).toEqual([])
       expect(web.stdout).toContain('Usage: dsh --profile web')
       expect(web.stdout).toContain('--port <port>')
       expect(web.stdout).not.toContain('dsh web: http://')
@@ -353,7 +358,9 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
         DSH_TELEMETRY_DISABLED: '1',
       })
       expect(headlessHelp.code).toBe(0)
-      expect(headlessHelp.stderr).toBe('')
+      // SWD-151: same treatment — --help still boots enough of the profile
+      // (tool-subagent registration, for example) to log legitimate [I] lines.
+      expect(nonConsoleExporterStderrLines(headlessHelp.stderr)).toEqual([])
       expect(headlessHelp.stdout).toContain('Usage: dsh --profile headless')
 
       const missingTask = await runBuiltBin(['--profile', 'headless'], {
@@ -370,7 +377,10 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
   it('runs the headless profile through its app-owned task positional', async () => {
     const apiKey = 'built-dsh-headless-key'
     const server = await startMockLlmServer({
-      sequence: ['success'],
+      // Two scripted turns: the main task call, and the background
+      // session-title-service call every headless session fires once. One
+      // entry left the title call to hit script exhaustion and warn.
+      sequence: ['success', 'success'],
       apiKey,
       successText: 'published headless profile reached the mock',
     })
@@ -378,13 +388,22 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
     try {
       const result = await runBuiltBin(['--profile', 'headless', 'answer', 'from', 'the', 'published', 'entry'], {
         DSH_HOME: home,
+        // Isolate agent/skill discovery from this host's real $HOME: without
+        // this, a host whose real ~/.agents happens to define a skill with
+        // the same name as one of dsh's bundled ones (as this repo's own dev
+        // box does) gets a spurious skill-registry [W] "ignored because a
+        // higher-priority skill already exists" that has nothing to do with
+        // the built bin under test.
+        DSH_AGENTS_HOME: join(home, '.agents'),
         DSH_TELEMETRY_DISABLED: '1',
         DEEPSEEK_API_KEY: apiKey,
         DEEPSEEK_BASE_URL: server.baseURL,
       })
       expect(result.code, result.stderr).toBe(0)
       expect(result.stdout).toBe('published headless profile reached the mock')
-      expect(result.stderr).toBe('')
+      // SWD-151: same treatment — this profile's own [I] boot logs (tool-subagent,
+      // tool-mailbox, hmr) legitimately land on stderr now.
+      expect(nonConsoleExporterStderrLines(result.stderr)).toEqual([])
       expect(server.requests.length).toBeGreaterThan(0)
       expect(server.requests.every(request => request.path === '/chat/completions')).toBe(true)
       expect(JSON.stringify(server.requests.map(request => request.body))).toContain('answer from the published entry')
@@ -701,7 +720,9 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
     it('prints the web profile bundle layers without a user layer', async () => {
       const { stdout, code, stderr } = await runBuiltBin(['--profile', 'web', '--dump-default-config'], { DSH_HOME: home })
       expect(code).toBe(0)
-      expect(stderr).toBe('')
+      // SWD-151: same treatment — a real profile's own [I] boot logs
+      // legitimately land on stderr now.
+      expect(nonConsoleExporterStderrLines(stderr)).toEqual([])
       expect(stdout).toContain("name: '@deepseek-ai/dsh-agent-loop'")
       expect(stdout).toContain('agents: []')
       expect(stdout).toContain('# == @deepseek-ai/dsh-base')
@@ -714,7 +735,8 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
         { DSH_HOME: home },
       )
       expect(code).toBe(0)
-      expect(stderr).toBe('')
+      // SWD-151: same treatment as above.
+      expect(nonConsoleExporterStderrLines(stderr)).toEqual([])
       expect(stdout).toContain("name: '@deepseek-ai/dsh-headless'")
       expect(stdout).not.toMatch(/name: '@deepseek-ai\/dsh-host-/)
       expect(stdout).not.toContain("name: '@deepseek-ai/dsh-web-app'")

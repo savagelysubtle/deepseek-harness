@@ -165,6 +165,70 @@ export interface LoaderSmokeResult {
 }
 
 /**
+ * The Node `logger-console` exporter's per-line render() shape (SWD-151,
+ * `vendor/logger-console/src/shared.ts`): a `showTime` timestamp, the
+ * severity bracket built from `message.type[0].toUpperCase()` (`error` →
+ * `E`, `info` → `I`, `warn` → `W`, `debug` → `D`), the logger name, then the
+ * formatted message. Colors are stripped from the match because a piped
+ * stderr (as every subprocess smoke captures it) reports no color support,
+ * so `render()` emits plain text. The severity bracket is captured so
+ * {@link nonConsoleExporterStderrLines} can tell an `[I]` boot line apart
+ * from a `[W]`/`[E]` one that happens to share the same shape.
+ */
+const CONSOLE_EXPORTER_LOG_LINE_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[([EIWD])\] \S+ .*$/
+
+/** A console-exporter severity bracket letter a smoke may choose to allow through. */
+export type ConsoleExporterSeverity = 'E' | 'I' | 'W'
+
+/** Options for {@link nonConsoleExporterStderrLines}. */
+export interface NonConsoleExporterStderrLinesOptions {
+  /**
+   * Severities treated as expected boot noise instead of unexpected output.
+   * Defaults to `['I']`: ordinary info-level boot logs (subagent/mailbox tool
+   * registration, `hmr watching […]`, and similar) are expected and never
+   * fail a smoke, but a `[W]`/`[E]` line is NOT expected boot noise by
+   * default — a real warning or error must still fail the assertion, or a
+   * smoke could never again catch one. A scenario with a genuinely expected
+   * warning (for example, a scripted mock that intentionally leaves the
+   * background session-title call unscripted) opts that severity in
+   * explicitly, at the call site, with a comment saying why.
+   */
+  readonly allow?: ReadonlyArray<ConsoleExporterSeverity>
+}
+
+/**
+ * Every non-empty line of a captured stderr stream that is NOT expected
+ * output from the Node `logger-console` exporter (SWD-151). The exporter now
+ * writes every accepted log level to stderr instead of stdout, so an
+ * assembled app's own operator-facing boot logs legitimately land there —
+ * stderr is no longer a proxy for "nothing went wrong". A smoke that wants
+ * that proxy back asserts this returns `[]` instead of asserting
+ * `stderr === ''`.
+ *
+ * By default only `[I]` (info) lines matching the exporter's render() shape
+ * are treated as expected; every `[W]`/`[E]` line (and any line outside the
+ * shape entirely) still comes back as unexpected, so a smoke assertion built
+ * on this helper still fails on a real warning or error. Pass `allow` to
+ * widen that set for one call site that has a specific, documented reason to
+ * expect a higher severity.
+ *
+ * @param stderr - captured process stderr text.
+ * @param options - severities to treat as expected; see {@link NonConsoleExporterStderrLinesOptions}.
+ * @returns every non-empty line that is not expected exporter output; empty when stderr carries only allowed exporter lines.
+ */
+export function nonConsoleExporterStderrLines(
+  stderr: string,
+  options: NonConsoleExporterStderrLinesOptions = {},
+): string[] {
+  const allow = new Set(options.allow ?? ['I'])
+  return stderr.split('\n').filter((line) => {
+    if (line.length === 0) return false
+    const severity = CONSOLE_EXPORTER_LOG_LINE_RE.exec(line)?.[1]
+    return severity === undefined || !allow.has(severity)
+  })
+}
+
+/**
  * Boot one real Loader tree from an isolated cwd, close stdin immediately, and
  * await a clean exit. The helper owns process kill and temp-directory cleanup on
  * every outcome, and picks src/lib via {@link resolveExampleLaunch}.

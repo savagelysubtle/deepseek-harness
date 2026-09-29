@@ -12,6 +12,7 @@ const SYSTEM = '{{system}}'
 const TOOLS = '{{tools}}'
 const EVENT_TIME = '{{eventTime}}'
 const EVENT_OMITTED_BYTES = '{{eventOmittedBytes}}'
+const LOG_TIME = '{{logTime}}'
 
 /** A cwd-rooted path after volatile cwd replacement, through its last separator-delimited segment. */
 const CWD_ROOTED_PATH_RE = /\{\{cwd\}\}(?:[\\/][^\s<>"'`]+)+/g
@@ -26,6 +27,20 @@ const FILE_URI_PATH_PREFIX_RE = /(?:^|[^a-z0-9+.-])file:\/\/\/?$/i
 
 /** A UUID v4 string, the shape `randomUUID()` produces for session ids. */
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
+/**
+ * The timestamp prefix the Node `logger-console` exporter's `render()` writes ahead of every
+ * accepted message (SWD-151: `logger-console/src/shared.ts`'s default `showTime` template,
+ * `yyyy-MM-dd hh:mm:ss `, followed by the `[E|I|W|D]` severity bracket) — matched by a lookahead so
+ * only the timestamp itself is consumed and replaced, leaving the bracket, logger name, and message
+ * text in place for {@link normalizeConsoleExporterStderr}.
+ */
+const CONSOLE_EXPORTER_LOG_TIME_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} (?=\[[EIWD]\] )/gm
+/**
+ * A console-exporter line already normalized by {@link CONSOLE_EXPORTER_LOG_TIME_RE}, capturing the
+ * logger name so {@link normalizeConsoleExporterStderr} can canonicalize boot-log order (see there
+ * for why order needs canonicalizing at all).
+ */
+const NORMALIZED_CONSOLE_EXPORTER_LINE_RE = /^\{\{logTime\}\} \[[EIWD]\] (\S+) /
 const LOCAL_SPILL_PATH_RE = new RegExp(
   String.raw`\{\{cwd\}\}[\\/]\.spill[\\/]session-[0-9a-f]{12}[\\/][0-9a-f]{12}-([A-Za-z0-9._~-]+?)`
   + String.raw`(?=\. Use read with offset/limit|[\s)]|$)`,
@@ -371,6 +386,68 @@ export function scrubToolSchemas(rawLog: string): string {
  */
 export function scrubRequestHeaders(rawLog: string): string {
   return scrubHeaderContent(rawLog, { system: true, tools: true })
+}
+
+/**
+ * Normalize a captured stderr stream that may carry Node `logger-console` exporter output
+ * (SWD-151) for a byte-stable golden. Every accepted log level now writes its own rendered line to
+ * stderr, so an assembled app's operator-facing boot logs legitimately interleave with any literal
+ * stderr text a golden pins (a startup error message, for example) — those log lines carry a
+ * wall-clock timestamp and can embed a random session id, neither of which is reproducible run to
+ * run. This replaces just those two volatile pieces: the render() timestamp prefix becomes
+ * `{{logTime}}`, and any embedded UUID (matching {@link normalizeSessionLog}'s session-id scrub)
+ * becomes `{{sessionId}}`. Severity, logger name, and the rest of the message text stay verbatim, so
+ * a real change to what an app logs still shows up in the golden diff. Lines outside the
+ * console-exporter shape (including any literal stderr text unrelated to logging) pass through
+ * unchanged except for the same UUID scrub.
+ *
+ * Different plugins log their own boot messages independently and concurrently, with no ordering
+ * guarantee between one plugin's logger and another's (confirmed on the running host 2026-09-29: the
+ * same headless-profile boot logged `tool-mailbox` before `tool-subagent` in one run and after it in
+ * the next). A byte-stable golden cannot pin an order that is not actually guaranteed, so every
+ * now-normalized console-exporter line is stable-sorted by its logger name — this canonicalizes
+ * cross-plugin order while leaving same-plugin lines in their original relative order (stable sort),
+ * since consecutive lines from the same synchronous logger call ARE ordered.
+ *
+ * The sort is scoped to each CONTIGUOUS run of console-exporter lines independently — it resets at
+ * every non-matching line (a literal stderr line, or a blank line) — rather than pooling every
+ * matching line across the whole text. Only lines racing against each other at the same boot moment
+ * lack an ordering guarantee; a `[W]`/`[E]` line logged right before an unrelated later fatal line
+ * has no such race with it and must never be sorted away from it into an earlier, unrelated cluster.
+ * Non-log lines always keep their original position.
+ *
+ * @param stderr - captured process stderr text.
+ * @returns stderr with every console-exporter line's timestamp and embedded UUID replaced by
+ * stable tokens, and each contiguous run of boot-log lines canonicalized by logger name.
+ */
+export function normalizeConsoleExporterStderr(stderr: string): string {
+  const withTokens = stderr
+    .replace(CONSOLE_EXPORTER_LOG_TIME_RE, `${LOG_TIME} `)
+    .replace(UUID_RE, SESSION_ID)
+  const lines = withTokens.split('\n')
+  const result = [...lines]
+  let runStart: number | undefined
+  let run: { line: string; key: string; originalIndex: number }[] = []
+  const flushRun = (): void => {
+    if (runStart === undefined) return
+    const start = runStart
+    const sorted = [...run].sort((left, right) =>
+      left.key === right.key ? left.originalIndex - right.originalIndex : left.key < right.key ? -1 : 1)
+    sorted.forEach((entry, offset) => { result[start + offset] = entry.line })
+    runStart = undefined
+    run = []
+  }
+  lines.forEach((line, index) => {
+    const key = NORMALIZED_CONSOLE_EXPORTER_LINE_RE.exec(line)?.[1]
+    if (key === undefined) {
+      flushRun()
+      return
+    }
+    runStart ??= index
+    run.push({ line, key, originalIndex: run.length })
+  })
+  flushRun()
+  return result.join('\n')
 }
 
 /** Which independent request-header payloads a scrubber replaces. */
