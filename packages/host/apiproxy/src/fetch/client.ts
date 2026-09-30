@@ -392,6 +392,8 @@ export abstract class AbstractApiClient implements IApiClient {
     // "the list silently froze at stale state" (the 2026-08-30 workspace-render incident class).
     const parsed = UNARY_VALUE_SCHEMAS[method].safeParse(full.result.value)
     if (!parsed.success) {
+      /* v8 ignore next -- zod@4.4.3's safeParse only constructs a ZodError when result.issues.length > 0 (core/parse.ts _safeParse), and
+         finalizeIssue always sets a string message, so issues[0] and its .message can never be undefined here */
       throw new Error(`rpc "${method}": response value failed the client-side schema (${parsed.error.issues.length} issue(s); first: ${parsed.error.issues[0]?.path.join('.') || '(root)'}: ${parsed.error.issues[0]?.message ?? 'unknown'})`)
     }
     const value = parsed.data as ResponseValue<K>

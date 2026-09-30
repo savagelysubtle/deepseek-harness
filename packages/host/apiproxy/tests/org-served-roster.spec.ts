@@ -28,12 +28,18 @@ import {
   writeOrgServedRoster,
 } from '../src/org-served-roster.ts'
 
-// Controls for the node:fs/promises mock below, used only by the
-// rename-failure test, which needs a filesystem failure no real temp-dir
-// setup can trigger deterministically. Every other test in this file uses
-// the real filesystem untouched — same precedent as
+// Controls for the node:fs/promises mock below, used only by the failure-
+// injection tests, which need filesystem faults no real temp-dir setup can
+// trigger deterministically. Every other test in this file uses the real
+// filesystem untouched — same precedent as
 // packages/mailbox/mailbox/tests/org-registry.spec.ts.
-const fsControl = vi.hoisted(() => ({ forceRenameFailure: false }))
+const fsControl = vi.hoisted(() => ({
+  forceRenameFailure: false,
+  forceReadFileNonErrorThrow: false,
+  forceBackupOpenNonEexist: false,
+  forceBackupOpenAlwaysEexist: false,
+  forceRmFailure: false,
+}))
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
@@ -43,6 +49,92 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       if (fsControl.forceRenameFailure) throw new Error('simulated rename failure: disk full')
       return actual.rename(...args)
     },
+    async readFile(...args: Parameters<typeof actual.readFile>): ReturnType<typeof actual.readFile> {
+      if (fsControl.forceReadFileNonErrorThrow) {
+        fsControl.forceReadFileNonErrorThrow = false
+        // Deliberately a non-Error throw: proves the `String(error)` fallback branch.
+        throw 'simulated non-error read failure'
+      }
+      return actual.readFile(...args)
+    },
+    async open(...args: Parameters<typeof actual.open>): ReturnType<typeof actual.open> {
+      const [path, flags] = args
+      const isBackupWrite = typeof path === 'string' && path.includes('.bak-') && flags === 'wx'
+      if (isBackupWrite && fsControl.forceBackupOpenAlwaysEexist) {
+        throw Object.assign(new Error('EEXIST: simulated'), { code: 'EEXIST' })
+      }
+      if (isBackupWrite && fsControl.forceBackupOpenNonEexist) {
+        fsControl.forceBackupOpenNonEexist = false
+        throw Object.assign(new Error('EACCES: simulated permission failure'), { code: 'EACCES' })
+      }
+      return actual.open(...args)
+    },
+    async rm(...args: Parameters<typeof actual.rm>): ReturnType<typeof actual.rm> {
+      if (fsControl.forceRmFailure) {
+        fsControl.forceRmFailure = false
+        throw new Error('simulated rm cleanup failure')
+      }
+      return actual.rm(...args)
+    },
+  }
+})
+
+/** Reset every fs-failure-injection flag; called from this file's own afterEach. */
+function resetFsControl(): void {
+  fsControl.forceRenameFailure = false
+  fsControl.forceReadFileNonErrorThrow = false
+  fsControl.forceBackupOpenNonEexist = false
+  fsControl.forceBackupOpenAlwaysEexist = false
+  fsControl.forceRmFailure = false
+}
+
+/**
+ * Controls for the `yaml` mock below, used only by the self-validation tests:
+ * writeOrgServedRoster's own step-7 safety net (re-parse the JUST-SERIALISED
+ * text and re-check both mounts before anything is written) has no other way
+ * to be exercised — every other write in this file round-trips cleanly by
+ * construction, so the mismatch it guards against never otherwise occurs.
+ * `corruptNextStringify` simulates a serializer defect landing between the
+ * document this module built and the bytes it would write/re-read.
+ */
+const yamlControl = vi.hoisted(() => ({
+  corruptNextStringify: undefined as undefined | 'mismatched-addresses' | 'malformed-addresses',
+  forceParseNonErrorThrow: false,
+}))
+
+vi.mock('yaml', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('yaml')>()
+  return {
+    ...actual,
+    parse(...args: Parameters<typeof actual.parse>): ReturnType<typeof actual.parse> {
+      if (yamlControl.forceParseNonErrorThrow) {
+        yamlControl.forceParseNonErrorThrow = false
+        // Deliberately a non-Error throw: proves the `String(error)` fallback branch.
+        throw 'simulated non-error parse failure'
+      }
+      return actual.parse(...args)
+    },
+    stringify(value: unknown, options?: unknown): string {
+      const mode = yamlControl.corruptNextStringify
+      if (mode === undefined) return actual.stringify(value, options as never)
+      yamlControl.corruptNextStringify = undefined
+      // `value` is the freshly built patch-list array; tamper the
+      // tool-mailbox mount's config in place before serialising, so the
+      // bytes written (and re-read at step 7) disagree with what the caller
+      // actually requested.
+      const tampered = JSON.parse(JSON.stringify(value)) as Array<{ insert?: unknown }>
+      for (const top of tampered) {
+        const insert = top.insert
+        if (!Array.isArray(insert)) continue
+        for (const entry of insert as Array<Record<string, unknown>>) {
+          if (entry.id !== 'tool-mailbox') continue
+          const config = entry.config as Record<string, unknown> | undefined
+          if (config === undefined) continue
+          config.addresses = mode === 'mismatched-addresses' ? ['tampered-mismatch'] : 'not-a-list'
+        }
+      }
+      return actual.stringify(tampered, options as never)
+    },
   }
 })
 
@@ -51,6 +143,9 @@ const MOUNT_IDS: readonly [string, string] = ['mailbox-bridge', 'tool-mailbox']
 let dirs: string[] = []
 
 afterEach(() => {
+  resetFsControl()
+  yamlControl.corruptNextStringify = undefined
+  yamlControl.forceParseNonErrorThrow = false
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
   dirs = []
 })
@@ -297,6 +392,46 @@ describe('hashOrgServedRosterBytes', () => {
   })
 })
 
+describe('findOrgMountAddresses', () => {
+  // Direct tests of the malformed-document branches: writeOrgServedRoster
+  // only ever calls this against a document it already read successfully
+  // (real profile fixtures below always parse to a well-formed top-level
+  // list), so these shapes — a non-list document, a non-object top-level
+  // entry, a non-object insert entry, and a mount whose config itself isn't
+  // an object — never reach it through that path. The function is exported
+  // for exactly this: a direct, real-input test of its own contract.
+  it('refuses a document whose top level is not a list', () => {
+    expect(findOrgMountAddresses('not-a-list', 'mailbox-bridge')).toEqual({
+      ok: false,
+      reason: 'profile patch file does not contain a top-level list',
+    })
+    expect(findOrgMountAddresses({ insert: [] }, 'mailbox-bridge').ok).toBe(false)
+  })
+
+  it('skips a non-object top-level entry and a non-object insert entry on the way to a real match', () => {
+    const patches = [
+      'a stray scalar top-level entry',
+      null,
+      { insert: ['a stray scalar insert entry', null, { id: 'mailbox-bridge', config: { addresses: ['a'] } }] },
+    ]
+    expect(findOrgMountAddresses(patches, 'mailbox-bridge')).toEqual({ ok: true, addresses: ['a'] })
+  })
+
+  it('reports "not a list of strings" when the matched entry has no config object at all', () => {
+    // Distinct from the existing `config: { addresses: 'not-a-list' }` case:
+    // this exercises the OTHER side of the config type-guard — `config`
+    // itself missing or not an object — not just `addresses` malformed.
+    expect(findOrgMountAddresses(
+      [{ insert: [{ id: 'mailbox-bridge' }] }],
+      'mailbox-bridge',
+    )).toEqual({ ok: false, reason: 'profile mount "mailbox-bridge" config.addresses is not a list of strings' })
+    expect(findOrgMountAddresses(
+      [{ insert: [{ id: 'mailbox-bridge', config: null }] }],
+      'mailbox-bridge',
+    ).ok).toBe(false)
+  })
+})
+
 describe('readOrgProfilePatchesWithToken', () => {
   it('reads, parses, and hashes a real file in one pass, matching hashOrgServedRosterBytes of its raw bytes', async () => {
     const dir = tempDir()
@@ -315,6 +450,36 @@ describe('readOrgProfilePatchesWithToken', () => {
     if (read.ok) throw new Error('unreachable')
     expect(read.reason).toContain(missing)
   })
+
+  it('reports invalid YAML content as a named failure, distinct from an unreadable file', async () => {
+    const dir = tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    writeFileSync(path, '- insert:\n  - id: [unterminated flow mapping\n')
+    const read = await readOrgProfilePatchesWithToken(path)
+    expect(read.ok).toBe(false)
+    if (read.ok) throw new Error('unreachable')
+    expect(read.reason).toContain('is not valid YAML')
+  })
+
+  it('folds a non-Error thrown by the filesystem into String(error), not `.message`', async () => {
+    const dir = tempDir()
+    const path = writeProfile(dir, ['seat-a'])
+    fsControl.forceReadFileNonErrorThrow = true
+    const read = await readOrgProfilePatchesWithToken(path)
+    expect(read.ok).toBe(false)
+    if (read.ok) throw new Error('unreachable')
+    expect(read.reason).toContain('simulated non-error read failure')
+  })
+
+  it('folds a non-Error thrown by the YAML parser into String(error), not `.message`', async () => {
+    const dir = tempDir()
+    const path = writeProfile(dir, ['seat-a'])
+    yamlControl.forceParseNonErrorThrow = true
+    const read = await readOrgProfilePatchesWithToken(path)
+    expect(read.ok).toBe(false)
+    if (read.ok) throw new Error('unreachable')
+    expect(read.reason).toContain('simulated non-error parse failure')
+  })
 })
 
 describe('buildNextServedRosterPatches', () => {
@@ -330,6 +495,38 @@ describe('buildNextServedRosterPatches', () => {
     const next = buildNextServedRosterPatches(patches, MOUNT_IDS, ['x', 'y', 'z'])
     expect(findOrgMountAddresses(next, 'mailbox-bridge')).toEqual({ ok: true, addresses: ['x', 'y', 'z'] })
     expect(findOrgMountAddresses(next, 'tool-mailbox')).toEqual({ ok: true, addresses: ['x', 'y', 'z'] })
+  })
+
+  it('skips non-object top-level and insert entries while locating both mounts, and fills in a missing config object', () => {
+    // A direct exported-function test: writeOrgServedRoster never reaches
+    // this with such shapes (findOrgMountAddresses already refused a
+    // config-less mount before this would run), so locateOrgMountEntryForWrite's
+    // own skip-continues and the `currentConfig` fallback are only reachable
+    // by calling the exported function directly with a crafted document.
+    const patches = [
+      'a stray scalar top-level entry',
+      { insert: 'not-an-array' },
+      {
+        insert: [
+          'a stray scalar insert entry',
+          { id: 'mailbox-bridge', config: { addresses: ['a'], pollIntervalMs: 5000 } },
+          { id: 'tool-mailbox' }, // no `config` key at all
+        ],
+      },
+    ]
+    const next = buildNextServedRosterPatches(patches, MOUNT_IDS, ['x'])
+    expect(findOrgMountAddresses(next, 'mailbox-bridge')).toEqual({ ok: true, addresses: ['x'] })
+    expect(findOrgMountAddresses(next, 'tool-mailbox')).toEqual({ ok: true, addresses: ['x'] })
+    // The bridge mount's OTHER config keys survived the rebuild untouched
+    // (it sits at insert index 1: index 0 is the stray scalar entry above it).
+    const rebuiltBridge = (next[2] as { insert: Array<Record<string, unknown>> }).insert[1]
+    expect((rebuiltBridge?.config as Record<string, unknown>).pollIntervalMs).toBe(5000)
+  })
+
+  it('throws an internal error when a mount id is not found in the patches — unreachable through writeOrgServedRoster, but this exported function has no such precondition', () => {
+    const patches = realShapedPatches(['a'], ['a'])
+    expect(() => buildNextServedRosterPatches(patches, ['mailbox-bridge', 'does-not-exist'], ['x']))
+      .toThrow(/internal: mount "does-not-exist" vanished between validation and rebuild/)
   })
 })
 
@@ -619,5 +816,159 @@ describe('writeOrgServedRoster', () => {
     // replaced it never completed) — only the temp file attempt and the
     // backup it already made exist alongside it.
     expect(readFileSync(path)).toEqual(originalBytes)
+  })
+
+  it('refuses OrgServedRosterWriteError, folding a non-Error thrown by the filesystem into String(cause), when the initial read fails', async () => {
+    const dir = tempDir()
+    const path = writeProfile(dir, ['seat-a'])
+    const token = await currentToken(path)
+
+    fsControl.forceReadFileNonErrorThrow = true
+    let caught: unknown
+    try {
+      await writeOrgServedRoster(path, MOUNT_IDS, ['a'], token)
+    } catch (error: unknown) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(OrgServedRosterWriteError)
+    expect((caught as Error).message).toContain('simulated non-error read failure')
+  })
+
+  it('refuses OrgServedRosterWriteError — never a plain Error — when the current bytes are not valid YAML', async () => {
+    const dir = tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    const malformedYaml = '- insert:\n  - id: [unterminated flow mapping\n'
+    writeFileSync(path, malformedYaml)
+    const token = hashOrgServedRosterBytes(readFileSync(path))
+
+    let caught: unknown
+    try {
+      await writeOrgServedRoster(path, MOUNT_IDS, ['a'], token)
+    } catch (error: unknown) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(OrgServedRosterWriteError)
+    expect((caught as Error).message).toContain('is not valid YAML')
+    expect(readFileSync(path, 'utf8')).toBe(malformedYaml)
+  })
+
+  it('refuses OrgServedRosterWriteError naming tool-mailbox when THAT mount (not the bridge) is malformed', async () => {
+    // The existing "mount's current addresses is malformed" test above only
+    // exercises the bridge side of this check; the tool side is a distinct
+    // branch (currentTool.ok, not currentBridge.ok).
+    const dir = tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    const malformed = [
+      { insert: [{ id: 'mailbox-bridge', config: { addresses: ['a'] } }] },
+      { insert: [{ id: 'tool-mailbox', config: { addresses: 'not-a-list' } }] },
+    ]
+    writeFileSync(path, stringifyYaml(malformed, { indentSeq: false }))
+    const token = await currentToken(path)
+
+    let caught: unknown
+    try {
+      await writeOrgServedRoster(path, MOUNT_IDS, ['a'], token)
+    } catch (error: unknown) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(OrgServedRosterWriteError)
+    expect((caught as Error).message).toContain('tool-mailbox')
+  })
+
+  it('refuses OrgServedRosterWriteError — never a plain Error — when writing the backup fails for a reason other than a name collision', async () => {
+    const dir = tempDir()
+    const path = writeProfile(dir, ['seat-a'])
+    const originalBytes = readFileSync(path)
+    const token = await currentToken(path)
+
+    fsControl.forceBackupOpenNonEexist = true
+    let caught: unknown
+    try {
+      await writeOrgServedRoster(path, MOUNT_IDS, ['seat-a', 'seat-b'], token)
+    } catch (error: unknown) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(OrgServedRosterWriteError)
+    expect((caught as Error).message).toContain('could not write a backup')
+    // Refused before the target file (or anything else) was touched.
+    expect(readFileSync(path)).toEqual(originalBytes)
+    expect(readdirSync(dir)).toEqual(['cordis.patch.yml'])
+  })
+
+  it('refuses OrgServedRosterWriteError after exhausting every disambiguating backup filename attempt', async () => {
+    const dir = tempDir()
+    const path = writeProfile(dir, ['seat-a'])
+    const token = await currentToken(path)
+
+    fsControl.forceBackupOpenAlwaysEexist = true
+    let caught: unknown
+    try {
+      await writeOrgServedRoster(path, MOUNT_IDS, ['seat-a', 'seat-b'], token)
+    } catch (error: unknown) {
+      caught = error
+    } finally {
+      fsControl.forceBackupOpenAlwaysEexist = false
+    }
+    expect(caught).toBeInstanceOf(OrgServedRosterWriteError)
+    expect((caught as Error).message).toContain('could not find a free backup filename')
+  })
+
+  it('swallows a failed cleanup rm() after a mocked rename failure — the original write error still surfaces', async () => {
+    const dir = tempDir()
+    const path = writeProfile(dir, ['seat-a'])
+    const originalBytes = readFileSync(path)
+    const token = await currentToken(path)
+
+    fsControl.forceRenameFailure = true
+    fsControl.forceRmFailure = true
+    let caught: unknown
+    try {
+      await writeOrgServedRoster(path, MOUNT_IDS, ['seat-a', 'seat-b'], token)
+    } catch (error: unknown) {
+      caught = error
+    } finally {
+      fsControl.forceRenameFailure = false
+      fsControl.forceRmFailure = false
+    }
+    expect(caught).toBeInstanceOf(OrgServedRosterWriteError)
+    expect((caught as Error).message).toContain('simulated rename failure')
+    expect(readFileSync(path)).toEqual(originalBytes)
+  })
+
+  it('refuses OrgServedRosterWriteError, naming the mismatched mount, when the produced document self-validation finds different addresses', async () => {
+    const dir = tempDir()
+    const path = writeProfile(dir, ['seat-a'])
+    const originalBytes = readFileSync(path)
+    const token = await currentToken(path)
+
+    yamlControl.corruptNextStringify = 'mismatched-addresses'
+    let caught: unknown
+    try {
+      await writeOrgServedRoster(path, MOUNT_IDS, ['seat-a', 'seat-b'], token)
+    } catch (error: unknown) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(OrgServedRosterWriteError)
+    expect((caught as Error).message).toContain('tool-mailbox')
+    expect((caught as Error).message).toContain('failed self-validation')
+    // Refused before the atomic rename — the original file is untouched.
+    expect(readFileSync(path)).toEqual(originalBytes)
+  })
+
+  it('refuses OrgServedRosterWriteError, naming the mount and its read reason, when the produced document self-validation cannot even read that mount back', async () => {
+    const dir = tempDir()
+    const path = writeProfile(dir, ['seat-a'])
+    const token = await currentToken(path)
+
+    yamlControl.corruptNextStringify = 'malformed-addresses'
+    let caught: unknown
+    try {
+      await writeOrgServedRoster(path, MOUNT_IDS, ['seat-a', 'seat-b'], token)
+    } catch (error: unknown) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(OrgServedRosterWriteError)
+    expect((caught as Error).message).toContain('tool-mailbox')
+    expect((caught as Error).message).toContain('failed self-validation')
   })
 })

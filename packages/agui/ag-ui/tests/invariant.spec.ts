@@ -70,6 +70,40 @@ describe('invariant companion wiring', () => {
     await new Promise<void>((resolve) => { setImmediate(resolve); setImmediate(resolve) })
   })
 
+  it('attaches to a server already live before the companion installs', async () => {
+    // Reversed order from the other two tests: the server exists first, then
+    // the companion installs — exercising the `listAgUiServers()` backfill
+    // loop rather than the `onAgUiServer` creation subscription.
+    const logs = new Map([[sessionIdOf('s-preexisting'), { events: [] as SessionEvent[] }]])
+    const server = new AgUiServer(
+      { host: '127.0.0.1', port: 0, bearerToken: 'token-value-1', keepAliveMs: 15_000, maxBufferedEvents: 64 },
+      threadId => logs.get(threadId)?.events,
+      undefined,
+    )
+    servers.push(server)
+    await server.listen()
+
+    context = new Context()
+    await context.plugin(invariantService.default)
+    await context.plugin({ name: 'ag-ui-invariant-under-test', inject: ['invariants'], apply: companionApply })
+
+    const seen: string[] = []
+    server.onFrame((_label, frame) => { seen.push(frame.type) })
+    const response = await fetch(`http://127.0.0.1:${server.port}/ag-ui/s-preexisting`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer token-value-1' },
+      body: '',
+    })
+    void response
+    server.broadcastSessionEvent(sessionIdOf('s-preexisting'), ev('turn/start', { turn: 1 }))
+    server.broadcastSessionEvent(sessionIdOf('s-preexisting'), ev('turn/end', { turn: 1, reason: { kind: 'completed' } }))
+    await new Promise<void>((resolve) => { setImmediate(resolve); setImmediate(resolve) })
+    // The companion's own frame observer (installed on the backfill path) must
+    // have seen this traffic too, alongside the test's own observer above.
+    expect(seen.filter(type => type === 'RUN_STARTED')).toHaveLength(1)
+    expect(seen.filter(type => type === 'RUN_FINISHED')).toHaveLength(1)
+  })
+
   it('notifies frame observers exactly once per emitted frame', async () => {
     // Manual topology: the focused invariant suite owns its service mounts.
     context = new Context()

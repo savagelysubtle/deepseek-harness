@@ -227,7 +227,8 @@ class Connection {
       // when the socket accepts every byte: a synchronous event burst always
       // accumulates here before the first drain tick runs.
       this.draining = true
-      setImmediate(() => { void this.drain().catch(() => { /* client vanished; teardown owns the socket */ }) })
+      /* v8 ignore next -- drain() never rejects: its try/catch/finally covers the whole loop including the yieldBetweenBatches seam */
+      setImmediate(() => { void this.drain().catch(() => { /* unreachable: drain() handles its own errors */ }) })
     }
   }
 
@@ -277,6 +278,8 @@ class Connection {
    * @returns whether the socket absorbed the data without backpressure.
    */
   private rawWrite(payload: string): boolean {
+    /* v8 ignore next -- drain() re-checks closed synchronously before every rawWrite and terminate() flips closed with no
+       await, so this guard cannot observe a closed connection */
     if (this.closed) return true
     return this.res.write(payload)
   }
@@ -288,6 +291,7 @@ class Connection {
     * @param message - failure text carried by the terminal RUN_ERROR frame.
     */
   private fail(message: string): void {
+    /* v8 ignore next -- enqueue() re-checks closed at its top with no await before calling fail() */
     if (this.closed) return
     this.res.end(sseFrame({ type: 'RUN_ERROR', message }))
     this.terminate()
@@ -446,6 +450,10 @@ export class AgUiServer {
     const url = new URL(req.url ?? '/', 'http://ag-ui.invalid')
     const match = /^\/ag-ui\/([^/]+)$/.exec(url.pathname)
     if (match === null) {
+      /* v8 ignore next -- no await separates 'request' dispatch from this line, and dispose()'s closeAllConnections()
+         resets any request whose headers have not finished parsing before handle() is entered (probe: 4/4 runs saw
+         ECONNRESET, handle() never dispatched); disposed can only be observed true here by an unawaited dispose()
+         racing a live request, which no call site does */
       res.writeHead(this.disposed ? 503 : 404)
       res.end()
       return
@@ -462,6 +470,7 @@ export class AgUiServer {
       body = await readBody(req)
     } catch (error: unknown) {
       res.writeHead(400)
+      /* v8 ignore next -- parseThreadId/readBody/parseRunId throw only Error instances */
       res.end(error instanceof Error ? error.message : String(error))
       return
     }
@@ -476,6 +485,7 @@ export class AgUiServer {
       runIdBase = parseRunId(body)
     } catch (error: unknown) {
       res.writeHead(400)
+      /* v8 ignore next -- parseThreadId/readBody/parseRunId throw only Error instances */
       res.end(error instanceof Error ? error.message : String(error))
       return
     }
@@ -512,6 +522,8 @@ export class AgUiServer {
       this.yieldBetweenBatches,
       (closing) => {
         const current = this.connections.get(threadId)
+        /* v8 ignore next -- every connections-map mutation funnels through this onClose closure, so a live Set member
+           can never find its thread entry already deleted by a sibling's close */
         if (current === undefined) return
         current.delete(closing)
         if (current.size === 0) this.connections.delete(threadId)

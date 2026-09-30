@@ -8,6 +8,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { ApiProxy, GoalRef, HostFrame, MuxFrame, RpcMessage, RpcRequest, RpcResponse } from '@deepseek-ai/dsh-host-apiproxy'
+import type { WorktreeRef } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { InProcessApiClient, RpcId, toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
 
 const sid = (id: string): SessionId => id as SessionId
@@ -28,6 +29,9 @@ function scriptedApi(overrides: {
   settings?: Partial<ApiProxy['settings']>
   credentials?: Partial<ApiProxy['credentials']>
   llm?: Partial<ApiProxy['llm']>
+  mailbox?: Partial<ApiProxy['mailbox']>
+  worktree?: Partial<ApiProxy['worktree']>
+  org?: Partial<ApiProxy['org']>
   respond?: ApiProxy['respond']
 } = {}): ApiProxy {
   async function *empty<F>(): AsyncGenerator<RpcRequest<F>> { /* no frames */ }
@@ -131,9 +135,9 @@ function scriptedApi(overrides: {
       discoverModels: err,
       ...overrides.llm,
     },
-    mailbox: { publish: err },
-    worktree: { list: err, create: err, lock: err, remove: err },
-    org: { get: err, write: err, writeServed: err },
+    mailbox: { publish: err, ...overrides.mailbox },
+    worktree: { list: err, create: err, lock: err, remove: err, ...overrides.worktree },
+    org: { get: err, write: err, writeServed: err, ...overrides.org },
     events: { mux: () => empty<MuxFrame>(), host: () => empty<HostFrame>(), ...overrides.events },
     respond: overrides.respond ?? (() => Promise.resolve({ accepted: false as const, reason: 'not-pending' as const })),
     downloads: { sessionLog: async () => new Response('stub', { status: 404 }) },
@@ -817,5 +821,136 @@ describe('config unary surface', () => {
     expect(response.result.ok).toBe(false)
     if (response.result.ok) throw new Error('unreachable')
     expect(response.result.error.code).toBe('bad-request')
+  })
+})
+
+describe('session-lifecycle-broadcast / worktree / org / mailbox unary surface', () => {
+  // None of the other cases in this file ever call these client methods, so
+  // their thin `this.callUnary(...)` wrappers on the client side, and their
+  // matching UNARY_ROUTES entries on the handler side, never ran at all.
+  // Same isomorphic point as every other case in this file: the real
+  // envelope wrap/unwrap and both zod parses, just over these methods.
+  it('round-trips session.stopTree, session.stopAll, and session.sendAll', async () => {
+    const seen: { method: string; payload: unknown }[] = []
+    const record = recorderInto(seen)
+    const api = scriptedApi({
+      sessions: {
+        stopTree: record('session.stopTree', r => ok(r, { ownTurnStopped: true, descendants: 'ok' as const })),
+        stopAll: record('session.stopAll', r => ok(r, { stoppedCount: 3, descendants: 'ok' as const })),
+        sendAll: record('session.sendAll', r => ok(r, { sentCount: 2, result: 'ok' as const })),
+      },
+    })
+    const c = client(api)
+
+    const stopped = await c.sessions.stopTree({ sessionId: sid('s1') })
+    expect(stopped.result).toEqual({ ok: true, value: { ownTurnStopped: true, descendants: 'ok' } })
+    const stoppedAll = await c.sessions.stopAll({})
+    expect(stoppedAll.result).toEqual({ ok: true, value: { stoppedCount: 3, descendants: 'ok' } })
+    const sent = await c.sessions.sendAll({ content: [{ type: 'text', text: 'stand down' }] })
+    expect(sent.result).toEqual({ ok: true, value: { sentCount: 2, result: 'ok' } })
+
+    expect(seen.map(call => call.method)).toEqual(['session.stopTree', 'session.stopAll', 'session.sendAll'])
+    expect(seen[0]?.payload).toEqual({ sessionId: sid('s1') })
+    expect(seen[2]?.payload).toEqual({ content: [{ type: 'text', text: 'stand down' }] })
+  })
+
+  it('round-trips every worktree method with its own payload and value shape', async () => {
+    const seen: { method: string; payload: unknown }[] = []
+    const record = recorderInto(seen)
+    const row = { seat: 'eve', path: '/p', branch: 'br', sessionName: 'task', locked: false }
+    const handle = { slug: 'wt-1', branch: 'br', path: '/p', sessionName: 'task', seat: 'eve' }
+    const api = scriptedApi({
+      worktree: {
+        list: record('worktree.list', r => ok(r, { items: [row] })),
+        create: record('worktree.create', r => ok(r, { worktree: handle })),
+        lock: record('worktree.lock', r => ok(r, { locked: true as const })),
+        remove: record('worktree.remove', r => ok(r, { removed: true as const })),
+      },
+    })
+    const c = client(api)
+
+    const listed = await c.worktree.list({})
+    expect(listed.result).toEqual({ ok: true, value: { items: [row] } })
+    const created = await c.worktree.create({ seat: 'eve', sessionName: 'task' })
+    expect(created.result).toEqual({ ok: true, value: { worktree: handle } })
+    const locked = await c.worktree.lock({ ref: 'wt-1' as WorktreeRef, reason: 'holding for review' })
+    expect(locked.result).toEqual({ ok: true, value: { locked: true } })
+    const removed = await c.worktree.remove({ ref: 'wt-1' as WorktreeRef, reason: 'cleanup' })
+    expect(removed.result).toEqual({ ok: true, value: { removed: true } })
+
+    expect(seen.map(call => call.method))
+      .toEqual(['worktree.list', 'worktree.create', 'worktree.lock', 'worktree.remove'])
+    expect(seen[1]?.payload).toEqual({ seat: 'eve', sessionName: 'task' })
+    expect(seen[2]?.payload).toEqual({ ref: 'wt-1', reason: 'holding for review' })
+  })
+
+  it('round-trips every org method with its own payload and value shape', async () => {
+    const seen: { method: string; payload: unknown }[] = []
+    const record = recorderInto(seen)
+    const registryView = { baseDir: '/org', seats: {}, edges: [], callUp: [] }
+    const document = { baseDir: '/org', seats: {}, edges: [], callUp: [] }
+    const api = scriptedApi({
+      org: {
+        get: record('org.get', r => ok(r, {
+          profile: '/org/profile.yml',
+          registry: { ok: true as const, registry: registryView, document, token: 't1' },
+          mailboxBridge: { ok: true as const, addresses: ['seat-a'] },
+          toolMailbox: { ok: true as const, addresses: ['seat-a'] },
+          drift: { ok: true as const, rows: [] },
+          servedRosterToken: { ok: true as const, token: 'served-t1' },
+        })),
+        write: record('org.write', r => ok(r, { registry: registryView, token: 't2' })),
+        writeServed: record('org.writeServed', r => ok(r, { addresses: ['seat-a', 'seat-b'], token: 'served-t2' })),
+      },
+    })
+    const c = client(api)
+
+    const got = await c.org.get({})
+    expect(got.result).toEqual({
+      ok: true,
+      value: {
+        profile: '/org/profile.yml',
+        registry: { ok: true, registry: registryView, document, token: 't1' },
+        mailboxBridge: { ok: true, addresses: ['seat-a'] },
+        toolMailbox: { ok: true, addresses: ['seat-a'] },
+        drift: { ok: true, rows: [] },
+        servedRosterToken: { ok: true, token: 'served-t1' },
+      },
+    })
+    const wrote = await c.org.write({ document, expectedToken: 't1' })
+    expect(wrote.result).toEqual({ ok: true, value: { registry: registryView, token: 't2' } })
+    const wroteServed = await c.org.writeServed({ addresses: ['seat-a', 'seat-b'], expectedToken: 'served-t1' })
+    expect(wroteServed.result).toEqual({ ok: true, value: { addresses: ['seat-a', 'seat-b'], token: 'served-t2' } })
+
+    expect(seen.map(call => call.method)).toEqual(['org.get', 'org.write', 'org.writeServed'])
+    expect(seen[1]?.payload).toEqual({ document, expectedToken: 't1' })
+    expect(seen[2]?.payload).toEqual({ addresses: ['seat-a', 'seat-b'], expectedToken: 'served-t1' })
+  })
+
+  it('round-trips mailbox.publish', async () => {
+    const seen: { method: string; payload: unknown }[] = []
+    const record = recorderInto(seen)
+    const api = scriptedApi({
+      mailbox: {
+        publish: record('mailbox.publish', r => ok(r, { messageId: 'm1', disposition: 'delivered' as const })),
+      },
+    })
+    const published = await client(api).mailbox.publish({ address: 'alfred', from: 'batman', payload: { hi: true } })
+    expect(published.result).toEqual({ ok: true, value: { messageId: 'm1', disposition: 'delivered' } })
+    expect(seen).toEqual([{ method: 'mailbox.publish', payload: { address: 'alfred', from: 'batman', payload: { hi: true } } }])
+  })
+
+  it('throws when the response value fails the client-side schema, naming the schema root when the offending issue has no path', async () => {
+    // The existing config-surface test above already exercises the
+    // "first issue has a path" side of this error message; this covers the
+    // `|| '(root)'` fallback for a root-level issue (the whole value has the
+    // wrong shape, not just one of its fields).
+    const api = scriptedApi({
+      sessions: {
+        list: r => ok(r, 'not-an-object' as unknown as { items: never[] }),
+      },
+    })
+    await expect(client(api).sessions.list({})).rejects.toThrow(/response value failed the client-side schema/)
+    await expect(client(api).sessions.list({})).rejects.toThrow(/\(root\)/)
   })
 })

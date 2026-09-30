@@ -121,12 +121,16 @@ function collectWarnings(events: readonly SessionEvent[]): DurableWarning[] {
   for (const event of events) {
     if (!isPluginWarning(event)) continue
     const block = event.data.content[0]
+    /* v8 ignore next 3 -- validateSession validates every plugin-warning event via validateWarning
+     * (which fails loudly) before ever calling validateGenerations, so collectWarnings never sees
+     * a non-text block. */
     if (block?.type !== 'text') {
       continue
     }
     const parsed = parseWarningText(block.text)
     // Unparseable text under this package's name is foreign content; the
     // per-warning format check reports it only where that event validates.
+    /* v8 ignore next -- same reason: validateWarning already rejects unparseable text before collectWarnings can run. */
     if (parsed === undefined) continue
     warnings.push({ seq: event.seq, parsed })
   }

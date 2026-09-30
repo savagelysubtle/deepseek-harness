@@ -222,6 +222,8 @@ export class FollowTailer {
 
   private async poll(sessionId: SessionId, path: string): Promise<void> {
     const cursor = this.cursors.get(sessionId)
+    /* v8 ignore next -- cursors and the interval are always set (initCursor) and cleared (stop) together with no await between them, and
+       clearInterval prevents all future firings, so a scheduled poll() can never find its own cursor missing */
     if (cursor === undefined) return // stopped between schedule and fire
     await this.drain(sessionId, cursor, path)
     // Re-probed AFTER draining, not before: this collects whatever the owner

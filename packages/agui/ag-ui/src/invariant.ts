@@ -71,6 +71,8 @@ function validateFrame(
     connections.set(label, tracker)
   }
   const violation = frameRelationViolation(tracker.runOpen, frame)
+  /* v8 ignore next -- translateSessionEvent's own drop/no-op guards make a double-RUN_STARTED or close-unopened run
+     structurally unreachable through any real SessionEvent */
   if (violation !== undefined) fail(`connection ${label} ${violation}`)
   if (frame.type === 'RUN_STARTED') tracker.runOpen = true
   if (frame.type === 'RUN_FINISHED' || frame.type === 'RUN_ERROR') tracker.runOpen = false

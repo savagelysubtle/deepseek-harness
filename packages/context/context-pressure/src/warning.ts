@@ -64,10 +64,14 @@ export function parseWarningText(text: string): ParsedWarning | undefined {
   const match = WARNING_PATTERN.exec(text)
   if (match === null) return undefined
   return {
+    /* v8 ignore start -- WARNING_PATTERN's five capture groups are mandatory and never inside an
+     * alternation, so a non-null match always defines match[1..5]; these fallbacks only satisfy
+     * TS's exec() typing. */
     thresholdPercent: match[1] ?? '',
     totalTokens: Number(match[2] ?? -1),
     contextWindow: Number(match[3] ?? -1),
     usedPercent: match[4] ?? '',
     remainingTokens: Number(match[5] ?? -1),
+    /* v8 ignore stop */
   }
 }

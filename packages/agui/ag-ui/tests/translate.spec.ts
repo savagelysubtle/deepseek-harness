@@ -93,6 +93,13 @@ describe('translateSessionEvent', () => {
     expect(s.openMessage).toBeUndefined()
   })
 
+  it('translateAgentError is a no-op when no run is open on this connection', () => {
+    const s = state()
+    expect(s.runOpen).toBe(false)
+    expect(translateAgentError(s, 'never opened')).toEqual([])
+    expect(s.runOpen).toBe(false)
+  })
+
   it('suppresses a stray turn/end that arrives after an out-of-band run error', () => {
     const s = state()
     translateSessionEvent(event('turn/start', { turn: 1 }), s)
@@ -231,6 +238,46 @@ describe('tool streaming brackets', () => {
         { type: 'TOOL_CALL_ARGS', toolCallId: CallId('call-9'), delta: '{"url":"x"}' },
         { type: 'TOOL_CALL_END', toolCallId: CallId('call-9') },
       ])
+  })
+
+  it('closes a tool bracket left open by an interrupted stream at turn/end', () => {
+    const s = state()
+    translateSessionEvent(event('turn/start', { turn: 1 }), s)
+    // The delta opens a TOOL_CALL_START/ARGS bracket but no assistant/message
+    // ever arrives to close it — an interrupted stream, exactly what
+    // closeStreamBrackets exists to clean up.
+    translateSessionEvent(toolDelta(CallId('call-cut'), '{"par', 'grep'), s)
+    const frames = translateSessionEvent(
+      event('turn/end', { turn: 1, reason: { kind: 'completed' } }),
+      s,
+    )
+    expect(frames).toEqual([
+      { type: 'TOOL_CALL_END', toolCallId: CallId('call-cut') },
+      { type: 'RUN_FINISHED', threadId: 'thread-a', runId: 'run-base-1' },
+    ])
+    expect(s.openTools.size).toBe(0)
+  })
+
+  it('leaves a tool bracket from a different turn/step open at assistant/message', () => {
+    const s = state()
+    translateSessionEvent(toolDelta(CallId('call-other'), '{}', 'ls', 1, 0), s)
+    const frames = translateSessionEvent(
+      event('assistant/message', {
+        turn: 1,
+        step: 9,
+        message: {
+          id: MessageId('asst-9'),
+          role: 'assistant',
+          content: [],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+      }),
+      s,
+    )
+    // The open bracket belongs to step 0; this assistant/message is step 9,
+    // so the position-match guard skips it without a TOOL_CALL_END.
+    expect(frames).toEqual([])
+    expect(s.openTools.has(CallId('call-other'))).toBe(true)
   })
 
   it('closes streamed tool brackets at assistant/message', () => {

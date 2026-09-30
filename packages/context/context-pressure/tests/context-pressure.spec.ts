@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
+import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import { CompactionId } from '@deepseek-ai/dsh-compaction'
 import * as contextPressure from '@deepseek-ai/dsh-context-pressure'
 import type { Config } from '@deepseek-ai/dsh-context-pressure'
@@ -282,6 +283,25 @@ describe('threshold crossing and dedup', () => {
 
     await fire(ctx, subject, 2, 1)
 
+    expect(warningPercents(session)).toEqual(['25'])
+  })
+
+  it('ignores a plugin-attributed message under this name with no text block during folding', async () => {
+    const { ctx } = await mount({ thresholds: [0.25] })
+    const session = seededSession('non-text', { inputTokens: 30_000, outputTokens: 0 })
+    session.append('user/message', createUserMessage({
+      content: [{
+        type: 'image',
+        attachment: { attachmentId: AttachmentId('a'), mediaType: 'image/png', bytes: 1, width: 1, height: 1 },
+      }],
+      source: { kind: 'plugin', plugin: 'context-pressure' },
+    }), { surfaceOp: 'append' })
+    const subject = agent(session)
+    openStepTurn(session, 2, 1)
+
+    await fire(ctx, subject, 2, 1)
+
+    // The non-text message stays uncounted; the real crossing still fires once.
     expect(warningPercents(session)).toEqual(['25'])
   })
 })
