@@ -27,6 +27,8 @@ const PACKAGE_NAME = '@deepseek-ai/dsh-agent-loop'
  * @returns whether `dispatched` reconstructs from `expected` under that rule.
  */
 function messagesReconstruct(dispatched: readonly Message[], expected: readonly Message[]): boolean {
+  // The install() listener already fails loud on a missing clock tail; this guard keeps the
+  // function honest as a standalone contract for direct callers and tests.
   const last = dispatched[dispatched.length - 1]
   if (last === undefined || !isClockMessage(last)) return false
   return JSON.stringify(dispatched.slice(0, -1)) === JSON.stringify(expected)

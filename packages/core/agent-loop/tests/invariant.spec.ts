@@ -110,7 +110,7 @@ describe('request-reconstruction invariant', () => {
       expect(() => { dispatch(ctx, options) }).toThrow(/missing its required unconditional clock tail message/)
     })
 
-    it('rejects a request with no trailing message at all (an empty-tail regression the reviewer flagged: '
+    it('rejects a request with no trailing message at all (the boundary array unchanged, no clock appended: '
       + 'a code path that omitted the clock must not pass silently)', async () => {
       const { ctx, session, boundary } = await requestSetup()
       const options = loopRequest({ model: 'm', messages: Object.freeze(boundary), sessionId: session.id })
