@@ -50,7 +50,7 @@ This table connects model-visible tool names to the plugin package and service s
 
 ### `mailbox_await`
 
-Hold this turn until a reply arrives or the deadline expires — the wait primitive to call right after mailbox_send when you are blocked on an answer, instead of improvising a Bash sleep-poll loop that burns one turn per poll. Pass the traceId from that send's result to correlate the wait with that exact message: a refusal in transit ends the wait immediately with its reason (never wait out the deadline for a refused message), and a timeout states whether the message was delivered or never picked up. The wait recognizes a reply whether it was still queued or already delivered to this seat — but the reply only carries your traceId if the sender passed it as replyToTraceId on their mailbox_send, so say so when you ask for a reply. A timeout is a normal outcome — on one, report the stall, re-await, or move on rather than retrying blindly. Without a traceId the wait ends on any inbound mail for this seat. The deadline is clamped to 1000–600000 ms; default 300000 (5 minutes).
+Part of the org's mailbox channel, alongside mailbox_send. Hold this turn until a reply arrives or the deadline expires — the wait primitive to call right after mailbox_send when you are blocked on an answer, instead of improvising a Bash sleep-poll loop that burns one turn per poll. Pass the traceId from that send's result to correlate the wait with that exact message: a refusal in transit ends the wait immediately with its reason (never wait out the deadline for a refused message), and a timeout states whether the message was delivered or never picked up. The wait recognizes a reply whether it was still queued or already delivered to this seat — but the reply only carries your traceId if the sender passed it as replyToTraceId on their mailbox_send, so say so when you ask for a reply. A timeout is a normal outcome — on one, report the stall, re-await, or move on rather than retrying blindly. Without a traceId the wait ends on any inbound mail for this seat. The deadline is clamped to 1000–600000 ms; default 300000 (5 minutes).
 
 ```json
 {
@@ -72,7 +72,7 @@ Source: [`packages/mailbox/tool-mailbox/src/index.ts`](../packages/mailbox/tool-
 
 ### `mailbox_check_inbox`
 
-Drain this seat's own mailbox: claim and deliver every pending message addressed to this seat. Takes no address argument — the runtime drains this session's own address, and only that one. Each returned message is removed from the pending queue (delivered); call it whenever you expect mail, for example after learning a coworker sent you something.
+Part of the org's mailbox channel, alongside mailbox_send. Drain this seat's own mailbox: claim and deliver every pending message addressed to this seat. Takes no address argument — the runtime drains this session's own address, and only that one. Each returned message is removed from the pending queue (delivered); call it whenever you expect mail, for example after learning a coworker sent you something.
 
 ```json
 {
@@ -85,7 +85,7 @@ Source: [`packages/mailbox/tool-mailbox/src/index.ts`](../packages/mailbox/tool-
 
 ### `mailbox_directory`
 
-List every seat in the org directory with its role, so you address coworkers by their bare name in mailbox_send's `to`. Takes no argument. Marks which seats this host serves, which are department leads, and which are throwaway test seats that must never be mailed. Topology and admission are enforced when you send — the directory tells you who exists, not who may hear you.
+The org directory is where to find a coworker's bare seat name before sending mail. Call this first if you do not already know it, rather than guessing or improvising another channel. List every seat in the org directory with its role, so you address coworkers by their bare name in mailbox_send's `to`. Takes no argument. Marks which seats this host serves, which are department leads, and which are throwaway test seats that must never be mailed. Topology and admission are enforced when you send — the directory tells you who exists, not who may hear you.
 
 ```json
 {
@@ -98,7 +98,7 @@ Source: [`packages/mailbox/tool-mailbox/src/index.ts`](../packages/mailbox/tool-
 
 ### `mailbox_send`
 
-Send a mailbox message to another seat by its bare name. The sender is filled in by the runtime from this session's trusted name and cannot be chosen or changed — the recipient sees the message as coming from this seat. Replies travel as their own mailbox_send calls, not inside this one. When this message IS the reply the other seat is waiting for, pass the traceId its sender quoted as replyToTraceId: the reply then carries that correlation id, and the waiting seat's mailbox_await matches it instead of timing out. The result names a traceId: pass it to mailbox_await to hold this turn until the reply arrives or the deadline expires.
+This is the org's channel for reaching another seat directly by name. Use it, not a file drop or any other ad hoc workaround, whenever you need to contact a coworker; call mailbox_directory first if you do not already know their bare seat name. Send a mailbox message to another seat by its bare name. The sender is filled in by the runtime from this session's trusted name and cannot be chosen or changed — the recipient sees the message as coming from this seat. Replies travel as their own mailbox_send calls, not inside this one. When this message IS the reply the other seat is waiting for, pass the traceId its sender quoted as replyToTraceId: the reply then carries that correlation id, and the waiting seat's mailbox_await matches it instead of timing out. The result names a traceId: pass it to mailbox_await to hold this turn until the reply arrives or the deadline expires.
 
 ```json
 {

@@ -138,6 +138,7 @@ describe('mailbox tool schemas', () => {
     expect(parameters.required).toEqual(['to', 'subject', 'body'])
     expect(schema!.description).toContain('filled in by the runtime')
     expect(schema!.description).toContain('replyToTraceId')
+    expect(schema!.description).toContain('org\'s channel')
     await ctx.fiber.dispose()
   })
 
@@ -149,6 +150,7 @@ describe('mailbox tool schemas', () => {
     expect(parameters.properties).toEqual({})
     expect(parameters.required).toBeUndefined()
     expect(schema!.description).toContain('own address')
+    expect(schema!.description).toContain('mailbox channel')
     await ctx.fiber.dispose()
   })
 })
@@ -645,6 +647,7 @@ describe('mailbox_await', () => {
     expect(schema!.description).toContain('sleep-poll')
     expect(schema!.description).toContain('A timeout is a normal outcome')
     expect(schema!.description).toContain('traceId')
+    expect(schema!.description).toContain('mailbox channel')
     await ctx.fiber.dispose()
   })
 
@@ -1043,6 +1046,7 @@ describe('mailbox_directory', () => {
     expect(schema!.parameters).toEqual({ type: 'object', properties: {} })
     expect(schema!.description).toContain('bare name')
     expect(schema!.description).toContain('test seats')
+    expect(schema!.description).toContain('org directory')
     await ctx.fiber.dispose()
   })
 

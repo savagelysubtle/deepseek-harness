@@ -25,7 +25,7 @@
   name: '@deepseek-ai/dsh-persona'
   config:
     text: >-
-      You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.
+      You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}. Before assuming you lack a capability or improvising a workaround, check your own tool definitions: the tools you were given already state what they do and when to use them.
 
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'
