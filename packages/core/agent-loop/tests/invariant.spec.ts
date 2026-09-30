@@ -36,10 +36,19 @@ async function requestSetup() {
   return { ctx, session, boundary }
 }
 
+/** A well-formed clock tail, fixed so tests stay deterministic. */
+function clockTail() {
+  return buildClockMessage(() => new Date('2026-09-29T16:13:00Z'))
+}
+
 describe('request-reconstruction invariant', () => {
-  it('accepts a frozen request equal to the boundary derivation and folded header', async () => {
+  it('accepts a frozen request equal to the boundary derivation plus a trailing clock message and folded header', async () => {
     const { ctx, session, boundary } = await requestSetup()
-    const options = loopRequest({ model: 'm', messages: Object.freeze(boundary), sessionId: session.id })
+    const options = loopRequest({
+      model: 'm',
+      messages: Object.freeze([...boundary, clockTail()]),
+      sessionId: session.id,
+    })
     expect(() => { dispatch(ctx, options) }).not.toThrow()
   })
 
@@ -50,29 +59,29 @@ describe('request-reconstruction invariant', () => {
     }), { surfaceOp: 'append' })
     const options = loopRequest({
       model: 'm',
-      messages: Object.freeze(session.deriveMessages()),
+      messages: Object.freeze([...session.deriveMessages(), clockTail()]),
       sessionId: session.id,
     })
     expect(() => { dispatch(ctx, options) }).not.toThrow()
   })
 
-  it('requires the messages to equal the boundary derivation exactly (no unlogged prefix)', async () => {
+  it('requires the messages to equal the boundary derivation exactly (no unlogged prefix), clock tail aside', async () => {
     const { ctx, session, boundary } = await requestSetup()
     const extra = { role: 'user' as const, content: [{ type: 'text' as const, text: '<system-reminder>catalog</system-reminder>' }] }
-    expect(() => { dispatch(ctx, loopRequest({ model: 'm', messages: Object.freeze([...boundary]), sessionId: session.id })) })
+    expect(() => { dispatch(ctx, loopRequest({ model: 'm', messages: Object.freeze([...boundary, clockTail()]), sessionId: session.id })) })
       .not.toThrow()
-    expect(() => { dispatch(ctx, loopRequest({ model: 'm', messages: Object.freeze([extra, ...boundary]), sessionId: session.id })) })
+    expect(() => { dispatch(ctx, loopRequest({ model: 'm', messages: Object.freeze([extra, ...boundary, clockTail()]), sessionId: session.id })) })
       .toThrow(/diverges from the dispatch-time durable derivation/)
-    expect(() => { dispatch(ctx, loopRequest({ model: 'm', messages: Object.freeze([...boundary, extra]), sessionId: session.id })) })
+    expect(() => { dispatch(ctx, loopRequest({ model: 'm', messages: Object.freeze([...boundary, extra, clockTail()]), sessionId: session.id })) })
       .toThrow(/diverges from the dispatch-time durable derivation/)
   })
 
   it('rejects message and header divergence', async () => {
     const { ctx, session, boundary } = await requestSetup()
-    const divergent = [...boundary, { role: 'user', content: [{ type: 'text', text: 'phantom' }] }]
+    const divergent = [...boundary, { role: 'user', content: [{ type: 'text', text: 'phantom' }] }, clockTail()]
     expect(() => { dispatch(ctx, loopRequest({ model: 'm', messages: Object.freeze(divergent), sessionId: session.id })) })
       .toThrow(/diverges from the dispatch-time durable derivation/)
-    expect(() => { dispatch(ctx, loopRequest({ model: 'other', messages: Object.freeze(boundary), sessionId: session.id })) })
+    expect(() => { dispatch(ctx, loopRequest({ model: 'other', messages: Object.freeze([...boundary, clockTail()]), sessionId: session.id })) })
       .toThrow(/diverges from the folded request header/)
   })
 
@@ -98,7 +107,20 @@ describe('request-reconstruction invariant', () => {
         messages: Object.freeze([...boundary, notTheClock]),
         sessionId: session.id,
       })
-      expect(() => { dispatch(ctx, options) }).toThrow(/diverges from the dispatch-time durable derivation/)
+      expect(() => { dispatch(ctx, options) }).toThrow(/missing its required unconditional clock tail message/)
+    })
+
+    it('rejects a request with no trailing message at all (an empty-tail regression the reviewer flagged: '
+      + 'a code path that omitted the clock must not pass silently)', async () => {
+      const { ctx, session, boundary } = await requestSetup()
+      const options = loopRequest({ model: 'm', messages: Object.freeze(boundary), sessionId: session.id })
+      expect(() => { dispatch(ctx, options) }).toThrow(/missing its required unconditional clock tail message/)
+    })
+
+    it('rejects a loop request with an empty messages array (no clock tail to find at all)', async () => {
+      const { ctx, session } = await requestSetup()
+      const options = loopRequest({ model: 'm', messages: Object.freeze([]), sessionId: session.id })
+      expect(() => { dispatch(ctx, options) }).toThrow(/missing its required unconditional clock tail message/)
     })
 
     it('still rejects two trailing clock-shaped messages (only the very last may be discounted)', async () => {
@@ -175,7 +197,7 @@ describe('request-reconstruction invariant', () => {
     session.append('request/header', { header: { config: { provider: 'mock', model: 'm' } }, reason: 'initial' })
     const divergent = loopRequest({
       model: 'm',
-      messages: Object.freeze([{ role: 'user', content: [{ type: 'text', text: 'phantom' }] }]),
+      messages: Object.freeze([{ role: 'user', content: [{ type: 'text', text: 'phantom' }] }, clockTail()]),
       sessionId: session.id,
     })
     expect(() => { dispatch(ctx, divergent) }).toThrow(/diverges from the dispatch-time durable derivation/)

@@ -13,20 +13,23 @@ const PACKAGE_NAME = '@deepseek-ai/dsh-agent-loop'
 
 /**
  * Whether `dispatched` (a request's `messages`) reconstructs from `expected`
- * (`session.deriveMessages()` at dispatch time): byte-equal, OR byte-equal
- * once one trailing message recognized as the unconditional per-request
+ * (`session.deriveMessages()` at dispatch time): byte-equal once the
+ * REQUIRED trailing message recognized as the unconditional per-request
  * clock tail (SWD-113, see `./clock.ts`) is set aside. `buildRequest` appends
  * that one message WITHOUT ever logging it, so a dispatched request
  * legitimately carries exactly one message `expected` has no counterpart
- * for — never more, and never anywhere but the very end.
+ * for — never more, and never anywhere but the very end. A request whose
+ * last message is not the clock tail never reconstructs, full stop: the
+ * absence is caught here rather than left to silently pass (a code path
+ * that omitted the clock would otherwise never be caught by this check).
  * @param dispatched - the frozen request's `messages` array.
  * @param expected - `session.deriveMessages()` at dispatch time.
  * @returns whether `dispatched` reconstructs from `expected` under that rule.
  */
 function messagesReconstruct(dispatched: readonly Message[], expected: readonly Message[]): boolean {
   const last = dispatched[dispatched.length - 1]
-  const withoutClock = last !== undefined && isClockMessage(last) ? dispatched.slice(0, -1) : dispatched
-  return JSON.stringify(withoutClock) === JSON.stringify(expected)
+  if (last === undefined || !isClockMessage(last)) return false
+  return JSON.stringify(dispatched.slice(0, -1)) === JSON.stringify(expected)
 }
 
 /** Cordis companion plugin name. */
@@ -54,6 +57,10 @@ const install: InvariantInstaller = Object.assign((ctx: Context, fail: Invariant
     const header = foldRequestHeader(events)
     if (header === undefined) {
       return fail('a loop-built request with no request/header event in its session log')
+    }
+    const lastMessage = options.messages[options.messages.length - 1]
+    if (lastMessage === undefined || !isClockMessage(lastMessage)) {
+      fail(`llm request for session "${String(session.id)}" is missing its required unconditional clock tail message (SWD-113): the last message must satisfy isClockMessage`)
     }
     const expected = session.deriveMessages()
     if (!messagesReconstruct(options.messages, expected)) {
