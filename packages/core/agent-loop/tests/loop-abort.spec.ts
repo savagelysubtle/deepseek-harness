@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import LlmRuntime, { createUserMessage, StreamChunk } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { CallId, createUserMessage, StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
@@ -216,6 +216,41 @@ describe('loop guard wiring: tool-call channel', () => {
     // fabricated for a call that never started (the fourth model turn never
     // happens because the abort throws out of the third).
     expect(agent.session.events.filter(e => e.type === 'tool/result')).toHaveLength(3)
+  })
+
+  it('renders a non-JSON tool-call argument string verbatim in the aborted fragment '
+    + "(argsPreview's string-passthrough branch, not a re-quoted/re-escaped JSON value)", async () => {
+    // Model output whose tool-call arguments are not valid JSON at all —
+    // parseArguments() (tool-calls.ts) falls back to the raw string on a
+    // JSON.parse failure, and that raw string is what reaches argsPreview()
+    // unchanged (coverage-edges.spec.ts's "tool JSON parse" suite proves the
+    // loop tolerates this without crashing; this proves the SAME raw string
+    // is what a human sees in an aborted-loop fragment).
+    const malformedCall = (id: string): StreamChunk[] => [
+      { type: 'block-start', index: 0, blockType: 'tool-call' },
+      { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(id), name: 'echo_raw', arguments: 'not json' } },
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ]
+    const adapter = new MockAdapter([malformedCall('c1'), malformedCall('c2')])
+    const ctx = await harness(adapter, { toolRepeatThreshold: 2 })
+    ctx.tools.register(defineContentToolFixture({
+      name: 'echo_raw',
+      description: 'echoes whatever it is given, JSON or not',
+      parameters: { input: { type: 'string' } },
+      async execute(args: unknown) {
+        return [{ type: 'text', text: typeof args === 'string' ? `raw: ${args}` : JSON.stringify(args) }]
+      },
+    }))
+    const agent = ctx.agentLoop.create(SessionId('tool-repeat-raw-args'), { provider: 'mock', model: 'mock' })
+    const aborts = captureLoopAborts(ctx, agent)
+
+    send(agent, 'go')
+    await waitForIdle(ctx, agent)
+
+    expect(lastTurnError(agent)?.code).toBe('LOOP_ABORTED')
+    expect(aborts).toHaveLength(1)
+    expect(aborts[0]?.channel).toBe('tool-call')
+    expect(aborts[0]?.fragment).toContain('echo_raw(not json)')
   })
 
   it('does not trip a polling tool whose result keeps changing (legitimate repetition)', async () => {

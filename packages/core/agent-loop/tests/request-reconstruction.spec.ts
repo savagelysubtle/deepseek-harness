@@ -515,6 +515,57 @@ describe('request stability across the loop', () => {
       .toBe('config')
   })
 
+  it('folds a preparedCall-undefined header (NO_ADAPTER) forward into a SECOND step\'s '
+    + 'requestProposal unmodified, instead of trying to strip adapter-owned defaults that never existed', async () => {
+    // requestProposal() (agent.ts) is only reached once `requestHeaderLogged`
+    // is true, i.e. from the second step of a turn onward. Its early return
+    // (`header.adapterDefaults === undefined` -> return header.config as-is)
+    // is only exercised when the PERSISTED header from the prior step itself
+    // carried no adapter defaults -- which happens whenever `preparedCall`
+    // stayed undefined (NO_ADAPTER, as in the sibling tests above). A
+    // short-circuiting `llm/stream` listener owning an unregistered route
+    // lets both steps of one multi-step turn go through with no adapter ever
+    // registered, so the SECOND step's fold genuinely takes this path.
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SystemPrompt, { persona: 'stable base' })
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(AgentLoop, { agents: [] })
+    registerEcho(ctx)
+    const script = [
+      toolCallResponse('c1', 'echo', { text: 'one' }, 'first'),
+      textResponse('done'),
+    ]
+    ctx.on('llm/stream', () => {
+      const chunks = script.shift()
+      if (chunks === undefined) throw new Error('script exhausted')
+      return (async function* () { yield* chunks })()
+    })
+    const agent = ctx.agentLoop.create(SessionId('listener-owned-two-steps'), {
+      provider: 'listener',
+      model: 'virtual',
+    })
+
+    send(agent, 'go')
+    await waitForIdle(ctx, agent)
+
+    // Two real steps happened (tool call, then the concluding answer) and the
+    // second step's own header fold never crashed trying to delete
+    // properties off an `adapterDefaults` that was never there.
+    const stepStarts = agent.session.events.filter(event => event.type === 'step/start')
+    expect(stepStarts).toHaveLength(2)
+
+    // Nothing about the config actually changed between the two steps (no
+    // adapter defaults to resolve either time), so only the anchoring header
+    // is logged -- never a 'change' snapshot.
+    const headers = agent.session.events.filter(event => event.type === 'request/header')
+    expect(headers).toHaveLength(1)
+    expect(headers[0]?.data.header.adapterDefaults).toBeUndefined()
+    expect(headers[0]?.data.header.config).toEqual({ provider: 'listener', model: 'virtual' })
+  })
+
   it('a compaction replace rewrites the resend, and the log explains it', async () => {
     const adapter = new MockAdapter([textResponse('one'), textResponse('two')])
     const ctx = await harness(adapter)
@@ -884,6 +935,25 @@ describe('request/context capacity records', () => {
   })
 })
 
+describe('runMaintenance() re-entrancy guard', () => {
+  it('refuses a second runMaintenance() call while the first is still active work in flight', async () => {
+    const adapter = new MockAdapter([textResponse('one')])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('maintenance-already-active'), { provider: 'mock', model: 'mock' })
+
+    const gate = Promise.withResolvers<undefined>()
+    const maintenance = agent.runMaintenance(async () => { await gate.promise })
+
+    // The guard throws synchronously, before ever touching the job callback.
+    expect(() => {
+      void agent.runMaintenance(async () => undefined)
+    }).toThrow(/already has active work/)
+
+    gate.resolve(undefined)
+    await maintenance
+  })
+})
+
 describe('tool-registration race recovery (SWD-115)', () => {
   it('a wake whose only turn ended idle before a tool finished registering gets one corrective dispatch carrying the full tool set', async () => {
     // Turn 1 ends on plain text — no tool call, so no second step ever
@@ -1117,6 +1187,62 @@ describe('tool-registration race recovery (SWD-115)', () => {
     // at 1 forever, for the rest of the agent's life).
     expect(adapter.requests).toHaveLength(2)
     expect(adapter.requests[1]?.tools?.map(tool => tool.name)).toEqual(['echo'])
+  })
+
+  it('a second drift found while a correction is already latched behind maintenance short-circuits '
+    + 'instead of queuing a second corrective wake on top of it', async () => {
+    const adapter = new MockAdapter([textResponse('one'), textResponse('corrected')])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('tool-race-double-drift'), { provider: 'mock', model: 'mock' })
+
+    send(agent, 'go')
+    await waitForIdle(ctx, agent)
+    expect(adapter.requests).toHaveLength(1)
+
+    const infoCalls: unknown[][] = []
+    const origInfo = agent.ctx.logger.info.bind(agent.ctx.logger)
+    agent.ctx.logger.info = ((...args: unknown[]) => {
+      infoCalls.push(args)
+      origInfo(...(args as [never]))
+    }) as typeof agent.ctx.logger.info
+
+    const maintenanceGate = Promise.withResolvers<undefined>()
+    const maintenance = agent.runMaintenance(async () => { await maintenanceGate.promise })
+
+    vi.useFakeTimers()
+    try {
+      // First drift: latches a corrective wake behind maintenance
+      // (`toolSnapshotCorrectionPending` becomes true) -- same as the
+      // BLOCKING 2 case above.
+      registerEcho(ctx)
+      await vi.advanceTimersByTimeAsync(TOOL_SNAPSHOT_SETTLE_MS)
+      expect(adapter.requests).toHaveLength(1)
+
+      // Second drift while the FIRST correction is still pending (maintenance
+      // has not concluded): the recheck must not queue a second corrective
+      // wake on top of the first one -- it short-circuits instead.
+      registerLate(ctx)
+      await vi.advanceTimersByTimeAsync(TOOL_SNAPSHOT_SETTLE_MS)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(infoCalls.some(args =>
+      args.some(arg => String(arg).includes('short-circuited (a correction is already pending)')))).toBe(true)
+
+    const corrected = waitForIdle(ctx, agent)
+    maintenanceGate.resolve(undefined)
+    await maintenance
+    await corrected
+
+    // Exactly ONE corrective dispatch went out (not two), and it carries BOTH
+    // tools -- the live registry read when the latched wake's own step
+    // actually runs picks up everything registered by then, not merely what
+    // the first recheck alone saw.
+    expect(adapter.requests).toHaveLength(2)
+    expect(adapter.requests[1]?.tools?.map(tool => tool.name)).toEqual(
+      expect.arrayContaining(['echo', 'late']),
+    )
   })
 })
 

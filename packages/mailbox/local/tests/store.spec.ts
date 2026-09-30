@@ -72,6 +72,17 @@ describe('schema ownership', () => {
     foreign.close()
     expect(() => openMailboxDatabase(path)).toThrow('is not a mailbox store')
   })
+
+  it('rejects a mailbox_meta table with no readable schema version stamp', () => {
+    const path = tempDbPath()
+    openMailboxDatabase(path).close()
+    const db = new DatabaseSync(path)
+    // The table itself is a real mailbox_meta table (distinct from the
+    // no-table case above), just missing the one row this check reads.
+    db.prepare('DELETE FROM mailbox_meta WHERE key = ?').run('schema_version')
+    db.close()
+    expect(() => openMailboxDatabase(path)).toThrow('has no readable schema version stamp')
+  })
 })
 
 describe('publish/claim/settle', () => {
@@ -251,6 +262,41 @@ describe('publish/claim/settle', () => {
     store.close()
   })
 
+  it('rejects publish with the real Error a circular payload throws, instead of wrapping it', async () => {
+    const store = storeWith(fakeClock().clock)
+    // JSON.stringify throws a genuine TypeError on a circular structure,
+    // synchronously, before any write happens — the `error instanceof Error`
+    // TRUE side of publish's catch, distinct from the abort tests below
+    // (which reject with a non-Error reason and take the wrapping branch).
+    const circular: Record<string, unknown> = {}
+    circular['self'] = circular
+    await expect(store.publish({ to: OPS, from: 'gotham:alfred', payload: circular }))
+      .rejects.toThrow(/circular/i)
+    store.close()
+  })
+
+  it('skips both a malformed and a well-formed row when their claim UPDATE matches nothing, as if raced away', async () => {
+    // SQLite's own locking (BEGIN IMMEDIATE) makes a real lost race between
+    // this transaction's SELECT and its claim UPDATE unreachable in a
+    // single-process test, so the "changes !== 1" defensive branches are
+    // exercised here against a stub connection instead of a timing-based
+    // race — per the house rule against flaky race-shaped tests.
+    const rows = [
+      { id: 'poison-1', to_address: OPS, from_address: 'guest:x', type: null, subject: null, payload: '{"broken"', trace_id: null, blocking: null, created_at: 1_000_000 },
+      { id: 'good-1', to_address: OPS, from_address: 'guest:x', type: null, subject: null, payload: null, trace_id: null, blocking: null, created_at: 1_000_000 },
+    ]
+    const raceStub = {
+      exec: () => {},
+      prepare: (sql: string) => {
+        if (sql.includes('SELECT id, to_address')) return { all: () => rows }
+        if (sql.includes('SET state = \'claimed\'')) return { run: () => ({ changes: 0 }) }
+        throw new Error(`unexpected prepare in race stub: ${sql}`)
+      },
+    }
+    const store = new SqliteMailboxStore(raceStub as unknown as DatabaseSync, fakeClock().clock)
+    await expect(store.claim(filter([OPS]))).resolves.toEqual([])
+  })
+
   it('keeps a failed settlement terminal and unclaimable', async () => {
     const { clock, advance } = fakeClock()
     const store = storeWith(clock)
@@ -265,6 +311,22 @@ describe('publish/claim/settle', () => {
 })
 
 describe('settlement rejection', () => {
+  it('rejects a settle outcome state outside the known union as unreachable', async () => {
+    // TypeScript's own exhaustiveness check (`const unreachable: never =
+    // outcome`) guards this at compile time; a caller that bypasses the type
+    // (an external, non-TypeScript caller, or a bug upstream) reaches it at
+    // runtime instead, which this proves rejects loud rather than silently
+    // falling through.
+    const { clock } = fakeClock()
+    const store = storeWith(clock)
+    const id = await store.publish({ to: OPS, from: 'gotham:alfred' })
+    const [lease] = await store.claim(filter([OPS]))
+    expect(id).toBeTruthy()
+    await expect(store.settle(lease!.leaseRef, { state: 'bogus', result: undefined } as never))
+      .rejects.toThrow(/unreachable mailbox outcome/)
+    store.close()
+  })
+
   it('throws on unknown, malformed, double, and mismatched settlements', async () => {
     const { clock } = fakeClock()
     const store = storeWith(clock)
@@ -396,6 +458,51 @@ describe('lookupByTraceId', () => {
     // its deadline expires on an answer that can never come.
     await expect(store.lookupByTraceId('trace-refused')).resolves.toEqual([
       { id, from: 'gotham:alfred', to: OPS, sentAt: 1_000_000, state: 'failed', failureReason: 'org-registry-denied: no edge' },
+    ])
+    store.close()
+  })
+
+  it('degrades a settlement envelope that is unreadable, non-object, or missing its expected field, instead of failing the read', async () => {
+    const { clock } = fakeClock()
+    const path = tempDbPath()
+    const store = storeWith(clock, path)
+    const invalidJson = await store.publish({ to: OPS, from: 'gotham:alfred', traceId: 'trace-bad-json' })
+    const nonObject = await store.publish({ to: OPS, from: 'gotham:alfred', traceId: 'trace-non-object' })
+    const doneNoDeliveredAt = await store.publish({ to: OPS, from: 'gotham:alfred', traceId: 'trace-done-no-deliveredat' })
+    const failedNoReason = await store.publish({ to: OPS, from: 'gotham:alfred', traceId: 'trace-failed-no-reason' })
+    const pendingWithLeftoverResult = await store.publish({ to: OPS, from: 'gotham:alfred', traceId: 'trace-pending-leftover' })
+
+    const db = new DatabaseSync(path)
+    try {
+      db.prepare('UPDATE messages SET state = \'done\', result = ? WHERE id = ?').run('not-json{', invalidJson)
+      db.prepare('UPDATE messages SET state = \'done\', result = ? WHERE id = ?').run('42', nonObject)
+      db.prepare('UPDATE messages SET state = \'done\', result = ? WHERE id = ?')
+        .run(JSON.stringify({ messageId: doneNoDeliveredAt }), doneNoDeliveredAt)
+      db.prepare('UPDATE messages SET state = \'failed\', result = ? WHERE id = ?').run('{}', failedNoReason)
+      // Back to 'pending' but still carrying a leftover result value —
+      // unreachable through settle() itself (its own 'pending' case always
+      // clears result to NULL) — simulating a hand-edited or
+      // pre-migration row instead.
+      db.prepare('UPDATE messages SET state = \'pending\', result = ? WHERE id = ?')
+        .run(JSON.stringify({ deliveredAt: 1 }), pendingWithLeftoverResult)
+    } finally {
+      db.close()
+    }
+
+    await expect(store.lookupByTraceId('trace-bad-json')).resolves.toEqual([
+      { id: invalidJson, from: 'gotham:alfred', to: OPS, sentAt: 1_000_000, state: 'done' },
+    ])
+    await expect(store.lookupByTraceId('trace-non-object')).resolves.toEqual([
+      { id: nonObject, from: 'gotham:alfred', to: OPS, sentAt: 1_000_000, state: 'done' },
+    ])
+    await expect(store.lookupByTraceId('trace-done-no-deliveredat')).resolves.toEqual([
+      { id: doneNoDeliveredAt, from: 'gotham:alfred', to: OPS, sentAt: 1_000_000, state: 'done' },
+    ])
+    await expect(store.lookupByTraceId('trace-failed-no-reason')).resolves.toEqual([
+      { id: failedNoReason, from: 'gotham:alfred', to: OPS, sentAt: 1_000_000, state: 'failed' },
+    ])
+    await expect(store.lookupByTraceId('trace-pending-leftover')).resolves.toEqual([
+      { id: pendingWithLeftoverResult, from: 'gotham:alfred', to: OPS, sentAt: 1_000_000, state: 'pending' },
     ])
     store.close()
   })
@@ -533,6 +640,18 @@ describe('abort handling and rejection normalization', () => {
   // to the plain-method-plus-explicit-Promise shape the other five took, so
   // its rejection path is not this normalization branch and is out of scope
   // here.
+
+  it('rejects claimableAddresses, lookupByTraceId, and lookupInboundSince with the real Error a closed handle throws', async () => {
+    // A closed DatabaseSync's own prepare() throws a genuine Error
+    // ("database is not open"), synchronously — the `error instanceof Error`
+    // TRUE side of each method's catch, distinct from the plain-reason abort
+    // tests above (which take the wrapping branch instead).
+    const store = storeWith(fakeClock().clock)
+    store.close()
+    await expect(store.claimableAddresses({ staleClaimMs: 30_000 })).rejects.toThrow('database is not open')
+    await expect(store.lookupByTraceId('trace-1')).rejects.toThrow('database is not open')
+    await expect(store.lookupInboundSince(OPS, 0)).rejects.toThrow('database is not open')
+  })
 
   it('returns a rejected promise rather than throwing synchronously on a validation failure', async () => {
     // Distinct from the abort cases above: this proves the general

@@ -30,6 +30,8 @@ function messagesReconstruct(dispatched: readonly Message[], expected: readonly 
   // The install() listener already fails loud on a missing clock tail; this guard keeps the
   // function honest as a standalone contract for direct callers and tests.
   const last = dispatched[dispatched.length - 1]
+  /* v8 ignore next -- duplicated by install()'s identical check immediately before this function is ever called (messagesReconstruct is
+     module-private, its only caller is install()) */
   if (last === undefined || !isClockMessage(last)) return false
   return JSON.stringify(dispatched.slice(0, -1)) === JSON.stringify(expected)
 }

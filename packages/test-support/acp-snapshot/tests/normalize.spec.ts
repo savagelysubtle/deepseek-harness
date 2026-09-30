@@ -695,4 +695,25 @@ describe('normalizeConsoleExporterStderr', () => {
       '{{logTime}} [W] z-logger warned right before the fatal line — must stay put',
     ])
   })
+
+  it('resets the run at a blank line too, treating it the same as a non-matching literal line', () => {
+    const raw = [
+      // A leading blank line before any console-exporter line at all: flushRun
+      // fires with no run ever started, the early-return branch neither of
+      // the two tests above exercises (their first line always matches).
+      '',
+      logLine('2026-09-29 10:00:00', 'I', 'b-logger', 'after a leading blank line'),
+      logLine('2026-09-29 10:00:00', 'I', 'a-logger', 'after a leading blank line'),
+      '',
+      logLine('2026-09-29 10:00:01', 'I', 'z-logger', 'in its own run, unsorted against anything'),
+    ].join('\n')
+    const out = normalizeConsoleExporterStderr(raw)
+    expect(out.split('\n')).toEqual([
+      '',
+      '{{logTime}} [I] a-logger after a leading blank line',
+      '{{logTime}} [I] b-logger after a leading blank line',
+      '',
+      '{{logTime}} [I] z-logger in its own run, unsorted against anything',
+    ])
+  })
 })

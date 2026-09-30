@@ -336,6 +336,7 @@ const UNSENT_MESSAGE_ID = 'unsent'
  * @returns the refusal reason, or undefined when the destination is known.
  */
 function unknownRecipientRefusal(to: MailboxAddress, addresses: readonly string[] | undefined): string | undefined {
+  /* v8 ignore next -- the only call site (tools.ts ~540) gates on this identical condition first */
   if (addresses === undefined || addresses.length === 0) return undefined
   if (addresses.includes(to)) return undefined
   return `"${to}" is not a known seat this deployment serves (${addresses.join(', ')}). `
@@ -750,10 +751,13 @@ function sentStateOf(sent: MailboxTraceEntry | undefined): MailboxAwaitSentState
     case 'done': return 'delivered'
     case 'claimed': return 'claimed'
     case 'pending': return 'pending'
+    /* v8 ignore start -- the enclosing mailbox_await loop returns on sent?.state === 'failed' before timeoutResult ever calls this in the
+       same iteration */
     case 'failed':
       // A failed row ends the wait as a refusal in the same iteration that
       // observed it; a timeout never carries one.
       throw new Error('mailbox_await: a failed sent row is a refusal, never a timeout diagnosis')
+    /* v8 ignore stop */
   }
 }
 

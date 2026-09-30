@@ -62,6 +62,8 @@ function argsPreview(args: unknown): string {
   try {
     return JSON.stringify(args)
   } catch {
+    /* v8 ignore next -- args is always tool-calls.ts's parseArguments() result (JSON.parse output or the pre-handled raw string), which
+       JSON.stringify can never throw on */
     return String(args)
   }
 }

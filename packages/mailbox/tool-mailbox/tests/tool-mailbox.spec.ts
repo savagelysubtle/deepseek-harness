@@ -21,7 +21,7 @@ import MailboxRegistry from '@deepseek-ai/dsh-mailbox'
 import type { MailboxLease, MailboxRegistry as MailboxRegistryShape } from '@deepseek-ai/dsh-mailbox'
 import MailboxLocal from '@deepseek-ai/dsh-mailbox-local'
 import * as tool from '../src/index.ts'
-import { AWAIT_MAX_DEADLINE_MS, AWAIT_MIN_DEADLINE_MS, AWAIT_POLL_INTERVAL_MS, clampAwaitDeadlineMs, mailboxAwaitTool, mailboxCheckInboxTool, mailboxSendTool } from '../src/tools.ts'
+import { AWAIT_MAX_DEADLINE_MS, AWAIT_MIN_DEADLINE_MS, AWAIT_POLL_INTERVAL_MS, clampAwaitDeadlineMs, mailboxAwaitTool, mailboxCheckInboxTool, mailboxDirectoryTool, mailboxSendTool } from '../src/tools.ts'
 import { deriveNamedSessionId } from '@deepseek-ai/dsh-named-sessions'
 import { resolveMailboxIdentity, resolveMailboxIdentityWithRegistry } from '../src/identity.ts'
 import * as invariant from '../src/invariant.ts'
@@ -360,6 +360,59 @@ describe('mailbox_send — known recipient admission (SWD-140)', () => {
     await ctx.fiber.dispose()
   })
 
+  it('sweeps an expired pre-storage refusal record on the next refused send\'s own recordPreStorageRefusal call', async () => {
+    const { ctx } = await setup('batman', { addresses: ['batman'] })
+    vi.useFakeTimers()
+    try {
+      const first = await callAs(ctx, 'batman', 'mailbox_send', { to: 'robin', subject: 's', body: 'b' })
+      if (first.isError) throw new Error('expected a graceful refusal')
+      const firstTraceId = (first.value as { traceId: string }).traceId
+
+      // Past PRE_STORAGE_REFUSAL_RETENTION_MS: the NEXT refused send's own
+      // recordPreStorageRefusal sweeps this now-expired entry before recording
+      // its own — the sweep loop's delete branch, not merely elapsed time.
+      await vi.advanceTimersByTimeAsync(600_001)
+      const second = await callAs(ctx, 'batman', 'mailbox_send', { to: 'joker', subject: 's', body: 'b' })
+      if (second.isError) throw new Error('expected a graceful refusal')
+
+      // Proof the sweep actually deleted the first record: an await on its
+      // traceId now times out untraceable instead of finding a live refusal.
+      const pending = callAs(ctx, 'batman', 'mailbox_await', { traceId: firstTraceId, deadlineMs: AWAIT_MIN_DEADLINE_MS })
+      await vi.advanceTimersByTimeAsync(AWAIT_MIN_DEADLINE_MS + 1)
+      const result = await pending
+      expect(result.isError).toBe(false)
+      if (result.isError) throw new Error('expected mailbox_await success')
+      expect(result.value).toMatchObject({ outcome: 'timeout', sentState: 'unknown' })
+    } finally {
+      vi.useRealTimers()
+    }
+    await ctx.fiber.dispose()
+  })
+
+  it('treats a pre-storage refusal record past its retention window as absent when mailbox_await reads it directly, pruning it', async () => {
+    const { ctx } = await setup('batman', { addresses: ['batman'] })
+    vi.useFakeTimers()
+    try {
+      const sent = await callAs(ctx, 'batman', 'mailbox_send', { to: 'robin', subject: 's', body: 'b' })
+      if (sent.isError) throw new Error('expected a graceful refusal')
+      const traceId = (sent.value as { traceId: string }).traceId
+
+      // No second refused send runs in between, so recordPreStorageRefusal's
+      // own sweep never fires again — this await is what discovers the
+      // expiry, via takePreStorageRefusal's own retention check.
+      await vi.advanceTimersByTimeAsync(600_001)
+      const pending = callAs(ctx, 'batman', 'mailbox_await', { traceId, deadlineMs: AWAIT_MIN_DEADLINE_MS })
+      await vi.advanceTimersByTimeAsync(AWAIT_MIN_DEADLINE_MS + 1)
+      const result = await pending
+      expect(result.isError).toBe(false)
+      if (result.isError) throw new Error('expected mailbox_await success')
+      expect(result.value).toMatchObject({ outcome: 'timeout', sentState: 'unknown' })
+    } finally {
+      vi.useRealTimers()
+    }
+    await ctx.fiber.dispose()
+  })
+
   it('never calls the underlying publish for a refused destination', async () => {
     const publish = vi.fn(async () => 'should-not-be-called')
     const send = mailboxSendTool(
@@ -504,6 +557,17 @@ describe('mailbox_send delivery state', () => {
   it('reports pending for a fresh row and folds claimed into pending', async () => {
     expect(((await runOnce(sendWithRead([row('msg-1', 'pending')]))) as { deliveryState: string }).deliveryState).toBe('pending')
     expect(((await runOnce(sendWithRead([row('msg-1', 'claimed')]))) as { deliveryState: string }).deliveryState).toBe('pending')
+  })
+
+  it('renders the fallback reason text for a handcrafted refused value carrying no refusalReason at all', () => {
+    // Unreachable through execute(): whenever execute sets deliveryState
+    // 'refused', it has already filled refusalReason (with the real reason or
+    // its OWN fallback text), so render's identical-looking fallback only
+    // answers a raw/replayed SendResult missing the field entirely.
+    const send = sendWithRead([])
+    const value = { messageId: 'msg-1', to: 'alfred', from: 'batman', traceId: 't', deliveryState: 'refused' } as never
+    const blocks = send.output.render(args, value)
+    expect((blocks[0] as { text: string }).text).toContain('recorded no reason')
   })
 
   it('reports pending when the post-admission read finds no row', async () => {
@@ -731,6 +795,154 @@ describe('mailbox_await', () => {
     expect(result.value).toMatchObject({ outcome: 'reply', count: 1, messages: [{ from: 'alfred', subject: 'answer' }] })
     expect(storedRows(dbPath, 'batman')[0]?.state).toBe('claimed')
     await ctx.fiber.dispose()
+  })
+
+  it('renders a read-detected claimed arrival with blocking marked and an absent subject stringified as JSON', async () => {
+    const { ctx } = await setup('batman')
+    const send = await call(ctx, 'mailbox_send', { to: 'alfred', subject: 'request', body: 'status?' })
+    const traceId = sentTraceId(send)
+    // No subject at all, a non-string payload, and the blocking mark — the
+    // three toReadEntry fields the other await/check_inbox tests never
+    // exercise together, since they always thread a subject and a string body.
+    await ctx.mailbox.publish({ to: 'batman' as never, from: 'alfred', blocking: true, payload: { op: 'task', detail: 'dock' }, traceId })
+    const leases = await ctx.mailbox.claim({ addresses: ['batman' as never], limit: 1, staleClaimMs: 60_000 })
+    expect(leases).toHaveLength(1)
+    const result = await call(ctx, 'mailbox_await', { traceId, deadlineMs: AWAIT_MAX_DEADLINE_MS })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected mailbox_await success')
+    expect(result.value).toMatchObject({
+      outcome: 'reply',
+      count: 1,
+      messages: [{ from: 'alfred', blocking: true, body: JSON.stringify({ op: 'task', detail: 'dock' }, null, 2) }],
+    })
+    expect((result.value as { messages: Array<{ subject?: string }> }).messages[0]).not.toHaveProperty('subject')
+    await ctx.fiber.dispose()
+  })
+
+  it('falls back to sentAt when a done read-detected arrival carries neither claimedAt nor deliveredAt', async () => {
+    const { ctx } = await setup('batman')
+    const send = await call(ctx, 'mailbox_send', { to: 'alfred', subject: 'request', body: 'status?' })
+    const traceId = sentTraceId(send)
+    const beforePublish = Date.now()
+    // No payload at all (body renders '') and no subject.
+    await ctx.mailbox.publish({ to: 'batman' as never, from: 'alfred', traceId })
+    const leases = await ctx.mailbox.claim({ addresses: ['batman' as never], limit: 1, staleClaimMs: 60_000 })
+    expect(leases).toHaveLength(1)
+    const messageId = leases[0]!.message.id
+    if (messageId === undefined) throw new Error('claim returned an id-less message')
+    // A malformed/legacy settlement envelope that never recorded `deliveredAt`:
+    // a `done` settlement always clears `claimed_at` to NULL, so with
+    // deliveredAt absent too the entry has no claim or delivery timestamp at
+    // all, and toReadEntry's fallback chain must reach the row's own sentAt.
+    await ctx.mailbox.settle(leases[0]!.leaseRef, { state: 'done', result: { messageId } as never })
+    const result = await call(ctx, 'mailbox_await', { traceId, deadlineMs: AWAIT_MAX_DEADLINE_MS })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected mailbox_await success')
+    const messages = (result.value as { messages: Array<{ body: string; claimedAt: number }> }).messages
+    expect(messages).toHaveLength(1)
+    expect(messages[0]!.body).toBe('')
+    expect(messages[0]!.claimedAt).toBeGreaterThanOrEqual(beforePublish)
+    await ctx.fiber.dispose()
+  })
+
+  it('times out reporting a send the recipient claimed but never confirmed delivered', async () => {
+    const { ctx, dbPath } = await setup('batman')
+    const send = await call(ctx, 'mailbox_send', { to: 'alfred', subject: 'request', body: 'status?' })
+    const traceId = sentTraceId(send)
+    // Claimed as the bridge would mid-delivery, but never settled: the sent
+    // row sits in `claimed`, reaching neither `done` nor `failed`.
+    const leases = await ctx.mailbox.claim({ addresses: ['alfred' as never], limit: 1, staleClaimMs: 60_000 })
+    expect(leases).toHaveLength(1)
+    vi.useFakeTimers()
+    try {
+      const pending = call(ctx, 'mailbox_await', { traceId, deadlineMs: AWAIT_MIN_DEADLINE_MS })
+      await vi.advanceTimersByTimeAsync(AWAIT_MIN_DEADLINE_MS + 1)
+      const result = await pending
+      expect(result.isError).toBe(false)
+      if (result.isError) throw new Error('expected mailbox_await success')
+      expect(result.value).toEqual({
+        outcome: 'timeout',
+        messages: [],
+        count: 0,
+        sentState: 'claimed',
+        waitedMs: expect.any(Number) as unknown,
+      })
+      expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('picked up for delivery') as unknown }])
+      expect(storedRows(dbPath, 'alfred')[0]?.state).toBe('claimed')
+      vi.useRealTimers()
+      await ctx.fiber.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('times out with the untraceable diagnosis when the traceId matches no row this seat ever sent', async () => {
+    const { ctx } = await setup('batman')
+    vi.useFakeTimers()
+    try {
+      const pending = call(ctx, 'mailbox_await', { traceId: 'no-such-trace-ever-sent', deadlineMs: AWAIT_MIN_DEADLINE_MS })
+      await vi.advanceTimersByTimeAsync(AWAIT_MIN_DEADLINE_MS + 1)
+      const result = await pending
+      expect(result.isError).toBe(false)
+      if (result.isError) throw new Error('expected mailbox_await success')
+      expect(result.value).toEqual({
+        outcome: 'timeout',
+        messages: [],
+        count: 0,
+        sentState: 'unknown',
+        waitedMs: expect.any(Number) as unknown,
+      })
+      expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining('no row this seat sent carries the id') as unknown }])
+      vi.useRealTimers()
+      await ctx.fiber.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('falls back to the standard reason text when a failed sent row recorded none, via mailbox_await itself', async () => {
+    const { ctx, dbPath } = await setup('batman')
+    const send = await call(ctx, 'mailbox_send', { to: 'alfred', subject: 'request', body: 'approve the leave' })
+    const traceId = sentTraceId(send)
+    const leases = await ctx.mailbox.claim({ addresses: ['alfred' as never], limit: 1, staleClaimMs: 60_000 })
+    expect(leases).toHaveLength(1)
+    // A failed settlement that records no reason at all — distinct from
+    // drainOnce's always-reasoned failures used elsewhere in this file, and
+    // exercised here through mailbox_await's own failed-row check rather than
+    // mailbox_send's post-admission read.
+    await ctx.mailbox.settle(leases[0]!.leaseRef, { state: 'failed', result: {} as never })
+    const result = await call(ctx, 'mailbox_await', { traceId, deadlineMs: AWAIT_MAX_DEADLINE_MS })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected mailbox_await success')
+    expect(result.value).toMatchObject({ outcome: 'refused' })
+    expect((result.value as { refusalReason: string }).refusalReason).toContain('recorded no reason')
+    expect(storedRows(dbPath, 'alfred')[0]?.state).toBe('failed')
+    await ctx.fiber.dispose()
+  })
+
+  it('rejects promptly with the abort reason observed just before the poll sleep, not mid-sleep', async () => {
+    // Deterministic trigger for waitPollInterval's `if (signal.aborted)`
+    // entry check: the stub's claim() aborts the controller as a side effect
+    // BEFORE the loop reaches its poll sleep, so no timer or race is needed.
+    const controller = new AbortController()
+    const abortError = new Error('claim observed the abort')
+    const awaiting = mailboxAwaitTool({
+      claim: async () => {
+        controller.abort(abortError)
+        return []
+      },
+      lookupByTraceId: async () => [],
+      lookupInboundSince: async () => [],
+    } as unknown as MailboxRegistryShape, { sessionName: 'alfred' })
+    await expect(awaiting.execute({ deadlineMs: AWAIT_MAX_DEADLINE_MS }, {
+      signal: controller.signal,
+      callId: CallId('call-pre-aborted'),
+      name: 'mailbox_await',
+      arguments: {},
+      token: Symbol('token') as never,
+      rootCallId: CallId('call-pre-aborted'),
+      deferContext: () => {},
+    } as never)).rejects.toBe(abortError)
   })
 
   it('does not end a traced wait on inbound mail delivered before the awaited send', async () => {
@@ -1026,6 +1238,34 @@ describe('mailbox_await', () => {
   })
 })
 
+describe('mailbox_await render — edge cases reached only via a handcrafted value', () => {
+  /** A minimal await tool whose loop is never exercised by these tests — only its pure render. */
+  function awaitingTool() {
+    return mailboxAwaitTool({
+      claim: async () => [],
+      lookupByTraceId: async () => [],
+      lookupInboundSince: async () => [],
+    } as unknown as MailboxRegistryShape, { sessionName: 'alfred' })
+  }
+
+  it('reports no delivery diagnosis for a timeout value carrying no sentState at all', () => {
+    // Documented as reachable only by replaying a row logged before sentState
+    // existed; the real loop always sets it, so this is exercised directly
+    // against the tool's pure render rather than through execute().
+    const value = { outcome: 'timeout', messages: [], count: 0, waitedMs: 10 } as never
+    const blocks = awaitingTool().output.render({ traceId: undefined }, value)
+    expect((blocks[0] as { text: string }).text).toContain('carries no delivery diagnosis')
+  })
+
+  it('omits the delivered-at clause when a delivered timeout value carries no deliveredAt', () => {
+    const value = { outcome: 'timeout', messages: [], count: 0, sentState: 'delivered', waitedMs: 10 } as never
+    const blocks = awaitingTool().output.render({ traceId: 'x' }, value)
+    const text = (blocks[0] as { text: string }).text
+    expect(text).toContain('WAS delivered to its recipient')
+    expect(text).not.toMatch(/ at \d/)
+  })
+})
+
 describe('mailbox_directory', () => {
   /** Write a minimal valid org registry listing the given seats. */
   function writeRegistry(seats: Record<string, { lead?: boolean; test?: boolean }>): string {
@@ -1104,6 +1344,33 @@ describe('mailbox_directory', () => {
     if (result.isError) throw new Error('expected mailbox_directory success')
     expect(result.value).toMatchObject({ count: 2, orgRegistry: 'loaded' })
     await ctx.fiber.dispose()
+  })
+
+  it('presents as a pure card', () => {
+    const directory = mailboxDirectoryTool({ addresses: ['batman'] })
+    expect(directory.presentCall?.({})).toEqual({ card: 'generic', title: 'Org directory', kind: 'other' })
+  })
+
+  it('defaults an absent addresses config to no served roster, and omits the empty "Served on this host" line', async () => {
+    const registryPath = writeRegistry({ alfred: {} })
+    // No `addresses` key at all — exercises the `config.addresses ?? []`
+    // fallback and an empty served group, distinct from every other directory
+    // test above, which always configures a served roster.
+    const directory = mailboxDirectoryTool({ orgRegistryPath: registryPath })
+    const value = await directory.execute({}, {
+      signal: testSignal,
+      callId: CallId('call-directory-noaddr'),
+      name: 'mailbox_directory',
+      arguments: {},
+      token: Symbol('token') as never,
+      rootCallId: CallId('call-directory-noaddr'),
+      deferContext: () => {},
+    } as never) as { seats: unknown[]; count: number; orgRegistry: string }
+    expect(value).toEqual({ seats: [{ name: 'alfred' }], count: 1, orgRegistry: 'loaded' })
+    const blocks = directory.output.render({}, value as never)
+    const text = (blocks[0] as { text: string }).text
+    expect(text).not.toContain('Served on this host')
+    expect(text).toContain('Elsewhere in the org: alfred.')
   })
 })
 
