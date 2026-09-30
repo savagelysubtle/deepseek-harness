@@ -141,6 +141,99 @@ describe('PiAiAdapter provider routing', () => {
     expect(server.requests).toHaveLength(2)
   })
 
+  it('disables reasoning for a session-title call regardless of the profile default', async () => {
+    // Mirrors llm-deepseek/serialize.ts's identical `purpose === 'session-title'`
+    // guard: an auxiliary title call must not spend its small maxTokens budget
+    // on reasoning even when the route configures a real default.
+    const server = await mockServer([{ events: textEvents }])
+    const ctx = await harness(server.url, { reasoning: 'max' })
+    await assemble(ctx, { model: 'deepseek-v4-flash', purpose: 'session-title', messages: [] })
+    expect(server.requests[0]).toMatchObject({ thinking: { type: 'disabled' } })
+    expect(server.requests[0]).not.toHaveProperty('reasoning_effort')
+  })
+
+  it('lets a session-title purpose win over an explicit reasoningEffort override', async () => {
+    // Matches llm-deepseek/serialize.ts's precedence exactly: the purpose
+    // check short-circuits ahead of the caller's own `reasoningEffort`, so an
+    // auxiliary call cannot be talked back into reasoning by naming an effort.
+    const server = await mockServer([{ events: textEvents }])
+    const ctx = await harness(server.url, { reasoning: 'max' })
+    await assemble(ctx, {
+      model: 'deepseek-v4-flash',
+      purpose: 'session-title',
+      reasoningEffort: ReasoningEffortId('high'),
+      messages: [],
+    })
+    expect(server.requests[0]).toMatchObject({ thinking: { type: 'disabled' } })
+    expect(server.requests[0]).not.toHaveProperty('reasoning_effort')
+  })
+
+  it('resolves a session-title call to the lowest declared effort when the model never declares off', async () => {
+    // Matches the production incident exactly: ~/.dsh/settings.yaml declares
+    // openrouter's glm-5.3-flash with `reasoningEfforts: { low, high, max }`
+    // and no `off` key at all, so getSupportedThinkingLevels(model) never
+    // offers 'off' for it — forcing 'off' unconditionally used to throw
+    // UNSUPPORTED_REASONING_EFFORT on every title call. The purpose must
+    // still never throw: it falls back to this model's lowest declared level.
+    const server = await mockServer([{ events: textEvents }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'acme-gateway': {
+          apiKeyEnv: 'PI_TEST_KEY',
+          api: 'openai-completions',
+          baseURL: `${server.url}/v1`,
+          compat: { thinkingFormat: 'openrouter' },
+          models: [{
+            id: 'acme-think',
+            contextWindow: 65_536,
+            maxTokens: 4096,
+            reasoningEfforts: { low: 'low', high: 'high', max: 'max' },
+          }],
+        },
+      },
+    })
+    const result = await assemble(ctx, {
+      provider: 'acme-gateway',
+      model: 'acme-think',
+      purpose: 'session-title',
+      // An explicit override must still lose to the purpose, exactly as it
+      // does when the model declares 'off'.
+      reasoningEffort: ReasoningEffortId('max'),
+      messages: [],
+    })
+    expect(result.finish.kind).not.toBe('error')
+    expect(server.requests[0]).toMatchObject({ reasoning: { effort: 'low' } })
+  })
+
+  it('leaves a non-reasoning model unaffected by the session-title guard', async () => {
+    // gpt-4.1 carries no reasoning metadata at all, so forcing 'off' must
+    // resolve the same way it always has (a no-op) rather than throwing
+    // UNSUPPORTED_REASONING_EFFORT before the request ever reaches the wire.
+    const server = await mockServer([{ status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: { openai: { apiKeyEnv: 'PI_TEST_KEY', baseURL: `${server.url}/v1` } },
+    })
+    const result = await assemble(ctx, { provider: 'openai', model: 'gpt-4.1', purpose: 'session-title', messages: [] })
+    expect(server.paths).toEqual(['/v1/responses'])
+    expect(result.finish).toMatchObject({ kind: 'error', failure: { code: 'AUTH' } })
+  })
+
+  it('keeps the profile default for an ordinary conversational call and for compaction', async () => {
+    // Negative control for the two tests above: leaving `purpose` unset, and
+    // naming the other purpose the harness defines, must both still reach the
+    // profile's configured reasoning default — only 'session-title' guards.
+    const server = await mockServer([{ events: textEvents }, { events: textEvents }])
+    const ctx = await harness(server.url, { reasoning: 'max' })
+    await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+    expect(server.requests[0]).toMatchObject({ thinking: { type: 'enabled' }, reasoning_effort: 'max' })
+    await assemble(ctx, { model: 'deepseek-v4-flash', purpose: 'compaction', messages: [] })
+    expect(server.requests[1]).toMatchObject({ thinking: { type: 'enabled' }, reasoning_effort: 'max' })
+  })
+
   it('preserves omitted profile options when constructing the adapter directly', async () => {
     const server = await mockServer([{ events: textEvents }])
     const ctx = new Context()

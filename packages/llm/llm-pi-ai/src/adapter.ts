@@ -49,6 +49,7 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
+import { THINKING_LEVELS } from './catalog.ts'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { toPiContext } from './context.ts'
 import { toStreamChunks } from './stream.ts'
@@ -138,6 +139,55 @@ function resolveReasoningLevel(
     `pi-ai provider "${model.provider}" model "${model.id}" does not support reasoning effort "${effort}"`,
     'UNSUPPORTED_REASONING_EFFORT',
   )
+}
+
+/**
+ * The lowest level `getSupportedThinkingLevels(model)` offers above `off`, in
+ * pi-ai's own escalation order (`THINKING_LEVELS`, shared with catalog.ts so
+ * both stay in step with a pi-ai upgrade). `undefined` when the model
+ * supports no reasoning level at all beyond what `auxiliaryReasoningLevel`
+ * already special-cases (it never actually reaches this for such a model —
+ * see there).
+ */
+function lowestSupportedReasoningLevel(model: Model<Api>): ModelThinkingLevel | undefined {
+  const supported = getSupportedThinkingLevels(model)
+  return THINKING_LEVELS.find(level => level !== 'off' && supported.includes(level))
+}
+
+/**
+ * The reasoning level one `purpose: 'session-title'` call resolves to for
+ * this exact model. Mirrors llm-deepseek/serialize.ts's identical guard in
+ * intent — an auxiliary title call must not reason — but not in mechanism:
+ * DeepSeek's own wire protocol has a real `thinking: {type: 'disabled'}`
+ * toggle independent of any declared effort, while pi-ai's generic `reasoning`
+ * option has none — `off` is only reachable when the model's own declared
+ * `reasoningEfforts` names it (see `resolveReasoningLevel`'s doc above).
+ *
+ * A hand-declared model that omits `off` from its `reasoningEfforts` — a real,
+ * observed deployment shape: an OpenRouter-hosted model configured with only
+ * `{low, high, max}`, whatever wire spellings the deployment gave them —
+ * previously made this purpose throw `UNSUPPORTED_REASONING_EFFORT` for every
+ * title call, permanently failing session titling instead of merely spending
+ * its token budget on reasoning. This never throws: it picks,
+ * in order, `off` when supported, else the model's own lowest declared
+ * non-off level (still real reasoning, but the smallest slice the deployment
+ * offers), else `undefined` — a model with no reasoning capability at all,
+ * where `getSupportedThinkingLevels` reports only `off`, always takes the
+ * first branch, so `undefined` is reached only if a future pi-ai catalog ever
+ * describes a reasoning model with no declared level whatsoever.
+ *
+ * An explicit per-request `GenerateOptions.reasoningEffort` is not consulted
+ * here at all — this purpose overrides it unconditionally, matching
+ * llm-deepseek's precedence exactly (its `purpose === 'session-title'` check
+ * also short-circuits ahead of any effort resolution). That explicit-effort
+ * fail-loud behaviour is untouched for every other call: it still flows
+ * through `resolveReasoningLevel` and still throws when the caller names a
+ * level this model does not declare.
+ */
+function auxiliaryReasoningLevel(model: Model<Api>): ModelThinkingLevel | undefined {
+  const supported = getSupportedThinkingLevels(model)
+  if (supported.includes('off')) return 'off'
+  return lowestSupportedReasoningLevel(model)
 }
 
 /**
@@ -290,10 +340,9 @@ export class PiAiAdapter extends LlmAdapter {
     const snapshot = this.current()
     const profile = this.profileOf(snapshot, options.provider)
     const model = this.modelOf(snapshot, options.provider, options.model)
-    const reasoning = resolveReasoningLevel(
-      model,
-      options.reasoningEffort ?? profile.reasoning,
-    )
+    const reasoning = options.purpose === 'session-title'
+      ? auxiliaryReasoningLevel(model)
+      : resolveReasoningLevel(model, options.reasoningEffort ?? profile.reasoning)
     const apiKey = await this.config.resolveApiKey(options.provider, profile)
 
     const consumer = new AbortController()
