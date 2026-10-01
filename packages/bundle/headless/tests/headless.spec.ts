@@ -9,8 +9,8 @@ import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentHandle, CreateAgentOptions, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
 import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
-import SessionStore from '@deepseek-ai/dsh-session'
-import type { Session, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import { apply, Config, internals, resolveRunSpec } from '../src/index.ts'
 import {
   acquireNamedSessionLock,
@@ -449,6 +449,17 @@ describe('headless named sessions', () => {
       json: true,
     })
     expect(resolveRunSpec({ task: 't' })).toEqual({ kind: 'one-shot', json: false })
+  })
+
+  it('validates config: an explicit sessionId overrides derivation from the name', () => {
+    // A seat's recorded id may have come apart from its current name after a
+    // rename; the explicit id must win over what derivation would produce.
+    expect(resolveRunSpec({ task: 't', sessionName: 'ok.Name-1', sessionId: 'named-explicit123' })).toEqual({
+      kind: 'named',
+      name: 'ok.Name-1',
+      sessionId: SessionId('named-explicit123'),
+      json: false,
+    })
   })
 
   it('fails loud in named mode without a persistence backend', async () => {

@@ -3,13 +3,13 @@
  * bounded results, and durable overwrite semantics against temp roots.
  */
 import { describe, expect, it } from 'vitest'
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 
 import { LocalMemoryProvider } from '../src/local.ts'
-import { MAX_ENTRY_BYTES } from '../src/scope.ts'
+import { MAX_ENTRY_BYTES, MAX_ENTRY_PATH_LENGTH, MAX_LIST_ENTRIES } from '../src/scope.ts'
 
 const PROJECT_A = '/tmp/fictional/workspace-a'
 const PROJECT_B = '/tmp/fictional/workspace-b'
@@ -129,6 +129,47 @@ describe('read/write/list/search round-trips', () => {
     }
   })
 
+  it('rejects a search query over 512 characters', async () => {
+    const booted = await boot()
+    try {
+      await expect(booted.provider.search(PROJECT_A, 'x'.repeat(513)))
+        .rejects.toThrow(/exceeds 512 characters/)
+    } finally {
+      await booted.done()
+    }
+  })
+
+  it('stops scanning further entries once an earlier entry already filled the limit', async () => {
+    const booted = await boot()
+    try {
+      await booted.provider.write(PROJECT_A, 'first.md', 'needle one\nneedle two\n')
+      await booted.provider.write(PROJECT_A, 'second.md', 'needle three\n')
+      const matches = await booted.provider.search(PROJECT_A, 'needle', 2)
+      expect(matches).toHaveLength(2)
+      expect(matches.every(match => match.path === 'first.md')).toBe(true)
+    } finally {
+      await booted.done()
+    }
+  })
+
+  it('skips an entry larger than the complete-entry limit during search without reading it', async () => {
+    const booted = await boot()
+    try {
+      await booted.provider.write(PROJECT_A, 'small.md', 'needle here')
+      const scope = (await readdir(booted.root))[0] as string
+      // Bypass write()'s own size guard: a file can land on disk beyond
+      // MAX_ENTRY_BYTES through means other than this provider (migrated
+      // content, direct disk edits), and search() must still skip it by
+      // size alone, never attempting to read it.
+      await writeFile(join(booted.root, scope, 'oversized.md'), `needle\n${'x'.repeat(MAX_ENTRY_BYTES)}`, 'utf8')
+      const matches = await booted.provider.search(PROJECT_A, 'needle')
+      expect(matches.every(match => match.path === 'small.md')).toBe(true)
+      expect(matches.some(match => match.path === 'oversized.md')).toBe(false)
+    } finally {
+      await booted.done()
+    }
+  })
+
   it('enforces the complete-entry byte bound on write', async () => {
     const booted = await boot()
     try {
@@ -150,6 +191,25 @@ describe('read/write/list/search round-trips', () => {
       await booted.done()
     }
   })
+
+  it('caps list() at MAX_LIST_ENTRIES even when more entries exist on disk', async () => {
+    const booted = await boot()
+    try {
+      const total = MAX_LIST_ENTRIES + 1
+      await Promise.all(
+        Array.from({ length: total }, (_, index) => {
+          const name = `n${String(index).padStart(5, '0')}.md`
+          return booted.provider.write(PROJECT_A, name, 'x')
+        }),
+      )
+      const entries = await booted.provider.list(PROJECT_A)
+      expect(entries).toHaveLength(MAX_LIST_ENTRIES)
+      const paths = entries.map(entry => entry.path)
+      expect(paths).toEqual([...paths].sort((a, b) => a.localeCompare(b)))
+    } finally {
+      await booted.done()
+    }
+  }, 30_000)
 })
 
 describe('path jail', () => {
@@ -169,6 +229,16 @@ describe('path jail', () => {
     try {
       await expect(booted.provider.write(PROJECT_A, badPath, 'x')).rejects.toThrow(/^memory:/)
       await expect(booted.provider.list(PROJECT_A)).resolves.toEqual([])
+    } finally {
+      await booted.done()
+    }
+  })
+
+  it('rejects a path over MAX_ENTRY_PATH_LENGTH characters', async () => {
+    const booted = await boot()
+    try {
+      await expect(booted.provider.write(PROJECT_A, 'x'.repeat(MAX_ENTRY_PATH_LENGTH + 1), 'x'))
+        .rejects.toThrow(new RegExp(`exceeds ${String(MAX_ENTRY_PATH_LENGTH)} characters`))
     } finally {
       await booted.done()
     }

@@ -428,6 +428,9 @@ export class LocalMemoryProvider extends MemoryService {
     const scope = this.scopeDir(cwd)
     const entries: MemoryEntry[] = []
     const walk = async (relative: string): Promise<void> => {
+      /* v8 ignore next -- always false: the only top-level call starts with entries.length 0, and every recursive
+         call is reached only right after the identical check below already proved entries.length < MAX_LIST_ENTRIES,
+         with nothing async in between */
       if (entries.length >= MAX_LIST_ENTRIES) return
       let dirents
       try {
@@ -470,11 +473,15 @@ export class LocalMemoryProvider extends MemoryService {
       }
       const lines = text.split('\n')
       for (let index = 0; index < lines.length && matches.length < effectiveLimit; index++) {
+        /* v8 ignore next -- lines comes from text.split('\n'), never sparse; lines[index] is always a string for
+           index < lines.length */
         const at = lines[index]?.toLowerCase().indexOf(needle) ?? -1
         if (at === -1 || lines[index] === undefined) continue
         matches.push({
           path: entry.path,
           line: index + 1,
+          /* v8 ignore next -- lines comes from text.split('\n'), never sparse; lines[index] is always a string for
+             index < lines.length */
           excerpt: (lines[index] ?? '').trim().slice(0, 160),
         })
       }

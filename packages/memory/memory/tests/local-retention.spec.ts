@@ -15,6 +15,7 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 
 import { LocalMemoryProvider, MAX_RETAINED_VERSIONS } from '../src/local.ts'
+import { projectSlug } from '../src/scope.ts'
 
 const PROJECT = '/tmp/fictional/retention-workspace'
 
@@ -38,6 +39,11 @@ async function boot(): Promise<Booted> {
 async function scopeDir(root: string): Promise<string> {
   const [name] = await readdir(root)
   return join(root, name as string)
+}
+
+/** The scope directory `PROJECT` will resolve to, computed without requiring it to exist yet. */
+function scopeDirForProject(root: string): string {
+  return join(root, projectSlug(PROJECT))
 }
 
 /** Every retained copy's content for one entry, oldest filename first. */
@@ -235,6 +241,38 @@ describe('write() retention (SWD-148)', () => {
       await expect(booted.provider.write(PROJECT, 'guarded.md', 'new content'))
         .rejects.toThrow(/could not retain the previous "guarded\.md"/)
       expect(await booted.provider.read(PROJECT, 'guarded.md')).toBe('original content')
+    } finally {
+      await booted.done()
+    }
+  })
+
+  it('treats a lock file with unparseable content as abandoned rather than honoring it', async () => {
+    const booted = await boot()
+    try {
+      const scope = scopeDirForProject(booted.root)
+      const lockPath = join(scope, '.locks', 'malformed-lock.md.lock')
+      await mkdir(join(lockPath, '..'), { recursive: true })
+      await writeFile(lockPath, 'not json at all', 'utf8')
+      const result = await booted.provider.write(PROJECT, 'malformed-lock.md', 'content')
+      expect(result.replaced).toBeUndefined()
+      expect(await booted.provider.read(PROJECT, 'malformed-lock.md')).toBe('content')
+    } finally {
+      await booted.done()
+    }
+  })
+
+  it('treats a lock file whose recorded pid is not a plausible pid as abandoned', async () => {
+    const booted = await boot()
+    try {
+      const scope = scopeDirForProject(booted.root)
+      const lockPath = join(scope, '.locks', 'bad-pid-lock.md.lock')
+      await mkdir(join(lockPath, '..'), { recursive: true })
+      // A string, a non-integer, and a negative number all fail the same
+      // "plausible pid" guard as a missing field.
+      await writeFile(lockPath, JSON.stringify({ pid: 'not-a-number' }), 'utf8')
+      const result = await booted.provider.write(PROJECT, 'bad-pid-lock.md', 'content')
+      expect(result.replaced).toBeUndefined()
+      expect(await booted.provider.read(PROJECT, 'bad-pid-lock.md')).toBe('content')
     } finally {
       await booted.done()
     }

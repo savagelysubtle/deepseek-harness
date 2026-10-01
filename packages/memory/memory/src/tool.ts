@@ -170,12 +170,16 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
         // the index signature they already satisfy at runtime.
         return { action, entries: await memory.list(cwd) as unknown as JsonValue[] }
       }
+      /* v8 ignore next -- action is enum-validated by defineTool's wrapper before execute() runs (schema.ts
+         validate()); no caller can reach this with an action outside read|write|list|search */
       if (action === 'search') {
         if (typeof input.query !== 'string' || input.query.trim() === '') {
           throw new Error('memory: action "search" requires a non-empty query')
         }
         return { action, matches: await memory.search(cwd, input.query, searchLimit) as unknown as JsonValue[] }
       }
+      /* v8 ignore next -- action is enum-validated by defineTool's wrapper before execute() runs (schema.ts
+         validate()); no caller can reach this with an action outside read|write|list|search */
       throw new Error(`memory: unknown action ${JSON.stringify(action)} — expected read | write | list | search`)
     },
   }))

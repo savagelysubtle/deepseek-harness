@@ -42,6 +42,15 @@ async function setup(): Promise<{ ctx: Context; root: string; cwd: string }> {
   return { ctx, root, cwd: '/tmp/fictional/tool-workspace' }
 }
 
+/** The tool mounted with NO memory service present — `ctx.get('memory')` stays undefined. */
+async function setupWithoutMemoryService(): Promise<Context> {
+  const ctx = new Context()
+  await ctx.plugin(SystemPrompt)
+  await ctx.plugin(ToolRuntime)
+  await ctx.plugin({ name: 'tool-memory', inject: ['tools'], apply: toolMemoryApply }, {})
+  return ctx
+}
+
 async function call(ctx: Context, args: unknown, cwd?: string) {
   return ctx.tools.execute({
     signal: new AbortController().signal,
@@ -163,8 +172,9 @@ describe('memory tool', () => {
         { args: { action: 'read' }, pattern: /requires a non-empty "path"/ },
         { args: { action: 'write', path: 'x.md' }, pattern: /requires string "content"/ },
         { args: { action: 'search' }, pattern: /requires a non-empty query/ },
-        // An unknown enum value dies at schema validation, before execute
-        // runs; the executor keeps its unknown-action guard for direct calls.
+        // defineTool's wrapper enum-validates "action" against the schema
+        // before execute() ever runs, so execute()'s own unknown-action
+        // guard is unreachable through this (or any other) call path.
         { args: { action: 'append', path: 'x.md' }, pattern: /"action" must be one of/ },
       ] as const
       for (const { args, pattern } of cases) {
@@ -183,6 +193,33 @@ describe('memory tool', () => {
     try {
       const empty = await call(ctx, { action: 'search', query: 'nothing-here' })
       expect(text(empty)).toBe('(no matches)')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('fails loud when mounted without the memory service', async () => {
+    const ctx = await setupWithoutMemoryService()
+    try {
+      const result = await call(ctx, { action: 'list' })
+      expect(result.isError).toBe(true)
+      expect(text(result)).toMatch(/requires the memory service — mount @deepseek-ai\/dsh-memory\/local/)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('renders read/list/search output defensively when optional fields are absent from the value', async () => {
+    const { ctx, root } = await setup()
+    try {
+      const definition = ctx.tools.get('memory')
+      expect(definition).toBeDefined()
+      expect(definition!.output.render({ action: 'read' }, { action: 'read' })).toEqual([{ type: 'text', text: '' }])
+      expect(definition!.output.render({ action: 'list' }, { action: 'list' })).toEqual([
+        { type: 'text', text: '(no memory entries yet — create one with action:"write")' },
+      ])
+      expect(definition!.output.render({ action: 'search' }, { action: 'search' })).toEqual([{ type: 'text', text: '(no matches)' }])
     } finally {
       await rm(root, { recursive: true, force: true })
       await ctx.fiber.dispose()

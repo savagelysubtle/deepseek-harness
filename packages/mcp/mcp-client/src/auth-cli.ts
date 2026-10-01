@@ -53,6 +53,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
   const flagsWithValues = new Set(['--url', '--server-name', '--scope', '--client-id', '--redirect-port', '--credentials-path', '--timeout-ms'])
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
+    /* v8 ignore next -- argv from process.argv is never sparse; only a fabricated array could produce this */
     if (arg === undefined) break
     if (arg === '--reset') continue
     const value = argv[i + 1]
@@ -102,6 +103,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
 function captureAuthorizationCode(port: number, timeoutMs: number): Promise<string> {
   const captured: PromiseWithResolvers<string> = Promise.withResolvers()
   const server = createServer((request, response) => {
+    /* v8 ignore next -- request.url is always defined on a server 'request' event; optional only on the shared client type */
     const incoming = new URL(request.url ?? '/', 'http://127.0.0.1')
     if (incoming.pathname !== '/callback') {
       response.writeHead(404).end()
@@ -180,6 +182,7 @@ export async function runAuthCli(argv: readonly string[]): Promise<void> {
     ...(args.scope === undefined ? {} : { scope: args.scope }),
     authorizationCode: code,
   })
+  /* v8 ignore next -- SDK 1.29.0 authInternal always returns AUTHORIZED or throws given an authorizationCode (auth.js ~262-271) */
   if (result !== 'AUTHORIZED') throw new Error('token exchange did not complete — rerun the command')
   const info = await localProvider.describe(provider.ref)
   console.log([

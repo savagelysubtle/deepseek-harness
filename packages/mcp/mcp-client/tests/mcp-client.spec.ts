@@ -1196,6 +1196,28 @@ describe('createTransport', () => {
     }
   })
 
+  it('accepts a configured OAuth scope without throwing', () => {
+    // NOTE: this only proves createTransport builds a transport without
+    // throwing when `auth.scope` is set — it does NOT prove the scope
+    // reaches the server. In SDK 1.29.0, StreamableHTTPClientTransport's
+    // constructor sets its private `_scope` to `undefined` unconditionally
+    // and never reads the `scope` option this test passes; the option is
+    // presently inert. Confirmed by review, not fixed here (vendored SDK).
+    const config: Config = {
+      transport: 'streamable-http',
+      serverName: 'srv',
+      url: 'http://localhost:3000/mcp',
+      headers: {},
+      auth: { mode: 'oauth', scope: 'mcp:tools', redirectPort: 14_507 },
+      toolCallTimeoutMs: 60_000,
+      failOnStartupError: false,
+    }
+    const transport = createTransport(config)
+    expect(transport).toBeDefined()
+    expect(transport).toHaveProperty('start')
+    expect(transport).toHaveProperty('close')
+  })
+
   it('merges explicit env on top of scrubbed ambient env', () => {
     const config: Config = {
       transport: 'stdio',

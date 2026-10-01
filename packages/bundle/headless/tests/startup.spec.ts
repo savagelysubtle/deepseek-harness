@@ -54,6 +54,7 @@ export const apply = ctx => globalThis.__headlessStartupApply(ctx)
     '  config:',
     '    task: !!js ctx.headlessStartup.task',
     '    sessionName: !!js ctx.headlessStartup.sessionName',
+    '    sessionId: !!js ctx.headlessStartup.sessionId',
     '    format: !!js ctx.headlessStartup.format',
     '- id: headless-startup',
     `  name: ${pathToFileURL(join(dir, 'startup.mjs')).href}`,
@@ -116,6 +117,40 @@ describe('headless command-line provider', () => {
     expect(task).toBeUndefined()
     expect(observed.runnerConfig).toBeUndefined()
     expect(observed.exits).toEqual([1])
+  })
+
+  it('rejects --session-id without --session-name', async () => {
+    const { task, observed } = await bootStartup(['--session-id', 'named-abc123', 'task'])
+    expect(observed.out).toContain('--session-id requires --session-name')
+    expect(task).toBeUndefined()
+    expect(observed.runnerConfig).toBeUndefined()
+    expect(observed.exits).toEqual([1])
+  })
+
+  it.each([
+    { args: ['--session-name', 'work', '--session-id', '', 'task'] },
+    { args: ['--session-name', 'work', '--session-id', '   ', 'task'] },
+  ])('rejects an empty or whitespace-only --session-id ($args)', async ({ args }) => {
+    const { task, observed } = await bootStartup(args)
+    expect(observed.out).toContain('--session-id must be a non-empty session id')
+    expect(task).toBeUndefined()
+    expect(observed.runnerConfig).toBeUndefined()
+    expect(observed.exits).toEqual([1])
+  })
+
+  it('passes a valid --session-id alongside --session-name into the runner config', async () => {
+    const { task, observed } = await bootStartup([
+      '--session-name', 'work',
+      '--session-id', 'named-abc123',
+      'task',
+    ])
+    expect(task).toEqual({ task: 'task', sessionName: 'work', sessionId: 'named-abc123' })
+    expect(observed.runnerConfig).toEqual({
+      task: 'task',
+      sessionName: 'work',
+      sessionId: 'named-abc123',
+    })
+    expect(observed.exits).toEqual([])
   })
 
   it('rejects an unknown --format value as a usage failure', async () => {

@@ -21,6 +21,7 @@ import { oauthCredentialRef, CredentialsOAuthProvider }
 import { apply as mcpApply, inject as mcpInject, name as mcpName, Config as ConfigSchema, DEFAULT_OAUTH_REDIRECT_PORT }
   from '@deepseek-ai/dsh-mcp-client/src/index.ts'
 import { runAuthCli } from '@deepseek-ai/dsh-mcp-client/src/auth-cli.ts'
+import { startConnection, resolveReconnectPolicy } from '@deepseek-ai/dsh-mcp-client/src/connection.ts'
 
 async function mountRegistry(credentialsPath?: string): Promise<Context> {
   const ctx = new Context()
@@ -127,6 +128,11 @@ describe('consent CLI and host pickup', () => {
         '--credentials-path', credPath,
         '--redirect-port', String(port),
         '--timeout-ms', '15000',
+        // --reset on a not-yet-populated store is a no-op (nothing to drop);
+        // --scope exercises parseArgs' and runAuthCli's scope-forwarding
+        // branches end to end. The fixture ignores the scope value.
+        '--reset',
+        '--scope', 'mcp:tools',
       ])
       await vi.waitFor(() => {
         expect(lines.some(line => line.includes('Open this URL'))).toBe(true)
@@ -266,6 +272,229 @@ describe('stored-state robustness', () => {
 
       await provider.invalidateCredentials('all')
       expect(await ctx.credentials.resolve(ref)).toBeUndefined()
+      await ctx.fiber.dispose()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+      await fixture.close()
+    }
+  })
+
+  it('rejects a stored envelope at the wrong version', async () => {
+    const fixture = await startOAuthFixture()
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
+    const credPath = join(dir, 'creds.yaml')
+    try {
+      const ctx = await mountRegistry(credPath)
+      const ref = oauthCredentialRef('wrong-version')
+      await ctx.credentials.set(ref, JSON.stringify({ version: 2 }))
+      const provider = CredentialsOAuthProvider.create({
+        serverName: 'wrong-version',
+        serverUrl: new URL(fixture.url),
+        store: ctx.credentials,
+        redirectUri: 'http://127.0.0.1:19995/callback',
+      })
+      await expect(provider.tokens()).rejects.toThrow(/stored OAuth state under DSH_MCP_OAUTH_WRONG_VERSION is not a version 1 envelope/)
+      await ctx.fiber.dispose()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+      await fixture.close()
+    }
+  })
+
+  it('rejects a stored tokens entry that is not an object', async () => {
+    const fixture = await startOAuthFixture()
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
+    const credPath = join(dir, 'creds.yaml')
+    try {
+      const ctx = await mountRegistry(credPath)
+      const ref = oauthCredentialRef('bad-tokens')
+      await ctx.credentials.set(ref, JSON.stringify({ version: 1, tokens: 'nope' }))
+      const provider = CredentialsOAuthProvider.create({
+        serverName: 'bad-tokens',
+        serverUrl: new URL(fixture.url),
+        store: ctx.credentials,
+        redirectUri: 'http://127.0.0.1:19994/callback',
+      })
+      await expect(provider.tokens()).rejects.toThrow(/stored OAuth state under DSH_MCP_OAUTH_BAD_TOKENS has an invalid tokens entry/)
+      await ctx.fiber.dispose()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+      await fixture.close()
+    }
+  })
+
+  it('rejects a stored codeVerifier entry that is not a string', async () => {
+    const fixture = await startOAuthFixture()
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
+    const credPath = join(dir, 'creds.yaml')
+    try {
+      const ctx = await mountRegistry(credPath)
+      const ref = oauthCredentialRef('bad-verifier')
+      await ctx.credentials.set(ref, JSON.stringify({ version: 1, codeVerifier: 123 }))
+      const provider = CredentialsOAuthProvider.create({
+        serverName: 'bad-verifier',
+        serverUrl: new URL(fixture.url),
+        store: ctx.credentials,
+        redirectUri: 'http://127.0.0.1:19993/callback',
+      })
+      await expect(provider.tokens())
+        .rejects.toThrow(/stored OAuth state under DSH_MCP_OAUTH_BAD_VERIFIER has an invalid codeVerifier entry/)
+      await ctx.fiber.dispose()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+      await fixture.close()
+    }
+  })
+})
+
+describe('CredentialsOAuthProvider direct unit coverage', () => {
+  it('clientMetadata forwards a configured scope', async () => {
+    const fixture = await startOAuthFixture()
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
+    const credPath = join(dir, 'creds.yaml')
+    try {
+      const ctx = await mountRegistry(credPath)
+      const provider = CredentialsOAuthProvider.create({
+        serverName: 'scope-meta',
+        serverUrl: new URL(fixture.url),
+        store: ctx.credentials,
+        redirectUri: 'http://127.0.0.1:19992/callback',
+        scope: 'mcp:tools extra',
+      })
+      expect(provider.clientMetadata.scope).toBe('mcp:tools extra')
+      await ctx.fiber.dispose()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+      await fixture.close()
+    }
+  })
+
+  it('codeVerifier throws when none is pending', async () => {
+    const fixture = await startOAuthFixture()
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
+    const credPath = join(dir, 'creds.yaml')
+    try {
+      const ctx = await mountRegistry(credPath)
+      const provider = CredentialsOAuthProvider.create({
+        serverName: 'no-verifier',
+        serverUrl: new URL(fixture.url),
+        store: ctx.credentials,
+        redirectUri: 'http://127.0.0.1:19991/callback',
+      })
+      await expect(provider.codeVerifier()).rejects.toThrow(
+        /no pending PKCE verifier under DSH_MCP_OAUTH_NO_VERIFIER — restart the login command/,
+      )
+      await ctx.fiber.dispose()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+      await fixture.close()
+    }
+  })
+
+  it('a static client id bypasses both the store read and the dynamic-registration write', async () => {
+    const fixture = await startOAuthFixture()
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
+    const credPath = join(dir, 'creds.yaml')
+    try {
+      const ctx = await mountRegistry(credPath)
+      const provider = CredentialsOAuthProvider.create({
+        serverName: 'static-client',
+        serverUrl: new URL(fixture.url),
+        store: ctx.credentials,
+        redirectUri: 'http://127.0.0.1:19990/callback',
+        staticClientId: 'preset-client-1',
+      })
+      expect(await provider.clientInformation()).toEqual({ client_id: 'preset-client-1' })
+
+      // Attempting to persist a dynamic registration must be a silent no-op:
+      // the static id always wins and the store is never written.
+      await provider.saveClientInformation({ client_id: 'dyn-would-be-1' })
+      expect(await provider.clientInformation()).toEqual({ client_id: 'preset-client-1' })
+      expect(await ctx.credentials.resolve(oauthCredentialRef('static-client'))).toBeUndefined()
+      await ctx.fiber.dispose()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+      await fixture.close()
+    }
+  })
+
+  it('invalidateCredentials clears client, verifier, and discovery independently', async () => {
+    const fixture = await startOAuthFixture()
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
+    const credPath = join(dir, 'creds.yaml')
+    try {
+      const ctx = await mountRegistry(credPath)
+      const provider = CredentialsOAuthProvider.create({
+        serverName: 'scoped-invalidate',
+        serverUrl: new URL(fixture.url),
+        store: ctx.credentials,
+        redirectUri: 'http://127.0.0.1:19989/callback',
+      })
+      await provider.saveClientInformation({ client_id: 'c1' })
+      await provider.saveCodeVerifier('verifier')
+      await provider.saveDiscoveryState({ authorizationServerUrl: 'https://as.example' })
+
+      await provider.invalidateCredentials('client')
+      expect(await provider.clientInformation()).toBeUndefined()
+      // Unrelated state classes survive a scoped invalidate.
+      expect(await provider.codeVerifier()).toBe('verifier')
+      expect(await provider.discoveryState()).toBeDefined()
+
+      await provider.invalidateCredentials('verifier')
+      await expect(provider.codeVerifier()).rejects.toThrow(/no pending PKCE verifier/)
+
+      await provider.invalidateCredentials('discovery')
+      expect(await provider.discoveryState()).toBeUndefined()
+      await ctx.fiber.dispose()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+      await fixture.close()
+    }
+  })
+})
+
+describe('resolveAuthProvider (connection.ts) direct wiring', () => {
+  it('a direct startConnection caller gets the same named diagnostic apply() fails loud with', async () => {
+    const fixture = await startOAuthFixture()
+    try {
+      // No credentials plugin mounted: ctx.get('credentials') is undefined.
+      const ctx = await mountRegistry()
+      const config: Config = { ...httpConfig(fixture, 'direct-no-creds'), reconnect: { enabled: false } }
+      expect(() => startConnection(ctx, config, resolveReconnectPolicy(undefined, 'reconnect')))
+        .toThrow(/direct-no-creds\): auth\.oauth requires the credential-reference service — mount @deepseek-ai\/dsh-credentials-local/)
+      await ctx.fiber.dispose()
+    } finally {
+      await fixture.close()
+    }
+  })
+
+  it('logs consent guidance once per server across repeated reconnect attempts, with scope and clientId forwarded', async () => {
+    const fixture = await startOAuthFixture()
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
+    const credPath = join(dir, 'creds.yaml')
+    try {
+      const ctx = await mountRegistry(credPath)
+      const errors: string[] = []
+      vi.spyOn(ctx.logger, 'error').mockImplementation(((message: unknown) => {
+        errors.push(String(message))
+      }) as never)
+      const config: Config = {
+        transport: 'streamable-http',
+        serverName: 'noconsent-repeat',
+        url: fixture.url,
+        headers: {},
+        auth: { mode: 'oauth', scope: 'mcp:tools', clientId: 'preset-repeat-1' },
+        toolCallTimeoutMs: 10_000,
+        failOnStartupError: false,
+        reconnect: { enabled: true, initialDelayMs: 5, maxDelayMs: 20, maxAttempts: 3 },
+      }
+      await mcpApply(ctx, config)
+      await vi.waitFor(() => {
+        expect(errors.some(line => line.includes('giving up after 3 consecutive failed reconnect attempts'))).toBe(true)
+      })
+      // The full consent guidance (URL + instructions) is logged exactly once
+      // even though every one of the 4 attempts hits the same auth-required path.
+      expect(errors.filter(line => line.includes('human consent required')).length).toBe(1)
       await ctx.fiber.dispose()
     } finally {
       await rm(dir, { recursive: true, force: true })

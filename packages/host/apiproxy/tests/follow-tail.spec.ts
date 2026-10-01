@@ -376,7 +376,7 @@ describe('FollowTailer', () => {
 
     vi.useFakeTimers()
     try {
-      const { resolve } = armPendingStat()
+      const { resolve: resolveInitialStat } = armPendingStat()
       const tailer = new FollowTailer({
         locate: h => ctx.sessionPersistence.locate(h),
         liveOwner: () => Promise.resolve({ pid: 1 }),
@@ -386,13 +386,28 @@ describe('FollowTailer', () => {
       tailer.start(header.id, header, baseline)
       // Pins cursor.offset to the pre-truncation size deterministically — no
       // guessing how long the real initial stat() takes to land.
-      await resolve(fullSize)
+      await resolveInitialStat(fullSize)
       expect(tailer.isFollowing(header.id)).toBe(true)
 
       truncateSync(location.path, 0)
 
-      // One poll tick: drain()'s own (real, unmocked) stat() sees the shrink.
+      // Arms drain()'s OWN stat() call too — not just initCursor's — and
+      // settles it with the shrunken size up front. Without this, that
+      // stat() is a REAL, unmocked fs call: vi.advanceTimersByTimeAsync
+      // only drains the virtual-timer/microtask machinery, not real libuv
+      // I/O, so under CPU load the real stat() can still be in flight when
+      // advanceTimersByTimeAsync returns, racing the assertion below.
+      // Resolving it here keeps the whole tick deterministic with no real
+      // fs call anywhere on the awaited path.
+      const { resolve: resolveDrainStat } = armPendingStat()
+      await resolveDrainStat(0)
+
+      // One poll tick: drain()'s stat() (now mocked and already settled)
+      // sees the shrink once its microtask chain runs, then an explicit
+      // flush proves that chain — including the stop() it triggers — has
+      // actually completed before asserting.
       await vi.advanceTimersByTimeAsync(15)
+      await flushMicrotasks()
       expect(tailer.isFollowing(header.id)).toBe(false)
     } finally {
       vi.useRealTimers()
