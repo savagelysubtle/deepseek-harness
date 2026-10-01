@@ -45,12 +45,19 @@ export function createTransport(config: Config, authProvider?: OAuthClientProvid
       // properties typed without `| undefined` (exactOptionalPropertyTypes
       // mismatch with the Transport interface); the SDK constructed the
       // object, so the cast records only that widening.
+      //
+      // No `scope` option is forwarded here: SDK 1.29.0's constructor sets
+      // its private `_scope` to `undefined` unconditionally and never reads
+      // this option (streamableHttp.js constructor, ~line 28) — only a
+      // WWW-Authenticate challenge ever sets it later. A configured scope
+      // instead reaches the authorization server through the auth provider's
+      // `clientMetadata.scope` (see oauth.ts `buildClientMetadata`), which
+      // `auth.js`'s scope-selection fallback reads directly.
       return new StreamableHTTPClientTransport(
         new URL(config.url),
         {
           requestInit: { headers: config.headers },
           ...(authProvider === undefined ? {} : { authProvider }),
-          ...(config.auth?.scope === undefined ? {} : { scope: config.auth.scope }),
         },
       ) as Transport
   }

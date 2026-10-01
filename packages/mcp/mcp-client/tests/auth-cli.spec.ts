@@ -17,7 +17,7 @@ import { Context } from '@deepseek-ai/cordis'
 import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
 
 import { startOAuthFixture } from './oauth-fixture.ts'
-import { runAuthCli } from '@deepseek-ai/dsh-mcp-client/src/auth-cli.ts'
+import { parseArgs, runAuthCli } from '@deepseek-ai/dsh-mcp-client/src/auth-cli.ts'
 import { oauthCredentialRef } from '@deepseek-ai/dsh-mcp-client/src/oauth.ts'
 
 /** Bind `server` to an OS-assigned free port on 127.0.0.1 and resolve with the
@@ -96,9 +96,49 @@ describe('parseArgs validation (runAuthCli argv)', () => {
       .rejects.toThrow(/--redirect-port must be an integer between 1 and 65535/)
   })
 
-  it('rejects an out-of-range --timeout-ms', async () => {
-    await expect(runAuthCli(['--url', 'http://x', '--server-name', 'y', '--timeout-ms', '0']))
-      .rejects.toThrow(/--timeout-ms must be an integer between 1 and 65535/)
+  it('rejects a --redirect-port above 65535', async () => {
+    await expect(runAuthCli(['--url', 'http://x', '--server-name', 'y', '--redirect-port', '70000']))
+      .rejects.toThrow(/--redirect-port must be an integer between 1 and 65535/)
+  })
+
+  // Regression for the bug where numberFlag applied the 1..65535 port bound
+  // to --timeout-ms too: 0, a negative value, and a non-numeric value are
+  // still rejected, each with the timeout-specific message (not the port
+  // one). The 65535 port ceiling no longer applies to this flag — it has its
+  // own, much higher ceiling (Node's timer max) — see the acceptance and
+  // ceiling-rejection cases below.
+  it.each(['0', '-1', 'abc'])('rejects --timeout-ms %s', async (bad) => {
+    await expect(runAuthCli(['--url', 'http://x', '--server-name', 'y', '--timeout-ms', bad]))
+      .rejects.toThrow(/--timeout-ms must be an integer between 1 and 2147483647 \(Node's timer ceiling\)/)
+  })
+
+  it('rejects a --timeout-ms above Node\'s 32-bit setTimeout ceiling (2147483648)', async () => {
+    // Above 2147483647ms, Node's setTimeout silently clamps the delay to 1ms
+    // (with a TimeoutOverflowWarning) instead of honoring it — the opposite
+    // of the longer wait the caller asked for — so this must be rejected,
+    // not merely accepted and misbehave at runtime.
+    await expect(runAuthCli(['--url', 'http://x', '--server-name', 'y', '--timeout-ms', '2147483648']))
+      .rejects.toThrow(/--timeout-ms must be an integer between 1 and 2147483647 \(Node's timer ceiling\)/)
+  })
+})
+
+describe('parseArgs — accepted --timeout-ms values (defect: the port bound used to reject these)', () => {
+  // Exercises parseArgs directly: these values must parse successfully, not
+  // merely "not throw while also doing real network/credential-fiber work",
+  // so this checks parseArgs in isolation rather than through runAuthCli.
+  it('accepts the documented default (300000) passed explicitly', () => {
+    const args = parseArgs(['--url', 'http://x', '--server-name', 'y', '--timeout-ms', '300000'])
+    expect(args.timeoutMs).toBe(300_000)
+  })
+
+  it('accepts a value above the old 65535 port-shaped ceiling (600000)', () => {
+    const args = parseArgs(['--url', 'http://x', '--server-name', 'y', '--timeout-ms', '600000'])
+    expect(args.timeoutMs).toBe(600_000)
+  })
+
+  it("accepts Node's timer ceiling itself (2147483647)", () => {
+    const args = parseArgs(['--url', 'http://x', '--server-name', 'y', '--timeout-ms', '2147483647'])
+    expect(args.timeoutMs).toBe(2_147_483_647)
   })
 })
 

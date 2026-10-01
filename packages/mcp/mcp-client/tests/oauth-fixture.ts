@@ -48,11 +48,27 @@ function sendJson(response: ServerResponse, status: number, value: unknown, extr
   response.end(JSON.stringify(value))
 }
 
+/** Options for {@link startOAuthFixture}. */
+export interface OAuthFixtureOptions {
+  /**
+   * Omit `scopes_supported` from the RFC 9728 protected-resource response.
+   * The SDK's scope-selection strategy prefers a PRM `scopes_supported` value
+   * over a provider's `clientMetadata.scope` fallback, so a test isolating
+   * the `clientMetadata` fallback must omit it — otherwise this fixture's
+   * default `scopes_supported` always wins and masks whatever scope the
+   * provider configured. Defaults to `false` (`scopes_supported` present),
+   * matching every existing caller.
+   */
+  omitScopesSupported?: boolean
+}
+
 /**
  * Start the combined MCP + OAuth fixture.
+ * @param options - fixture behavior overrides; see {@link OAuthFixtureOptions}.
  * @returns the live fixture; `close()` when the test finishes.
  */
-export function startOAuthFixture(): Promise<OAuthFixture> {
+export function startOAuthFixture(options: OAuthFixtureOptions = {}): Promise<OAuthFixture> {
+  const omitScopesSupported = options.omitScopesSupported ?? false
   // Start rejecting everything: a test that needs an initially-valid bearer
   // sets it explicitly via setValidToken.
   let validToken = ''
@@ -114,7 +130,7 @@ export function startOAuthFixture(): Promise<OAuthFixture> {
         sendJson(response, 200, {
           resource: `${base}/mcp`,
           authorization_servers: [base],
-          scopes_supported: ['mcp:tools'],
+          ...(omitScopesSupported ? {} : { scopes_supported: ['mcp:tools'] }),
         })
         return
       }

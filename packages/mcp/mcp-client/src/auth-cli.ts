@@ -43,12 +43,20 @@ interface CliArgs {
   reset: boolean
 }
 
+// Node's `setTimeout` takes a 32-bit signed delay internally: anything above
+// this clamps to 1ms (with a TimeoutOverflowWarning) and fires almost
+// immediately instead of after the requested wait, which is the opposite of
+// what a caller asking for a long consent-wait budget wants.
+const NODE_TIMER_MAX_MS = 2_147_483_647
+
 /**
  * Parse `--flag value` arguments; repeated or unknown flags fail loud.
+ * Exported so tests can assert accepted values directly, without driving the
+ * network and credential-fiber work the rest of {@link runAuthCli} does.
  * @param argv - raw argv entries after the script path.
  * @returns the parsed flags.
  */
-function parseArgs(argv: readonly string[]): CliArgs {
+export function parseArgs(argv: readonly string[]): CliArgs {
   const values = new Map<string, string>()
   const flagsWithValues = new Set(['--url', '--server-name', '--scope', '--client-id', '--redirect-port', '--credentials-path', '--timeout-ms'])
   for (let i = 0; i < argv.length; i++) {
@@ -72,11 +80,26 @@ function parseArgs(argv: readonly string[]): CliArgs {
       '  [--scope s] [--client-id id] [--redirect-port p] [--credentials-path f] [--timeout-ms ms] [--reset]',
     ].join('\n'))
   }
-  const numberFlag = (name: string, fallback: number): number => {
+  // Port and timeout flags carry different bounds: a redirect port is a real
+  // TCP port (1..65535), but a consent-wait timeout's only documented value
+  // is the 300_000ms default — so the port's 65_535 ceiling must not apply
+  // here. It is still bounded above, just by a different ceiling: Node's
+  // setTimeout delay (NODE_TIMER_MAX_MS), past which a long wait fires almost
+  // instantly instead of waiting, defeating the point of a longer timeout.
+  const portFlag = (name: string, fallback: number): number => {
     const raw = values.get(name)
     if (raw === undefined) return fallback
     const parsed = Number(raw)
     if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65_535) throw new Error(`${name} must be an integer between 1 and 65535`)
+    return parsed
+  }
+  const timeoutFlag = (name: string, fallback: number): number => {
+    const raw = values.get(name)
+    if (raw === undefined) return fallback
+    const parsed = Number(raw)
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > NODE_TIMER_MAX_MS) {
+      throw new Error(`${name} must be an integer between 1 and ${NODE_TIMER_MAX_MS} (Node's timer ceiling)`)
+    }
     return parsed
   }
   const scope = values.get('--scope')
@@ -87,9 +110,9 @@ function parseArgs(argv: readonly string[]): CliArgs {
     serverName,
     ...(scope === undefined ? {} : { scope }),
     ...(clientId === undefined ? {} : { clientId }),
-    redirectPort: numberFlag('--redirect-port', DEFAULT_OAUTH_REDIRECT_PORT),
+    redirectPort: portFlag('--redirect-port', DEFAULT_OAUTH_REDIRECT_PORT),
     ...(credentialsPath === undefined ? {} : { credentialsPath }),
-    timeoutMs: numberFlag('--timeout-ms', 300_000),
+    timeoutMs: timeoutFlag('--timeout-ms', 300_000),
     reset: argv.includes('--reset'),
   }
 }

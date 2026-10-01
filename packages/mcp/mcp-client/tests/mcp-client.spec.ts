@@ -12,9 +12,32 @@ import ToolRuntime, { type JsonValue } from '@deepseek-ai/dsh-tools'
 import type { PostToolDecision } from '@deepseek-ai/dsh-tools'
 import { publicToolName, syncTools, type ToolBridgeOptions } from '@deepseek-ai/dsh-mcp-client/src/tools.ts'
 import { createTransport } from '@deepseek-ai/dsh-mcp-client/src/transport.ts'
+import { CredentialsOAuthProvider, type OAuthCredentialStore } from '@deepseek-ai/dsh-mcp-client/src/oauth.ts'
 import type { Config } from '@deepseek-ai/dsh-mcp-client'
+import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
+import { auth as sdkAuth } from '@modelcontextprotocol/sdk/client/auth.js'
+import { startOAuthFixture } from './oauth-fixture.ts'
 
 const testToolSignal = new AbortController().signal
+
+/** Minimal in-memory {@link OAuthCredentialStore} for a provider that never
+ * needs to survive past one test — avoids spinning up a real credential
+ * fiber just to exercise the SDK's own scope-selection logic. */
+function memoryCredentialStore(): OAuthCredentialStore {
+  const values = new Map<string, string>()
+  return {
+    resolve: async (ref: CredentialRef) => {
+      const value = values.get(ref)
+      return value === undefined ? undefined : { value, source: 'memory' }
+    },
+    set: async (ref: CredentialRef, value: string) => {
+      values.set(ref, value)
+    },
+    unset: async (ref: CredentialRef) => {
+      values.delete(ref)
+    },
+  }
+}
 
 // ---- Mock MCP Client ----
 
@@ -1196,26 +1219,65 @@ describe('createTransport', () => {
     }
   })
 
-  it('accepts a configured OAuth scope without throwing', () => {
-    // NOTE: this only proves createTransport builds a transport without
-    // throwing when `auth.scope` is set — it does NOT prove the scope
-    // reaches the server. In SDK 1.29.0, StreamableHTTPClientTransport's
-    // constructor sets its private `_scope` to `undefined` unconditionally
-    // and never reads the `scope` option this test passes; the option is
-    // presently inert. Confirmed by review, not fixed here (vendored SDK).
-    const config: Config = {
-      transport: 'streamable-http',
-      serverName: 'srv',
-      url: 'http://localhost:3000/mcp',
-      headers: {},
-      auth: { mode: 'oauth', scope: 'mcp:tools', redirectPort: 14_507 },
-      toolCallTimeoutMs: 60_000,
-      failOnStartupError: false,
+  it('builds a transport for a configured OAuth scope; the scope itself reaches the server through clientMetadata, not a transport option', async () => {
+    // Earlier versions of this test only proved createTransport(config) built
+    // a transport without throwing when `auth.scope` was set — it did not
+    // prove the scope reached the server. SDK 1.29.0's
+    // StreamableHTTPClientTransport constructor sets its private `_scope` to
+    // `undefined` unconditionally and never reads a transport-level `scope`
+    // option (streamableHttp.js constructor, ~line 28); only a later
+    // WWW-Authenticate challenge ever sets it. That option was therefore dead
+    // and createTransport no longer forwards config.auth?.scope into it.
+    //
+    // The configured scope instead reaches the server through the OAuth
+    // provider's `clientMetadata.scope` (oauth.ts `buildClientMetadata`),
+    // which the SDK reads as the scope-selection fallback once no
+    // WWW-Authenticate challenge or protected-resource `scopes_supported`
+    // value takes priority over it (auth.js `authInternal` ~line 224, the
+    // DCR request body ~line 892-910, and the authorization URL ~line
+    // 716-719). This fixture omits `scopes_supported` so that fallback is
+    // actually exercised instead of being masked by it.
+    const fixture = await startOAuthFixture({ omitScopesSupported: true })
+    const configuredScope = 'custom:configured-scope'
+    let capturedAuthorizationUrl: URL | undefined
+    const provider = CredentialsOAuthProvider.create({
+      serverName: 'scope-dcr',
+      serverUrl: new URL(fixture.url),
+      store: memoryCredentialStore(),
+      redirectUri: 'http://127.0.0.1:19999/callback',
+      scope: configuredScope,
+      onAuthorizationUrl(url) {
+        capturedAuthorizationUrl = url
+      },
+    })
+    try {
+      const config: Config = {
+        transport: 'streamable-http',
+        serverName: 'scope-dcr',
+        url: fixture.url,
+        headers: {},
+        auth: { mode: 'oauth', scope: configuredScope, redirectPort: 19_999 },
+        toolCallTimeoutMs: 60_000,
+        failOnStartupError: false,
+      }
+      // createTransport still only takes the provider — no scope leaks
+      // through config.auth into the transport's own constructor options.
+      const transport = createTransport(config, provider)
+      expect(transport).toBeDefined()
+      expect(transport).toHaveProperty('start')
+      expect(transport).toHaveProperty('close')
+
+      // Drive the SAME `auth()` entry point the transport calls internally
+      // on a 401, against the real fixture, to prove the configured scope
+      // actually reaches the DCR and authorization requests.
+      const result = await sdkAuth(provider, { serverUrl: fixture.url })
+      expect(result).toBe('REDIRECT')
+      expect(fixture.registrationRequests).toHaveLength(1)
+      expect(fixture.registrationRequests[0]).toMatchObject({ scope: configuredScope })
+      expect(capturedAuthorizationUrl?.searchParams.get('scope')).toBe(configuredScope)
+    } finally {
+      await fixture.close()
     }
-    const transport = createTransport(config)
-    expect(transport).toBeDefined()
-    expect(transport).toHaveProperty('start')
-    expect(transport).toHaveProperty('close')
   })
 
   it('merges explicit env on top of scrubbed ambient env', () => {
