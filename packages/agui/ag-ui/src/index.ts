@@ -85,8 +85,11 @@ function resolveOptions(config: Config): ResolvedAgUiOptions {
  * quiescence, so an HMR reload leaves neither sockets nor listeners behind.
  * @param ctx - Cordis context carrying the session store and logger.
  * @param config - deployment config; see {@link Config}.
+ * @returns resolves once the listener is bound and accepting connections.
+ * @throws when the configured host/port cannot be bound; the message names
+ *   the host and port, with the underlying bind error chained as `cause`.
  */
-export function apply(ctx: Context, config: Config): void {
+export async function apply(ctx: Context, config: Config): Promise<void> {
   // Misconfiguration fails loud before any resource is created.
   const options = resolveOptions(config)
   // ACP-pattern capture: broadcast callbacks run outside this plugin's
@@ -96,6 +99,16 @@ export function apply(ctx: Context, config: Config): void {
     const session = sessions.get(threadId)
     return session?.events
   }, ctx.logger('ag-ui'))
+
+  try {
+    await server.listen()
+  } catch (cause) {
+    // A failed bind leaves nothing to tear down later: dispose now so the
+    // unbound server does not linger in the process-wide registry, then fail
+    // the plugin's own init loudly (never swallowed) with host and port named.
+    await server.dispose()
+    throw new Error(`ag-ui: failed to listen on ${options.host}:${options.port}`, { cause })
+  }
 
   ctx.on('session/event', (session, event: SessionEvent) => {
     server.broadcastSessionEvent(session.header.id, event)

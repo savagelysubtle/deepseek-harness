@@ -61,9 +61,14 @@ describe('bearer auth', () => {
     expect(unknown.status).toBe(401)
   })
 
-  it('fails loud at load when the configured token is absent or shorter than 8 characters', () => {
-    // The resolve step runs before any socket or service access exists.
-    expect(() => { plugin.apply(undefined as never, { port: 0, bearerToken: 'short' }) }).toThrow(/bearerToken/)
+  it('fails loud at load when the configured token is absent or shorter than 8 characters', async () => {
+    // The resolve step runs before any socket or service access exists, and
+    // runs synchronously inside the now-`async` `apply` — a synchronous throw
+    // inside an async function still only surfaces as a promise rejection, so
+    // this asserts the rejection rather than a synchronous throw.
+    await expect(
+      plugin.apply(undefined as never, { port: 0, bearerToken: 'short' }),
+    ).rejects.toThrow(/bearerToken/)
     expect(() => plugin.Config({ port: 0, bearerToken: 'short' })).toThrow()
     const resolved = plugin.Config({ port: 0, bearerToken: 'long-enough-token' })
     expect(resolved.keepAliveMs).toBe(15_000)
