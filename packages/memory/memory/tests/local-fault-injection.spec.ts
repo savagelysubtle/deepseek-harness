@@ -53,6 +53,12 @@ const state = vi.hoisted(() => ({
   /** unlink: always throw with this code for a path ending in this suffix. */
   failUnlinkErrorCodeSuffix: undefined as string | undefined,
   failUnlinkErrorCode: undefined as string | undefined,
+  /** Counts every unlink call that matched failUnlinkErrorCodeSuffix, so a test can assert the
+   *  acquire loop polled a bounded number of times rather than spinning. */
+  failUnlinkErrorCodeCallCount: 0,
+  /** unlink: always throw a plain Error carrying no `code` property, for a path ending in this
+   *  suffix — exercises the acquire-timeout diagnostic's fallback when `.code` is undefined. */
+  failUnlinkNoCodeSuffix: undefined as string | undefined,
   /** unlink: always throw (generic) for a path containing this substring. */
   failUnlinkContains: undefined as string | undefined,
 
@@ -76,6 +82,10 @@ const state = vi.hoisted(() => ({
   /** open: always (persistently, not one-shot) throw EEXIST for a path ending in this suffix — simulates a
    *  contended lock file without ever touching real disk. */
   alwaysFailOpenEexistSuffix: undefined as string | undefined,
+  /** open: throw EEXIST once for a path ending in this suffix, then delegate — simulates a lock file that
+   *  appears contended on the first attempt (so the abandoned-lock branch runs) but was never actually
+   *  created on real disk, so the real readFile/unlink calls against it genuinely reject ENOENT. */
+  failOpenEexistOnceSuffix: undefined as string | undefined,
   /** mkdir: resolve immediately without touching real disk for a path starting with this prefix (write()
    *  mkdir's both the entry's own directory and the lock directory — both land under one scope dir). */
   alwaysResolveMkdirPrefix: undefined as string | undefined,
@@ -119,10 +129,14 @@ vi.mock('node:fs/promises', async (importOriginal) => {
         throw Object.assign(new Error('ENOENT: injected unlink failure'), { code: 'ENOENT' })
       }
       if (state.failUnlinkErrorCodeSuffix !== undefined && p.endsWith(state.failUnlinkErrorCodeSuffix)) {
+        state.failUnlinkErrorCodeCallCount += 1
         throw Object.assign(
           new Error(`injected unlink failure (${String(state.failUnlinkErrorCode)})`),
           { code: state.failUnlinkErrorCode },
         )
+      }
+      if (state.failUnlinkNoCodeSuffix !== undefined && p.endsWith(state.failUnlinkNoCodeSuffix)) {
+        throw new Error('boom')
       }
       if (state.failUnlinkContains !== undefined && p.includes(state.failUnlinkContains)) {
         throw Object.assign(new Error('ENOSPC: injected prune-unlink failure'), { code: 'ENOSPC' })
@@ -179,6 +193,10 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       if (state.alwaysFailOpenEexistSuffix !== undefined && p.endsWith(state.alwaysFailOpenEexistSuffix)) {
         throw Object.assign(new Error('EEXIST: injected persistent open failure'), { code: 'EEXIST' })
       }
+      if (state.failOpenEexistOnceSuffix !== undefined && p.endsWith(state.failOpenEexistOnceSuffix)) {
+        state.failOpenEexistOnceSuffix = undefined
+        throw Object.assign(new Error('EEXIST: injected one-shot open failure'), { code: 'EEXIST' })
+      }
       if (state.failOpenNonErrorSuffix !== undefined && p.endsWith(state.failOpenNonErrorSuffix)) {
         throw 'injected non-Error open failure'
       }
@@ -213,6 +231,8 @@ afterEach(() => {
   state.failUnlinkEnoentSuffix = undefined
   state.failUnlinkErrorCodeSuffix = undefined
   state.failUnlinkErrorCode = undefined
+  state.failUnlinkErrorCodeCallCount = 0
+  state.failUnlinkNoCodeSuffix = undefined
   state.failUnlinkContains = undefined
   state.failRenameSuffix = undefined
   state.failWriteFileTargetSuffix = undefined
@@ -224,6 +244,7 @@ afterEach(() => {
   state.failOpenErrorCodeSuffix = undefined
   state.failOpenErrorCode = undefined
   state.alwaysFailOpenEexistSuffix = undefined
+  state.failOpenEexistOnceSuffix = undefined
   state.alwaysResolveMkdirPrefix = undefined
 })
 
@@ -311,7 +332,7 @@ describe('acquireEntryLock fault injection', () => {
     }
   })
 
-  it('retries past a failed cleanup unlink of an abandoned lock instead of giving up', async () => {
+  it('retries past a failed (non-ENOENT) cleanup unlink of an abandoned lock instead of giving up', async () => {
     const booted = await boot()
     try {
       const scope = scopeDirForProject(booted.root)
@@ -319,7 +340,10 @@ describe('acquireEntryLock fault injection', () => {
       await mkdir(join(lockPath, '..'), { recursive: true })
       // A pid this large can never be a live process, so this lock reads as
       // abandoned on the real (non-mocked) read; only its cleanup unlink is
-      // injected to fail once.
+      // injected to fail once, with a non-ENOENT code (EIO) — that falls
+      // through to the same poll delay a live-holder retry uses, so this
+      // write waits out one real LOCK_POLL_INTERVAL_MS before the second
+      // iteration's unlink succeeds for real, rather than retrying instantly.
       await writeFile(lockPath, JSON.stringify({ pid: 2_147_483_647 }), 'utf8')
       state.failUnlinkOnceSuffix = 'unlinkfail-abandoned.md.lock'
       const result = await booted.provider.write(PROJECT, 'unlinkfail-abandoned.md', 'content')
@@ -379,6 +403,129 @@ describe('acquireEntryLock fault injection', () => {
         expect((error as Error).message).toMatch(
           /could not acquire the write lock for "contended\.md" — another process is still writing it after waiting 5000ms/,
         )
+      } finally {
+        vi.useRealTimers()
+      }
+    } finally {
+      await booted.done()
+    }
+  })
+
+  it('fails loud, naming the entry, the lock path, and the last unlink error code, when an abandoned lock can never be removed', async () => {
+    const booted = await boot()
+    try {
+      // Same deterministic-loop setup as the live-holder timeout test above:
+      // mkdir, open and readFile are all mocked so nothing on the awaited
+      // path is real I/O, letting a single bounded fake-timer advance carry
+      // the whole poll loop through to its deadline.
+      state.alwaysResolveMkdirPrefix = scopeDirForProject(booted.root)
+      state.alwaysFailOpenEexistSuffix = 'unremovable.md.lock'
+      // A pid this large can never be a live process (same value the
+      // real-fs "retries past a failed cleanup unlink" test above uses), so
+      // this lock reads as abandoned on every iteration — the branch under
+      // test, not the live-holder one.
+      state.fixedReadSuffix = 'unremovable.md.lock'
+      state.fixedReadValue = JSON.stringify({ pid: 2_147_483_647 })
+      // The cleanup unlink never succeeds — stands in for a directory
+      // occupying the lock path, or a permission that blocks unlink but not
+      // open/readFile.
+      state.failUnlinkErrorCodeSuffix = 'unremovable.md.lock'
+      state.failUnlinkErrorCode = 'EPERM'
+      vi.useFakeTimers()
+      try {
+        const writing = booted.provider.write(PROJECT, 'unremovable.md', 'new content')
+        let settled: unknown
+        writing.then(
+          (value) => { settled = { ok: true, value } },
+          (error: unknown) => { settled = { ok: false, error } },
+        )
+        // One jump spanning the acquire timeout plus one more poll interval,
+        // then a microtask flush so the loop's final iteration — including
+        // the throw and the write() promise's own rejection — has actually
+        // run before asserting.
+        await vi.advanceTimersByTimeAsync(5_000 + 20)
+        await flushMicrotasks()
+        expect(settled).toMatchObject({ ok: false })
+        const { error } = settled as { ok: false; error: unknown }
+        expect(error).toBeInstanceOf(Error)
+        expect((error as Error).message).toMatch(
+          /could not acquire the write lock for "unremovable\.md" — the abandoned/,
+        )
+        expect((error as Error).message).toMatch(
+          /lock at ".*unremovable\.md\.lock" could not be removed after waiting/,
+        )
+        expect((error as Error).message).toMatch(/5000ms \(last unlink error: EPERM\)/)
+        // Bounded polling: roughly timeout / poll-interval (5000 / 20 = 250)
+        // attempts, not an unbounded spin.
+        expect(state.failUnlinkErrorCodeCallCount).toBeGreaterThan(0)
+        expect(state.failUnlinkErrorCodeCallCount).toBeLessThan(500)
+      } finally {
+        vi.useRealTimers()
+      }
+    } finally {
+      await booted.done()
+    }
+  })
+
+  it('retries past an ENOENT unlink race on an abandoned lock without taking the poll delay', async () => {
+    const booted = await boot()
+    try {
+      // The lock file is only ever pretended to exist: the one-shot EEXIST
+      // injection makes the first open() attempt believe it is contended,
+      // but nothing was ever actually written to disk at lockPath. So the
+      // real (unmocked) readFile inside entryLockHolderLive genuinely
+      // rejects ENOENT — read as "not live" (abandoned), same as any other
+      // read failure — and the real (unmocked) unlink that follows also
+      // genuinely rejects ENOENT. That is exactly the branch under test:
+      // treated as a race already won by another taker, not a removal
+      // failure, so it must continue immediately rather than fall through
+      // to the deadline/poll-delay path. The second, delegated open() call
+      // then genuinely succeeds, since nothing was ever there to begin with.
+      state.failOpenEexistOnceSuffix = 'enoent-race.md.lock'
+      vi.useFakeTimers()
+      try {
+        // Fake timers make delay()'s setTimeout never fire on its own: if
+        // the ENOENT branch still fell through to the poll delay, this
+        // await would hang until Vitest's own test timeout instead of
+        // settling — there is no advanceTimersByTimeAsync call here at all.
+        const result = await booted.provider.write(PROJECT, 'enoent-race.md', 'content')
+        expect(result.replaced).toBeUndefined()
+        expect(await booted.provider.read(PROJECT, 'enoent-race.md')).toBe('content')
+      } finally {
+        vi.useRealTimers()
+      }
+    } finally {
+      await booted.done()
+    }
+  })
+
+  it('falls back to the unlink error itself in the acquire-timeout diagnostic when it carries no error code', async () => {
+    const booted = await boot()
+    try {
+      state.alwaysResolveMkdirPrefix = scopeDirForProject(booted.root)
+      state.alwaysFailOpenEexistSuffix = 'codeless.md.lock'
+      state.fixedReadSuffix = 'codeless.md.lock'
+      state.fixedReadValue = JSON.stringify({ pid: 2_147_483_647 })
+      // A plain Error with no `code` property at all — the diagnostic must
+      // still name something useful instead of printing "undefined".
+      state.failUnlinkNoCodeSuffix = 'codeless.md.lock'
+      vi.useFakeTimers()
+      try {
+        const writing = booted.provider.write(PROJECT, 'codeless.md', 'new content')
+        let settled: unknown
+        writing.then(
+          (value) => { settled = { ok: true, value } },
+          (error: unknown) => { settled = { ok: false, error } },
+        )
+        await vi.advanceTimersByTimeAsync(5_000 + 20)
+        await flushMicrotasks()
+        expect(settled).toMatchObject({ ok: false })
+        const { error } = settled as { ok: false; error: unknown }
+        expect(error).toBeInstanceOf(Error)
+        expect((error as Error).message).toMatch(
+          /could not acquire the write lock for "codeless\.md" — the abandoned/,
+        )
+        expect((error as Error).message).toContain('boom')
       } finally {
         vi.useRealTimers()
       }

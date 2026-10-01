@@ -20,6 +20,8 @@ export interface OAuthFixture {
   base: string
   /** Every `/token` request body, in arrival order. */
   tokenRequests: TokenRequest[]
+  /** Every `/register` (RFC 7591 dynamic client registration) request body, in arrival order. */
+  registrationRequests: unknown[]
   /** Bearer token currently accepted by the MCP endpoint. */
   setValidToken(token: string): void
   /** Close the listener. */
@@ -55,6 +57,7 @@ export function startOAuthFixture(): Promise<OAuthFixture> {
   // sets it explicitly via setValidToken.
   let validToken = ''
   const tokenRequests: TokenRequest[] = []
+  const registrationRequests: unknown[] = []
   const handleRequest = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     // Build absolute URLs from the Host header: the default-origin trick
     // loses the ephemeral port, and the SDK validates resource identity by
@@ -133,6 +136,7 @@ export function startOAuthFixture(): Promise<OAuthFixture> {
 
       // ---- RFC 7591 dynamic client registration ----
       if (incoming.pathname === '/register' && request.method === 'POST') {
+        registrationRequests.push(JSON.parse(await readBody(request)))
         sendJson(response, 201, {
           client_id: 'dyn-client-1',
           client_id_issued_at: Math.floor(Date.now() / 1000),
@@ -198,6 +202,7 @@ export function startOAuthFixture(): Promise<OAuthFixture> {
         url: `http://127.0.0.1:${address.port}/mcp`,
         base: `http://127.0.0.1:${address.port}`,
         tokenRequests,
+        registrationRequests,
         setValidToken(token: string): void {
           validToken = token
         },

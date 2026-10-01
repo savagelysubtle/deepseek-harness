@@ -134,10 +134,18 @@ function captureAuthorizationCode(port: number, timeoutMs: number): Promise<stri
       '— free the port or pass --redirect-port on BOTH this command and the plugin config',
     ].join(' ')))
   })
-  void captured.promise.finally(() => {
+  // `.finally()`'s own returned promise adopts `captured.promise`'s rejection
+  // and nobody holds a handler for it, so discarding it with `void` (as
+  // before) left an independent unhandled rejection on every failure path.
+  // `.then(cleanup, cleanup)` runs the same cleanup on both outcomes but
+  // never itself rejects — neither handler throws — so discarding IT is
+  // safe. `captured.promise` itself is returned below unchanged, so callers
+  // still see the real resolution or rejection.
+  const cleanup = (): void => {
     clearTimeout(timer)
     server.close()
-  })
+  }
+  void captured.promise.then(cleanup, cleanup)
   server.listen(port, '127.0.0.1')
   return captured.promise
 }
@@ -153,42 +161,54 @@ export async function runAuthCli(argv: readonly string[]): Promise<void> {
   const args = parseArgs(argv)
   const ctx = new Context()
   // watch: false — a one-shot command has nothing to hot-reload.
-  const localProvider = new LocalCredentialProvider(ctx, {
+  const credentialsConfig = {
     ...(args.credentialsPath === undefined ? {} : { path: args.credentialsPath }),
     watch: false,
-  })
-  const store: OAuthCredentialStore = localProvider
-  const provider = CredentialsOAuthProvider.create({
-    serverName: args.serverName,
-    serverUrl: new URL(args.url),
-    ...(args.scope === undefined ? {} : { scope: args.scope }),
-    ...(args.clientId === undefined ? {} : { staticClientId: args.clientId }),
-    store,
-    redirectUri: `http://127.0.0.1:${args.redirectPort}/callback`,
-    onAuthorizationUrl(authorizationUrl) {
-      console.log(`Open this URL in any browser and approve access:\n\n  ${String(authorizationUrl)}\n\nWaiting for the consent redirect on 127.0.0.1:${args.redirectPort} ...`)
-    },
-  })
-  if (args.reset) await provider.invalidate('all')
-
-  let result = await sdkAuth(provider, { serverUrl: args.url, ...(args.scope === undefined ? {} : { scope: args.scope }) })
-  if (result === 'AUTHORIZED') {
-    console.log(`Already authorized: valid tokens are stored under ${provider.ref}. Pass --reset to start over.`)
-    return
   }
-  const code = await captureAuthorizationCode(args.redirectPort, args.timeoutMs)
-  result = await sdkAuth(provider, {
-    serverUrl: args.url,
-    ...(args.scope === undefined ? {} : { scope: args.scope }),
-    authorizationCode: code,
-  })
-  /* v8 ignore next -- SDK 1.29.0 authInternal always returns AUTHORIZED or throws given an authorizationCode (auth.js ~262-271) */
-  if (result !== 'AUTHORIZED') throw new Error('token exchange did not complete — rerun the command')
-  const info = await localProvider.describe(provider.ref)
-  console.log([
-    `Authorized. MCP OAuth tokens stored as credential reference ${provider.ref}`,
-    `in ${resolveSpec(localProvider.config).filename} (source layer: ${info.source}).`,
-  ].join(' '))
+  // Cordis only runs a Service's [Service.init] — where credentials-local's
+  // loadInitial() reads the existing .credentials.yaml into memory — when the
+  // class is mounted through ctx.plugin(...); a bare
+  // `new LocalCredentialProvider(ctx, {...})` never reaches it, so resolve()
+  // would always see an empty store regardless of what is on disk, and the
+  // "Already authorized" short circuit below could never fire.
+  const fiber = ctx.plugin(LocalCredentialProvider, credentialsConfig)
+  await fiber
+  try {
+    const store: OAuthCredentialStore = ctx.credentials
+    const provider = CredentialsOAuthProvider.create({
+      serverName: args.serverName,
+      serverUrl: new URL(args.url),
+      ...(args.scope === undefined ? {} : { scope: args.scope }),
+      ...(args.clientId === undefined ? {} : { staticClientId: args.clientId }),
+      store,
+      redirectUri: `http://127.0.0.1:${args.redirectPort}/callback`,
+      onAuthorizationUrl(authorizationUrl) {
+        console.log(`Open this URL in any browser and approve access:\n\n  ${String(authorizationUrl)}\n\nWaiting for the consent redirect on 127.0.0.1:${args.redirectPort} ...`)
+      },
+    })
+    if (args.reset) await provider.invalidate('all')
+
+    let result = await sdkAuth(provider, { serverUrl: args.url, ...(args.scope === undefined ? {} : { scope: args.scope }) })
+    if (result === 'AUTHORIZED') {
+      console.log(`Already authorized: valid tokens are stored under ${provider.ref}. Pass --reset to start over.`)
+      return
+    }
+    const code = await captureAuthorizationCode(args.redirectPort, args.timeoutMs)
+    result = await sdkAuth(provider, {
+      serverUrl: args.url,
+      ...(args.scope === undefined ? {} : { scope: args.scope }),
+      authorizationCode: code,
+    })
+    /* v8 ignore next -- SDK 1.29.0 authInternal always returns AUTHORIZED or throws given an authorizationCode (auth.js ~262-271) */
+    if (result !== 'AUTHORIZED') throw new Error('token exchange did not complete — rerun the command')
+    const info = await ctx.credentials.describe(provider.ref)
+    console.log([
+      `Authorized. MCP OAuth tokens stored as credential reference ${provider.ref}`,
+      `in ${resolveSpec(credentialsConfig).filename} (source layer: ${info.source}).`,
+    ].join(' '))
+  } finally {
+    await fiber.dispose()
+  }
 }
 
 // Bin execution guard: run only when this file is the entry module, so an
@@ -197,6 +217,8 @@ const invoked = process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(process.argv[1]).href
 if (invoked) {
   runAuthCli(process.argv.slice(2)).catch((error: unknown) => {
+    /* v8 ignore next -- every throw site reachable from runAuthCli (parseArgs, the credential fiber's init, URL parsing,
+       the SDK auth flow, captureAuthorizationCode) throws Error instances */
     console.error(String(error instanceof Error ? error.message : error))
     process.exitCode = 1
   })

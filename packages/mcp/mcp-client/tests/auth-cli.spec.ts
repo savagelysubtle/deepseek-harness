@@ -2,38 +2,23 @@
  * Tests for the `dsh-mcp-client-auth` consent CLI (`runAuthCli`) that the
  * OAuth end-to-end flow in oauth.spec.ts does not already exercise: argv
  * validation, full-flow runs that reach every parseArgs default and every
- * scope/client-id forwarding branch, and the loopback callback server's
+ * scope/client-id forwarding branch, the loopback callback server's
  * non-happy paths (wrong path, authorization-server error redirect, missing
- * code, timeout, port conflict).
- *
- * NOTE on the "Already authorized" short circuit (auth-cli.ts:173-176): it is
- * NOT exercised here. `runAuthCli` constructs its `LocalCredentialProvider`
- * with a bare `new LocalCredentialProvider(ctx, {...})` (auth-cli.ts:154-157)
- * instead of `ctx.plugin(LocalCredentialProvider, {...})`. Cordis's
- * `Service.init` async generator — where credentials-local's `loadInitial()`
- * reads the existing `.credentials.yaml` into memory — runs only when a
- * Service subclass is loaded as a Cordis "class plugin" via `ctx.plugin(...)`
- * (see `[Service.init]` doc in vendor/cordis/src/service.ts and its only
- * caller in the plugin loader); a bare constructor call never triggers it.
- * Verified empirically: constructing `LocalCredentialProvider` directly
- * against a `.credentials.yaml` that already holds a valid entry and calling
- * `.resolve()` immediately after (even after a 200ms grace delay) returns
- * `undefined` — see the reasoning recorded in the task's final report. This
- * means every real `runAuthCli` invocation starts from a provider whose
- * in-memory store is empty regardless of what is on disk, so the "already
- * authorized" check can never see a grant a PRIOR process wrote — it is
- * live, reachable code in principle, but dead in every actual call path
- * through the shipped `runAuthCli`. Reported as a real defect, not fixed here
- * (this package's write list is tests/** only).
+ * code, timeout, port conflict), and the "Already authorized" short circuit
+ * (auth-cli.ts ~192-195) against a store seeded exactly as a prior run would
+ * leave it.
  */
 import { describe, expect, it, vi } from 'vitest'
 import { createServer } from 'node:http'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
+import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
 
 import { startOAuthFixture } from './oauth-fixture.ts'
 import { runAuthCli } from '@deepseek-ai/dsh-mcp-client/src/auth-cli.ts'
+import { oauthCredentialRef } from '@deepseek-ai/dsh-mcp-client/src/oauth.ts'
 
 /** Bind `server` to an OS-assigned free port on 127.0.0.1 and resolve with the
  * assigned port once listening (rejects on a bind error). The caller decides
@@ -85,53 +70,6 @@ async function completeConsentFlow(run: Promise<void>, log: { lines: string[] })
   const browserResponse = await fetch(matched[0], { redirect: 'follow' })
   expect(browserResponse.ok).toBe(true)
   await run
-}
-
-/**
- * The exact messages `captureAuthorizationCode` (auth-cli.ts) rejects with on
- * its four failure paths — the only reasons `toleratingKnownFinallyLeak`
- * below is allowed to swallow.
- */
-const KNOWN_FINALLY_LEAK_PATTERNS = [
-  /^authorization server redirected with error:/,
-  /^no consent callback within \d+ms — rerun the command to get a fresh login URL$/,
-  /^cannot listen on 127\.0\.0\.1:\d+ for the consent redirect /,
-]
-
-/**
- * `captureAuthorizationCode` (auth-cli.ts) does
- * `void captured.promise.finally(() => {...})`: the promise `.finally()`
- * returns is discarded, so on EVERY rejection path (error redirect, missing
- * code, timeout, port conflict) that returned promise carries the same
- * rejection and is never handled — a real, independent unhandled-rejection
- * event, on top of the `run` promise this file properly awaits and asserts
- * on. This is a source defect (reported in the task write-up, not fixed here
- * — this package's write list is tests/** only); it fires regardless of how
- * a caller handles `captureAuthorizationCode`'s own returned promise, so it
- * cannot be avoided by attaching handlers earlier in this file.
- *
- * Driving these real failure paths is the only way to cover them, so this
- * saves and swaps out `process`'s own `unhandledRejection` listeners around
- * exactly the call that exercises one — but ONLY the four known leak
- * messages above are swallowed; any other reason is forwarded to the saved
- * listeners (vitest's own included) so an unrelated failure during the same
- * call can never hide behind this.
- */
-async function toleratingKnownFinallyLeak<T>(fn: () => Promise<T>): Promise<T> {
-  const saved = process.listeners('unhandledRejection')
-  process.removeAllListeners('unhandledRejection')
-  const forwardUnlessKnownLeak = (reason: unknown, promise: Promise<unknown>): void => {
-    const message = reason instanceof Error ? reason.message : String(reason)
-    if (KNOWN_FINALLY_LEAK_PATTERNS.some(pattern => pattern.test(message))) return
-    for (const listener of saved) listener(reason, promise)
-  }
-  process.on('unhandledRejection', forwardUnlessKnownLeak)
-  try {
-    return await fn()
-  } finally {
-    process.off('unhandledRejection', forwardUnlessKnownLeak)
-    for (const listener of saved) process.on('unhandledRejection', listener)
-  }
 }
 
 describe('parseArgs validation (runAuthCli argv)', () => {
@@ -244,7 +182,7 @@ describe('captureAuthorizationCode (loopback listener)', () => {
     }
   })
 
-  it('surfaces an authorization-server error redirect without a description', () => toleratingKnownFinallyLeak(async () => {
+  it('surfaces an authorization-server error redirect without a description', async () => {
     const fixture = await startOAuthFixture()
     const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
     const credPath = join(dir, 'creds.yaml')
@@ -276,9 +214,9 @@ describe('captureAuthorizationCode (loopback listener)', () => {
       await rm(dir, { recursive: true, force: true })
       await fixture.close()
     }
-  }))
+  })
 
-  it('surfaces an authorization-server error redirect with a description', () => toleratingKnownFinallyLeak(async () => {
+  it('surfaces an authorization-server error redirect with a description', async () => {
     const fixture = await startOAuthFixture()
     const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
     const credPath = join(dir, 'creds.yaml')
@@ -307,9 +245,9 @@ describe('captureAuthorizationCode (loopback listener)', () => {
       await rm(dir, { recursive: true, force: true })
       await fixture.close()
     }
-  }))
+  })
 
-  it('reports "missing code" when the callback carries neither code nor error', () => toleratingKnownFinallyLeak(async () => {
+  it('reports "missing code" when the callback carries neither code nor error', async () => {
     const fixture = await startOAuthFixture()
     const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
     const credPath = join(dir, 'creds.yaml')
@@ -336,9 +274,9 @@ describe('captureAuthorizationCode (loopback listener)', () => {
       await rm(dir, { recursive: true, force: true })
       await fixture.close()
     }
-  }))
+  })
 
-  it('times out waiting for the consent callback', () => toleratingKnownFinallyLeak(async () => {
+  it('times out waiting for the consent callback', async () => {
     const fixture = await startOAuthFixture()
     const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
     const credPath = join(dir, 'creds.yaml')
@@ -358,9 +296,9 @@ describe('captureAuthorizationCode (loopback listener)', () => {
       await rm(dir, { recursive: true, force: true })
       await fixture.close()
     }
-  }))
+  })
 
-  it('fails loud when the loopback port is already bound', () => toleratingKnownFinallyLeak(async () => {
+  it('fails loud when the loopback port is already bound', async () => {
     const fixture = await startOAuthFixture()
     const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
     const credPath = join(dir, 'creds.yaml')
@@ -385,5 +323,66 @@ describe('captureAuthorizationCode (loopback listener)', () => {
       await rm(dir, { recursive: true, force: true })
       await fixture.close()
     }
-  }))
+  })
+})
+
+describe('already-authorized short circuit', () => {
+  it('skips the entire consent flow when a valid stored grant already exists', async () => {
+    const fixture = await startOAuthFixture()
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
+    const credPath = join(dir, 'creds.yaml')
+    // Never bound: proving nothing ever listens on it is exactly the "no
+    // loopback listener" assertion below.
+    const port = await getFreePort()
+    const log = captureLog()
+    try {
+      // Seed exactly what a prior completed CLI login leaves behind: a
+      // dynamically registered client and a refreshable token pair. The SDK's
+      // auth() always re-validates a stored grant by refreshing it, so the
+      // refresh_token must match what the fixture's /token endpoint accepts.
+      const seedCtx = new Context()
+      const seedFiber = seedCtx.plugin(LocalCredentialProvider, { path: credPath, watch: false })
+      await seedFiber
+      const ref = oauthCredentialRef('already-authorized')
+      await seedCtx.credentials.set(ref, JSON.stringify({
+        version: 1,
+        tokens: { access_token: 'at-stale', refresh_token: 'rt-1', token_type: 'Bearer' },
+        clientInformation: { client_id: 'dyn-client-1' },
+      }))
+      await seedFiber.dispose()
+      const registrationsAfterSeed = fixture.registrationRequests.length
+
+      const run = runAuthCli([
+        '--url', fixture.url,
+        '--server-name', 'already-authorized',
+        '--credentials-path', credPath,
+        '--redirect-port', String(port),
+        '--timeout-ms', '15000',
+      ])
+      await expect(run).resolves.toBeUndefined()
+
+      // Prints the short-circuit message, never the consent-flow prompt.
+      expect(log.lines.some(line => line.includes('Already authorized'))).toBe(true)
+      expect(log.lines.some(line => line.includes('Open this URL'))).toBe(false)
+
+      // No loopback listener: captureAuthorizationCode (the function that
+      // binds the redirect port) never ran, so nothing answers on it.
+      await expect(fetch(`http://127.0.0.1:${port}/callback?code=unused`)).rejects.toThrow()
+
+      // No dynamic-registration request: the fixture's /register endpoint
+      // always returns the same client_id regardless of whether it was ever
+      // called, so comparing the stored clientInformation to that id proves
+      // nothing either way. The fixture's own request counter is the real
+      // proof — it must sit exactly where seeding left it (zero calls).
+      expect(fixture.registrationRequests.length).toBe(registrationsAfterSeed)
+
+      // The refresh grant is the only token-endpoint traffic — no
+      // authorization_code exchange ran because no code was ever captured.
+      expect(fixture.tokenRequests.map(request => request.grant_type)).toEqual(['refresh_token'])
+    } finally {
+      log.restore()
+      await rm(dir, { recursive: true, force: true })
+      await fixture.close()
+    }
+  })
 })

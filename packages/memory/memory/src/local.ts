@@ -190,12 +190,16 @@ async function entryLockHolderLive(lockPath: string): Promise<boolean> {
  * check-retain-rename sequence, waiting up to {@link LOCK_ACQUIRE_TIMEOUT_MS}
  * for a live holder to release before failing loud. An abandoned lock (dead
  * holder, or unreadable/foreign content) is taken over immediately, same as
- * `dsh-named-sessions`'s own steal semantics.
+ * `dsh-named-sessions`'s own steal semantics — unless its removal itself
+ * keeps failing, in which case this waits out the same timeout and poll
+ * delay as a live holder before failing loud, rather than spinning forever.
  * @param lockPath - absolute path of this entry's lock file.
  * @param jailed - normalized scope-relative entry path, for the timeout error.
  * @param slug - project slug, for the timeout error.
  * @returns the held lock; the caller must always release it.
- * @throws when the lock cannot be taken within the timeout, naming the entry.
+ * @throws when the lock cannot be taken within the timeout, naming the entry
+ * (and, for an abandoned lock that could not be removed, the lock path and
+ * the last unlink error's code).
  */
 async function acquireEntryLock(lockPath: string, jailed: string, slug: string): Promise<EntryLock> {
   await mkdir(join(lockPath, '..'), { recursive: true })
@@ -209,13 +213,32 @@ async function acquireEntryLock(lockPath: string, jailed: string, slug: string):
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
         throw new Error(`memory(${slug}): could not create the write lock for "${jailed}" (${String(error instanceof Error ? error.message : error)})`)
       }
+      let unlinkError: NodeJS.ErrnoException | undefined
       if (!await entryLockHolderLive(lockPath)) {
-        // Abandoned: no live holder to wait on. Another taker may win the
-        // unlink race first, which the next loop iteration's create resolves.
-        await unlink(lockPath).catch(() => {})
-        continue
+        // Abandoned: no live holder to wait on. An ENOENT removing it means
+        // another taker already won the unlink race — same as a successful
+        // unlink of our own, that resolves with a single quick retry on the
+        // next loop iteration's create. Any other removal failure (a
+        // directory occupies the lock path; a permission that blocks
+        // unlink but not open/readFile) falls through to the same deadline
+        // and poll delay the live-holder branch below uses, so it still
+        // fails loud instead of spinning this loop forever.
+        try {
+          await unlink(lockPath)
+          continue
+        } catch (unlinkFailure) {
+          if ((unlinkFailure as NodeJS.ErrnoException).code === 'ENOENT') continue
+          unlinkError = unlinkFailure as NodeJS.ErrnoException
+        }
       }
       if (Date.now() >= deadline) {
+        if (unlinkError) {
+          // `.code` is only set for a genuine NodeJS.ErrnoException; fall
+          // back to the error's own string form so a codeless rejection
+          // still names something useful instead of printing "undefined".
+          const unlinkErrorDetail = unlinkError.code ?? String(unlinkError)
+          throw new Error(`memory(${slug}): could not acquire the write lock for "${jailed}" — the abandoned lock at "${lockPath}" could not be removed after waiting ${LOCK_ACQUIRE_TIMEOUT_MS}ms (last unlink error: ${unlinkErrorDetail})`)
+        }
         throw new Error(`memory(${slug}): could not acquire the write lock for "${jailed}" — another process is still writing it after waiting ${LOCK_ACQUIRE_TIMEOUT_MS}ms`)
       }
       await delay(LOCK_POLL_INTERVAL_MS)
