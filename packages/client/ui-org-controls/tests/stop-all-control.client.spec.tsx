@@ -142,4 +142,44 @@ describe('StopAllControl', () => {
     renderStopAll({ wide: false })
     expect(screen.queryByText('Stop All')).toBeNull()
   })
+
+  it('a thrown Error (promise rejection, not a { ok: false } answer) surfaces its own message', async () => {
+    const onStopAll = vi.fn().mockRejectedValue(new Error('socket closed'))
+    renderStopAll({ onStopAll })
+    fireEvent.click(screen.getByRole('button', { name: 'Stop All' }))
+    const confirmButtons = screen.getAllByRole('button', { name: 'Stop All' })
+    fireEvent.click(confirmButtons[confirmButtons.length - 1] as HTMLElement)
+    const banner = await screen.findByRole('alert')
+    expect(banner.textContent).toContain('Stop All failed: socket closed')
+    expect(banner.getAttribute('data-variant')).toBe('error')
+  })
+
+  it('a thrown non-Error rejection is stringified rather than crashing', async () => {
+    const onStopAll = vi.fn().mockRejectedValue('boom')
+    renderStopAll({ onStopAll })
+    fireEvent.click(screen.getByRole('button', { name: 'Stop All' }))
+    const confirmButtons = screen.getAllByRole('button', { name: 'Stop All' })
+    fireEvent.click(confirmButtons[confirmButtons.length - 1] as HTMLElement)
+    const banner = await screen.findByRole('alert')
+    expect(banner.textContent).toContain('Stop All failed: boom')
+  })
+
+  it('Escape closes the confirm dialog without calling onStopAll', () => {
+    const onStopAll = vi.fn()
+    renderStopAll({ onStopAll })
+    fireEvent.click(screen.getByRole('button', { name: 'Stop All' }))
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(onStopAll).not.toHaveBeenCalled()
+  })
+
+  it('Cancel closes the confirm dialog without calling onStopAll', () => {
+    const onStopAll = vi.fn()
+    renderStopAll({ onStopAll })
+    fireEvent.click(screen.getByRole('button', { name: 'Stop All' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(onStopAll).not.toHaveBeenCalled()
+  })
 })

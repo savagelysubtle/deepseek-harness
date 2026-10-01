@@ -632,6 +632,126 @@ describe('OrgBoardController served-roster write path', () => {
     expect(controller.store.getSnapshot().servedWrite).toEqual({ pending: false, notice: null })
   })
 
+  it('a failed registry result (registry.ok false) clears document/token, proving the next edit refuses locally rather than editing stale state', async () => {
+    const partialValue: ResponseValue<'org.get'> = {
+      ...VALUE,
+      registry: { ok: false, reason: 'registry.yml not found' },
+    }
+    const get = vi.fn().mockResolvedValue(ok(partialValue))
+    const write = vi.fn()
+    const controller = new OrgBoardController({ org: { get, write, writeServed: vi.fn() } })
+    await controller.load()
+    expect(controller.store.getSnapshot().value).toEqual(partialValue)
+    await controller.addSeat('lucius', '/org/lucius')
+    expect(write).not.toHaveBeenCalled()
+    const { write: writeState } = controller.store.getSnapshot()
+    expect(writeState.notice?.kind).toBe('invalid')
+    expect(writeState.notice?.message).toBe('no org registry is loaded to edit')
+  })
+
+  it('setSeatServed refuses locally when servedAddresses loaded but the served-roster token itself failed to load', async () => {
+    const partialValue: ResponseValue<'org.get'> = {
+      ...VALUE,
+      servedRosterToken: { ok: false, reason: 'profile patch file could not be read' },
+    }
+    const get = vi.fn().mockResolvedValue(ok(partialValue))
+    const writeServed = vi.fn()
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed } })
+    await controller.load()
+    await controller.setSeatServed('x', true, false)
+    expect(writeServed).not.toHaveBeenCalled()
+    expect(controller.store.getSnapshot().servedWrite).toEqual({
+      pending: false, notice: { kind: 'invalid', message: 'no served roster is loaded to write against' },
+    })
+  })
+
+  it('a thrown transport error during setSeatServed is treated as write-failed, same as a business error', async () => {
+    const get = vi.fn().mockResolvedValue(ok(VALUE))
+    const writeServed = vi.fn().mockRejectedValue(new Error('socket closed'))
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed } })
+    await controller.load()
+    await controller.setSeatServed('x', true, false)
+    expect(controller.store.getSnapshot().servedWrite).toEqual({
+      pending: false, notice: { kind: 'write-failed', message: 'socket closed' },
+    })
+  })
+
+  it('a non-Error throw during setSeatServed is stringified rather than crashing', async () => {
+    const get = vi.fn().mockResolvedValue(ok(VALUE))
+    const writeServed = vi.fn().mockRejectedValue('boom')
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed } })
+    await controller.load()
+    await controller.setSeatServed('x', true, false)
+    expect(controller.store.getSnapshot().servedWrite.notice).toEqual({ kind: 'write-failed', message: 'boom' })
+  })
+
+  it('a stale in-flight served write\'s REJECTION can never overwrite newer state (a reload landing mid-write wins)', async () => {
+    let rejectWriteServed: (error: unknown) => void = () => {}
+    const get = vi.fn()
+      .mockResolvedValueOnce(ok(VALUE))
+      .mockResolvedValueOnce(ok(VALUE_2))
+    const writeServed = vi.fn(() => new Promise<OrgWriteServedResponse>((_resolve, reject) => { rejectWriteServed = reject }))
+    const controller = new OrgBoardController({ org: { get, write: vi.fn(), writeServed } })
+    await controller.load()
+
+    const writing = controller.setSeatServed('x', true, false)
+    await Promise.resolve()
+    expect(controller.store.getSnapshot().servedWrite.pending).toBe(true)
+
+    // A background reconnect refresh lands while the served write is still in flight.
+    await controller.load()
+    expect(controller.store.getSnapshot().value).toEqual(VALUE_2)
+    expect(controller.store.getSnapshot().servedWrite.pending).toBe(false)
+
+    // The write's late rejection arrives after the fact -- it must be
+    // discarded rather than overwriting the fresh state with a write-failed
+    // notice for a generation the UI has already moved past.
+    rejectWriteServed(new Error('too late'))
+    await writing.catch(() => {})
+
+    expect(get).toHaveBeenCalledTimes(2)
+    expect(controller.store.getSnapshot().value).toEqual(VALUE_2)
+    expect(controller.store.getSnapshot().servedWrite).toEqual({ pending: false, notice: null })
+  })
+
+  it('a non-Error throw during addSeat/write is stringified rather than crashing', async () => {
+    const get = vi.fn().mockResolvedValueOnce(ok(VALUE))
+    const write = vi.fn().mockRejectedValue('boom')
+    const controller = new OrgBoardController({ org: { get, write, writeServed: vi.fn() } })
+    await controller.load()
+    await controller.addSeat('lucius', '/org/lucius')
+    expect(controller.store.getSnapshot().write).toEqual({ pending: false, notice: { kind: 'write-failed', message: 'boom' } })
+  })
+
+  it('a stale in-flight write\'s REJECTION can never overwrite newer state (a reconnect refresh landing mid-write wins)', async () => {
+    let rejectWrite: (error: unknown) => void = () => {}
+    const get = vi.fn()
+      .mockResolvedValueOnce(ok(VALUE))
+      .mockResolvedValueOnce(ok(VALUE_2))
+    const write = vi.fn(() => new Promise<OrgWriteResponse>((_resolve, reject) => { rejectWrite = reject }))
+    const controller = new OrgBoardController({ org: { get, write, writeServed: vi.fn() } })
+    await controller.load()
+
+    const writing = controller.addSeat('lucius', '/org/lucius')
+    await Promise.resolve()
+    expect(controller.store.getSnapshot().write.pending).toBe(true)
+
+    // A background reconnect refresh lands while the write is still in flight.
+    await controller.load()
+    expect(controller.store.getSnapshot().value).toEqual(VALUE_2)
+    expect(controller.store.getSnapshot().write.pending).toBe(false)
+
+    // The write's late rejection arrives after the fact -- it must be
+    // discarded, never overwriting the fresh state with a write-failed
+    // notice for a generation the UI has already moved past.
+    rejectWrite(new Error('too late'))
+    await writing.catch(() => {})
+
+    expect(get).toHaveBeenCalledTimes(2)
+    expect(controller.store.getSnapshot().value).toEqual(VALUE_2)
+    expect(controller.store.getSnapshot().write).toEqual({ pending: false, notice: null })
+  })
+
   it('servedAddresses is null when drift.ok is false, including a partial roster failure (registry and ONE roster loaded, the other did not)', async () => {
     const partialValue: ResponseValue<'org.get'> = {
       ...VALUE,

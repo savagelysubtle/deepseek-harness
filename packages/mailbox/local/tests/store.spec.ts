@@ -8,13 +8,38 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { MailboxAddress, MailboxClaimFilter } from '@deepseek-ai/dsh-mailbox'
 import { formatMailboxAddress, MailboxRegistry } from '@deepseek-ai/dsh-mailbox'
-import MailboxLocal, { resolveMailboxPath, SCHEMA_VERSION } from '../src/index.ts'
+import MailboxLocal, { openLocalMailbox, resolveMailboxPath, SCHEMA_VERSION } from '../src/index.ts'
 import { openMailboxDatabase, SqliteMailboxStore } from '../src/sqlite.ts'
 import type { MailboxClock } from '../src/types.ts'
+
+// Lets one test inject a deterministic non-EEXIST failure from `openSync`
+// (e.g. EACCES) without depending on real OS permission checks, which a
+// root-running test process can bypass entirely — same `...actual`
+// passthrough + hoisted toggle-flag pattern as subprocess-local's
+// spawn.spec.ts and memory-local's fault-injection suite.
+const { failNextOpenCode } = vi.hoisted(() => ({ failNextOpenCode: { value: undefined as string | undefined } }))
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return {
+    ...actual,
+    openSync(
+      path: Parameters<typeof actual.openSync>[0],
+      flags: Parameters<typeof actual.openSync>[1],
+      mode?: Parameters<typeof actual.openSync>[2],
+    ) {
+      const code = failNextOpenCode.value
+      if (code !== undefined) {
+        failNextOpenCode.value = undefined
+        throw Object.assign(new Error(`simulated ${code} on open`), { code })
+      }
+      return actual.openSync(path, flags, mode)
+    },
+  }
+})
 
 let dirs: string[] = []
 
@@ -355,6 +380,19 @@ describe('service mounting', () => {
     expect(id).toBeTruthy()
     await fiber.dispose()
     expect(ctx.mailbox.getProvider('local')).toBeUndefined()
+  })
+})
+
+describe('openLocalMailbox / createDatabaseFile', () => {
+  it('propagates a non-EEXIST failure reserving the database file, instead of swallowing it as a first-writer race', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-mailbox-local-'))
+    dirs.push(dir)
+    const path = join(dir, 'mailbox.db')
+    // EACCES (permission denied) is a real, distinct failure the EEXIST
+    // swallow must never absorb — injected directly so the assertion holds
+    // regardless of whether this process happens to run as root.
+    failNextOpenCode.value = 'EACCES'
+    expect(() => openLocalMailbox(path)).toThrow(/EACCES/)
   })
 })
 

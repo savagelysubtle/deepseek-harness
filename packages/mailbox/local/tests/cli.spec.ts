@@ -9,10 +9,26 @@ import { existsSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync }
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { formatMailboxAddress } from '@deepseek-ai/dsh-mailbox'
 import { openMailboxDatabase, SCHEMA_VERSION, SqliteMailboxStore } from '../src/sqlite.ts'
 import * as cli from '../src/cli.ts'
+
+// Lets exactly one in-process test read a deterministic "piped stdin" body
+// through the real `readFileSync(0, ...)` call site, instead of the real fd
+// 0 (whose content under a test runner is environment-dependent and may
+// hang) — same `...actual` passthrough pattern as subprocess-local's
+// spawn.spec.ts.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return {
+    ...actual,
+    readFileSync(path: Parameters<typeof actual.readFileSync>[0], options?: Parameters<typeof actual.readFileSync>[1]) {
+      if (path === 0) return '{"piped":"in-process"}'
+      return actual.readFileSync(path, options as never)
+    },
+  }
+})
 
 const TARGET = formatMailboxAddress('target')
 
@@ -98,6 +114,45 @@ describe('dsh-mailbox send/inbox round-trip', () => {
     expect(drained[0]?.blocking).toBe(true)
     expect(drained[1]).not.toHaveProperty('blocking')
   })
+
+  it('renders type, subject, and both string and object payloads in human-readable blocks', async () => {
+    const dir = tempDir()
+    await run(['send', '--to', String(TARGET), '--from', 'gemini', '--type', 'note', '--subject', 'status'])
+    expect(await run(['inbox', '--address', String(TARGET)])).toContain('from guest:gemini type note subject status')
+
+    const stringPayloadFile = join(dir, 'string-payload.json')
+    writeFileSync(stringPayloadFile, JSON.stringify('plain text payload'))
+    await run(['send', '--to', String(TARGET), '--from', 'gemini', '--payload-file', stringPayloadFile])
+    expect(await run(['inbox', '--address', String(TARGET)])).toContain('plain text payload')
+
+    const objectPayloadFile = join(dir, 'object-payload.json')
+    writeFileSync(objectPayloadFile, JSON.stringify({ a: 1 }))
+    await run(['send', '--to', String(TARGET), '--from', 'gemini', '--payload-file', objectPayloadFile])
+    expect(await run(['inbox', '--address', String(TARGET)])).toContain(JSON.stringify({ a: 1 }, null, 2))
+  })
+
+  it('reports the send confirmation as JSON when --json is set', async () => {
+    tempDir()
+    const out = await run(['send', '--to', String(TARGET), '--from', 'claude-code', '--json'])
+    expect(JSON.parse(out)).toEqual({ stored: true, to: String(TARGET) })
+  })
+
+  it('reads a piped payload from stdin in-process, through the real fd-0 read site', async () => {
+    tempDir()
+    await run(['send', '--to', String(TARGET), '--from', 'claude-code', '--payload-stdin'])
+    const drained = JSON.parse(await run(['inbox', '--address', String(TARGET), '--json'])) as Array<{ payload?: unknown }>
+    expect(drained[0]?.payload).toEqual({ piped: 'in-process' })
+  })
+
+  it('accepts an explicit --limit, bounding the inbox batch', async () => {
+    const dir = tempDir()
+    const dbPath = join(dir, 'limited.db')
+    await run(['send', '--to', String(TARGET), '--from', 'a', '--db', dbPath])
+    await run(['send', '--to', String(TARGET), '--from', 'b', '--db', dbPath])
+    const drained = JSON.parse(await run(['inbox', '--address', String(TARGET), '--db', dbPath, '--limit', '1', '--json'])) as Array<{ from: string }>
+    expect(drained).toHaveLength(1)
+    expect(drained[0]?.from).toBe('guest:a')
+  })
 })
 
 describe('dsh-mailbox failure paths', () => {
@@ -171,6 +226,48 @@ describe('dsh-mailbox failure paths', () => {
     await expect(cli.runMailboxCli(['send', '--to', String(TARGET), '--from', 'claude-code', '--payload-file', join(dir, 'missing.json'), '--db', dbPath]))
       .rejects.toThrow()
     expect(existsSync(dbPath)).toBe(false)
+  })
+
+  it('rejects an unrecognized subcommand with the usage message', async () => {
+    tempDir()
+    await expect(cli.runMailboxCli(['bogus'])).rejects.toThrow(/usage: dsh-mailbox <send\|inbox>/)
+  })
+
+  it('breaks the flag-parsing loop cleanly on a stray undefined argv slot, then fails on the resulting missing flag', async () => {
+    tempDir()
+    // Violates the `readonly string[]` contract deliberately — the argv-safety
+    // guard this exercises only matters if a caller's array genuinely has a
+    // hole or an explicit `undefined` entry, which TS cannot express as input.
+    await expect(cli.runMailboxCli(['send', undefined as unknown as string]))
+      .rejects.toThrow(/missing required flag --to/)
+  })
+
+  it('rejects a value-flag with nothing after it, and a value-flag whose "value" is itself another flag', async () => {
+    tempDir()
+    await expect(cli.runMailboxCli(['send', '--to'])).rejects.toThrow(/missing value for --to/)
+    await expect(cli.runMailboxCli(['send', '--to', '--from', 'claude-code']))
+      .rejects.toThrow(/missing value for --to/)
+  })
+
+  it('rejects a non-positive or non-integer --limit, naming the raw value received', async () => {
+    tempDir()
+    await expect(cli.runMailboxCli(['inbox', '--address', String(TARGET), '--limit', '0']))
+      .rejects.toThrow(/--limit must be a positive integer, received "0"/)
+    await expect(cli.runMailboxCli(['inbox', '--address', String(TARGET), '--limit', 'nope']))
+      .rejects.toThrow(/--limit must be a positive integer, received "nope"/)
+  })
+
+  it('fails loud instead of forging an id when a claimed lease carries none (toEntry)', async () => {
+    const dir = tempDir()
+    const dbPath = join(dir, 'no-id.db')
+    await run(['send', '--to', String(TARGET), '--from', 'claude-code', '--db', dbPath])
+    vi.spyOn(SqliteMailboxStore.prototype, 'claim').mockResolvedValueOnce([{
+      message: { to: TARGET, from: 'ghost', sentAt: Date.now() },
+      leaseRef: 'fake-ref' as never,
+      claimedAt: Date.now(),
+    }])
+    await expect(cli.runMailboxCli(['inbox', '--address', String(TARGET), '--db', dbPath]))
+      .rejects.toThrow(/claimed message from "ghost" has no provider id/)
   })
 })
 

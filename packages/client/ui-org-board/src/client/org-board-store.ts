@@ -472,6 +472,8 @@ export class OrgBoardController {
    */
   private async write(document: OrgRegistryDocument): Promise<void> {
     const expectedToken = this.token
+    /* v8 ignore next 5 -- defensive: document and token are only ever set and cleared together in
+       load(), and applyEdit() returns before write() when document is null */
     if (expectedToken === null) {
       this.store.update((state) => {
         state.write = { pending: false, notice: { kind: 'invalid', message: 'no org registry is loaded to write against' } }

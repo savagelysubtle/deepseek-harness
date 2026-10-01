@@ -438,7 +438,8 @@ export function findOrgRegistryRoute(registry: OrgRegistry, fromSeat: string, to
   while (frontier.length > 0) {
     const next: string[][] = []
     for (const path of frontier) {
-      // Paths always carry their origin, so the endpoint fallback is unreachable.
+      /* v8 ignore next -- frontier always starts as [fromSeat] and every extension appends, so path is
+         never empty */
       const last = path[path.length - 1] ?? fromSeat
       for (const neighbor of adjacency.get(last) ?? []) {
         if (visited.has(neighbor)) continue

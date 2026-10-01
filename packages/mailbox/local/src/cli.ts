@@ -179,6 +179,8 @@ function keyOf(flag: string): string {
     '--trace-id': 'traceId',
   }
   const name = names[flag]
+  /* v8 ignore next -- keyOf's only caller (spreadOpt) passes one of the three literal flags, all present
+     in names; no path calls it unmapped */
   if (name === undefined) throw new Error(`internal error: unmapped flag ${flag}`)
   return name
 }
@@ -321,6 +323,9 @@ export function isEntryInvocation(invokedPath: string, entryUrl: string): boolea
 
 // Bin execution guard: run only when this file is the entry module, so an
 // in-process import (tests) never starts a store session.
+/* v8 ignore start -- bin-entry glue: the guard body runs only when this module is the entry, which
+   in-process coverage never measures; the subprocess tests in cli.spec.ts drive the real bin end to
+   end */
 const invoked = process.argv[1] !== undefined
   && isEntryInvocation(process.argv[1], import.meta.url)
 if (invoked) {
@@ -331,3 +336,4 @@ if (invoked) {
     process.exitCode = 1
   })
 }
+/* v8 ignore stop */

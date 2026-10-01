@@ -14,12 +14,15 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Context as ContextType } from '@deepseek-ai/cordis'
 import MailboxRegistry from '@deepseek-ai/dsh-mailbox'
 import { formatMailboxAddress } from '@deepseek-ai/dsh-mailbox'
+import type { MailboxMessageId } from '@deepseek-ai/dsh-mailbox'
 import { acquireNamedSessionLock, deriveNamedSessionId, namedLockPath } from '@deepseek-ai/dsh-named-sessions'
 import MailboxLocal from '@deepseek-ai/dsh-mailbox-local'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import * as mailCli from '../../local/src/cli.ts'
 import * as bridge from '../src/index.ts'
-import { admittedOutcome, relaySource, relayText, seatToolRestrictionSource, seatToolRestrictionText } from '../src/delivery.ts'
+import {
+  admittedOutcome, refusalSource, refusalText, relaySource, relayText, seatToolRestrictionSource, seatToolRestrictionText,
+} from '../src/delivery.ts'
 
 let homes: string[] = []
 
@@ -105,6 +108,24 @@ function targetSpec(
 }
 
 /**
+ * {@link targetSpec}'s same fixed shape plus an explicit `lockStaleMs` —
+ * built directly rather than spread over `targetSpec()`'s return, for the
+ * same `no-misused-spread` reason documented on that function.
+ * @param lockStaleMs - the explicit staleness bound to carry.
+ */
+function targetSpecWithLockStale(lockStaleMs: number): Parameters<typeof bridge.resolveBridgeSpec>[0] {
+  return {
+    addresses: ['target'],
+    pollIntervalMs: 5,
+    maxClaimPerCycle: 10,
+    staleClaimMs: 600_000,
+    admitFrom: ['sender'],
+    orgRegistryPath: registryPath,
+    lockStaleMs,
+  }
+}
+
+/**
  * A resolved spec for the idle-retire tests, carrying `residencyIdleMs`.
  * Built directly rather than as `{ ...targetSpec(), residencyIdleMs }` — see
  * the comment on {@link targetSpec}'s own override parameter for why spreading
@@ -127,6 +148,12 @@ interface LiveAgentStub {
   status: 'idle' | 'running'
   followup: ReturnType<typeof vi.fn>
   steer: ReturnType<typeof vi.fn>
+  /**
+   * Optional durable-log seam for a LIVE sender under refusal-notice tests —
+   * the ordinary routing stubs never read this, only `injectRefusalNotice`'s
+   * live-sender branch does.
+   */
+  session?: { events: unknown[]; append: ReturnType<typeof vi.fn> }
 }
 
 /**
@@ -140,6 +167,10 @@ async function makeHarness(options: {
   persisted?: boolean | readonly string[]
   /** Compose NO session-persistence backend at all (terminal wake failure). */
   noPersistence?: boolean
+  /** Compose NO session store ('sessions') service at all (terminal wake/notice failure). */
+  noSessions?: boolean
+  /** Compose NO default-model-selection service at all (terminal provisioning failure). */
+  noDefaultModel?: boolean
   /** Explicit queue file override (down-host tests mount the file the CLI wrote). */
   storePath?: string
   /** Explicit live-seat roster passed through to the spec (web-seat tests). */
@@ -226,7 +257,9 @@ async function makeHarness(options: {
     }),
   }
   ctx.provide('agents', agents as never)
-  ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'mock', model: 'mock' }) } as never)
+  if (options.noDefaultModel !== true) {
+    ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'mock', model: 'mock' }) } as never)
+  }
   if (options.noPersistence !== true) {
     ctx.provide('sessionPersistence', {
       list: async () => {
@@ -239,7 +272,9 @@ async function makeHarness(options: {
       },
     } as never)
   }
-  ctx.provide('sessions', { flush: vi.fn(async () => { state.flushes += 1 }) } as never)
+  if (options.noSessions !== true) {
+    ctx.provide('sessions', { flush: vi.fn(async () => { state.flushes += 1 }) } as never)
+  }
   return {
     ctx,
     storePath: join(dir, 'mailbox.db'),
@@ -289,6 +324,9 @@ describe('spec resolution', () => {
   it('rejects empty rosters and malformed addresses loud', () => {
     expect(() => bridge.resolveBridgeSpec({ addresses: [] })).toThrow(/at least one served/)
     expect(() => bridge.resolveBridgeSpec({ addresses: ['no separator'] })).toThrow(/invalid mailbox address/)
+    // No `addresses` key at all (not merely an empty array) hits the same
+    // empty-roster refusal through the `config.addresses ?? []` fallback.
+    expect(() => bridge.resolveBridgeSpec({})).toThrow(/at least one served/)
   })
 
   it('brands served addresses and applies explicit values over defaults', () => {
@@ -451,6 +489,52 @@ describe('delivery rendering', () => {
     expect(bare).not.toHaveProperty('subject')
     expect(bare).not.toHaveProperty('blocking')
     expect(bare.form === 'relay' && bare.senderClass).toBe('unverified')
+  })
+
+  it('admittedOutcome fails loud instead of forging an id for a lease with no provider id', () => {
+    expect(() => admittedOutcome({ message: { to: TARGET, from: 'sender', sentAt: 0 }, leaseRef: 'r' as never, claimedAt: 1 }))
+      .toThrow(/has no provider id/)
+  })
+
+  it('refusalSource fails loud instead of carrying a notice for a lease with no provider id', () => {
+    expect(() => refusalSource({ message: { to: TARGET, from: 'sender', sentAt: 0 }, leaseRef: 'r' as never, claimedAt: 1 }, 'some-reason'))
+      .toThrow(/has no provider id and cannot carry a notice/)
+  })
+
+  it('refusalText names the message id when present and omits it when absent', () => {
+    const withId = refusalText({ message: base, leaseRef: 'r' as never, claimedAt: 1 }, 'some-reason')
+    expect(withId).toContain(`(id ${base.id})`)
+    expect(withId).toContain(`to "${String(TARGET)}" was NOT delivered: some-reason`)
+    const withoutId = refusalText({ message: { to: TARGET, from: 'sender', sentAt: 0 }, leaseRef: 'r' as never, claimedAt: 1 }, 'some-reason')
+    expect(withoutId).not.toContain('(id ')
+    expect(withoutId).toContain(`to "${String(TARGET)}" was NOT delivered: some-reason`)
+  })
+
+  it('falls back to an empty string for an Intl format part the host ICU build unexpectedly omits', () => {
+    // Same pattern as context/time-context's invariant.spec.ts: the real
+    // formatter's own parts, minus one, proves the `?? ''` fallback at
+    // `formatDeliveredAt`'s `value()` helper without faking the whole clock.
+    // Captured before the spy below replaces it; called through
+    // `.apply(this, ...)` below with the real receiver.
+    // oxlint-disable-next-line typescript/unbound-method -- the captured original is immediately re-applied with the caller's receiver
+    const original = Intl.DateTimeFormat.prototype.formatToParts
+    const spy = vi.spyOn(Intl.DateTimeFormat.prototype, 'formatToParts').mockImplementation(function (
+      this: Intl.DateTimeFormat, ...args: Parameters<typeof original>
+    ) {
+      return original.apply(this, args).filter(part => part.type !== 'dayPeriod')
+    })
+    try {
+      const text = relayText({ message: base, leaseRef: 'r' as never, claimedAt: 1 }, 'unverified')
+      const header = text.split('\n')[0] ?? ''
+      // The am/pm marker is gone (fallen back to '') rather than glued onto
+      // the minute digits (`52pm`), so a space now separates minute from
+      // zone directly — the header still renders structurally, never
+      // leaking "undefined" from the missing part.
+      expect(header).toMatch(/\d{1,2}:\d{2} \S+ - from sender \(unverified\)\]$/)
+      expect(header).not.toContain('undefined')
+    } finally {
+      spy.mockRestore()
+    }
   })
 })
 
@@ -742,6 +826,164 @@ describe('routing outcomes', () => {
     expect(row.state).toBe('failed')
     expect((JSON.parse(row.result ?? '{}') as { reason?: string }).reason).toContain('disposed')
   })
+
+  it('stringifies a non-Error thrown by the followup fallback instead of assuming an Error shape', async () => {
+    const poisoned = {
+      status: 'idle' as const,
+      steer: vi.fn(() => { throw new Error('steer refused') }),
+      followup: vi.fn(() => { throw 'followup-boom' }),
+    }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: poisoned } })
+    const id = await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec()))
+    const row = await rowState(h.storePath, id)
+    expect(row.state).toBe('failed')
+    expect(resultReason(row.result)).toBe('followup-boom')
+  })
+
+  it('stringifies a non-Error thrown deep inside delivery before settling the terminal failure', async () => {
+    const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: live } })
+    const id = await publishHello(h.ctx)
+    // The real provider's `settle` throws a bare string for its ONE admission
+    // call; `settleFailed`'s own later call uses the real implementation, so
+    // the row still lands `failed` with the stringified reason.
+    vi.spyOn(h.ctx.mailbox, 'settle').mockImplementationOnce(() => { throw 'settle-boom' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec()))
+    const row = await rowState(h.storePath, id)
+    expect(row.state).toBe('failed')
+    expect(resultReason(row.result)).toBe('settle-boom')
+  })
+
+  it('skips the re-bounce for a terminally-failed bounce itself — no bounce-of-bounce ping-pong', async () => {
+    const poisoned = { status: 'idle' as const, followup: vi.fn(() => { throw new Error('boom') }), steer: vi.fn(() => { throw new Error('boom') }) }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: poisoned } })
+    const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', type: 'bounce', subject: 'undeliverable: something' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec()))
+    expect((await rowState(h.storePath, id)).state).toBe('failed')
+    // No SECOND message landed for 'sender' — a bounce's own terminal
+    // failure never re-bounces.
+    const db = new DatabaseSync(h.storePath)
+    try {
+      const rows = db.prepare('SELECT state FROM messages WHERE to_address = ?').all('sender') as Array<{ state: string }>
+      expect(rows).toEqual([])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('carries the original traceId onto the bounce it publishes for a non-bounce terminal failure', async () => {
+    const poisoned = { status: 'idle' as const, followup: vi.fn(() => { throw new Error('boom') }), steer: vi.fn(() => { throw new Error('boom') }) }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('target'))]: poisoned } })
+    const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'traced', traceId: 'trace-xyz' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec()))
+    expect((await rowState(h.storePath, id)).state).toBe('failed')
+    const [bounced] = await h.ctx.mailbox.claim({ addresses: ['sender' as never], limit: 10, staleClaimMs: 600_000 })
+    expect(bounced?.message).toMatchObject({ type: 'bounce', traceId: 'trace-xyz' })
+    expect((bounced?.message.payload as { bouncedMessageId?: string } | undefined)?.bouncedMessageId).toBe(id)
+  })
+
+  it('acquires the recipient lock with an explicit lockStaleMs when the spec carries one', async () => {
+    const h = await makeHarness({ persisted: false })
+    const id = await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpecWithLockStale(60_000)))
+    expect((await rowState(h.storePath, id)).state).toBe('done')
+    expect(h.createdSessions()).toContain(String(deriveNamedSessionId('target')))
+  })
+
+  it('throws loud when a fresh zero-residency wake has no session store service composed', async () => {
+    const h = await makeHarness({ noSessions: true })
+    const id = await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, residencySpec(0))
+    // The admission's own settle already wrote 'done' before the
+    // zero-residency immediate-retire path even runs, so the throw cannot
+    // flip that row — it surfaces instead as a best-effort bounce back to
+    // the sender, and the retire tail's own dispose never ran.
+    await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'done' })
+    expect(h.disposeCalls()).toBe(0)
+    const [bounced] = await h.ctx.mailbox.claim({ addresses: ['sender' as never], limit: 10, staleClaimMs: 600_000 })
+    expect(bounced?.message).toMatchObject({ type: 'bounce' })
+    expect((bounced?.message.payload as { reason?: string } | undefined)?.reason)
+      .toContain('wake requires the session store service')
+  })
+
+  it('throws loud when provisioning has no default-model-selection service composed', async () => {
+    const h = await makeHarness({ noDefaultModel: true })
+    const id = await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec()))
+    const row = await rowState(h.storePath, id)
+    expect(row.state).toBe('failed')
+    expect(resultReason(row.result)).toContain('requires the default model-selection service')
+  })
+
+  it('swallows a failed settlement write on refusal instead of masking the primary refusal', async () => {
+    const h = await makeHarness({})
+    vi.spyOn(h.ctx.mailbox, 'settle').mockRejectedValueOnce(new Error('settle surface down'))
+    const refusals: bridge.MailboxRefusal[] = []
+    h.ctx.on('mailbox/refused', (refusal) => { refusals.push(refusal) })
+    await h.ctx.mailbox.publish({ to: TARGET, from: 'nobody', subject: 'uninvited' })
+    await expect(bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(targetSpec()))).resolves.toBeUndefined()
+    expect(refusals).toEqual([{ from: 'nobody', to: String(TARGET), reason: 'sender-not-admitted' }])
+  })
+
+  it('fails loud when the registry becomes unavailable between seat-id resolution and provisioning (seatCwd)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-mailbox-bridge-vanishing-registry-'))
+    homes.push(dir)
+    const vanishingRegistryPath = join(dir, 'registry.yml')
+    writeFileSync(vanishingRegistryPath, `baseDir: ${dir}\nseats:\n  target: { cwd: target }\nedges: []\n`, 'utf8')
+    mkdirSync(join(dir, 'target'), { recursive: true })
+    const dbPath = join(dir, 'mailbox.db')
+
+    const ctx = new Context()
+    await ctx.plugin(MailboxRegistry, { defaultProvider: 'local' })
+    await ctx.plugin(MailboxLocal, { path: dbPath })
+    ctx.provide('agents', { get: () => undefined } as never)
+    ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'mock', model: 'mock' }) } as never)
+    ctx.provide('sessionPersistence', {
+      list: async () => {
+        // The registry disappears exactly here: after `judgmentRegistry` and
+        // `seatSessionId` already read it successfully for THIS lease, and
+        // immediately before `seatCwd`'s own read, which must now fail.
+        rmSync(vanishingRegistryPath, { force: true })
+        return []
+      },
+    } as never)
+    ctx.provide('sessions', { flush: vi.fn(async () => {}) } as never)
+
+    const id = await ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'hello' })
+    const spec = bridge.resolveBridgeSpec({
+      addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000,
+      admitFrom: ['sender'], orgRegistryPath: vanishingRegistryPath,
+    })
+    await bridge.internals.drainOnce(ctx, spec)
+    const row = await rowState(dbPath, id)
+    expect(row.state).toBe('failed')
+    expect(resultReason(row.result)).toMatch(/cannot provision "target" — org registry at ".*" did not load/)
+  })
+
+  it('release() is idempotent: a second call skips the already-deleted map entry instead of deleting a later resident', async () => {
+    const h = await makeHarness({ persisted: false })
+    const spec = residencySpec(1000)
+    const id = await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, spec)
+    await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'done' })
+    const resident = spec.residents.get('target')
+    expect(resident).toBeDefined()
+    resident!.release()
+    // `hardRetire`'s own flush-then-dispose tail is fire-and-forget (`void`),
+    // so disposal lands a tick later than the synchronous release call —
+    // same reasoning as the existing "release() still tears down immediately"
+    // test above.
+    await vi.waitFor(() => { expect(h.disposeCalls()).toBe(1) })
+    expect(spec.residents.has('target')).toBe(false)
+    // A second release on the SAME (now-stale) reference must not crash and
+    // must not touch a later resident's map entry — there is none here, but
+    // the identity guard (`spec.residents.get(name) === resident`) now reads
+    // false, exercising the skip-delete branch directly.
+    expect(() => { resident!.release() }).not.toThrow()
+    await vi.waitFor(() => { expect(h.disposeCalls()).toBe(2) })
+    expect(spec.residents.has('target')).toBe(false)
+  })
 })
 
 /**
@@ -858,6 +1100,48 @@ describe('idle-retire deferral for a seat with live continuable descendants', ()
 
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('staying resident past its idle window'))
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('"target"'))
+  })
+
+  it('does not reannounce on an intermediate blocked tick — only the first, and every 20th after it', async () => {
+    const h = await makeHarness({ persisted: true })
+    const stub = subagentsStub(true)
+    h.ctx.provide('subagents', stub.api as never)
+    const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
+    vi.useFakeTimers()
+    await publishHello(h.ctx)
+    const spec = residencySpec(1000)
+    await bridge.internals.drainOnce(h.ctx, spec)
+
+    await vi.advanceTimersByTimeAsync(1000) // tick 1: always announces
+    const callsAfterFirstTick = warn.mock.calls.length
+    expect(callsAfterFirstTick).toBeGreaterThan(0)
+
+    await vi.advanceTimersByTimeAsync(1000) // tick 2: neither the first tick nor a multiple of 20 — no announcement
+    expect(warn.mock.calls.length).toBe(callsAfterFirstTick)
+  })
+
+  it('escalates to logger.error once a seat has stayed blocked for DESCENDANT_ESCALATE_TICKS consecutive rechecks', async () => {
+    const h = await makeHarness({ persisted: true })
+    const stub = subagentsStub(true)
+    h.ctx.provide('subagents', stub.api as never)
+    const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
+    const error = vi.spyOn(h.ctx.logger, 'error').mockImplementation(() => {})
+    vi.useFakeTimers()
+    await publishHello(h.ctx)
+    // idleMs of 1 means every recheck tick is 1ms apart (`Math.min(idleMs,
+    // DESCENDANT_RECHECK_MS)`), so advancing by exactly
+    // DESCENDANT_ESCALATE_TICKS ms drives `blockedTicks` to precisely
+    // DESCENDANT_ESCALATE_TICKS (120) in one shot — the first tick where
+    // `describeBlockedResident` reports `escalate: true`.
+    const spec = residencySpec(1)
+    await bridge.internals.drainOnce(h.ctx, spec)
+
+    await vi.advanceTimersByTimeAsync(bridge.internals.DESCENDANT_ESCALATE_TICKS)
+
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('"target"'))
+    // Every reannounce tick strictly before the escalation threshold (1, 20,
+    // 40, ..., 100) still goes through the ordinary warn path.
+    expect(warn.mock.calls.length).toBeGreaterThan(0)
   })
 })
 
@@ -1693,6 +1977,73 @@ describe('durable refusal notices (the sender-side outlet)', () => {
     expect(data.source).toMatchObject({ kind: 'mailbox', form: 'notice' })
     expect((data.source as { reason?: unknown }).reason).toEqual(expect.stringContaining('duplicate-suppressed'))
   })
+
+  it('a sender address that fails mailbox grammar has nowhere to log the notice, and the refusal still settles', async () => {
+    const h = await makeHarness({})
+    const refusals: bridge.MailboxRefusal[] = []
+    h.ctx.on('mailbox/refused', (refusal) => { refusals.push(refusal) })
+    const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'no separator', subject: 'ungrammatical' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(refusingSpec()))
+    await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'failed' })
+    expect(refusals).toEqual([{ from: 'no separator', to: String(TARGET), reason: 'sender-not-admitted' }])
+    expect(h.resumeCalls()).toBe(0)
+    expect(h.flushes()).toBe(0)
+  })
+
+  it('logs a failed live-sender append instead of masking the primary refusal', async () => {
+    const throwingAppend = vi.fn(() => { throw new Error('append rejected') })
+    const sender = {
+      status: 'idle' as const, followup: vi.fn(), steer: vi.fn(),
+      session: { events: [], append: throwingAppend },
+    }
+    const h = await makeHarness({ liveBySession: { [String(deriveNamedSessionId('alice'))]: sender } })
+    const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
+    const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'alice', subject: 'unsolicited' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(refusingSpec()))
+    await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'failed' })
+    expect(throwingAppend).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('refusal notice for sender "alice" could not be logged'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('append rejected'))
+  })
+
+  it('warns and skips the notice when the sender\'s own session is locked elsewhere, with an explicit lockStaleMs', async () => {
+    const h = await makeHarness({ persisted: ['alice'] })
+    const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
+    const senderLock = acquireNamedSessionLock('alice')
+    try {
+      const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'alice', subject: 'ping' })
+      await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec({
+        addresses: ['target'], pollIntervalMs: 5, maxClaimPerCycle: 10, staleClaimMs: 600_000,
+        admitFrom: [], lockStaleMs: 60_000,
+      }))
+      await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'failed' })
+      expect(h.resumeCalls()).toBe(0)
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('refusal notice for sender "alice" skipped, its session is active elsewhere'))
+    } finally {
+      senderLock.release()
+    }
+  })
+
+  it('throws loud (and warns) when a dormant sender\'s notice has no session-persistence backend composed', async () => {
+    const h = await makeHarness({ noPersistence: true })
+    const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
+    const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'alice', subject: 'ping' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(refusingSpec()))
+    await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'failed' })
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('refusal notice for sender "alice" could not be logged'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('requires a configured session-persistence backend'))
+  })
+
+  it('throws loud (and warns) when a resumed sender\'s notice has no session store service composed', async () => {
+    const h = await makeHarness({ persisted: ['alice'], noSessions: true })
+    const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
+    const id = await h.ctx.mailbox.publish({ to: TARGET, from: 'alice', subject: 'ping' })
+    await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(refusingSpec()))
+    await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'failed' })
+    expect(h.resumeCalls()).toBe(1)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('refusal notice for sender "alice" could not be logged'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('requires the session store service'))
+  })
 })
 
 describe('publishAndWake', () => {
@@ -1755,6 +2106,33 @@ describe('publishAndWake', () => {
     const h = await makeHarness({ persisted: true })
     await expect(bridge.publishAndWake(h.ctx, { to: 'target', from: 'ceo' }))
       .rejects.toThrow(/no mailbox bridge is composed/)
+  })
+
+  it('throws loud when no mailbox registry at all is composed on the context', async () => {
+    const ctx = new Context()
+    await expect(bridge.publishAndWake(ctx, { to: 'target', from: 'ceo' }))
+      .rejects.toThrow(/no mailbox registry is composed in this deployment/)
+  })
+
+  it('reports only on the awaited message when the same drain cycle settles a different queued lease too', async () => {
+    const live = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
+    const other = { status: 'idle' as const, followup: vi.fn(), steer: vi.fn() }
+    const h = await makeHarness({
+      liveBySession: {
+        [String(deriveNamedSessionId('target'))]: live,
+        [String(deriveNamedSessionId('other'))]: other,
+      },
+    })
+    serveSpecs(h.ctx, ['target', 'other'], ['ceo', 'sender'])
+    // Left queued ahead of the awaited wake — no drain has run yet in this
+    // harness, so it rides the SAME claim batch as the wake below.
+    const earlier = await h.ctx.mailbox.publish({ to: formatMailboxAddress('other'), from: 'sender', subject: 'queued ahead' })
+    const result = await bridge.publishAndWake(h.ctx, { to: 'target', from: 'ceo', subject: 'wake' })
+    expect(result.disposition).toBe('delivered')
+    await expect(rowState(h.storePath, earlier)).resolves.toMatchObject({ state: 'done' })
+    await expect(rowState(h.storePath, result.messageId)).resolves.toMatchObject({ state: 'done' })
+    expect(other.steer).toHaveBeenCalledTimes(1)
+    expect(live.steer).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -1981,6 +2359,119 @@ describe('test:true boundary enforcement', () => {
     await bridge.internals.drainOnce(h.ctx, bridge.resolveBridgeSpec(specFor(['target'], ['sender'], path)))
     expect(live.steer).toHaveBeenCalledTimes(1)
     await expect(rowState(h.storePath, fixed)).resolves.toMatchObject({ state: 'done' })
+  })
+})
+
+describe('roster-drift check: the unexpected-failure fallback', () => {
+  it('warns, never throws, when the check fails outside the known missing/unavailable shapes — for an Error and for a non-Error throw', async () => {
+    const h = await makeHarness({})
+    const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
+    const spec = bridge.resolveBridgeSpec(targetSpec())
+
+    vi.spyOn(h.ctx.mailbox, 'declareRoster').mockImplementationOnce(() => { throw new Error('boom') })
+    await expect(bridge.internals.checkRosterDrift(h.ctx, spec)).resolves.toBeUndefined()
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('roster-drift check failed unexpectedly: boom'))
+
+    vi.spyOn(h.ctx.mailbox, 'declareRoster').mockImplementationOnce(() => { throw 'boom-string' })
+    await expect(bridge.internals.checkRosterDrift(h.ctx, spec)).resolves.toBeUndefined()
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('roster-drift check failed unexpectedly: boom-string'))
+  })
+})
+
+describe('apply(): the poll cycle\'s reentrancy guard and its structural-failure teardown', () => {
+  /** Register a provider whose `claim` is fully test-controlled; `settle`/others no-op. */
+  function registerControllableProvider(ctx: ContextType, claim: () => Promise<readonly []>): void {
+    ctx.mailbox.registerProvider({
+      name: 'local',
+      publish: async () => 'id' as MailboxMessageId,
+      claim,
+      claimableAddresses: async () => [],
+      settle: async () => {},
+      lookupByTraceId: async () => [],
+      lookupInboundSince: async () => [],
+    })
+  }
+
+  it('skips a reentrant cycle while the previous interval-driven drain is still in flight', async () => {
+    vi.useFakeTimers()
+    try {
+      const ctx = new Context()
+      await ctx.plugin(MailboxRegistry, { defaultProvider: 'local' })
+      let claimCalls = 0
+      let releaseGate: (() => void) | undefined
+      const gate = new Promise<void>((resolve) => { releaseGate = resolve })
+      registerControllableProvider(ctx, async () => {
+        claimCalls += 1
+        // The inline first drain inside `apply()` itself (call #1) must
+        // resolve immediately so `apply()` itself settles; only the FIRST
+        // interval-driven cycle (call #2) gates open, simulating a drain
+        // still in flight when the next poll tick fires.
+        if (claimCalls === 2) await gate
+        return []
+      })
+      await bridge.apply(ctx, {
+        addresses: ['target'],
+        orgRegistryPath: '/nonexistent/reentrancy-registry.yml',
+        pollIntervalMs: 5,
+      })
+      expect(claimCalls).toBe(1)
+
+      await vi.advanceTimersByTimeAsync(5) // first interval tick: cycle() sets draining=true, calls claim() (gated)
+      expect(claimCalls).toBe(2)
+
+      await vi.advanceTimersByTimeAsync(5) // second interval tick while still draining: must be skipped entirely
+      expect(claimCalls).toBe(2)
+
+      releaseGate?.()
+      await vi.advanceTimersByTimeAsync(0) // let the gated drain actually resolve, resetting draining to false
+
+      await vi.advanceTimersByTimeAsync(5) // a further tick now proceeds normally
+      expect(claimCalls).toBe(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clears the poll interval and does not self-heal after a second, interval-driven structural drain failure', async () => {
+    vi.useFakeTimers()
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const ctx = new Context()
+      await ctx.plugin(MailboxRegistry, { defaultProvider: 'local' })
+      let claimCalls = 0
+      registerControllableProvider(ctx, async () => {
+        claimCalls += 1
+        // The inline first drain (call #1) must succeed so `apply()` itself
+        // resolves; the first INTERVAL-driven cycle (call #2+) then fails
+        // structurally, exactly the "second structural failure after mount"
+        // case the interval's own `.catch` exists to make visible.
+        if (claimCalls >= 2) throw new Error('second-cycle-structural-failure')
+        return []
+      })
+      await bridge.apply(ctx, {
+        addresses: ['target'],
+        orgRegistryPath: '/nonexistent/clear-interval-registry.yml',
+        pollIntervalMs: 5,
+      })
+      expect(claimCalls).toBe(1)
+
+      await vi.advanceTimersByTimeAsync(5)
+      await vi.advanceTimersByTimeAsync(0) // flush the microtask chain so the rejection is observed
+      expect(claimCalls).toBe(2)
+      expect(unhandled).toHaveLength(1)
+      expect((unhandled[0] as Error).message).toBe('second-cycle-structural-failure')
+
+      // The interval is cleared: advancing far past several more polls never
+      // calls claim() again — the deployment fails visibly instead of
+      // silently retrying a broken cycle forever.
+      await vi.advanceTimersByTimeAsync(50)
+      expect(claimCalls).toBe(2)
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -2313,5 +2804,18 @@ describe('loop guards', () => {
       await expect(rowState(h.storePath, id)).resolves.toMatchObject({ state: 'done' })
     }
     expect(live.steer).toHaveBeenCalledTimes(10)
+  })
+
+  it('records admission memory even for a lease with no provider id, stamping an empty fingerprint messageId', () => {
+    const guards = new bridge.LoopGuards({
+      maxMessageChars: 1_000, maxDepthPerAddress: 10, depthWindowMs: 1_000,
+      repeatWindowMs: 60_000, maxHopsPerTrace: 10, maxTracedChains: 10,
+    })
+    const lease = { message: { to: TARGET, from: 'sender', sentAt: 0, subject: 'no id yet' }, leaseRef: 'r' as never, claimedAt: 1 }
+    expect(() => { guards.recordAdmission(lease) }).not.toThrow()
+    // Observable proof the fingerprint memory was actually written despite
+    // the missing id (the `?? ''` fallback): a second recording of the exact
+    // same content is now caught by the repeat guard.
+    expect(guards.refusalFor(lease)).toContain('duplicate-suppressed')
   })
 })

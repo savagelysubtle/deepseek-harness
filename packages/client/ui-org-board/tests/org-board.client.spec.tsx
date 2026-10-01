@@ -444,6 +444,26 @@ describe('OrgBoard remove seat (SWD-134 slice 4 step 4)', () => {
     expect(removeSeat).toHaveBeenCalledWith('batman')
   })
 
+  it('moving the selection to a different seat WHILE the remove-seat confirmation is open does not clobber it on confirm', () => {
+    // Modal.tsx has no focus trap or inert on the rest of the page, and
+    // onNodeClick is not gated on pending or on an open confirmation -- a
+    // keyboard user can still move the board's selection while this dialog
+    // is open. seatToRemove ('batman', captured when the dialog opened) and
+    // selectedSeat ('alfred', moved to afterward) then genuinely diverge, so
+    // onConfirm's `setSelectedSeat(current => current === name ? null : current)`
+    // must keep the NEW selection rather than nulling it out.
+    const { removeSeat } = renderBoard(ready(BASE_VALUE))
+    fireEvent.click(screen.getByText('batman'))
+    fireEvent.click(screen.getByRole('button', { name: 'Remove seat' }))
+    fireEvent.click(screen.getByText('alfred'))
+    fireEvent.click(screen.getByRole('checkbox'))
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }))
+    expect(removeSeat).toHaveBeenCalledTimes(1)
+    expect(removeSeat).toHaveBeenCalledWith('batman')
+    // The detail panel still shows alfred -- the later selection survived.
+    expect(screen.getByText('sess-alfred')).toBeTruthy()
+  })
+
   it('names an empty cascade explicitly (none), never a silent 0-line message', () => {
     renderBoard(ready(BASE_VALUE))
     fireEvent.click(screen.getByText('robin'))
@@ -466,6 +486,21 @@ describe('OrgBoard remove seat (SWD-134 slice 4 step 4)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(removeSeat).not.toHaveBeenCalled()
     expect(screen.queryByRole('dialog', { name: 'Remove seat' })).toBeNull()
+  })
+
+  it('Retry on a write-failed notice resubmits the exact same removeSeat payload', () => {
+    const { removeSeat, rerenderWithState } = renderBoard(ready(BASE_VALUE))
+    fireEvent.click(screen.getByText('batman'))
+    fireEvent.click(screen.getByRole('button', { name: 'Remove seat' }))
+    fireEvent.click(screen.getByRole('checkbox'))
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }))
+    expect(removeSeat).toHaveBeenCalledTimes(1)
+
+    removeSeat.mockClear()
+    rerenderWithState(withNotice(BASE_VALUE, { kind: 'write-failed', message: 'ECONNRESET' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(removeSeat).toHaveBeenCalledTimes(1)
+    expect(removeSeat).toHaveBeenCalledWith('batman')
   })
 })
 
@@ -505,6 +540,47 @@ describe('OrgBoard mail-permission lines (SWD-134 slice 4 step 4)', () => {
     fireEvent.click(targetHandle as Element)
     expect(addEdge).toHaveBeenCalledWith('alfred', 'robin')
   })
+
+  it('cancelling the mail-permission-line removal confirmation never calls removeEdge', async () => {
+    const { removeEdge, container } = renderBoard(ready(BASE_VALUE))
+    await waitFor(() => { expect(container.querySelector('.react-flow__edge')).toBeTruthy() })
+    fireEvent.click(container.querySelector('.react-flow__edge') as Element)
+    fireEvent.click(screen.getByRole('checkbox'))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(removeEdge).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog', { name: 'Remove mail-permission line' })).toBeNull()
+  })
+
+  it('Retry on a write-failed notice resubmits the exact same addEdge payload', async () => {
+    const { addEdge, container, rerenderWithState } = renderBoard(ready(BASE_VALUE))
+    await waitFor(() => { expect(container.querySelector('.react-flow__edge')).toBeTruthy() })
+    const sourceHandle = container.querySelector('.react-flow__handle[data-nodeid="alfred"].source')
+    const targetHandle = container.querySelector('.react-flow__handle[data-nodeid="robin"].target')
+    fireEvent.click(sourceHandle as Element)
+    fireEvent.click(targetHandle as Element)
+    expect(addEdge).toHaveBeenCalledTimes(1)
+
+    addEdge.mockClear()
+    rerenderWithState(withNotice(BASE_VALUE, { kind: 'write-failed', message: 'ECONNRESET' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(addEdge).toHaveBeenCalledTimes(1)
+    expect(addEdge).toHaveBeenCalledWith('alfred', 'robin')
+  })
+
+  it('Retry on a write-failed notice resubmits the exact same removeEdge payload', async () => {
+    const { removeEdge, container, rerenderWithState } = renderBoard(ready(BASE_VALUE))
+    await waitFor(() => { expect(container.querySelector('.react-flow__edge')).toBeTruthy() })
+    fireEvent.click(container.querySelector('.react-flow__edge') as Element)
+    fireEvent.click(screen.getByRole('checkbox'))
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }))
+    expect(removeEdge).toHaveBeenCalledTimes(1)
+
+    removeEdge.mockClear()
+    rerenderWithState(withNotice(BASE_VALUE, { kind: 'write-failed', message: 'ECONNRESET' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(removeEdge).toHaveBeenCalledTimes(1)
+    expect(removeEdge).toHaveBeenCalledWith('alfred', 'batman')
+  })
 })
 
 describe('OrgBoard seat tools editing (SWD-134 slice 4 step 4)', () => {
@@ -534,6 +610,20 @@ describe('OrgBoard seat tools editing (SWD-134 slice 4 step 4)', () => {
     expect(screen.getByLabelText<HTMLInputElement>('Allowed tools').value).toBe('')
     fireEvent.click(screen.getByText('batman'))
     expect(screen.getByLabelText<HTMLInputElement>('Allowed tools').value).toBe('bash')
+  })
+
+  it('Retry on a write-failed notice resubmits the exact same setSeatTools payload', () => {
+    const { setSeatTools, rerenderWithState } = renderBoard(ready(BASE_VALUE))
+    fireEvent.click(screen.getByText('robin'))
+    fireEvent.change(screen.getByLabelText('Allowed tools'), { target: { value: 'read, write' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    expect(setSeatTools).toHaveBeenCalledTimes(1)
+
+    setSeatTools.mockClear()
+    rerenderWithState(withNotice(BASE_VALUE, { kind: 'write-failed', message: 'ECONNRESET' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(setSeatTools).toHaveBeenCalledTimes(1)
+    expect(setSeatTools).toHaveBeenCalledWith('robin', ['read', 'write'], undefined)
   })
 })
 
@@ -668,5 +758,115 @@ describe('OrgBoard served status toggle (SWD-134 slice 5 step 3)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
     expect(setSeatServed).toHaveBeenCalledTimes(2)
     expect(setSeatServed).toHaveBeenLastCalledWith('batman', false, true)
+  })
+
+  it('the servedWrite "invalid" notice shows the local refusal reason, distinct wording from "rejected"/"conflict"', () => {
+    const state: OrgBoardState = {
+      status: 'ready',
+      error: null,
+      value: BASE_VALUE,
+      write: { pending: false, notice: null },
+      servedWrite: { pending: false, notice: { kind: 'invalid', message: 'no served roster is loaded to edit' } },
+    }
+    renderBoard(state)
+    expect(screen.getByRole('alert').textContent).toBe(
+      translate('servedWrite.notice.invalid', { reason: 'no served roster is loaded to edit' }),
+    )
+    expect(screen.getByRole('alert').getAttribute('data-variant')).toBe('error')
+  })
+
+  it('the servedWrite "conflict" notice explains a reload already replaced the view, with a "warning" variant (not "error")', () => {
+    const state: OrgBoardState = {
+      status: 'ready',
+      error: null,
+      value: BASE_VALUE,
+      write: { pending: false, notice: null },
+      servedWrite: { pending: false, notice: { kind: 'conflict', message: 'served roster changed since it was read' } },
+    }
+    renderBoard(state)
+    const banner = screen.getByRole('alert')
+    expect(banner.textContent).toBe(translate('servedWrite.notice.conflict'))
+    expect(banner.getAttribute('data-variant')).toBe('warning')
+  })
+
+  it('the servedWrite "rejected" notice shows the server refusal reason', () => {
+    const state: OrgBoardState = {
+      status: 'ready',
+      error: null,
+      value: BASE_VALUE,
+      write: { pending: false, notice: null },
+      servedWrite: { pending: false, notice: { kind: 'rejected', message: 'invalid served address' } },
+    }
+    renderBoard(state)
+    expect(screen.getByRole('alert').textContent).toBe(
+      translate('servedWrite.notice.rejected', { reason: 'invalid served address' }),
+    )
+  })
+
+  it('a split notice with an empty mailbox-bridge-only list names the empty side explicitly ("None"), not a blank', () => {
+    const state: OrgBoardState = {
+      status: 'ready',
+      error: null,
+      value: BASE_VALUE,
+      write: { pending: false, notice: null },
+      servedWrite: { pending: false, notice: { kind: 'split', onlyMailboxBridge: [], onlyToolMailbox: ['robin'] } },
+    }
+    renderBoard(state)
+    expect(screen.getByRole('alert').textContent).toBe(
+      translate('servedWrite.notice.split', { onlyMailboxBridge: translate('drift.unserved.empty'), onlyToolMailbox: 'robin' }),
+    )
+  })
+
+  it('a seat served by neither roster shows "Not served", and toggling it offers to Serve (not Stop serving)', () => {
+    const state = ready({
+      ...BASE_VALUE,
+      drift: {
+        ok: true,
+        rows: [
+          { seat: 'batman', registered: true, servedByMailboxBridge: false, servedByToolMailbox: false },
+        ],
+      },
+    })
+    const { setSeatServed } = renderBoard(state)
+    fireEvent.click(screen.getByText('batman'))
+    expect(screen.getByText('Not served')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Change served status' }))
+    const dialog = screen.getByRole('dialog', { name: 'Change served status' })
+    expect(within(dialog).getByRole('button', { name: 'Serve' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('checkbox'))
+    fireEvent.click(screen.getByRole('button', { name: 'Serve' }))
+    expect(setSeatServed).toHaveBeenCalledWith('batman', true, false)
+  })
+})
+
+describe('OrgBoard pending guards on the graph (SWD-134 slice 4 step 4)', () => {
+  it('a write in flight blocks a connect-on-click addEdge attempt', async () => {
+    const { addEdge, container } = renderBoard(withNotice(BASE_VALUE, { kind: 'invalid', message: 'x' }, true))
+    await waitFor(() => { expect(container.querySelector('.react-flow__edge')).toBeTruthy() })
+    const sourceHandle = container.querySelector('.react-flow__handle[data-nodeid="alfred"].source')
+    const targetHandle = container.querySelector('.react-flow__handle[data-nodeid="robin"].target')
+    expect(sourceHandle).toBeTruthy()
+    expect(targetHandle).toBeTruthy()
+    fireEvent.click(sourceHandle as Element)
+    fireEvent.click(targetHandle as Element)
+    expect(addEdge).not.toHaveBeenCalled()
+  })
+
+  it('a write in flight blocks onEdgeClick from opening the remove-edge confirmation', async () => {
+    const { removeEdge, container } = renderBoard(withNotice(BASE_VALUE, { kind: 'invalid', message: 'x' }, true))
+    await waitFor(() => { expect(container.querySelector('.react-flow__edge')).toBeTruthy() })
+    fireEvent.click(container.querySelector('.react-flow__edge') as Element)
+    expect(screen.queryByRole('dialog', { name: 'Remove mail-permission line' })).toBeNull()
+    expect(removeEdge).not.toHaveBeenCalled()
+  })
+})
+
+describe('OrgBoard seat tools editing: non-empty deny list (SWD-134 slice 4 step 4)', () => {
+  it('saving a non-empty deny list (with allow left blank) calls setSeatTools with the parsed deny list', () => {
+    const { setSeatTools } = renderBoard(ready(BASE_VALUE))
+    fireEvent.click(screen.getByText('robin'))
+    fireEvent.change(screen.getByLabelText('Denied tools'), { target: { value: 'web, exec' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    expect(setSeatTools).toHaveBeenCalledWith('robin', undefined, ['web', 'exec'])
   })
 })

@@ -35,20 +35,29 @@ import {
 // is set, and every test that sets one resets it in a `finally`.
 const fsControl = vi.hoisted(() => ({
   forceBackupEexist: false,
+  forceBackupOtherError: false,
   forceRenameFailure: false,
   forceRmFailure: false,
+  forceReadFileNonError: false,
 }))
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
   return {
     ...actual,
+    async readFile(...args: Parameters<typeof actual.readFile>): ReturnType<typeof actual.readFile> {
+      if (fsControl.forceReadFileNonError) throw 'not an Error instance'
+      return actual.readFile(...args)
+    },
     async open(...args: Parameters<typeof actual.open>): ReturnType<typeof actual.open> {
       const [path, flags] = args
       if (fsControl.forceBackupEexist && flags === 'wx' && typeof path === 'string' && path.includes('.bak-')) {
         const error = new Error(`EEXIST: file already exists, open '${path}'`) as NodeJS.ErrnoException
         error.code = 'EEXIST'
         throw error
+      }
+      if (fsControl.forceBackupOtherError && flags === 'wx' && typeof path === 'string' && path.includes('.bak-')) {
+        throw new Error('simulated backup open failure: permission denied')
       }
       return actual.open(...args)
     },
@@ -59,6 +68,24 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     async rm(...args: Parameters<typeof actual.rm>): ReturnType<typeof actual.rm> {
       if (fsControl.forceRmFailure) throw new Error('simulated cleanup failure: permission denied')
       return actual.rm(...args)
+    },
+  }
+})
+
+// Controls for the 'yaml' mock below, used only by the one test that must
+// inject a thrown value which is NOT an `Error` instance — the installed
+// `yaml` parser only ever throws real `YAMLParseError`s (an `Error`
+// subclass), so no malformed-YAML fixture can reach that branch. Every
+// other test in this file uses the real parser untouched.
+const yamlControl = vi.hoisted(() => ({ forceNonErrorParseThrow: false }))
+
+vi.mock('yaml', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('yaml')>()
+  return {
+    ...actual,
+    parse(...args: Parameters<typeof actual.parse>): ReturnType<typeof actual.parse> {
+      if (yamlControl.forceNonErrorParseThrow) throw 'not an Error instance'
+      return actual.parse(...args)
     },
   }
 })
@@ -91,6 +118,12 @@ describe('parseOrgRegistry', () => {
     expect(registry.baseDir).toBe('/home/test/work')
   })
 
+  it('expands a BARE ~ (no trailing path) to the home directory itself', () => {
+    // Quoted: a bare, unquoted `~` is YAML's null literal, not the character.
+    const registry = parseOrgRegistry('baseDir: /projects\nseats:\n  solo: { cwd: "~" }\n', { home: '/home/test' })
+    expect(registry.seats.solo).toEqual({ cwd: '/home/test' })
+  })
+
   it('keeps seat names inside the mailbox address grammar', () => {
     for (const name of Object.keys(parseOrgRegistry(VALID).seats)) {
       expect(formatMailboxAddress(name)).toBe(parseMailboxAddress(formatMailboxAddress(name)))
@@ -103,6 +136,10 @@ describe('parseOrgRegistry', () => {
     ['seats:\n  solo: { cwd: one }\nbaseDir: "  "', 'baseDir'],
     ['seats:\n  "bad seat": { cwd: one }', 'names must match'],
     ['seats:\n  solo: { cwd: one, lead: "yes" }\nbaseDir: /p', 'seats.solo.lead'],
+    ['seats:\n  solo: { cwd: one, test: "yes" }\nbaseDir: /p', 'seats.solo.test'],
+    ['seats:\n  solo: { cwd: one }\nbaseDir: /p\nedges: not-a-list', 'edges'],
+    ['seats:\n  solo: { cwd: one }\nbaseDir: /p\ncallUp: not-a-list', 'callUp'],
+    ['seats:\n  solo: { cwd: one }\nbaseDir: /p\ncallUp: [1]', 'callUp'],
     ['seats:\n  solo: { cwd: one, tools: "everything" }', 'seats.solo.tools'],
     ['seats:\n  solo: { cwd: one, tools: [] }', 'seats.solo.tools'],
     ['seats:\n  solo: { cwd: one, tools: {} }', 'seats.solo.tools'],
@@ -125,6 +162,7 @@ describe('parseOrgRegistry', () => {
   it('rejects edges naming unknown seats, self-edges, and malformed pairs', () => {
     const base = 'baseDir: /projects\nseats:\n  a: { cwd: one }\n  b: { cwd: two }\n'
     expect(() => parseOrgRegistry(`${base}edges:\n  - [a, ghost]\n`)).toThrow('unknown seat "ghost"')
+    expect(() => parseOrgRegistry(`${base}edges:\n  - [ghost, a]\n`)).toThrow('unknown seat "ghost"')
     expect(() => parseOrgRegistry(`${base}edges:\n  - [a, a]\n`)).toThrow('connects seat "a" to itself')
     expect(() => parseOrgRegistry(`${base}edges:\n  - [a]\n`)).toThrow('[from, to] pair')
     expect(() => parseOrgRegistry(`${base}edges:\n  - a-b\n`)).toThrow('[from, to] pair')
@@ -135,6 +173,15 @@ describe('parseOrgRegistry', () => {
     expect(() => parseOrgRegistry(`${base}callUp: [ghost]\n`)).toThrow('unknown seat "ghost"')
     expect(() => parseOrgRegistry('baseDir: [/projects]\nseats:\n  a: { cwd: one }\n')).toThrow('baseDir')
     expect(() => parseOrgRegistry('baseDir: [unclosed\n')).toThrow('not valid YAML')
+  })
+
+  it('wraps a non-Error value thrown by the YAML parser in a real Error naming it not valid YAML', () => {
+    yamlControl.forceNonErrorParseThrow = true
+    try {
+      expect(() => parseOrgRegistry('irrelevant')).toThrow('org registry is not valid YAML: not an Error instance')
+    } finally {
+      yamlControl.forceNonErrorParseThrow = false
+    }
   })
 })
 
@@ -155,6 +202,19 @@ describe('orgRegistryAllows', () => {
 
   it('refuses an unconnected pair without call-up', () => {
     expect(orgRegistryAllows(registry, 'peer-a', 'peer-b')).toBe(false)
+  })
+
+  it('refuses a sender that matches an edge endpoint when the destination does not match that same edge', () => {
+    // 'lead-b' is the "from" end of the [lead-b, peer-b] edge, but 'peer-a'
+    // is not its "to" end — the sender-side match alone must not satisfy it.
+    expect(orgRegistryAllows(registry, 'lead-b', 'peer-a')).toBe(false)
+  })
+
+  it('refuses a recipient that matches an edge endpoint when the sender does not match that same edge', () => {
+    // 'lead-b' is the "to" end of the [lead-b, peer-b] edge (reversed), but
+    // 'peer-a' is not its "from" end — the recipient-side match alone must
+    // not satisfy it.
+    expect(orgRegistryAllows(registry, 'peer-a', 'lead-b')).toBe(false)
   })
 
   it('throws on unknown seat names', () => {
@@ -489,6 +549,52 @@ describe('loadOrgRegistryWithToken and writeOrgRegistry', () => {
     expect((caught as Error).message).toContain('could not be read for the concurrency check')
     // A caller distinguishing on instanceof/code must be told "retry this
     // same document," never "fix your content" — the document was fine.
+  })
+
+  it('wraps a non-Error cause in the write-time concurrency-check read failure message', async () => {
+    const dir = tempRegistryDir()
+    const path = seedRegistry(dir, { alfred: {} })
+    const { token } = await loadOrgRegistryWithToken(path)
+    const validDocument = { baseDir: dir, seats: { alfred: { cwd: '.' } }, edges: [], callUp: [] }
+
+    fsControl.forceReadFileNonError = true
+    let caught: unknown
+    try {
+      await writeOrgRegistry(path, validDocument, token)
+    } catch (error: unknown) {
+      caught = error
+    } finally {
+      fsControl.forceReadFileNonError = false
+    }
+    expect(caught).toBeInstanceOf(OrgRegistryWriteError)
+    expect((caught as Error).message).toContain('could not be read for the concurrency check')
+    expect((caught as Error).message).toContain('not an Error instance')
+  })
+
+  it('throws OrgRegistryWriteError immediately, without retrying filenames, on a non-EEXIST backup failure', async () => {
+    const dir = tempRegistryDir()
+    const path = seedRegistry(dir, { alfred: {} })
+    const originalBytes = readFileSync(path)
+    const { token } = await loadOrgRegistryWithToken(path)
+    const nextDocument = { baseDir: dir, seats: { alfred: { cwd: '.' }, batman: { cwd: '.' } }, edges: [], callUp: [] }
+
+    fsControl.forceBackupOtherError = true
+    let caught: unknown
+    try {
+      await writeOrgRegistry(path, nextDocument, token)
+    } catch (error: unknown) {
+      caught = error
+    } finally {
+      fsControl.forceBackupOtherError = false
+    }
+    expect(caught).toBeInstanceOf(OrgRegistryWriteError)
+    const message = (caught as Error).message
+    expect(message).toContain('could not write a backup of its previous content')
+    expect(message).toContain('simulated backup open failure')
+    // Refused on the first attempt — never fell through to treat the
+    // unrelated failure as an EEXIST collision to retry past.
+    expect(readFileSync(path)).toEqual(originalBytes)
+    expect(readdirSync(dir)).toEqual(['registry.yml'])
   })
 
   it('never silently destroys a previous backup when two writes land in the same millisecond timestamp — it disambiguates instead', async () => {

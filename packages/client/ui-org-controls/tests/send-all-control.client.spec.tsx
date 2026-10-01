@@ -180,4 +180,36 @@ describe('SendAllControl', () => {
     renderSendAll({ wide: false })
     expect(screen.queryByText('Send All')).toBeNull()
   })
+
+  it('a thrown Error (promise rejection, not a { ok: false } answer) surfaces its own message', async () => {
+    const onSendAll = vi.fn().mockRejectedValue(new Error('socket closed'))
+    renderSendAll({ onSendAll })
+    const dialog = openCompose()
+    fireEvent.change(dialog.getByPlaceholderText('Type a message to send to every session…'), { target: { value: 'stand down' } })
+    fireEvent.click(dialog.getByRole('button', { name: 'Send All' }))
+    const banner = await screen.findByRole('alert')
+    expect(banner.textContent).toContain('Send All failed: socket closed')
+    expect(banner.getAttribute('data-variant')).toBe('error')
+  })
+
+  it('a thrown non-Error rejection is stringified rather than crashing', async () => {
+    const onSendAll = vi.fn().mockRejectedValue('boom')
+    renderSendAll({ onSendAll })
+    const dialog = openCompose()
+    fireEvent.change(dialog.getByPlaceholderText('Type a message to send to every session…'), { target: { value: 'stand down' } })
+    fireEvent.click(dialog.getByRole('button', { name: 'Send All' }))
+    const banner = await screen.findByRole('alert')
+    expect(banner.textContent).toContain('Send All failed: boom')
+  })
+
+  it('dismisses the result banner', async () => {
+    const onSendAll = vi.fn().mockResolvedValue({ ok: true, value: { sentCount: 2, result: 'ok' as const } })
+    renderSendAll({ onSendAll })
+    const dialog = openCompose()
+    fireEvent.change(dialog.getByPlaceholderText('Type a message to send to every session…'), { target: { value: 'stand down' } })
+    fireEvent.click(dialog.getByRole('button', { name: 'Send All' }))
+    await screen.findByRole('alert')
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
 })

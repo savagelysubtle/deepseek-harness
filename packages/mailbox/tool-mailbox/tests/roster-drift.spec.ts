@@ -128,6 +128,31 @@ describe('checkRosterDrift condition (B): served name unknown to the org registr
     writeFileSync(path, 'baseDir: [unclosed\n', 'utf8')
     await expect(tool.checkRosterDrift(ctx, ['target'], path)).resolves.toBeUndefined()
   })
+
+  it('warns via the catch-all, naming an Error cause, when something inside the check throws unexpectedly', async () => {
+    const ctx = await makeCtx()
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    // Not a registry-read failure (those are handled by the branches above) —
+    // an unrelated failure from elsewhere in the try block, which the alarm
+    // must still absorb rather than let crash the mount.
+    vi.spyOn(ctx.mailbox, 'declareRoster').mockImplementation(() => { throw new Error('declareRoster boom') })
+    await expect(tool.checkRosterDrift(ctx, ['target'], '/irrelevant/registry.yml')).resolves.toBeUndefined()
+    expect(warn).toHaveBeenCalledTimes(1)
+    const message = warn.mock.calls[0]?.[0] as string
+    expect(message).toContain('roster-drift check failed unexpectedly')
+    expect(message).toContain('declareRoster boom')
+  })
+
+  it('warns via the catch-all, naming a non-Error cause as text, when the unexpected throw is not an Error', async () => {
+    const ctx = await makeCtx()
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    vi.spyOn(ctx.mailbox, 'declareRoster').mockImplementation(() => { throw 'declareRoster non-error boom' })
+    await expect(tool.checkRosterDrift(ctx, ['target'], '/irrelevant/registry.yml')).resolves.toBeUndefined()
+    expect(warn).toHaveBeenCalledTimes(1)
+    const message = warn.mock.calls[0]?.[0] as string
+    expect(message).toContain('roster-drift check failed unexpectedly')
+    expect(message).toContain('declareRoster non-error boom')
+  })
 })
 
 describe('apply() wiring', () => {
@@ -158,6 +183,25 @@ describe('apply() wiring', () => {
     await ctx.plugin(tool, { sessionName: 'solo' })
     // The existing "no served roster" warning fires; the roster-drift
     // warning text must not, since there is no roster to check.
+    expect(warn.mock.calls.some(call => String(call[0]).includes('roster drift'))).toBe(false)
+  })
+
+  it('omits addresses and orgRegistryPath from the identity and directory config when the field is truly absent from the config object', async () => {
+    // Called directly (bypassing ctx.plugin's schema layer, exactly as
+    // `checkRosterDrift` is called directly above): schemastery backfills a
+    // missing `addresses` to `[]` for any config that goes through
+    // `ctx.plugin`, so `config.addresses === undefined` is only reachable
+    // this way — through the plain function with a config object that
+    // genuinely has no `addresses` key at all.
+    const ctx = await makeToolCtx()
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    await tool.apply(ctx, { sessionName: 'solo' })
+    expect(ctx.tools.get('mailbox_send')).toBeDefined()
+    expect(ctx.tools.get('mailbox_check_inbox')).toBeDefined()
+    expect(ctx.tools.get('mailbox_await')).toBeDefined()
+    expect(ctx.tools.get('mailbox_directory')).toBeDefined()
+    // Single-seat shape: the "no served roster" info line fires, the
+    // roster-drift check (which requires a configured roster) never runs.
     expect(warn.mock.calls.some(call => String(call[0]).includes('roster drift'))).toBe(false)
   })
 })

@@ -62,6 +62,42 @@ const ORG_GET_VALUE_ONE_SEAT: ResponseValue<'org.get'> = {
   toolMailbox: { ok: true, addresses: ['alfred'] },
 }
 
+/**
+ * A four-seat, one-edge registry for the write-verb reachability test below.
+ * Every verb exercised there targets a DIFFERENT seat/edge pair that stays
+ * valid across repeated calls even though `org.get` always re-resolves this
+ * same pristine fixture after each successful write (this bench's `org.get`
+ * mock never actually persists an edit) -- `addSeat` targets a name absent
+ * from every seat here, `removeSeat` targets `lucius` (present, and never
+ * named by the pre-existing edge), `addEdge` connects `alfred`/`lucius`
+ * (absent from the edge list), and `removeEdge` targets the `robin`/`batman`
+ * edge that IS present -- so none of the five depends on a prior call's
+ * effect surviving the reload.
+ */
+const ORG_GET_VALUE_FOUR_SEATS: ResponseValue<'org.get'> = {
+  ...ORG_GET_VALUE,
+  registry: {
+    ok: true,
+    registry: {
+      baseDir: '/org',
+      seats: {
+        alfred: { cwd: '/org/alfred' }, lucius: { cwd: '/org/lucius' }, robin: { cwd: '/org/robin' }, batman: { cwd: '/org/batman' },
+      },
+      edges: [['robin', 'batman']],
+      callUp: [],
+    },
+    document: {
+      baseDir: '/org',
+      seats: {
+        alfred: { cwd: 'alfred' }, lucius: { cwd: 'lucius' }, robin: { cwd: 'robin' }, batman: { cwd: 'batman' },
+      },
+      edges: [['robin', 'batman']],
+      callUp: [],
+    },
+    token: 'registry-token',
+  },
+}
+
 afterEach(cleanup)
 
 class ResizeObserverStub {
@@ -73,11 +109,14 @@ beforeEach(() => { vi.stubGlobal('ResizeObserver', ResizeObserverStub) })
 
 /**
  * Real-stack bench: root Context + real SlotRegistry ring + the plugin
- * fiber. `orgWriteServed` defaults to an unused stub -- only the served-
- * toggle reachability test below supplies a real one, since it is the only
- * test in this file that ever calls `org.writeServed`.
+ * fiber. `orgWriteServed` and `orgWrite` default to unused stubs -- only a
+ * test that exercises the matching verb supplies a real one.
  */
-async function bench(orgGet: (payload: unknown) => unknown, orgWriteServed: (payload: unknown) => unknown = vi.fn()) {
+async function bench(
+  orgGet: (payload: unknown) => unknown,
+  orgWriteServed: (payload: unknown) => unknown = vi.fn(),
+  orgWrite: (payload: unknown) => unknown = vi.fn(),
+) {
   const ctx = new Context()
   const slots = new SlotRegistry(ctx)
   // The sidebar shell's role: declare the ring and seed two existing
@@ -94,7 +133,7 @@ async function bench(orgGet: (payload: unknown) => unknown, orgWriteServed: (pay
     { name: 'sidebar.footer.action', id: 'send-all' } as never,
     (() => null) as never,
   )
-  ctx.provide('connection', { api: { org: { get: orgGet, writeServed: orgWriteServed }, settings: {} }, isLoopback: false } as never)
+  ctx.provide('connection', { api: { org: { get: orgGet, writeServed: orgWriteServed, write: orgWrite }, settings: {} }, isLoopback: false } as never)
   ctx.provide('remote', { $on: () => () => {} } as never)
   ctx.provide('settingsScope', { bind: () => stubSettingsScope().scope } as never)
   ctx.plugin({ inject: [...localeInject], apply: localeApply })
@@ -162,6 +201,73 @@ describe('plugin registration', () => {
     await face?.load()
     expect(orgGet).toHaveBeenCalledWith({})
     expect(face?.hooks.orgBoard.getSnapshot().status).toBe('ready')
+  })
+
+  it('routes every injected write verb (addSeat/removeSeat/addEdge/removeEdge/setSeatTools) straight through to ctx.connection.api.org.write', async () => {
+    // THE SAME REACHABILITY LESSON as the served-toggle test below, applied
+    // to the other five verbs: index.ts's own wrapper closures (`addSeat`,
+    // `removeSeat`, `addEdge`, `removeEdge`, `setSeatTools`) are what this
+    // test exercises -- org-board-store.client.spec.ts already proves the
+    // controller's edit/write logic in depth, but nothing short of calling
+    // the injected FACE itself proves index.ts actually forwards to it.
+    const orgGet = vi.fn().mockResolvedValue({ result: { ok: true, value: ORG_GET_VALUE_FOUR_SEATS } })
+    const write = vi.fn().mockResolvedValue({
+      result: {
+        ok: true,
+        value: {
+          registry: {
+            baseDir: '/org',
+            seats: {
+              alfred: { cwd: '/org/alfred' }, lucius: { cwd: '/org/lucius' }, robin: { cwd: '/org/robin' }, batman: { cwd: '/org/batman' },
+            },
+            edges: [['robin', 'batman']],
+            callUp: [],
+          },
+          token: 'registry-token-2',
+        },
+      },
+    })
+    const b = await bench(orgGet, vi.fn(), write)
+    const entry = b.slots.entries('sidebar.footer.action').find(e => e.options.id === 'org-board')
+    const face = (entry?.inject as (() => OrgBoardFace) | undefined)?.()
+    if (face === undefined) throw new Error('org-board entry did not inject a face')
+    await face.load()
+
+    // Each call below targets a seat/edge pair that stays valid across the
+    // fixture's own reload after every successful write -- see
+    // ORG_GET_VALUE_FOUR_SEATS's own doc comment on why none depends on a
+    // prior call's effect surviving.
+    await face.addSeat('robin2', '/org/robin2')
+    await face.removeSeat('lucius')
+    await face.addEdge('alfred', 'lucius')
+    await face.removeEdge('robin', 'batman')
+    await face.setSeatTools('alfred', ['read'], undefined)
+    expect(write).toHaveBeenCalledTimes(5)
+    // Payload-level checks on two of the five, not just the call count --
+    // a swapped verb (e.g. removeSeat wired to addSeat's wrapper) would
+    // still call write() exactly 5 times but build the WRONG document.
+    expect(write).toHaveBeenNthCalledWith(1, {
+      document: {
+        baseDir: '/org',
+        seats: {
+          alfred: { cwd: 'alfred' }, lucius: { cwd: 'lucius' }, robin: { cwd: 'robin' }, batman: { cwd: 'batman' }, robin2: { cwd: '/org/robin2' },
+        },
+        edges: [['robin', 'batman']],
+        callUp: [],
+      },
+      expectedToken: 'registry-token',
+    })
+    expect(write).toHaveBeenNthCalledWith(4, {
+      document: {
+        baseDir: '/org',
+        seats: {
+          alfred: { cwd: 'alfred' }, lucius: { cwd: 'lucius' }, robin: { cwd: 'robin' }, batman: { cwd: 'batman' },
+        },
+        edges: [],
+        callUp: [],
+      },
+      expectedToken: 'registry-token',
+    })
   })
 
   it('a reconnect re-reads a loaded board, so pre-reconnect wiring is never left on screen', async () => {

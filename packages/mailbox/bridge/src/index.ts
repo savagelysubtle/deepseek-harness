@@ -1241,11 +1241,17 @@ function retainResident(
   }
   const resident: ResidentSeat = {
     keepAlive(): void {
+      /* v8 ignore next -- timer is always set before a ResidentSeat becomes externally reachable
+         (arm() runs synchronously in retainResident before the object escapes), and clearTimeout
+         never resets it to undefined */
       if (timer !== undefined) clearTimeout(timer)
       blockedTicks = 0
       arm()
     },
     release(): void {
+      /* v8 ignore next -- timer is always set before a ResidentSeat becomes externally reachable
+         (arm() runs synchronously in retainResident before the object escapes), and clearTimeout
+         never resets it to undefined */
       if (timer !== undefined) clearTimeout(timer)
       hardRetire()
     },
@@ -1257,6 +1263,9 @@ function retainResident(
       // which would delete the NEW resident's entry out from under it (by
       // name, not by identity) even though `hardRetire`'s own identity guard
       // exists precisely to stop that.
+      /* v8 ignore next -- timer is always set before a ResidentSeat becomes externally reachable
+         (arm() runs synchronously in retainResident before the object escapes), and clearTimeout
+         never resets it to undefined */
       if (timer !== undefined) clearTimeout(timer)
       blockedTicks = 0
       retireSuperseded()

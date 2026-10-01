@@ -692,6 +692,8 @@ export function OrgBoard({
                         // above already explains why; this adds no new text.
                         disabled={pending || servedPending || !drift.ok}
                         onClick={() => {
+                          /* v8 ignore next -- defensive: rendered only inside the selectedRecord branch, which requires
+                             selectedSeat !== null in the same render */
                           if (selectedSeat === null) return
                           setServedToggle({ name: selectedSeat, nextServed: !selectedCurrentlyServedByMailboxBridge })
                         }}
@@ -711,6 +713,8 @@ export function OrgBoard({
                       denyLabel={t('detail.tools.deny')}
                       saveLabel={t('action.save')}
                       onSave={(allow, deny) => {
+                        /* v8 ignore next -- defensive: rendered only inside the selectedRecord branch, which requires
+                           selectedSeat !== null in the same render */
                         if (selectedSeat === null) return
                         const name = selectedSeat
                         setLastAttempt(() => () => setSeatTools(name, allow, deny))
@@ -734,6 +738,8 @@ export function OrgBoard({
             onAcknowledgedChange={setRemoveAcknowledged}
             onCancel={() => { setSeatToRemove(null); setRemoveAcknowledged(false) }}
             onConfirm={() => {
+              /* v8 ignore next -- defensive: Modal unmounts its Confirm button when closed, and this field is nulled
+                 only by the dialog's own cancel/confirm */
               if (seatToRemove === null) return
               const name = seatToRemove
               setSeatToRemove(null)
@@ -756,6 +762,8 @@ export function OrgBoard({
             onAcknowledgedChange={setEdgeRemoveAcknowledged}
             onCancel={() => { setEdgeToRemove(null); setEdgeRemoveAcknowledged(false) }}
             onConfirm={() => {
+              /* v8 ignore next -- defensive: Modal unmounts its Confirm button when closed, and this field is nulled
+                 only by the dialog's own cancel/confirm */
               if (edgeToRemove === null) return
               const { from, to } = edgeToRemove
               setEdgeToRemove(null)
@@ -782,6 +790,8 @@ export function OrgBoard({
             onAcknowledgedChange={setServedAcknowledged}
             onCancel={() => { setServedToggle(null); setServedAcknowledged(false) }}
             onConfirm={() => {
+              /* v8 ignore next -- defensive: Modal unmounts its Confirm button when closed, and this field is nulled
+                 only by the dialog's own cancel/confirm */
               if (servedToggle === null) return
               const { name, nextServed } = servedToggle
               const acknowledgeSplit = servedAcknowledgeSplit

@@ -66,6 +66,8 @@ export function SendAllControl({ wide, useSessions, onSendAll, t }: SendAllContr
 
   const runSendAll = () => {
     const trimmed = text.trim()
+    /* v8 ignore next -- defensive: the only caller is the Send button, disabled under the identical
+       trimmed === '' condition */
     if (trimmed === '') return
     setBusy(true)
     onSendAll([{ type: 'text', text: trimmed }]).then((answer) => {

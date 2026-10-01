@@ -59,6 +59,24 @@ describe('provider registry', () => {
     second()
     expect(registry.getProvider('swap')).toBeUndefined()
   })
+
+  it('calling a disposer again after its name was replaced by a re-registration leaves the successor alone', async () => {
+    const { registry } = await setup()
+    const first = registry.registerProvider(fakeProvider('stale'))
+    first()
+    const secondProvider = fakeProvider('stale')
+    const second = registry.registerProvider(secondProvider)
+    // `first` already fired once above; calling it AGAIN now that 'stale' is
+    // owned by `second` must be a no-op — the disposer only ever owned ITS
+    // OWN registration, never the name itself. Asserting `toBe(secondProvider)`
+    // (not just a matching `name`) distinguishes the stale no-op from a wipe:
+    // both providers share the name 'stale', so only object identity proves
+    // the live registration is still the second one, not merely re-created.
+    first()
+    expect(registry.getProvider('stale')).toBe(secondProvider)
+    second()
+    expect(registry.getProvider('stale')).toBeUndefined()
+  })
 })
 
 describe('default-provider resolution', () => {

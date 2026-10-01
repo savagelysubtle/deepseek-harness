@@ -127,6 +127,8 @@ export async function loadRegistrySeatNames(path: string): Promise<RegistryLoadO
     return { kind: 'loaded', seatNames: new Set(Object.keys(registry.seats)) }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'missing' }
+    /* v8 ignore next -- loadOrgRegistry only ever throws Error instances (readFile rejects with
+     * Error; parseOrgRegistry wraps any non-Error parse failure into one) */
     return { kind: 'unavailable', error: error instanceof Error ? error : new Error(String(error)) }
   }
 }
