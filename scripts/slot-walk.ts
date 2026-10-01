@@ -20,6 +20,16 @@ const MERGE_HEAD = /declare module ['"]@deepseek-ai\/dsh-client-ui-slots['"]/
 /** Cheap textual prefilter for a registration call site. */
 const REGISTER_HEAD = /\.register\(/
 
+/**
+ * Glob-exclude pattern for the transient probe `scripts/oxlint-contract.spec.ts`
+ * ('discovers the owning TypeScript project for every file class') writes into
+ * a real client package's `src/` during its own test run and removes in a
+ * `finally`. Left unexcluded, a concurrent scan can list the probe via
+ * `SOURCE_GLOBS` and then fail with ENOENT reading it after that spec's cleanup
+ * races it off disk — a list-then-read gap, not a missing source file.
+ */
+const OXLINT_CONTRACT_PROBE_GLOB_EXCLUDES: readonly string[] = ['**/oxlint-contract-*.ts']
+
 /** One `SlotMap` member: the slot's contract as its owning package declares it. */
 export interface SlotDeclaration {
   /** SlotMap key, e.g. `settings.section`. */
@@ -93,11 +103,17 @@ export interface ScannedFile {
 export function scanSlotFiles(scanRoot: string, patterns: readonly string[]): ScannedFile[] {
   const out: ScannedFile[] = []
   const names = new Map<string, string>()
-  const rels = [...new Set(globSync(patterns as string[], { cwd: scanRoot })
+  const rels = [...new Set(globSync(patterns as string[], { cwd: scanRoot, exclude: OXLINT_CONTRACT_PROBE_GLOB_EXCLUDES })
     .map(path => path.split(sep).join('/')))].sort()
   for (const rel of rels) {
     const abs = resolve(scanRoot, rel)
-    const text = readFileSync(abs, 'utf8')
+    let text: string
+    try {
+      text = readFileSync(abs, 'utf8')
+    } catch (error) {
+      if (isEnoent(error)) continue
+      throw error
+    }
     if (!MERGE_HEAD.test(text) && !REGISTER_HEAD.test(text)) continue
     out.push({
       rel,
@@ -120,11 +136,18 @@ export function scanSlotFiles(scanRoot: string, patterns: readonly string[]): Sc
 export function indexExportedTypes(scanRoot: string, patterns: readonly string[]): Map<string, TypeDeclaration> {
   const index = new Map<string, TypeDeclaration>()
   const ambiguous = new Set<string>()
-  const rels = [...new Set(globSync(patterns as string[], { cwd: scanRoot })
+  const rels = [...new Set(globSync(patterns as string[], { cwd: scanRoot, exclude: OXLINT_CONTRACT_PROBE_GLOB_EXCLUDES })
     .map(path => path.split(sep).join('/')))].sort()
   for (const rel of rels) {
     const abs = resolve(scanRoot, rel)
-    const sf = ts.createSourceFile(abs, readFileSync(abs, 'utf8'), ts.ScriptTarget.Latest, true, scriptKindOf(rel))
+    let text: string
+    try {
+      text = readFileSync(abs, 'utf8')
+    } catch (error) {
+      if (isEnoent(error)) continue
+      throw error
+    }
+    const sf = ts.createSourceFile(abs, text, ts.ScriptTarget.Latest, true, scriptKindOf(rel))
     for (const statement of sf.statements) {
       if (!ts.isInterfaceDeclaration(statement) && !ts.isTypeAliasDeclaration(statement)) continue
       if (!statement.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.ExportKeyword)) continue
@@ -325,6 +348,11 @@ function packageNameOf(scanRoot: string, rel: string, cache: Map<string, string>
     dir = dirname(dir)
   }
   return '(unknown package)'
+}
+
+/** Whether `error` is a missing-file (ENOENT) failure from a `fs` read. */
+function isEnoent(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'ENOENT'
 }
 
 /** TSX must parse as TSX; a `.ts` file with JSX-looking generics must not. */

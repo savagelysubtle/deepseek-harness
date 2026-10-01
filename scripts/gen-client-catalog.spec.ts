@@ -7,8 +7,18 @@
  * make a stale or undocumented contract fail loudly instead of shipping.
  */
 
+import { randomUUID } from 'node:crypto'
+import { rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { collectSlotEntries, oversizedSlotReports, resolveSlotEntries, validateSlotContracts } from './gen-client-catalog.ts'
+import {
+  collectSlotEntries,
+  oversizedSlotReports,
+  resolveSlotEntries,
+  SOURCE_GLOBS,
+  validateSlotContracts,
+} from './gen-client-catalog.ts'
+import { indexExportedTypes, scanSlotFiles } from './slot-walk.ts'
 import type { SlotDeclaration, SlotRegistration, TypeDeclaration } from './slot-walk.ts'
 
 /** A declaration with every field the catalog needs, overridable per case. */
@@ -211,4 +221,41 @@ describe('the real workspace surface', () => {
     expect(root?.replaceRisk).toBe('shadows-shipped-ui')
     expect(root?.occupants.join(' ')).toContain('AppFrame')
   })
+
+  it('ignores the transient oxlint-contract probe file while it exists on disk', async () => {
+    // scripts/oxlint-contract.spec.ts ('discovers the owning TypeScript project
+    // for every file class') writes a probe matching this exact name into a
+    // real client package's src/ and deletes it in a finally. The catalog scan
+    // must never list it, so a concurrent run of both specs cannot race the
+    // probe's deletion into an ENOENT.
+    const probePath = join(process.cwd(), 'packages/client/ui-primitives/src', `oxlint-contract-${randomUUID()}.ts`)
+    await writeFile(probePath, [
+      "declare module '@deepseek-ai/dsh-client-ui-slots' {",
+      '  interface SlotMap {',
+      "    'oxlint-contract-probe.seat': {",
+      "      kind: 'single'",
+      "      scope: 'root'",
+      '    }',
+      '  }',
+      '}',
+      '',
+      '/** Exported probe type that must not leak into the catalog type index. */',
+      'export interface OxlintContractProbeType {',
+      '  value: string',
+      '}',
+      '',
+    ].join('\n'))
+    try {
+      const files = scanSlotFiles(process.cwd(), SOURCE_GLOBS)
+      expect(files.some(file => file.rel.includes('oxlint-contract-'))).toBe(false)
+
+      const types = indexExportedTypes(process.cwd(), SOURCE_GLOBS)
+      expect(types.has('OxlintContractProbeType')).toBe(false)
+
+      const entries = collectSlotEntries(process.cwd())
+      expect(entries.some(entry => entry.key === 'oxlint-contract-probe.seat')).toBe(false)
+    } finally {
+      await rm(probePath, { force: true })
+    }
+  }, 30_000)
 })
