@@ -95,6 +95,8 @@ export function parseWorktreeCliArgs(argv: readonly string[]): WorktreeCliArgs {
   const values = new Map<string, string>()
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i]
+    /* v8 ignore next -- rest is a dense array spread from argv, so i < rest.length guarantees rest[i] is defined;
+       noUncheckedIndexedAccess guard only */
     if (arg === undefined) break
     if (!VALUE_FLAGS.has(arg)) throw new Error(`unknown argument: ${arg}`)
     const value = rest[i + 1]
@@ -191,21 +193,28 @@ export async function runWorktreeCli(argv: readonly string[]): Promise<number> {
           internals.stdout.write(`${JSON.stringify({ removed: args.slug })}\n`)
           return 0
         }
+        /* v8 ignore start -- WorktreeCliArgs is closed; this default proves exhaustiveness and is unreachable for
+           any member of the union */
         default: {
           // The subcommand union is closed; the never assignment proves the
           // default dead and keeps a future member from compiling silently.
           const unreachable: never = args
           throw new Error(`internal error: unhandled command ${JSON.stringify(unreachable)}`)
         }
+        /* v8 ignore stop */
       }
     } finally {
       unregister()
       await ctx.fiber.dispose()
     }
   } catch (error: unknown) {
+    /* v8 ignore start -- the String(error) arm: every throw site reachable from runWorktreeCli (argv parsing, the
+       service fiber, git subprocess failures, output streams) throws Error instances; the WorktreeError and Error
+       arms are exercised by cli.spec.ts */
     internals.stderr.write(error instanceof WorktreeError
       ? `${error.code}: ${error.message}\n`
       : `${error instanceof Error ? error.message : String(error)}\n`)
+    /* v8 ignore stop */
     return 1
   }
 }

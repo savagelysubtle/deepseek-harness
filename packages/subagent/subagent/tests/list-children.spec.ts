@@ -264,6 +264,62 @@ describe('SubagentRuntime.listChildren', () => {
     ])
   })
 
+  it('serves a route with only the model field when the descriptor omits an agent provider', async () => {
+    const { ctx } = await setup([])
+    // A parent that exists only in persistence, matching the restart shape
+    // above — only the descriptor's route fields differ in this case.
+    const coldParent = SessionId('00000000-0000-4000-8000-00000000e0e0')
+    await ctx.sessionPersistence.create({
+      version: SESSION_FORMAT_VERSION,
+      id: coldParent,
+      createdAt: 1,
+    })
+    const childId = await authorChild(ctx, '00000000-0000-4000-8000-00000000e0e1', {
+      parentSession: coldParent,
+      origin: 'subagent',
+    }, childEvents({
+      version: SUBAGENT_DESCRIPTOR_VERSION,
+      mode: 'continuable',
+      provider: 'spawn',
+      label: 'model only route',
+      agentModel: 'custom-model',
+    }))
+    const entries = await ctx.subagents.listChildren(coldParent)
+    expect(entries).toEqual([
+      {
+        kind: 'child', id: childId, label: 'model only route', mode: 'continuable', model: 'custom-model',
+        activity: 'inactive', hasChildren: false,
+      },
+    ])
+  })
+
+  it('serves a route with only the provider field when the descriptor omits an agent model', async () => {
+    const { ctx } = await setup([])
+    const coldParent = SessionId('00000000-0000-4000-8000-00000000e1e0')
+    await ctx.sessionPersistence.create({
+      version: SESSION_FORMAT_VERSION,
+      id: coldParent,
+      createdAt: 1,
+    })
+    const childId = await authorChild(ctx, '00000000-0000-4000-8000-00000000e1e1', {
+      parentSession: coldParent,
+      origin: 'subagent',
+    }, childEvents({
+      version: SUBAGENT_DESCRIPTOR_VERSION,
+      mode: 'continuable',
+      provider: 'spawn',
+      label: 'provider only route',
+      agentProvider: 'custom-provider',
+    }))
+    const entries = await ctx.subagents.listChildren(coldParent)
+    expect(entries).toEqual([
+      {
+        kind: 'child', id: childId, label: 'provider only route', mode: 'continuable', provider: 'custom-provider',
+        activity: 'inactive', hasChildren: false,
+      },
+    ])
+  })
+
   it('orders children by createdAt then id without listing ordinary forks', async () => {
     const { ctx, parent } = await setup([])
     /** Publish one live child with a pinned header ordering key. */

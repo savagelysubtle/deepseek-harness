@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { stubSettingsScope } from '../src/settings-scope.ts'
 import { cleanup } from '@testing-library/react'
 import { defineStore } from '@deepseek-ai/dsh-client-runtime/client'
-import type { SessionId, WorkspaceId } from '@deepseek-ai/dsh-client-runtime/client'
+import type { PromptContentPart, SessionId, WorkspaceId } from '@deepseek-ai/dsh-client-runtime/client'
 import type { PropsRenderSlots, SessionStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
 import { SlotTestRuntime } from '@deepseek-ai/dsh-client-test-runtime'
 
@@ -268,6 +268,32 @@ describe('sessions', () => {
     expect(runtime.sessions.calls).toEqual([
       { method: 'search', args: ['marker', signal] },
       { method: 'search', args: ['marker', signal] },
+    ])
+    await runtime.dispose()
+  })
+
+  it('answers stopAll/sendAll with a clean no-op until a scenario stubs an outcome, recording every call', async () => {
+    const runtime = await runtimeWithFrame()
+    await runtime.sessions.add({ id: 's1' })
+
+    await expect(runtime.sessions.stopAll())
+      .resolves.toEqual({ ok: true, value: { stoppedCount: 0, descendants: 'ok' } })
+    runtime.sessions.stubStopAll(() => ({ stoppedCount: 2, descendants: { failed: 's2' } }))
+    await expect(runtime.sessions.stopAll())
+      .resolves.toEqual({ ok: true, value: { stoppedCount: 2, descendants: { failed: 's2' } } })
+
+    const content: PromptContentPart[] = [{ type: 'text', text: 'stand down' }]
+    await expect(runtime.sessions.sendAll(content))
+      .resolves.toEqual({ ok: true, value: { sentCount: 0, result: 'ok' } })
+    runtime.sessions.stubSendAll(sent => ({ sentCount: sent.length, result: { failed: 's3' } }))
+    await expect(runtime.sessions.sendAll(content))
+      .resolves.toEqual({ ok: true, value: { sentCount: 1, result: { failed: 's3' } } })
+
+    expect(runtime.sessions.calls).toEqual([
+      { method: 'stopAll', args: [] },
+      { method: 'stopAll', args: [] },
+      { method: 'sendAll', args: [content] },
+      { method: 'sendAll', args: [content] },
     ])
     await runtime.dispose()
   })

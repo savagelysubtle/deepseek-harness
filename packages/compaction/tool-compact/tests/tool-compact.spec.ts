@@ -393,6 +393,38 @@ describe('deferred compact tool', () => {
     expect(engine.calls).toHaveLength(1)
   })
 
+  it('ignores a non-idle status notification and leaves the schedule pending', async () => {
+    const { ctx, engine } = await harness()
+    const agent = fakeAgent('non-idle-status')
+    await callCompact(ctx, agent)
+
+    // A "running" notification must not consume the pending schedule — only
+    // the idle boundary hands it to the engine.
+    emitStatus(ctx, agent, 'running')
+    await flush()
+
+    expect(engine.calls).toHaveLength(0)
+
+    emitStatus(ctx, agent, 'idle')
+    await flush()
+
+    expect(engine.calls).toHaveLength(1)
+  })
+
+  it('falls back to String(error) in the warning when a deferred failure is not an Error instance', async () => {
+    const { ctx, engine } = await harness()
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    const agent = fakeAgent('non-error-failure')
+    engine.failure = 'raw string failure'
+    await callCompact(ctx, agent)
+
+    emitStatus(ctx, agent, 'idle')
+    await flush()
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('raw string failure'))
+    expect(engine.calls).toHaveLength(1)
+  })
+
   it('runs a fresh schedule even though the previous cycle left a terminal settlement', async () => {
     const { ctx, engine } = await harness()
     const agent = fakeAgent('re-schedule')

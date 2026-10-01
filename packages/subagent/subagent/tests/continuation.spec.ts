@@ -1578,6 +1578,78 @@ describe('continuable settlement delivery', () => {
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
   })
 
+  it('rejects a report from an agent that was never a resident continuable child', async () => {
+    const { ctx, parent } = await setup([])
+
+    await expect(ctx.subagents.reportFrom(parent, message('not a subagent'), {
+      delivery: 'quiet',
+      signal: testSignal,
+    })).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+  })
+
+  it('rejects a report from a stale duplicate of a live resident child', async () => {
+    const { ctx, parent } = await setup([textResponse('answer')])
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    const child = await vi.waitFor(() => {
+      const live = ctx.agents.get(started.childId)
+      expect(live).toBeDefined()
+      return live!
+    })
+    const stale = { ...child, id: child.id } as unknown as Agent
+
+    await expect(ctx.subagents.reportFrom(stale, message('stale report'), {
+      delivery: 'quiet',
+      signal: testSignal,
+    })).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+
+    await waitNoActivation(ctx, started.childId)
+  })
+
+  it('wakes the parent on a wakeup delivery and reports a rejected send as the parent being unavailable', async () => {
+    const { ctx, parent } = await setup([textResponse('answer')])
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    const child = await vi.waitFor(() => {
+      const live = ctx.agents.get(started.childId)
+      expect(live).toBeDefined()
+      return live!
+    })
+    vi.spyOn(parent, 'followup').mockImplementation(() => {
+      throw new Error('parent closed during delivery')
+    })
+
+    await expect(ctx.subagents.reportFrom(child, message('wake up'), {
+      delivery: 'wakeup',
+      signal: testSignal,
+    })).rejects.toMatchObject({ code: 'PARENT_UNAVAILABLE' })
+
+    await waitNoActivation(ctx, started.childId)
+  })
+
+  it('rejects reporting once the direct parent is no longer live', async () => {
+    const hold = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([{ chunks: textResponse('held open'), gate: hold.promise }])
+    const { ctx } = await setupWith(adapter)
+    const host = await ctx.agents.create({
+      sessionId: SessionId('report-parent-gone'),
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+    const started = await ctx.subagents.startContinuable(startSpec(host.agent))
+    const child = await vi.waitFor(() => {
+      const live = ctx.agents.get(started.childId)
+      expect(live).toBeDefined()
+      return live!
+    })
+
+    await host.dispose()
+    await expect(ctx.subagents.reportFrom(child, message('still working'), {
+      delivery: 'quiet',
+      signal: testSignal,
+    })).rejects.toMatchObject({ code: 'PARENT_UNAVAILABLE' })
+
+    hold.resolve(undefined)
+    await waitNoActivation(ctx, started.childId)
+  })
+
   it('delivers the terminal reason when the child never had a chance to report', async () => {
     const { ctx, parent } = await setup([maxTokensResponse('half an ans'), textResponse('parent ack')])
     const started = await ctx.subagents.startContinuable(startSpec(parent))
@@ -2142,6 +2214,68 @@ describe('continuable public API', () => {
     await waitNoActivation(ctx, started.childId)
     const loaded = await ctx.sessionPersistence.load(started.childId)
     expect(hasUserText(loaded.events, 'survives')).toBe(true)
+  })
+})
+
+describe('SubagentRuntime.registerContinuableSetup', () => {
+  it('composes a contribution into every fresh continuable child and revokes it on Activation disposal', async () => {
+    const { ctx, parent } = await setup([textResponse('answer')])
+    const installed: SessionId[] = []
+    const disposedIds: SessionId[] = []
+    const dispose = ctx.subagents.registerContinuableSetup((childCtx) => {
+      installed.push((childCtx.agent as Agent).session.header.id)
+      // The same real capability the package's own setup contribution installs
+      // (`installReportTool` in `@deepseek-ai/dsh-subagent-tool-subagent-report`):
+      // a tool registered into the child's own context, not just a closure flag.
+      const disposeTool = childCtx.tools.register(defineTool({
+        name: 'setup-installed-marker',
+        description: 'observable marker installed by a continuable setup contribution',
+        parameters: {},
+        output: {
+          schema: { type: 'object', additionalProperties: false, properties: {} },
+          render: () => [{ type: 'text', text: 'marker' }],
+        },
+        execute: () => Promise.resolve({}),
+      }))
+      return () => {
+        disposedIds.push((childCtx.agent as Agent).session.header.id)
+        disposeTool()
+      }
+    })
+
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    expect(installed).toEqual([started.childId])
+    const child = await vi.waitFor(() => {
+      const live = ctx.agents.get(started.childId)
+      expect(live).toBeDefined()
+      return live!
+    })
+    // Observable from the child's own Context after start, not just that the
+    // contribution's callback ran: a scoped registration is visible only in
+    // the registering agent's own view, so the child itself is the scope key.
+    expect(child.ctx.tools.schemas(child).map(schema => schema.name)).toContain('setup-installed-marker')
+
+    await waitNoActivation(ctx, started.childId)
+    expect(disposedIds).toEqual([started.childId])
+
+    dispose()
+  })
+
+  it('stops composing a contribution into later children once its disposer runs', async () => {
+    const { ctx, parent } = await setup([textResponse('first'), textResponse('second')])
+    const installed: SessionId[] = []
+    const dispose = ctx.subagents.registerContinuableSetup((childCtx) => {
+      installed.push((childCtx.agent as Agent).session.header.id)
+      return () => {}
+    })
+
+    const first = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, first.childId)
+    dispose()
+
+    const second = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, second.childId)
+    expect(installed).toEqual([first.childId])
   })
 })
 

@@ -167,6 +167,27 @@ describe('tool-jobs setup', () => {
     expect(await loadWith(1)).toBe('loaded')
   })
 
+  it('rejects a machine-owner wake budget that cannot bound anything', async () => {
+    // Same bound, mirrored for the machine-owner budget: a fractional budget
+    // counts nothing and an infinite one removes the bound it exists for.
+    const loadWith = async (machineOwnerWakeBudget: number): Promise<string> => {
+      const ctx = new Context()
+      await ctx.plugin(SystemPrompt)
+      await ctx.plugin(ToolRuntime)
+      await ctx.plugin(LocalJobRegistry)
+      try {
+        await ctx.plugin(ToolTasks, { machineOwnerWakeBudget })
+        return 'loaded'
+      } catch (error: unknown) {
+        return String(error)
+      }
+    }
+
+    expect(await loadWith(Number.POSITIVE_INFINITY)).toContain('machineOwnerWakeBudget')
+    expect(await loadWith(2.5)).toContain('machineOwnerWakeBudget')
+    expect(await loadWith(1)).toBe('loaded')
+  })
+
   it('renders status lines with and without producer detail', () => {
     const base = { id: 'bash-1', kind: 'bash', label: 'x', startedAt: 0, reported: false } as unknown as JobSnapshot
     expect(statusLine({ ...base, status: 'running' })).toBe('[status: running]')
@@ -258,6 +279,24 @@ describe('job_output', () => {
     expect(Buffer.byteLength(text(result))).toBeLessThanOrEqual(64)
     expect(text(result)).toContain('[result truncated]')
     expect(text(result)).not.toContain('[status: running]')
+  })
+
+  it('does not double the truncation marker when the body already visibly ends with one', async () => {
+    const { ctx } = await setup()
+    const body = `${'x'.repeat(20)}[output truncated]`
+    ctx.jobs.start(producer({
+      outputLimitBytes: 50,
+      readOutput: () => body,
+    }).spec)
+
+    const result = await call(ctx, 'job_output', { job_id: 'bash-1' })
+    const rendered = text(result)
+    expect(Buffer.byteLength(rendered)).toBeLessThanOrEqual(50)
+    // The body already ends with the marker on its own; fitWithSuffix must
+    // recognize that and append only the status suffix, not a second
+    // "[output truncated]" stacked on top of it.
+    expect(rendered.match(/\[output truncated\]/g)).toHaveLength(1)
+    expect(rendered).toContain('[status: running]')
   })
 
   it('applies a producer limit to a normalized read failure', async () => {

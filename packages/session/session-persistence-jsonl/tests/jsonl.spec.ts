@@ -287,6 +287,24 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     expect((await ctx.sessionPersistence.list()).map(h => h.id)).toContain(m.id)
   })
 
+  it('prepare() delegates to the coordinator and reserves the unpublished Session used by resume', async () => {
+    const m = meta('prepare-direct', '/work')
+    await ctx.sessionPersistence.create(m)
+    await ctx.sessionPersistence.append(m.id, oneTurnLog())
+
+    const prepared = await ctx.sessionPersistence.prepare(m.id)
+    try {
+      // The prepared Session seeds the stored log verbatim, then marks the
+      // seed boundary with a synthetic `session/end-seed`.
+      expect(prepared.session.events.slice(0, -1).map(e => e.type)).toEqual(oneTurnLog().map(e => e.type))
+      expect(prepared.session.events.at(-1)?.type).toBe('session/end-seed')
+      // Reserved: a second prepare must not see this session as unprepared-live.
+      expect(ctx.sessions.get(m.id)).toBeUndefined()
+    } finally {
+      prepared[Symbol.dispose]()
+    }
+  })
+
   it('readRaw returns the stored artifact text verbatim with its original filename', async () => {
     const m = meta('raw-read', '/work')
     await ctx.sessionPersistence.create(m)
@@ -1009,6 +1027,47 @@ describe('JsonlSessionPersistence: external writer detection', () => {
     expect(await backend.readAppendIdentity(SessionId('no-such-session'))).toBeUndefined()
     await fiber.dispose()
   })
+
+  it('returns undefined when the log is removed between discovery and the identity stat', async () => {
+    const root = await freshRoot()
+    const m = meta('identity-removed-after-discovery')
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const fiber = await ctx.plugin(JsonlSessionPersistence, { root, compression: 'none' })
+    await ctx.sessionPersistence.create(m)
+    await ctx.sessionPersistence.append(m.id, oneTurnLog())
+
+    const persistence = ctx.sessionPersistence as unknown as {
+      findLog(id: SessionId, signal?: AbortSignal): Promise<string | undefined>
+      readAppendIdentity(id: SessionId): Promise<string | undefined>
+    }
+    const path = rawLogPath(root, m.cwd, m.id)
+    vi.spyOn(persistence, 'findLog').mockResolvedValue(path)
+    await rm(path)
+    expect(await persistence.readAppendIdentity(m.id)).toBeUndefined()
+    await fiber.dispose()
+  })
+
+  it('propagates a non-ENOENT identity-stat failure after log discovery', async () => {
+    const root = await freshRoot()
+    const m = meta('identity-stat-failure')
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const fiber = await ctx.plugin(JsonlSessionPersistence, { root, compression: 'none' })
+    await ctx.sessionPersistence.create(m)
+    await ctx.sessionPersistence.append(m.id, oneTurnLog())
+
+    const persistence = ctx.sessionPersistence as unknown as {
+      findLog(id: SessionId, signal?: AbortSignal): Promise<string | undefined>
+      readAppendIdentity(id: SessionId): Promise<string | undefined>
+    }
+    const path = rawLogPath(root, m.cwd, m.id)
+    // A NUL byte makes the stat call itself reject, not ENOENT — the only way
+    // to drive the catch block's rethrow without mocking `stat` directly.
+    vi.spyOn(persistence, 'findLog').mockResolvedValue(`${path}\0`)
+    await expect(persistence.readAppendIdentity(m.id)).rejects.toMatchObject({ code: 'ERR_INVALID_ARG_VALUE' })
+    await fiber.dispose()
+  })
 })
 
 describe('JsonlSessionPersistence: scanLog unit', () => {
@@ -1050,6 +1109,18 @@ describe('JsonlSessionPersistence: scanLog unit', () => {
       JSON.stringify({ type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } }),
       '',
     ].join('\n'))) }).toThrow(/seq gap in committed region/)
+  })
+
+  it('checkpoint() surfaces a recorded issue before any resolving turn/end arrives', () => {
+    // The zstd decode path (index.ts) reads `checkpoint().issue` to attribute a
+    // frame/committed-bytes mismatch to its real cause instead of a generic
+    // "torn record" message — this is the mid-scan moment it reads from.
+    const header = Buffer.from(`${JSON.stringify(toHeaderLine(meta('scanner-checkpoint-issue')))}\n`)
+    const scanner = new SessionLogScanner(header)
+    scanner.write(Buffer.from(`${JSON.stringify(oneTurnLog()[0])}\n{not json\n`))
+    const checkpoint = scanner.checkpoint()
+    expect(checkpoint.issue).toBeInstanceOf(Error)
+    expect(checkpoint.issue?.message).toMatch(/unparsable committed event/)
   })
 
   it('incrementally scans records split across reusable decoder chunks', () => {
@@ -1122,6 +1193,22 @@ describe('JsonlSessionPersistence: scanLog unit', () => {
   it('rejects a session header with negative-zero delegationDepth', () => {
     const log = '{"type":"session","version":0,"id":"invalid-depth","createdAt":1,"delegationDepth":-0}\n'
     expect(() => scanLog(Buffer.from(log))).toThrow(/session header/)
+  })
+
+  it('round-trips the subagent origin marker through toHeaderLine/isHeaderLine/fromHeaderLine', () => {
+    const line = toHeaderLine({
+      version: 0,
+      id: SessionId('spawned-subagent'),
+      createdAt: 1,
+      delegationDepth: 1,
+      origin: 'subagent',
+    })
+    const log = `${JSON.stringify(line)}\n`
+
+    // A subagent's origin decides how its own resumed session is scoped;
+    // dropping it on disk would make a resumed subagent indistinguishable
+    // from a top-level session.
+    expect(scanLog(Buffer.from(log)).meta.origin).toBe('subagent')
   })
 
   it('round-trips the agent preset a session was composed from', () => {

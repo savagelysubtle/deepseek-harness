@@ -268,4 +268,18 @@ describe('toolCallSignature', () => {
 
     expect(sigA).not.toEqual(sigB)
   })
+
+  it('hashes a tool call with no arguments at all (args undefined) deterministically', () => {
+    // A tool invoked with zero parameters has nothing to parse into an
+    // object — `args` arrives as `undefined` rather than `{}`. canonicalJson
+    // special-cases `undefined` (-> 'null') before it ever reaches
+    // JSON.stringify, which would otherwise return `undefined` (not a string)
+    // and break the hash.
+    const result: ContentBlock[] = [{ type: 'text', text: 'ok' }]
+    const sigA = toolCallSignature('no_args_tool', undefined, result)
+    const sigB = toolCallSignature('no_args_tool', undefined, result)
+
+    expect(sigA.argsHash).toBe(sigB.argsHash)
+    expect(sigA.argsHash).toMatch(/^[0-9a-f]{64}$/)
+  })
 })

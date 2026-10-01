@@ -617,6 +617,25 @@ describe('JsonlSessionPersistence: default Zstandard encoding', () => {
     await expect(ctx.sessionPersistence.load(header.id)).rejects.toThrow(/complete frame contains a torn JSONL record/)
   })
 
+  it('attributes a complete-frame/committed-bytes mismatch to the scanner\'s own recorded issue', async () => {
+    const root = await freshRoot()
+    const ctx = await mount(root)
+    const header = meta('complete-frame-real-issue')
+    await ctx.sessionPersistence.create(header)
+    await ctx.sessionPersistence.append(header.id, oneTurnLog())
+    // Unlike the torn-record case above, this line IS newline-terminated —
+    // the scanner commits it as a complete (corrupt) record and records
+    // `this.issue` rather than leaving it buffered as a dangling tail. With no
+    // turn/end anywhere after it, checkpoint() never throws early: the
+    // mismatch is only discovered once decoding finishes, and must surface
+    // THIS specific issue rather than the generic torn-record wording.
+    await appendFile(
+      logPath(root, header.cwd, header.id, 'zstd'),
+      await compressZstdFrame('{not valid json}extra\n'),
+    )
+    await expect(ctx.sessionPersistence.load(header.id)).rejects.toThrow(/unparsable committed event/)
+  })
+
   it('rolls back a checksummed append frame when fsync fails', async () => {
     const root = await freshRoot()
     const ctx = await mount(root)
