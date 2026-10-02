@@ -3,7 +3,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { GoalView } from '@deepseek-ai/dsh-goal'
-import { HarnessError } from '@deepseek-ai/dsh-llm'
+import { HarnessError, isFounderMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 
@@ -66,11 +66,21 @@ export function goalToolExecution(ctx: Context, exec: ToolRunContext): GoalToolE
  * Whether host-attested human input appears in the current root-agent turn.
  * An omitted `Agent.followup()` / `steer()` source resolves to `user`, so non-human
  * producers must supply their own source rather than inheriting this authority.
+ *
+ * A bare `user` source is not enough: it is also what subagent task delivery
+ * and the plan-mode re-steer inject, so `kind === 'user'` alone is not proof a
+ * human typed it. The founder stamp (`MessageSourceMap.user.founder`) is
+ * minted only by trusted harness code at a channel independently proven to be
+ * the loopback interface, so only a stamped `user` source grants direct-human
+ * authority here. Only the most recent user message of the open turn is
+ * checked, never any earlier one: a later, unstamped steer (for example a
+ * trusted-host but non-loopback caller) must not inherit authority from an
+ * earlier stamped message in the same turn.
  */
 function hasDirectHumanInput(ctx: Context, execution: GoalToolExecution): boolean {
   if (!ctx.agents.roots().includes(execution.agent)) return false
-  return execution.events.some(event =>
-    event.type === 'user/message' && event.data.source.kind === 'user')
+  const latest = execution.events.filter(event => event.type === 'user/message').at(-1)
+  return latest !== undefined && isFounderMessage(latest.data.source)
 }
 
 /** Whether this turn is the current goal's exact admitted round. */

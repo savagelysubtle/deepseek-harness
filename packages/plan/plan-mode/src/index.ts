@@ -27,7 +27,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import { z as zod } from 'zod'
 import type { ZodType } from 'zod'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, isFounderMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, UserMessage } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
@@ -164,6 +164,38 @@ function hasOpenTurn(events: readonly SessionEvent[]): boolean {
   return open
 }
 
+/**
+ * Whether the currently open turn's most recent `user/message` is
+ * founder-stamped (see {@link isFounderMessage}). Re-derives the open-turn
+ * window locally from `session.events` — the same source this module already
+ * reads for {@link foldPlanMode} and {@link hasOpenTurn} — rather than
+ * importing `openTurn` from `@deepseek-ai/dsh-tool-goal`, which plan-mode does
+ * not and must not depend on. Mirrors `hasDirectHumanInput` in
+ * `packages/goal/tool-goal/src/authority.ts`: only a stamped `user` source
+ * counts, never a bare one, and only the most recent user message of the open
+ * turn is checked — an earlier stamped message followed by a later unstamped
+ * one (for example a trusted-host but non-loopback caller steering mid-turn)
+ * must not leak authority forward. No open turn, or no such event in it,
+ * fails closed to `false` — it never throws, since a `/plan` command always
+ * runs inside the turn it was typed in, but a malformed or missing log must
+ * still resolve to "not the founder" rather than crash the command.
+ *
+ * @param events The session log or any prefix of it.
+ * @returns Whether the open turn's most recent user message is the founder's own.
+ */
+function openTurnIsFounderStamped(events: readonly SessionEvent[]): boolean {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const boundary = events[index]
+    if (boundary?.type === 'turn/end') return false
+    if (boundary?.type === 'turn/start') {
+      const latest = events.slice(index + 1)
+        .filter(event => event.type === 'user/message').at(-1)
+      return latest !== undefined && isFounderMessage(latest.data.source)
+    }
+  }
+  return false
+}
+
 /** Plan state at the last logged request header, or `undefined` before the first header. */
 function planModeAtLastHeader(events: readonly SessionEvent[]): boolean | undefined {
   let lastHeader = -1
@@ -291,7 +323,19 @@ export class PlanModeController extends Service {
             }
           }
           const outcome = this.set(agent, true)
-          if (message !== '') agent.steer(createUserMessage({ content: [{ type: 'text', text: message }], source: { kind: 'user' } }))
+          if (message !== '') {
+            // Copy the founder stamp from the triggering turn's own logged
+            // input, never mint it here: this command layer has no socket
+            // and cannot itself prove a loopback channel (sentinel review,
+            // SWD-125). An unstamped triggering turn yields an unstamped
+            // re-steer, so goal authority never flows through this path.
+            agent.steer(createUserMessage({
+              content: [{ type: 'text', text: message }],
+              source: openTurnIsFounderStamped(agent.session.events)
+                ? { kind: 'user', founder: true }
+                : { kind: 'user' },
+            }))
+          }
           return {
             kind: 'success',
             text: outcome === 'committed'

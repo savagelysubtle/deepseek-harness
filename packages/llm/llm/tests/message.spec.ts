@@ -5,7 +5,9 @@ import {
   createToolResultMessage,
   createUserMessage,
   freezeMessage,
+  isFounderMessage,
   MessageId,
+  type MessageSourceMap,
 } from '@deepseek-ai/dsh-llm'
 
 describe('message construction', () => {
@@ -95,5 +97,30 @@ describe('message construction', () => {
     expect(message.id).not.toHaveLength(0)
     expect(Object.isFrozen(message)).toBe(true)
     expect(Object.isFrozen(message.content[0])).toBe(true)
+  })
+})
+
+describe('isFounderMessage', () => {
+  it('is true only for a user source explicitly stamped founder: true', () => {
+    expect(isFounderMessage({ kind: 'user', founder: true })).toBe(true)
+  })
+
+  it('is false for a bare user source carrying no founder field', () => {
+    expect(isFounderMessage({ kind: 'user' })).toBe(false)
+  })
+
+  it('is false for every other source kind, founder field or not', () => {
+    expect(isFounderMessage({ kind: 'model', provider: 'test', model: 'test' })).toBe(false)
+    expect(isFounderMessage({ kind: 'tool', callId: CallId('call-1') })).toBe(false)
+    expect(isFounderMessage({ kind: 'plugin', plugin: 'test' })).toBe(false)
+  })
+
+  it('rejects a founder value other than the literal true at the type level', () => {
+    // @ts-expect-error founder must be the literal `true`, never `false`
+    const rejectedFalse: MessageSourceMap['user'] = { kind: 'user', founder: false }
+    // @ts-expect-error founder must be the literal `true`, never the string "true"
+    const rejectedString: MessageSourceMap['user'] = { kind: 'user', founder: 'true' }
+    expect(rejectedFalse).toBeDefined()
+    expect(rejectedString).toBeDefined()
   })
 })

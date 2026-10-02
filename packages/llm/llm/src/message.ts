@@ -98,7 +98,22 @@ export type ContextFormed =
  * Merge-extensible sum type — plugins add their own `kind`s.
  */
 export interface MessageSourceMap {
-  user: { kind: 'user' }
+  user: {
+    kind: 'user'
+    /**
+     * Whether this message is the founder's own, typed directly at this
+     * machine. Minted only by trusted harness code at loopback-proven direct
+     * channels — never derived from tool arguments, mailbox payloads, or
+     * model output; there is no signature, so the guarantee is entirely
+     * architectural (which first-party call sites are allowed to set it),
+     * the same boundary `ToolMessageSource.callId` already relies on.
+     * Literal `true` only; no other source kind carries this field, and its
+     * absence means "not the founder" and fails closed — a resumed log
+     * written before this field existed renders as unstamped, never as an
+     * error.
+     */
+    founder?: true
+  }
   plugin: { kind: 'plugin'; plugin: string } & ContextFormed
   model: ModelMessageSource
   tool: ToolMessageSource
@@ -124,6 +139,18 @@ export function boundContextSummary(summary: string): string {
 
 /** Any known message source, derived from {@link MessageSourceMap}; switch on `kind` and fall through unknowns (merge-extensible). */
 export type MessageSource = MessageSourceMap[keyof MessageSourceMap]
+
+/**
+ * Whether a message source is the founder's own, typed directly at this
+ * machine (see {@link MessageSourceMap.user.founder}). The only source kind
+ * that can ever carry the field is `'user'`; every other kind, and a bare
+ * `'user'` source without the field, is not the founder.
+ * @param source - the message source to test.
+ * @returns true only when `kind === 'user'` and `founder === true`.
+ */
+export function isFounderMessage(source: MessageSource): boolean {
+  return source.kind === 'user' && source.founder === true
+}
 
 /** One immutable message representation shared by delivery, durable history, and model requests. */
 export interface Message {

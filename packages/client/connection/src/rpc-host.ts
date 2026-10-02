@@ -13,6 +13,7 @@ import {
 } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { bridge, type FetchHandler } from './http-bridge.ts'
 import { isTrustedApiRequest } from './api-request-trust.ts'
+import { isLoopbackAddress } from './loopback-hostname.ts'
 import { API_PATH } from './api-path.ts'
 import type {
   ConnectionRpcEndpointMatcher,
@@ -73,16 +74,16 @@ export class HostConnectionService extends Service implements HostConnectionHand
     fallback: FetchHandler,
   ): FetchHandler {
     return {
-      fetch: (request) => {
+      fetch: (request, peerIsLoopback) => {
         const endpoint = endpointFromPath(channel, new URL(request.url).pathname)
         const interceptor = this.interceptors.get(channel)
         if (endpoint === undefined || interceptor === undefined || !interceptor.matches(endpoint)) {
-          return fallback.fetch(request)
+          return fallback.fetch(request, peerIsLoopback)
         }
         if (interceptor.options.authority === 'loopback' && !isTrustedApiRequest(request, [])) {
           return Promise.resolve(new Response('forbidden', { status: 403 }))
         }
-        return interceptor.fetchHandler.fetch(request)
+        return interceptor.fetchHandler.fetch(request, peerIsLoopback)
       },
     }
   }
@@ -105,7 +106,10 @@ export class HostConnectionService extends Service implements HostConnectionHand
           res.end('forbidden')
           return
         }
-        await bridge(req, res, fetchHandler)
+        // Computed from the raw socket, never from a request header: a
+        // client cannot set or spoof this fact (see FetchHandler.fetch).
+        const peerIsLoopback = isLoopbackAddress(req.socket.remoteAddress)
+        await bridge(req, res, fetchHandler, undefined, peerIsLoopback)
       },
     }
     return owner.effect(

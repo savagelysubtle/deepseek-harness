@@ -8,9 +8,13 @@ import type { AddressInfo } from 'node:net'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
-import { RpcId, type ClientRequest } from '@deepseek-ai/dsh-host-apiproxy/api'
+import { RpcId, type ClientRequest, type RpcRequest } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { WebServer, WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
-import { API_PATH, apply, HOST_EVENTS_PATH, inject, MUX_EVENTS_PATH, type HostConnectionHandle } from '../src/index.ts'
+import {
+  API_PATH, apply, HOST_EVENTS_PATH, HostConnectionService, inject, MUX_EVENTS_PATH, type HostConnectionHandle,
+} from '../src/index.ts'
+import { bridge, type FetchHandler } from '../src/http-bridge.ts'
+import { isLoopbackAddress } from '../src/loopback-hostname.ts'
 
 /** Structural webServer fake recording both route registries. */
 function fakeHttpServer(
@@ -34,24 +38,45 @@ function fakeHttpServer(
   }
 }
 
+// register()'s route handler reads req.socket.remoteAddress directly (the
+// peer-loopback fact, never a header); every fake below defaults to a
+// loopback peer so existing assertions (none of which depend on it) keep
+// exercising that line. Pass remoteAddress to simulate a non-loopback peer.
+
 /** Bodyless GET carrying the given headers (enough for the trust fence + bridge). */
-function fakeRequest(headers: Record<string, string>, url = `${API_PATH}/session.list`): IncomingMessage {
+function fakeRequest(
+  headers: Record<string, string>,
+  url = `${API_PATH}/session.list`,
+  remoteAddress = '127.0.0.1',
+): IncomingMessage {
   const request = Readable.from([]) as unknown as IncomingMessage
-  Object.assign(request, { url, method: 'GET', headers })
+  Object.assign(request, { url, method: 'GET', headers, socket: { remoteAddress } })
   return request
 }
 
 /** JSON POST carrying a complete client-request envelope. */
-function fakePost(headers: Record<string, string>, url: string, body: unknown): IncomingMessage {
+function fakePost(
+  headers: Record<string, string>,
+  url: string,
+  body: unknown,
+  remoteAddress = '127.0.0.1',
+): IncomingMessage {
   const request = Readable.from([Buffer.from(JSON.stringify(body))]) as unknown as IncomingMessage
-  Object.assign(request, { url, method: 'POST', headers: { 'content-type': 'application/json', ...headers } })
+  Object.assign(request, {
+    url, method: 'POST', headers: { 'content-type': 'application/json', ...headers }, socket: { remoteAddress },
+  })
   return request
 }
 
 /** Raw POST for malformed-body and media-type boundary cases. */
-function fakeRawPost(headers: Record<string, string>, url: string, body: string): IncomingMessage {
+function fakeRawPost(
+  headers: Record<string, string>,
+  url: string,
+  body: string,
+  remoteAddress = '127.0.0.1',
+): IncomingMessage {
   const request = Readable.from([Buffer.from(body)]) as unknown as IncomingMessage
-  Object.assign(request, { url, method: 'POST', headers })
+  Object.assign(request, { url, method: 'POST', headers, socket: { remoteAddress } })
   return request
 }
 
@@ -74,7 +99,10 @@ function fakeResponse(): { response: ServerResponse; state: { status?: number; b
   return { response, state }
 }
 
-async function mounted(config?: { trustedHosts?: string[] }): Promise<{
+async function mounted(
+  config?: { trustedHosts?: string[] },
+  apiProxy: ApiProxy = {} as unknown as ApiProxy,
+): Promise<{
   routes: WebRoute[]
   upgrades: WebUpgradeRoute[]
   dispose: () => Promise<void>
@@ -83,7 +111,7 @@ async function mounted(config?: { trustedHosts?: string[] }): Promise<{
   const routes: WebRoute[] = []
   const upgrades: WebUpgradeRoute[] = []
   ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
-  ctx.provide('apiProxy', {} as unknown as ApiProxy)
+  ctx.provide('apiProxy', apiProxy)
   const fiber = ctx.plugin({ inject: [...inject], apply }, config)
   await fiber.await()
   return { routes, upgrades, dispose: () => fiber.dispose() }
@@ -416,6 +444,115 @@ describe('connection node half', () => {
     await removeLoopback()
     await remove()
     await fiber.dispose()
+  })
+})
+
+describe('peer-loopback plumbing (rpc-host)', () => {
+  /**
+   * Pins createSharedFetchHandler()'s own forwarding at the bridge/rpc-host seam directly,
+   * one level below the real `/api` route: the 'through the real /api route' describe block
+   * below drives the same fact through apply()'s actual wiring end to end, including the
+   * ApiProxy-facing RpcRequest it lands on.
+   */
+  function recordingFetchHandler(received: boolean[]): { fetch: FetchHandler['fetch'] } {
+    return {
+      fetch: async (_request, peerIsLoopback) => {
+        received.push(peerIsLoopback)
+        return new Response(null, { status: 204 })
+      },
+    }
+  }
+
+  it('forwards a proven loopback peer through bridge() into the shared /api fetch handler', async () => {
+    const connection = new HostConnectionService(new Context(), [])
+    const received: boolean[] = []
+    const fetchHandler = connection.createSharedFetchHandler(API_PATH, recordingFetchHandler(received))
+    const request = fakeRequest({}, `${API_PATH}/session.list`, '127.0.0.1')
+    const { response } = fakeResponse()
+
+    await bridge(request, response, fetchHandler, undefined, isLoopbackAddress(request.socket.remoteAddress))
+
+    expect(received).toEqual([true])
+  })
+
+  it('forwards false for a non-loopback peer, unmoved by a client-sent loopback header', async () => {
+    const connection = new HostConnectionService(new Context(), [])
+    const received: boolean[] = []
+    const fetchHandler = connection.createSharedFetchHandler(API_PATH, recordingFetchHandler(received))
+    const request = fakeRequest({ 'x-peer-is-loopback': 'true' }, `${API_PATH}/session.list`, '203.0.113.5')
+    const { response } = fakeResponse()
+
+    await bridge(request, response, fetchHandler, undefined, isLoopbackAddress(request.socket.remoteAddress))
+
+    expect(received).toEqual([false])
+  })
+})
+
+describe('peer-loopback plumbing through the real /api route', () => {
+  /**
+   * Minimal ApiProxy whose `sessions.list` records the complete RpcRequest it is handed,
+   * proving `peerIsLoopback` reaches the ApiProxy through `apply()`'s real wiring — the actual
+   * route handler, the real `isLoopbackAddress(req.socket.remoteAddress)` call, bridge(), and
+   * the real `toFetchHandler` — not just the bridge/rpc-host seam the describe block above pins.
+   */
+  function recordingApiProxy(received: RpcRequest<{ cursor?: string }>[]): ApiProxy {
+    return {
+      sessions: {
+        list: async (request: RpcRequest<{ cursor?: string }>) => {
+          received.push(request)
+          return { rpcId: request.rpcId, result: { ok: true, value: { items: [] } } }
+        },
+      },
+    } as unknown as ApiProxy
+  }
+
+  /** One session.list envelope, the simplest unary method on the dispatch table. */
+  function listRequest(rpcId: string): ClientRequest {
+    return { type: 'client-request', rpcId: RpcId(rpcId), method: 'session.list', payload: {} }
+  }
+
+  it('stamps peerIsLoopback true on the ApiProxy request for a real loopback socket', async () => {
+    const received: RpcRequest<{ cursor?: string }>[] = []
+    const { routes, dispose } = await mounted({ trustedHosts: ['10.0.0.1'] }, recordingApiProxy(received))
+    const result = fakeResponse()
+    await routes[0]!.handler(
+      fakePost({ host: 'localhost' }, `${API_PATH}/session.list`, listRequest('r-loopback'), '127.0.0.1'),
+      result.response,
+    )
+    expect(result.state.status).toBe(200)
+    expect(received.map(r => r.peerIsLoopback)).toEqual([true])
+    await dispose()
+  })
+
+  it('stamps peerIsLoopback false for a real non-loopback socket', async () => {
+    const received: RpcRequest<{ cursor?: string }>[] = []
+    const { routes, dispose } = await mounted({ trustedHosts: ['10.0.0.1'] }, recordingApiProxy(received))
+    const result = fakeResponse()
+    await routes[0]!.handler(
+      fakePost({ host: '10.0.0.1' }, `${API_PATH}/session.list`, listRequest('r-lan'), '10.0.0.1'),
+      result.response,
+    )
+    expect(result.state.status).toBe(200)
+    expect(received.map(r => r.peerIsLoopback)).toEqual([false])
+    await dispose()
+  })
+
+  it('stays false over a non-loopback socket even when Host and headers spoof loopback', async () => {
+    const received: RpcRequest<{ cursor?: string }>[] = []
+    const { routes, dispose } = await mounted({ trustedHosts: ['10.0.0.1'] }, recordingApiProxy(received))
+    const result = fakeResponse()
+    await routes[0]!.handler(
+      fakePost(
+        { host: 'localhost', 'x-peer-is-loopback': 'true', 'x-forwarded-for': '127.0.0.1' },
+        `${API_PATH}/session.list`,
+        listRequest('r-spoof'),
+        '10.0.0.1',
+      ),
+      result.response,
+    )
+    expect(result.state.status).toBe(200)
+    expect(received.map(r => r.peerIsLoopback)).toEqual([false])
+    await dispose()
   })
 })
 

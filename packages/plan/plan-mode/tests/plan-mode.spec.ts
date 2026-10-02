@@ -593,6 +593,124 @@ describe('/plan', () => {
     })
   })
 
+  it('copies the founder stamp onto the re-steer only from the triggering turn\'s own logged input (SWD-125)', async () => {
+    const ctx = await setup()
+    await ctx.plugin(CommandRuntime)
+    await new Promise(resolve => setImmediate(resolve))
+    const signal = new AbortController().signal
+
+    // Stamped triggering turn: the re-steer copies the stamp forward.
+    const founder = await agentWithSession(ctx, 'founder-plan-command')
+    openTurn(founder.session)
+    founder.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'please plan the migration' }],
+      source: { kind: 'user', founder: true },
+    }), { surfaceOp: 'append' })
+    const founderSteer = vi.fn()
+    ;(founder as unknown as { steer: typeof founderSteer }).steer = founderSteer
+    await ctx.commands.execute(founder, '/plan draft the migration', signal)
+    expect(founderSteer).toHaveBeenCalledExactlyOnceWith({
+      id: expect.any(String) as unknown,
+      role: 'user',
+      content: [{ type: 'text', text: 'draft the migration' }],
+      source: { kind: 'user', founder: true },
+    })
+
+    // Unstamped triggering turn (e.g. subagent delivery, or a prior unstamped
+    // re-steer): the re-steer stays bare rather than inheriting authority.
+    const unstamped = await agentWithSession(ctx, 'unstamped-plan-command')
+    openTurn(unstamped.session)
+    unstamped.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'please plan the migration' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    const unstampedSteer = vi.fn()
+    ;(unstamped as unknown as { steer: typeof unstampedSteer }).steer = unstampedSteer
+    await ctx.commands.execute(unstamped, '/plan draft the migration', signal)
+    expect(unstampedSteer).toHaveBeenCalledExactlyOnceWith({
+      id: expect.any(String) as unknown,
+      role: 'user',
+      content: [{ type: 'text', text: 'draft the migration' }],
+      source: { kind: 'user' },
+    })
+
+    // No open turn at all: fails closed to a bare source, never throws.
+    const idle = await agentWithSession(ctx, 'idle-plan-triggering-command')
+    const idleSteer = vi.fn()
+    ;(idle as unknown as { steer: typeof idleSteer }).steer = idleSteer
+    await expect(ctx.commands.execute(idle, '/plan draft the migration', signal)).resolves.toBeDefined()
+    expect(idleSteer).toHaveBeenCalledExactlyOnceWith({
+      id: expect.any(String) as unknown,
+      role: 'user',
+      content: [{ type: 'text', text: 'draft the migration' }],
+      source: { kind: 'user' },
+    })
+
+    // A turn that closed before the command ran is not "open" either, even
+    // though it logged a founder-stamped input: fails closed to a bare
+    // source, same as no turn at all.
+    const closed = await agentWithSession(ctx, 'closed-plan-triggering-command')
+    openTurn(closed.session)
+    closed.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'please plan the migration' }],
+      source: { kind: 'user', founder: true },
+    }), { surfaceOp: 'append' })
+    closeTurn(closed.session)
+    const closedSteer = vi.fn()
+    ;(closed as unknown as { steer: typeof closedSteer }).steer = closedSteer
+    await ctx.commands.execute(closed, '/plan draft the migration', signal)
+    expect(closedSteer).toHaveBeenCalledExactlyOnceWith({
+      id: expect.any(String) as unknown,
+      role: 'user',
+      content: [{ type: 'text', text: 'draft the migration' }],
+      source: { kind: 'user' },
+    })
+
+    // Two messages in one open turn: only the LATEST one counts, never an
+    // earlier one — a later, unstamped steer must not inherit authority from
+    // an earlier stamp, and a later stamped one is not held back by an
+    // earlier bare message.
+    const stampedThenBare = await agentWithSession(ctx, 'stamped-then-bare-plan-command')
+    openTurn(stampedThenBare.session)
+    stampedThenBare.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'first, stamped' }],
+      source: { kind: 'user', founder: true },
+    }), { surfaceOp: 'append' })
+    stampedThenBare.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'second, bare' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    const stampedThenBareSteer = vi.fn()
+    ;(stampedThenBare as unknown as { steer: typeof stampedThenBareSteer }).steer = stampedThenBareSteer
+    await ctx.commands.execute(stampedThenBare, '/plan draft the migration', signal)
+    expect(stampedThenBareSteer).toHaveBeenCalledExactlyOnceWith({
+      id: expect.any(String) as unknown,
+      role: 'user',
+      content: [{ type: 'text', text: 'draft the migration' }],
+      source: { kind: 'user' },
+    })
+
+    const bareThenStamped = await agentWithSession(ctx, 'bare-then-stamped-plan-command')
+    openTurn(bareThenStamped.session)
+    bareThenStamped.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'first, bare' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    bareThenStamped.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'second, stamped' }],
+      source: { kind: 'user', founder: true },
+    }), { surfaceOp: 'append' })
+    const bareThenStampedSteer = vi.fn()
+    ;(bareThenStamped as unknown as { steer: typeof bareThenStampedSteer }).steer = bareThenStampedSteer
+    await ctx.commands.execute(bareThenStamped, '/plan draft the migration', signal)
+    expect(bareThenStampedSteer).toHaveBeenCalledExactlyOnceWith({
+      id: expect.any(String) as unknown,
+      role: 'user',
+      content: [{ type: 'text', text: 'draft the migration' }],
+      source: { kind: 'user', founder: true },
+    })
+  })
+
   it('leaves active plan mode, cancels a pending entry, and treats inactive exit as idempotent', async () => {
     const ctx = await setup()
     await ctx.plugin(CommandRuntime)
