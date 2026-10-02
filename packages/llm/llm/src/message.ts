@@ -152,6 +152,84 @@ export function isFounderMessage(source: MessageSource): boolean {
   return source.kind === 'user' && source.founder === true
 }
 
+/**
+ * Harness-authored source `kind`s that are pure mechanical context: never the
+ * founder's own input, and never third-party content injected mid-turn.
+ * Compared as plain strings rather than literal members of the
+ * locally-declared {@link MessageSourceMap}, because `'skill-catalog'` and
+ * `'agent-instructions'` are declared by `declare module` augmentation in
+ * packages this one must not depend on (importing them back would be
+ * circular — they depend on `@deepseek-ai/dsh-llm`, not the reverse).
+ *
+ * CLOSED ON PURPOSE (sentinel ruling, 2026-10-02): a design that skipped
+ * EVERY non-`'user'` kind when picking the open turn's authority-bearing
+ * message was found unsafe, because several non-`'user'` kinds carry
+ * OUTSIDE-controlled content appended mid-turn via `agent.steer()`
+ * (`'next-step'`), and an earlier founder stamp must not persist over it:
+ *  - mailbox relay (`kind: 'mailbox', form: 'relay'`,
+ *    `packages/mailbox/bridge/src/delivery.ts:187-193`, delivered via
+ *    `agent.steer()` at `packages/mailbox/bridge/src/index.ts:975-990`).
+ *  - subagent settlement/report (`kind: 'subagent-settled'` /
+ *    `'subagent-report'`, `packages/subagent/subagent/src/continuation.ts:
+ *    1443-1479`, `parent.steer(message)` when the parent is busy).
+ * A bare `kind: 'plugin'` is ALSO not safe to skip on `kind` alone — hook
+ * steering uses it too (`packages/hooks/hooks-claude-code/src/index.ts:292`,
+ * `packages/hooks/hooks-codex/src/index.ts:268`), so the one `'plugin'`
+ * source that IS mechanical (the runtime-context snapshot) is recognized
+ * below by its exact plugin id, never by `kind` alone.
+ *
+ * The allowlist is exactly these two `kind`s and nothing else:
+ *  - `'skill-catalog'` — the pre-step skill-catalog waterfall
+ *    (`packages/skill/tool-skill/src/index.ts:247-305`).
+ *  - `'agent-instructions'` — pre-step workspace-instruction reconciliation
+ *    (`packages/context/agent-instructions/src/state.ts:81-85`).
+ */
+const MECHANICAL_CONTEXT_SOURCE_KINDS: ReadonlySet<string> = new Set(['skill-catalog', 'agent-instructions'])
+
+/**
+ * Plugin id of the one `kind: 'plugin'` source that is also mechanical
+ * context: the runtime-context snapshot
+ * (`packages/core/agent-loop/src/runtime-context.ts:9-15,64-73`). See
+ * {@link MECHANICAL_CONTEXT_SOURCE_KINDS}'s doc comment for why a bare
+ * `kind: 'plugin'` is not, by itself, safe to treat as mechanical.
+ */
+const RUNTIME_CONTEXT_SNAPSHOT_PLUGIN = '@deepseek-ai/dsh-system-prompt'
+
+/**
+ * Whether a message source is pure mechanical harness context, safe to skip
+ * when selecting the message that carries founder authority (see
+ * {@link selectFounderAuthorityMessage}) — never the founder's own input and
+ * never third-party content. The allowlist is closed on purpose; see
+ * {@link MECHANICAL_CONTEXT_SOURCE_KINDS}'s doc comment for the full
+ * rationale and the sentinel ruling that produced it.
+ * @param source - the message source to test.
+ * @returns true only for the runtime-context snapshot, the skill catalog, or agent-instructions reconciliation.
+ */
+export function isMechanicalContextSource(source: MessageSource): boolean {
+  return MECHANICAL_CONTEXT_SOURCE_KINDS.has(source.kind)
+    || (source.kind === 'plugin' && source.plugin === RUNTIME_CONTEXT_SNAPSHOT_PLUGIN)
+}
+
+/**
+ * The open turn's authority-bearing message: the last of `messages` whose
+ * source is not {@link isMechanicalContextSource}. Shared selection behind
+ * the founder-authority check in `@deepseek-ai/dsh-system-prompt`'s
+ * `openTurnIsFounderStamped`, `@deepseek-ai/dsh-tool-goal`'s
+ * `hasDirectHumanInput`, and `@deepseek-ai/dsh-plan-mode`'s
+ * `openTurnIsFounderStamped` — each re-derives its own open-turn window
+ * locally (to avoid depending on one another), then hands the ordered
+ * `user/message` payloads of that window to this one shared selection, and
+ * calls {@link isFounderMessage} on the result.
+ * @param messages - candidate messages, in log order (oldest first).
+ * @returns the last non-mechanical message, or `undefined` when every
+ *   candidate (including an empty list) is mechanical.
+ */
+export function selectFounderAuthorityMessage<M extends { readonly source: MessageSource }>(
+  messages: readonly M[],
+): M | undefined {
+  return messages.filter(message => !isMechanicalContextSource(message.source)).at(-1)
+}
+
 /** One immutable message representation shared by delivery, durable history, and model requests. */
 export interface Message {
   /** Stable identity preserved across every representation boundary. */

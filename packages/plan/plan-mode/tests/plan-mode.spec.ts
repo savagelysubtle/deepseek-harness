@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { createUserMessage, CallId } from '@deepseek-ai/dsh-llm'
+import type { MessageSource } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { RUN_CODE_NAME, defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import { Session, SessionId, type UserMessage } from '@deepseek-ai/dsh-session'
@@ -13,6 +14,35 @@ import CommandRuntime from '@deepseek-ai/dsh-commands'
 import { CodeRuntime, type CodeRunRequest, type CodeRunResult } from '@deepseek-ai/dsh-code-runtime'
 import PlanModeController, { EXIT_PLAN_MODE, foldPlanMode, resolveConfig } from '../src/index.ts'
 import type { PlanModeConfig } from '../src/index.ts'
+
+/**
+ * Minimal real-shaped `MailboxRelaySource` / `SubagentSettledMessageSource`
+ * literals (`packages/mailbox/mailbox/src/source.ts:19-50,82-88`,
+ * `packages/subagent/subagent/src/continuation.ts:82-96`). Both augmenting
+ * packages are already part of this repo's single `tsc -b tsconfig.host.json`
+ * program (every package's `tests/**` is swept into that one program by
+ * `tsconfig.host.json`'s own `include`), so their real `MessageSourceMap`
+ * merges are already visible here — no local `declare module` is needed, or
+ * safe: a locally-redeclared member with a DIFFERENT type than the real one
+ * is a duplicate-declaration error in that shared program, not a shadow.
+ * Each source's branded id field (`MailboxAddress`/`MailboxMessageId`,
+ * `SessionId`) cannot be minted here without adding `@deepseek-ai/dsh-mailbox`
+ * / `@deepseek-ai/dsh-subagent` as a dependency of this package purely for a
+ * test fixture, so the boundary cast below bridges only that nominal brand —
+ * every field name and plain-string value is the real shape.
+ */
+function mailboxRelaySource(): MessageSource {
+  return {
+    kind: 'mailbox', form: 'relay', address: 'addr', from: 'sender', messageId: 'msg-1',
+  } as unknown as MessageSource
+}
+
+/** See {@link mailboxRelaySource}'s doc comment. */
+function subagentSettledSource(): MessageSource {
+  return {
+    kind: 'subagent-settled', form: 'notice', summary: 'settled', senderSessionId: 'child-1',
+  } as unknown as MessageSource
+}
 
 const TEST_PLAN_SECTION = 'Test plan mode instructions.'
 const PLAN_CONFIG = { section: TEST_PLAN_SECTION } satisfies PlanModeConfig
@@ -708,6 +738,126 @@ describe('/plan', () => {
       role: 'user',
       content: [{ type: 'text', text: 'draft the migration' }],
       source: { kind: 'user', founder: true },
+    })
+  })
+
+  it('copies the founder stamp even when a plugin-sourced runtime-context snapshot follows the stamped message (SWD-125)', async () => {
+    const ctx = await setup()
+    await ctx.plugin(CommandRuntime)
+    await new Promise(resolve => setImmediate(resolve))
+    const signal = new AbortController().signal
+
+    // Exactly what the agent loop appends immediately after the human's own
+    // message within the same step (packages/core/agent-loop/src/agent.ts,
+    // RuntimeContextProjection#project): a plugin-sourced message that can
+    // never carry `founder`. It must not shadow the stamped human message.
+    const stampedThenSnapshot = await agentWithSession(ctx, 'stamped-then-snapshot-plan-command')
+    openTurn(stampedThenSnapshot.session)
+    stampedThenSnapshot.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'please plan the migration' }],
+      source: { kind: 'user', founder: true },
+    }), { surfaceOp: 'append' })
+    stampedThenSnapshot.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'Current runtime context: ...' }],
+      source: {
+        kind: 'plugin',
+        plugin: '@deepseek-ai/dsh-system-prompt',
+        form: 'snapshot',
+        sections: [{ name: 'test-section', text: 'context' }],
+      },
+    }), { surfaceOp: 'append' })
+    const stampedThenSnapshotSteer = vi.fn()
+    ;(stampedThenSnapshot as unknown as { steer: typeof stampedThenSnapshotSteer }).steer = stampedThenSnapshotSteer
+    await ctx.commands.execute(stampedThenSnapshot, '/plan draft the migration', signal)
+    expect(stampedThenSnapshotSteer).toHaveBeenCalledExactlyOnceWith({
+      id: expect.any(String) as unknown,
+      role: 'user',
+      content: [{ type: 'text', text: 'draft the migration' }],
+      source: { kind: 'user', founder: true },
+    })
+
+    // Bare triggering message with a trailing snapshot: still bare — the
+    // snapshot carries no authority of its own to leak forward either.
+    const bareThenSnapshot = await agentWithSession(ctx, 'bare-then-snapshot-plan-command')
+    openTurn(bareThenSnapshot.session)
+    bareThenSnapshot.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'please plan the migration' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    bareThenSnapshot.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'Current runtime context: ...' }],
+      source: {
+        kind: 'plugin',
+        plugin: '@deepseek-ai/dsh-system-prompt',
+        form: 'snapshot',
+        sections: [{ name: 'test-section', text: 'context' }],
+      },
+    }), { surfaceOp: 'append' })
+    const bareThenSnapshotSteer = vi.fn()
+    ;(bareThenSnapshot as unknown as { steer: typeof bareThenSnapshotSteer }).steer = bareThenSnapshotSteer
+    await ctx.commands.execute(bareThenSnapshot, '/plan draft the migration', signal)
+    expect(bareThenSnapshotSteer).toHaveBeenCalledExactlyOnceWith({
+      id: expect.any(String) as unknown,
+      role: 'user',
+      content: [{ type: 'text', text: 'draft the migration' }],
+      source: { kind: 'user' },
+    })
+  })
+
+  it('does NOT copy the founder stamp when a mailbox relay (outside-controlled content) follows '
+    + 'the stamped triggering message — mailbox is not on the closed mechanical-context allowlist, '
+    + 'so it counts as the latest message and denies (sentinel ruling, 2026-10-02)', async () => {
+    const ctx = await setup()
+    await ctx.plugin(CommandRuntime)
+    await new Promise(resolve => setImmediate(resolve))
+    const signal = new AbortController().signal
+
+    const stampedThenMailbox = await agentWithSession(ctx, 'stamped-then-mailbox-plan-command')
+    openTurn(stampedThenMailbox.session)
+    stampedThenMailbox.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'please plan the migration' }],
+      source: { kind: 'user', founder: true },
+    }), { surfaceOp: 'append' })
+    stampedThenMailbox.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'mail from outside' }],
+      source: mailboxRelaySource(),
+    }), { surfaceOp: 'append' })
+    const stampedThenMailboxSteer = vi.fn()
+    ;(stampedThenMailbox as unknown as { steer: typeof stampedThenMailboxSteer }).steer = stampedThenMailboxSteer
+    await ctx.commands.execute(stampedThenMailbox, '/plan draft the migration', signal)
+    expect(stampedThenMailboxSteer).toHaveBeenCalledExactlyOnceWith({
+      id: expect.any(String) as unknown,
+      role: 'user',
+      content: [{ type: 'text', text: 'draft the migration' }],
+      source: { kind: 'user' },
+    })
+  })
+
+  it('does NOT copy the founder stamp when a subagent-settled notice follows the stamped '
+    + 'triggering message', async () => {
+    const ctx = await setup()
+    await ctx.plugin(CommandRuntime)
+    await new Promise(resolve => setImmediate(resolve))
+    const signal = new AbortController().signal
+
+    const stampedThenSettled = await agentWithSession(ctx, 'stamped-then-settled-plan-command')
+    openTurn(stampedThenSettled.session)
+    stampedThenSettled.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'please plan the migration' }],
+      source: { kind: 'user', founder: true },
+    }), { surfaceOp: 'append' })
+    stampedThenSettled.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'It left no closing message.' }],
+      source: subagentSettledSource(),
+    }), { surfaceOp: 'append' })
+    const stampedThenSettledSteer = vi.fn()
+    ;(stampedThenSettled as unknown as { steer: typeof stampedThenSettledSteer }).steer = stampedThenSettledSteer
+    await ctx.commands.execute(stampedThenSettled, '/plan draft the migration', signal)
+    expect(stampedThenSettledSteer).toHaveBeenCalledExactlyOnceWith({
+      id: expect.any(String) as unknown,
+      role: 'user',
+      content: [{ type: 'text', text: 'draft the migration' }],
+      source: { kind: 'user' },
     })
   })
 
