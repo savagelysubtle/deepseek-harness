@@ -8,7 +8,8 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { AnonymousEntries, NamedEntries, ScopedLayers, scopeTarget } from '@deepseek-ai/dsh-scope'
 import type { ScopeKey, ScopeLayer, Scoped } from '@deepseek-ai/dsh-scope'
-import type { ContextSnapshotSection, ToolSchema } from '@deepseek-ai/dsh-llm'
+import { boundContextSummary, isFounderMessage } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, ContextSnapshotSection, Message, MessageSource, ToolSchema } from '@deepseek-ai/dsh-llm'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -284,6 +285,236 @@ function compareToolNames(a: ToolSchema, b: ToolSchema): number {
   return a.name < b.name ? -1 : a.name > b.name ? 1 : 0
 }
 
+// ---- `founder:context` section (SWD-125) ----
+//
+// Renders two facts about `MessageSourceMap.user.founder`
+// (`@deepseek-ai/dsh-llm`'s `isFounderMessage`) for the model: whether the
+// CURRENT open turn's input is the founder's own, and which of the last few
+// history turns were. Both are derived strictly from `source.founder` —
+// never a content-pipeline marker, never a flag.
+//
+// `packages/core/agent` and `packages/core/session` both depend on
+// `@deepseek-ai/dsh-system-prompt` (agent merges `agent`/`scope` into
+// `AssembleContext` by module augmentation — see
+// `packages/core/agent/src/runtime-types.ts`), so this package importing
+// either back would be circular. `AssembleContext.agent`'s real `Agent` type
+// is therefore invisible inside this file's own isolated project build; the
+// helpers below read it through a narrow structural view naming only the
+// fields this section touches, typed with the REAL `Message`/`MessageSource`
+// shapes from `@deepseek-ai/dsh-llm` (already a dependency here) wherever
+// those are what actually flows through at runtime. This mirrors how
+// `packages/plan/plan-mode/src/index.ts`'s `openTurnIsFounderStamped` and
+// `packages/goal/tool-goal/src/authority.ts`'s `openTurn` avoid depending on
+// each other: re-derive the open-turn window locally rather than import it.
+
+/**
+ * The founder-stamp-relevant fields of one logged session event. Every real
+ * `SessionEvent` other than these three `type`s is irrelevant to this
+ * section and simply matches none of the checks below — the duck-typed cast
+ * in {@link founderContextAgent} is therefore safe even though it is not a
+ * literal subtype of the real (invisible here) `SessionEvent` union.
+ */
+type FounderSessionEvent =
+  | { readonly type: 'turn/start' }
+  | { readonly type: 'turn/end' }
+  | { readonly type: 'user/message'; readonly data: { readonly source: MessageSource } }
+
+/** The structural slice of `Session` this section reads off `context.agent`. */
+interface FounderContextSession {
+  readonly events: readonly FounderSessionEvent[]
+  deriveMessages(): readonly Message[]
+}
+
+/** The structural slice of `Agent` this section reads off `context.agent`. */
+interface FounderContextAgent {
+  readonly session: FounderContextSession
+}
+
+/**
+ * Read `context.agent` through the structural view above (see the section
+ * header comment for why the real `Agent` type cannot be named here).
+ * @param context - the assembly's {@link AssembleContext}.
+ * @returns the agent, or `undefined` for an agent-less assembly (e.g. a diagnostic read).
+ */
+function founderContextAgent(context: AssembleContext): FounderContextAgent | undefined {
+  return (context as AssembleContext & { agent?: FounderContextAgent }).agent
+}
+
+/** Cap on how many founder-stamped history turns {@link founderHistoryLines} lists. */
+const FOUNDER_HISTORY_LIMIT = 5
+
+/**
+ * Whether the currently open turn's most recent `user/message` is
+ * founder-stamped (see {@link isFounderMessage}). Mirrors `openTurn` in
+ * `packages/goal/tool-goal/src/authority.ts` and `openTurnIsFounderStamped`
+ * in `packages/plan/plan-mode/src/index.ts`: only the MOST RECENT user
+ * message of the open turn counts, never an earlier one in the same turn —
+ * a later, unstamped steer must not inherit an earlier stamped message's
+ * authority. Unlike the goal tools' own `openTurn`, a missing open turn (a
+ * `turn/end` reached before any `turn/start`, or no boundary at all) fails
+ * closed to `false` instead of throwing: this section must render for
+ * assemblies with no open turn at all, such as between turns.
+ * @param events - the session log, or any prefix of it.
+ * @returns whether the open turn's most recent user message is the founder's own.
+ */
+function openTurnIsFounderStamped(events: readonly FounderSessionEvent[]): boolean {
+  const latest = latestOpenTurnUserMessage(events)
+  return latest !== undefined && isFounderMessage(latest.data.source)
+}
+
+/**
+ * Whether the currently open turn carries ANY `user/message` at all,
+ * stamped or not. When true, that most recent user turn is "the current
+ * input" — {@link openTurnIsFounderStamped} already decides whether it gets
+ * the fixed notice, and {@link founderHistoryLines} must not ALSO list it as
+ * history (the duplication the ticket's build review flagged): the same
+ * turn would otherwise appear both as the notice and as the list's own most
+ * recent bullet.
+ * @param events - the session log, or any prefix of it.
+ * @returns whether the open turn has a most recent `user/message` (any source).
+ */
+function openTurnHasUserMessage(events: readonly FounderSessionEvent[]): boolean {
+  return latestOpenTurnUserMessage(events) !== undefined
+}
+
+/**
+ * The open turn's most recent `user/message` event, or `undefined` when
+ * there is no open turn or it carries none. Shared walk behind
+ * {@link openTurnIsFounderStamped} and {@link openTurnHasUserMessage} so
+ * both apply the identical "most recent of the open turn" rule
+ * (`packages/goal/tool-goal/src/authority.ts`'s `openTurn` /
+ * `packages/plan/plan-mode/src/index.ts`'s `openTurnIsFounderStamped`): only
+ * the MOST RECENT user message of the open turn counts, never an earlier
+ * one in the same turn. A missing open turn (a `turn/end` reached before any
+ * `turn/start`, or no boundary at all) fails closed to `undefined` rather
+ * than throwing: this section must render for assemblies with no open turn
+ * at all, such as between turns.
+ * @param events - the session log, or any prefix of it.
+ * @returns the open turn's most recent `user/message` event, or `undefined`.
+ */
+function latestOpenTurnUserMessage(
+  events: readonly FounderSessionEvent[],
+): Extract<FounderSessionEvent, { type: 'user/message' }> | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const boundary = events[index]
+    if (boundary?.type === 'turn/end') return undefined
+    if (boundary?.type === 'turn/start') {
+      return events.slice(index + 1)
+        .filter((event): event is Extract<FounderSessionEvent, { type: 'user/message' }> => event.type === 'user/message')
+        .at(-1)
+    }
+  }
+  return undefined
+}
+
+/**
+ * Concatenate a message's text blocks in order. Non-text blocks (images,
+ * tool calls/results) contribute nothing to the excerpt.
+ * @param content - the message's content blocks.
+ * @returns the joined text, possibly empty.
+ */
+function textOf(content: readonly ContentBlock[]): string {
+  return content
+    .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
+    .map(block => block.text)
+    .join('\n')
+}
+
+/**
+ * Collapse any run of whitespace — including newlines — to a single space
+ * and trim the ends. A founder message can itself contain blank lines or a
+ * markdown list; without this, quoting it verbatim in {@link founderHistoryLines}
+ * would render as extra bullet-like lines inside the rendered list instead
+ * of one bounded excerpt.
+ * @param text - raw excerpt text.
+ * @returns the same text with internal whitespace runs collapsed to one space.
+ */
+function collapseWhitespace(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * The human-typed subset of derived messages: `role: 'user'` whose source is
+ * ALSO `kind: 'user'` — this excludes tool-result messages and
+ * plugin-injected notices (e.g. plan-mode's mode-switch narration), which
+ * are `role: 'user'` too but were never typed by anyone.
+ * @param messages - `Session.deriveMessages()`'s output, or any subset of it.
+ * @returns the messages a human actually typed.
+ */
+function userTurns(messages: readonly Message[]): Message[] {
+  return messages.filter(message => message.role === 'user' && message.source.kind === 'user')
+}
+
+/**
+ * Render the most recent {@link FOUNDER_HISTORY_LIMIT} founder-stamped EARLIER
+ * user turns still in context, oldest first — the same chronological order
+ * the rest of the transcript already reads in. A turn a compaction removed
+ * is correctly absent: `messages` is `Session.deriveMessages()`'s
+ * post-compaction projection, so a shadowed node never reaches this filter.
+ *
+ * "Earlier" excludes the single most recent user turn when `excludeCurrent`
+ * is true (the open turn has a `user/message` of its own — see
+ * {@link openTurnHasUserMessage}): that turn is already "the current input"
+ * the fixed notice covers, stamped or not, and must not also appear as this
+ * list's own most recent bullet. The `N of M` denominator is unaffected —
+ * `M` (`turns.length`) still counts every user turn in context, including
+ * the excluded current one, so a turn's position number stays stable
+ * whether or not it ends up excluded from the rendered list.
+ * @param messages - `agent.session.deriveMessages()`.
+ * @param excludeCurrent - whether to drop the single most recent user turn from the list.
+ * @returns one rendered line per recent founder-stamped earlier turn, oldest first.
+ */
+function founderHistoryLines(messages: readonly Message[], excludeCurrent: boolean): string[] {
+  const turns = userTurns(messages)
+  const currentIndex = excludeCurrent ? turns.length - 1 : -1
+  const founderPositions: number[] = []
+  turns.forEach((message, index) => {
+    if (index !== currentIndex && isFounderMessage(message.source)) founderPositions.push(index)
+  })
+  return founderPositions.slice(-FOUNDER_HISTORY_LIMIT).map((index) => {
+    // The index came from turns.forEach() above, so it is always in range.
+    // oxlint-disable-next-line typescript/no-non-null-assertion
+    const excerpt = boundContextSummary(collapseWhitespace(textOf(turns[index]!.content)))
+    return `- turn ${index + 1} of ${turns.length} user turns in context: "${excerpt}"`
+  })
+}
+
+/** Fixed notice for a founder-stamped current turn (see {@link openTurnIsFounderStamped}). */
+const FOUNDER_CURRENT_TURN_NOTICE = 'The current input is the founder\'s own, typed directly at this machine — '
+  + 'not peer or relay traffic. If sent via steer it already overrides what was running; treat it as already '
+  + 'confirmed, including for destructive action.'
+
+/** Introductory line for the rendered history list (see {@link founderHistoryLines}). */
+const FOUNDER_HISTORY_HEADER = 'Earlier in this context, these user turns were also the founder\'s own, '
+  + 'typed directly at this machine (not peer or relay traffic):'
+
+/**
+ * `founder:context`'s section text: the current-turn notice, the capped
+ * history list, both, or neither — computed strictly from
+ * `MessageSourceMap.user.founder` via {@link isFounderMessage}. An agent-less
+ * assembly (no turn-driving agent at all, e.g. a diagnostic read) renders
+ * nothing rather than throwing. The empty-string return suppresses the
+ * section: {@link renderPrompt} drops any section whose resolved text has
+ * zero length, and neither layer renders a header of its own when its list
+ * is empty, so there is nothing else to suppress.
+ * @param context - the assembly's {@link AssembleContext}.
+ * @returns the section text, or `''` when neither layer has anything to say.
+ */
+function founderContextSectionText(context: AssembleContext): string {
+  const agent = founderContextAgent(context)
+  if (agent === undefined) return ''
+  const parts: string[] = []
+  if (openTurnIsFounderStamped(agent.session.events)) {
+    parts.push(FOUNDER_CURRENT_TURN_NOTICE)
+  }
+  const excludeCurrent = openTurnHasUserMessage(agent.session.events)
+  const historyLines = founderHistoryLines(agent.session.deriveMessages(), excludeCurrent)
+  if (historyLines.length > 0) {
+    parts.push(`${FOUNDER_HISTORY_HEADER}\n${historyLines.join('\n')}`)
+  }
+  return parts.join('\n\n')
+}
+
 /** Plugin config: the deployment-authored fragment of the system prompt (see {@link Config.persona} for its contract). */
 export interface Config {
   /** Include the fixed DeepSeek Harness identity before the deployment persona (default true). */
@@ -482,6 +713,17 @@ export class SystemPrompt extends Service {
       order: PERSONA_ORDER,
       // The fallback narrows the optional input type; the schema already defaults it.
       text: config.persona ?? '',
+    })
+    // Unconditional (unlike harness:identity, there is no deployment config
+    // to turn this off): `app-boot`'s harness:source sits at -99 and
+    // web-app's app:web-surface at -98 (both registered by packages this one
+    // cannot depend on — see the section's own header comment above), so
+    // -98.5 is the nearest free slot between them. `SystemPrompt.section`
+    // only requires `order` to be finite (see `section()`), not an integer.
+    this.section({
+      name: 'founder:context',
+      order: -98.5,
+      text: founderContextSectionText,
     })
     // The current-date-and-time block moved off the system prompt (SWD-113):
     // it now rides as `@deepseek-ai/dsh-agent-loop`'s unconditional per-request
