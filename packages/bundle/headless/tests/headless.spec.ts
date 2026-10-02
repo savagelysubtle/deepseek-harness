@@ -178,6 +178,19 @@ describe('headless runner', () => {
     await test.ctx.fiber.dispose()
   })
 
+  it('stamps the appended user message as the founder\'s own (SWD-125: no listening socket, local operator by construction)', async () => {
+    let delivered: UserMessage | undefined
+    const test = await bench({
+      afterPrompt(session, message) {
+        delivered = message
+        appendTurn(session, 1, message, 'ack', true)
+      },
+    })
+    await test.run()
+    expect(delivered?.source).toEqual({ kind: 'user', founder: true })
+    await test.ctx.fiber.dispose()
+  })
+
   it('waits for asynchronously appended events instead of racing Agent idleness', async () => {
     const test = await bench({
       afterPrompt: async (session, message) => {

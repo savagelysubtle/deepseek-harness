@@ -396,6 +396,12 @@ export interface SessionsApi {
    * the Host validates, canonicalizes, and records it on that exact user message. Omission remains
    * valid for non-browser callers. Session-backed subagents reject with `agent-busy` and use
    * `subagent.prompt`.
+   *
+   * `founderStamped` reports whether the handler minted `founder: true` on the
+   * durable `user/message` source for this prompt — true only when the raw TCP
+   * peer was independently proven loopback (`request.peerIsLoopback === true`),
+   * never derived from payload, header, config, or env var. The client's
+   * on-screen "not founder-stamped" indicator reads this field directly.
    */
   prompt(request: RpcRequest<{
     sessionId: SessionId
@@ -403,7 +409,7 @@ export interface SessionsApi {
     content: PromptContentPart[]
     clientTimeZone?: string
   }>):
-  Promise<RpcResponse<{ accepted: true; command?: { kind: 'success'; text?: string } }>>
+  Promise<RpcResponse<{ accepted: true; command?: { kind: 'success'; text?: string }; founderStamped: boolean }>>
 
   /** Reads one durable image after proving that this session's log references its id. */
   attachment(request: RpcRequest<{ sessionId: SessionId; attachmentId: AttachmentIdType }>):
@@ -477,10 +483,16 @@ export interface SessionsApi {
    * such failure is joined into `result: { failed }`, mirroring
    * `StopDescendantsResult`'s precedent so a partial broadcast can never
    * type-check as a clean send.
+   *
+   * `founderStamped` is one decision for the whole broadcast, not per root:
+   * true iff the handler minted `founder: true` on every root's message
+   * source, which happens only when the raw TCP peer was independently
+   * proven loopback (`request.peerIsLoopback === true`).
    */
   sendAll(request: RpcRequest<{ content: PromptContentPart[] }>): Promise<RpcResponse<{
     sentCount: number
     result: SendAllResult
+    founderStamped: boolean
   }>>
 
 }

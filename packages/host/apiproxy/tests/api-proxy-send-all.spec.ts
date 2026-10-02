@@ -105,7 +105,10 @@ describe('session.sendAll', () => {
     expect(delivered.content).toEqual([{ type: 'text', text: 'stand down' }])
     expect(response.result).toEqual({
       ok: true,
-      value: { sentCount: 2, result: 'ok' },
+      // This bench's `request()` never sets peerIsLoopback, so the broadcast
+      // is unstamped (SWD-125 fails closed) — the loopback-gated case is
+      // covered by api-proxy-founder-stamp.spec.ts.
+      value: { sentCount: 2, result: 'ok', founderStamped: false },
     })
   })
 
@@ -114,7 +117,7 @@ describe('session.sendAll', () => {
     const response = await api.sessions.sendAll(request({ content: [{ type: 'text', text: 'hi' }] }))
     expect(response.result).toEqual({
       ok: true,
-      value: { sentCount: 0, result: 'ok' },
+      value: { sentCount: 0, result: 'ok', founderStamped: false },
     })
   })
 
@@ -133,6 +136,7 @@ describe('session.sendAll', () => {
       value: {
         sentCount: 1,
         result: { failed: 'top-disposing: agent "top-disposing": send refused, agent is disposed' },
+        founderStamped: false,
       },
     })
   })

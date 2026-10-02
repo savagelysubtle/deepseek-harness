@@ -2916,17 +2916,25 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             details: { value: clientTimeZone },
           })
         }
-        const resolved = await turnAgentFor<{ accepted: true }>(request, sessionId)
+        const resolved = await turnAgentFor<{ accepted: true; founderStamped: boolean }>(request, sessionId)
         if ('refused' in resolved) return resolved.refused
         const agent = resolved.agent
+        // Founder stamp minted ONLY when the raw TCP peer was independently
+        // proven loopback (request.peerIsLoopback, set exclusively by
+        // handleUnary from the real socket) — never from a payload field,
+        // header, config, or env var. founderStamped mirrors that mint
+        // decision back to the client as the hook for its on-screen
+        // "not founder-stamped" indicator.
+        const founderStamped = request.peerIsLoopback === true
         // Request identity and optional browser zone ride the exact durable user message.
         const source: MessageSource = {
           kind: 'user',
+          ...(founderStamped ? { founder: true as const } : {}),
           rpcId: request.rpcId,
           ...(canonicalTimeZone === undefined ? {} : { clientTimeZone: canonicalTimeZone }),
         }
         const hasImage = content.some(part => part.type === 'image')
-        const admit = async (): Promise<RpcResponse<{ accepted: true }>> => {
+        const admit = async (): Promise<RpcResponse<{ accepted: true; founderStamped: boolean }>> => {
           try {
             if (hasImage) {
               const current = selectionFor(agent).current
@@ -2957,7 +2965,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
               details: { reason: String(error) },
             })
           }
-          return ok(request, { accepted: true as const })
+          return ok(request, { accepted: true as const, founderStamped })
         }
         return hasImage ? serializeImageAdmission(agent, admit) : admit()
       },
@@ -3174,10 +3182,20 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         // broadcast from reaching every other seat, and must never be
         // silently folded into a bare success either — a partial send that
         // reports "sent" is exactly the defect this epic exists to remove.
+        // One founder-stamp decision for the whole broadcast (not per root):
+        // minted only when the raw TCP peer was independently proven
+        // loopback (request.peerIsLoopback, set exclusively by handleUnary
+        // from the real socket) — never from a payload field, header,
+        // config, or env var.
+        const founderStamped = request.peerIsLoopback === true
         let sentCount = 0
         const failures: string[] = []
         for (const agent of roots) {
-          const source: MessageSource = { kind: 'user', rpcId: request.rpcId }
+          const source: MessageSource = {
+            kind: 'user',
+            ...(founderStamped ? { founder: true as const } : {}),
+            rpcId: request.rpcId,
+          }
           try {
             agent.steer(createUserMessage({ content: durable, source }))
             sentCount += 1
@@ -3188,6 +3206,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         return ok(request, {
           sentCount,
           result: failures.length === 0 ? 'ok' as const : { failed: failures.join('; ') },
+          founderStamped,
         })
       },
     },

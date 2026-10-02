@@ -305,13 +305,20 @@ export const sessionPromptRequestSchema = z.object({
   clientTimeZone: z.string().optional(),
 }) as unknown as z.ZodType<RequestPayload<'session.prompt'>>
 
-/** session.prompt response value (the command slot appears only when the prompt dispatched a slash command). */
+/**
+ * session.prompt response value (the command slot appears only when the prompt dispatched a
+ * slash command). `founderStamped` (SWD-125) reports whether the host minted `founder: true` on
+ * the durable source for this prompt — required, never optional, so a stale server that predates
+ * the field fails this client-side parse loudly instead of the client silently treating every
+ * prompt as unstamped.
+ */
 export const sessionPromptValueSchema = z.object({
   accepted: z.literal(true),
   command: z.object({
     kind: z.literal('success'),
     text: z.string().optional(),
   }).optional(),
+  founderStamped: z.boolean(),
 }) satisfies z.ZodType<Wire<ResponseValue<'session.prompt'>>>
 
 /** Opaque attachment id after string-shape validation. */
@@ -402,8 +409,13 @@ export const sessionSendAllRequestSchema = z.object({
   content: z.array(promptContentPartSchema),
 }) satisfies z.ZodType<Wire<RequestPayload<'session.sendAll'>>>
 
-/** session.sendAll response value. */
+/**
+ * session.sendAll response value. `founderStamped` (SWD-125) is one decision for the whole
+ * broadcast (see {@link SessionsApi.sendAll}) — required, never optional, for the same
+ * fail-loud-not-silent reason as {@link sessionPromptValueSchema}'s field.
+ */
 export const sessionSendAllValueSchema = z.object({
   sentCount: z.number().int().nonnegative(),
   result: sendAllResultSchema,
+  founderStamped: z.boolean(),
 }) satisfies z.ZodType<Wire<ResponseValue<'session.sendAll'>>>
