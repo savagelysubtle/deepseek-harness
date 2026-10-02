@@ -94,7 +94,7 @@ interface MessageSourceMap {
 }
 ```
 
-`isFounderMessage(source)` 与消息构造函数一起导出，判定 `kind === 'user' && founder === true`；其他每种来源种类，以及没有该字段的裸 `user` 来源，都判定为假。铸造该字段的调用点是架构层面的约束，不是密码学保证：Host 的 `session.prompt`／`session.sendAll` RPC 只在原始 TCP 对端被独立证明为回环时才设置它（[`@deepseek-ai/dsh-host-apiproxy`](../../packages/host/apiproxy/README.md)）；headless 一次性 bundle 因为没有可供对端连接的监听端口，无条件设置它（[`@deepseek-ai/dsh-headless`](../../packages/bundle/headless/README.md)）。[`@deepseek-ai/dsh-tool-goal`](../../packages/goal/tool-goal/README.md) 是主要消费方：只有被标记为创始人的消息才能授予对 goal 变更的人类直接权限。
+`isFounderMessage(source)` 与消息构造函数一起导出，判定 `kind === 'user' && founder === true`；其他每种来源种类，以及没有该字段的裸 `user` 来源，都判定为假。铸造该字段的调用点是架构层面的约束，不是密码学保证：Host 的 `session.prompt`／`session.sendAll` RPC 只在原始 TCP 对端被独立证明为回环时才设置它（[`@deepseek-ai/dsh-host-apiproxy`](../../packages/host/apiproxy/README.md)）；headless 一次性 bundle 因为没有可供对端连接的监听端口，无条件设置它（[`@deepseek-ai/dsh-headless`](../../packages/bundle/headless/README.md)）；ACP 自动化桥接因为是本地编辑器启动的 stdio 子进程、没有对端套接字可供分类，在每次 `session/prompt` 上同样无条件设置它——与 headless 的理由一致（[`@deepseek-ai/dsh-acp`](../../packages/acp/acp/README.md)）。[`@deepseek-ai/dsh-tool-goal`](../../packages/goal/tool-goal/README.md) 是主要消费方：只有被标记为创始人的消息才能授予对 goal 变更的人类直接权限。
 
 生产方标识与呈现形式相互独立。`kind` 回答「由谁产生」；可选的 `form` 回答「这是什么类型的信息」，消费方决定如何呈现。多个生产方可以共用一种 `form`，一个生产方在一次会话中也可以发出多种 `form`。这些取值描述语义，并逐个增加；未声明或无法识别的值使用文档规定的默认值，按不透明内容呈现：
 

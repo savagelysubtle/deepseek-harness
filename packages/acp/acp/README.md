@@ -17,6 +17,10 @@ This package is a transport adapter, not a UI integration or a capability seam. 
 
 Both fields are optional so another agent/request listener may supply the target. The runnable ACP composition requires both.
 
+Every `session/prompt` message is founder-stamped unconditionally (`MessageSourceMap.user.founder: true`, [`isFounderMessage()`](../../llm/llm/README.md)): the bridge runs as a stdio child of the local editor that launched it, with no peer socket for a remote caller to reach, so the operator at the keyboard is the founder by construction — the same reasoning as the headless one-shot bundle (founder ruling 2026-10-02). This is what lets an ACP session use `create_goal`/`update_goal` ([`@deepseek-ai/dsh-tool-goal`](../../goal/tool-goal/README.md)), which require direct-human authority.
+
+That premise holds only while a human-launched editor is feeding this process's stdin. It does **not** hold when the composition is spawned by [`@deepseek-ai/dsh-subagent-acp`](../../subagent/subagent-acp/README.md) or any other programmatic launcher: the stamp would then hand the child's goal tools (`create_goal`/`update_goal`/`complete`) to whatever decided to spawn it. Do not mount `@deepseek-ai/dsh-command-goal`/`@deepseek-ai/dsh-tool-goal` in a composition reachable through a non-interactive ACP launcher unless the delegating caller is itself trusted with founder authority.
+
 ## Protocol contract
 
 | Method | Behavior |
