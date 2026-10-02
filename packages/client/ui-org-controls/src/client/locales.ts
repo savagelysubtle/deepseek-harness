@@ -28,6 +28,8 @@ export type OrgControlsKey =
   | 'sendAll.result.partial'
   | 'sendAll.result.error'
   | 'sendAll.result.dismiss'
+  | 'sendAll.founderStamp.notice'
+  | 'sendAll.founderStamp.dismiss'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -61,6 +63,11 @@ export const zh: Record<OrgControlsKey, string> = {
   'sendAll.result.partial': '已发送给 {count} 个会话，但部分会话未能收到：{reason}',
   'sendAll.result.error': '全部发送失败：{reason}',
   'sendAll.result.dismiss': '关闭',
+  // Identical text to ui-conversation's composer fence (founderStamp.notice/
+  // dismiss) — duplicated rather than imported: the two packages have no
+  // shared locale mechanism, each owning its own namespace (SWD-125 step 6).
+  'sendAll.founderStamp.notice': '未加盖创始人印记：该消息未经本机回环连接到达，已作为普通输入被接受。由此产生的目标变更与确认不被视为创始人本人的操作。要以创始人身份操作，请从本机直接驱动 dsh，或通过你自己的隧道连接。',
+  'sendAll.founderStamp.dismiss': '关闭提示',
 }
 
 /** English dictionary. */
@@ -88,4 +95,6 @@ export const en: Record<OrgControlsKey, string> = {
   'sendAll.result.partial': 'Sent to {count} session(s), but some sessions did not receive it: {reason}',
   'sendAll.result.error': 'Send All failed: {reason}',
   'sendAll.result.dismiss': 'Dismiss',
+  'sendAll.founderStamp.notice': "Not founder-stamped: this message was accepted as ordinary input because it did not arrive over loopback. Goal changes and confirmations from it are not treated as the founder's own. To act as founder, drive dsh from this machine or through your own tunnel.",
+  'sendAll.founderStamp.dismiss': 'Dismiss notice',
 }

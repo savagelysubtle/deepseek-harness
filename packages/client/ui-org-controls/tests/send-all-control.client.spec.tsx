@@ -115,7 +115,9 @@ describe('SendAllControl', () => {
   })
 
   it('shows the reachable count in the compose dialog before anything is sent, excluding a cold (never-attached) top-level row', () => {
-    const onSendAll = vi.fn().mockResolvedValue({ ok: true, value: { sentCount: 2, result: 'ok' as const } })
+    const onSendAll = vi.fn().mockResolvedValue({
+      ok: true, value: { sentCount: 2, result: 'ok' as const, founderStamped: true },
+    })
     renderSendAll({ sessions: TWO_LIVE_ONE_COLD, onSendAll })
     const dialog = openCompose()
     // Compose must already name the reachable count (2), not every
@@ -128,7 +130,7 @@ describe('SendAllControl', () => {
   })
 
   it('reports a clean success and steers the exact typed content', async () => {
-    const onSendAll = vi.fn().mockResolvedValue({ ok: true, value: { sentCount: 2, result: 'ok' } })
+    const onSendAll = vi.fn().mockResolvedValue({ ok: true, value: { sentCount: 2, result: 'ok', founderStamped: true } })
     renderSendAll({ onSendAll })
     const dialog = openCompose()
     fireEvent.change(dialog.getByPlaceholderText('Type a message to send to every session…'), { target: { value: 'stand down' } })
@@ -140,7 +142,7 @@ describe('SendAllControl', () => {
   it('never folds a { failed } result into success — it surfaces as a partial-failure banner', async () => {
     const onSendAll = vi.fn().mockResolvedValue({
       ok: true,
-      value: { sentCount: 1, result: { failed: 'agent "b": send refused, agent is disposed' } },
+      value: { sentCount: 1, result: { failed: 'agent "b": send refused, agent is disposed' }, founderStamped: true },
     })
     renderSendAll({ onSendAll })
     const dialog = openCompose()
@@ -203,7 +205,9 @@ describe('SendAllControl', () => {
   })
 
   it('dismisses the result banner', async () => {
-    const onSendAll = vi.fn().mockResolvedValue({ ok: true, value: { sentCount: 2, result: 'ok' as const } })
+    const onSendAll = vi.fn().mockResolvedValue({
+      ok: true, value: { sentCount: 2, result: 'ok' as const, founderStamped: true },
+    })
     renderSendAll({ onSendAll })
     const dialog = openCompose()
     fireEvent.change(dialog.getByPlaceholderText('Type a message to send to every session…'), { target: { value: 'stand down' } })
@@ -211,5 +215,79 @@ describe('SendAllControl', () => {
     await screen.findByRole('alert')
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  describe('founder-stamp fence (SWD-125 step 6)', () => {
+    const NOTICE = /Not founder-stamped/
+    const DISMISS_LABEL = 'Dismiss notice'
+
+    /** Composes and sends on the ALREADY-rendered component — never re-renders, so repeated calls share one instance's state. */
+    async function sendOnce() {
+      const dialog = openCompose()
+      fireEvent.change(
+        dialog.getByPlaceholderText('Type a message to send to every session…'),
+        { target: { value: 'stand down' } },
+      )
+      fireEvent.click(dialog.getByRole('button', { name: 'Send All' }))
+      // The success/result banner (role="alert") always renders once the
+      // mocked broadcast resolves, regardless of founderStamped — waiting on
+      // it (rather than the founder notice's role="status", absent when true)
+      // keeps this helper valid for every founderStamped case.
+      await screen.findByRole('alert')
+    }
+
+    it('shows the not-founder-stamped notice when the broadcast resolves founderStamped: false', async () => {
+      renderSendAll({
+        onSendAll: vi.fn().mockResolvedValue({
+          ok: true, value: { sentCount: 2, result: 'ok' as const, founderStamped: false },
+        }),
+      })
+      await sendOnce()
+      expect(screen.getByText(NOTICE)).toBeTruthy()
+    })
+
+    it('shows nothing when founderStamped: true', async () => {
+      renderSendAll({
+        onSendAll: vi.fn().mockResolvedValue({
+          ok: true, value: { sentCount: 2, result: 'ok' as const, founderStamped: true },
+        }),
+      })
+      await sendOnce()
+      await screen.findByText('Sent to 2 session(s).')
+      expect(screen.queryByText(NOTICE)).toBeNull()
+    })
+
+    it('shows nothing before any broadcast has resolved', () => {
+      renderSendAll()
+      expect(screen.queryByText(NOTICE)).toBeNull()
+    })
+
+    it('dismiss hides the notice; a later unstamped broadcast on the same control shows it again', async () => {
+      renderSendAll({
+        onSendAll: vi.fn().mockResolvedValue({
+          ok: true, value: { sentCount: 2, result: 'ok' as const, founderStamped: false },
+        }),
+      })
+      await sendOnce()
+      expect(screen.getByText(NOTICE)).toBeTruthy()
+      fireEvent.click(screen.getByLabelText(DISMISS_LABEL))
+      expect(screen.queryByText(NOTICE)).toBeNull()
+      // Same boolean, but a fresh object every resolution: the dismissed
+      // instance no longer matches, so the fence reopens on the SAME
+      // mounted control — proving this is the identity check, not a remount.
+      await sendOnce()
+      expect(screen.getByText(NOTICE)).toBeTruthy()
+    })
+
+    it('surfaces alongside a successful result banner — the two facts are independent', async () => {
+      renderSendAll({
+        onSendAll: vi.fn().mockResolvedValue({
+          ok: true, value: { sentCount: 2, result: 'ok' as const, founderStamped: false },
+        }),
+      })
+      await sendOnce()
+      expect(screen.getByText('Sent to 2 session(s).')).toBeTruthy()
+      expect(screen.getByText(NOTICE)).toBeTruthy()
+    })
   })
 })

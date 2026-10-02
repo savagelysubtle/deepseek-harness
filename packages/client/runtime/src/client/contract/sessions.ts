@@ -141,8 +141,19 @@ export interface ISessions {
    * call (org-wide Send All, SWD-131) — immediately, mid-turn, never queued.
    * Never mutates the list snapshot; the caller reads `result` for whether
    * every root actually received it.
+   *
+   * `founderStamped` mirrors the host's `sessions.sendAll` RPC field
+   * (SWD-125 step 6): one decision for the whole broadcast, true iff the
+   * handler minted `founder: true` on every root's message source. The
+   * sidebar's Send All control reads it directly off this resolved value —
+   * there is no snapshot to mirror it into, since this call deliberately
+   * never touches one (see above).
    * @param content - prompt content broadcast to every live top-level session.
    * @returns the host result or a folded transport error.
    */
-  sendAll(content: PromptContentPart[]): Promise<RpcResult<{ sentCount: number; result: SendAllResult }>>
+  sendAll(content: PromptContentPart[]): Promise<RpcResult<{
+    sentCount: number
+    result: SendAllResult
+    founderStamped: boolean
+  }>>
 }

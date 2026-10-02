@@ -57,6 +57,7 @@ export function InputBar({
   const lexicon = useLexicon(s => s)
   const commandMenuOpen = useMenuLauncher(source => source === 'command')
   const promptError = useSession(s => s.promptError) ?? null
+  const founderStamped = useSession(s => s.founderStamped) ?? null
   const running = useSession(s => s.running) ?? false
   const subagent = useSession(s => s.subagent) ?? null
   const removed = useSession(s => s.removed) ?? false
@@ -86,6 +87,16 @@ export function InputBar({
     setToast({ seq: toastSeq.current, text })
   }, [])
   const dismissToast = useCallback(() => { setToast(null) }, [])
+  // On-screen "not founder-stamped" fence (SWD-125 step 6; REALITY RULES: a
+  // state that changes what the operator's input is worth must say so on
+  // screen with reason and remedy). Dismissal is tracked by the exact
+  // founderStamped object the user dismissed — Session mints a new object on
+  // every resolved prompt, even a repeated false, so a later unstamped
+  // response (new object, same boolean) compares unequal to the dismissed
+  // one and the notice reopens without any effect or seq bookkeeping.
+  const [dismissedFounderStamp, setDismissedFounderStamp] = useState<{ readonly stamped: boolean } | null>(null)
+  const showFounderNotice = founderStamped !== null && !founderStamped.stamped
+    && founderStamped !== dismissedFounderStamp
   // The deployment's image-intake limits (absent while no attachment service
   // is composed — the pre-check below then defers entirely to the host).
   const imageLimits = useProjection('imageLimits')
@@ -676,6 +687,20 @@ export function InputBar({
       {notice !== null && (
         <div className={clsx(css.notice, notice.level === 'error' && css.noticeError)} role="status">
           {notice.text}
+        </div>
+      )}
+      {showFounderNotice && (
+        <div className={css.founderNotice} role="status">
+          <IconWarningOutline16 className={css.founderNoticeIcon} />
+          <span className={css.founderNoticeText}>{t('founderStamp.notice')}</span>
+          <button
+            type="button"
+            className={css.founderNoticeDismiss}
+            aria-label={t('founderStamp.dismiss')}
+            onClick={() => { setDismissedFounderStamp(founderStamped) }}
+          >
+            <span aria-hidden="true">{'×'}</span>
+          </button>
         </div>
       )}
       {/* Trigger clicks land on the card, not the textarea: the toolbar row's

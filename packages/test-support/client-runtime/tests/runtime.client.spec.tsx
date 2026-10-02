@@ -284,10 +284,10 @@ describe('sessions', () => {
 
     const content: PromptContentPart[] = [{ type: 'text', text: 'stand down' }]
     await expect(runtime.sessions.sendAll(content))
-      .resolves.toEqual({ ok: true, value: { sentCount: 0, result: 'ok' } })
+      .resolves.toEqual({ ok: true, value: { sentCount: 0, result: 'ok', founderStamped: true } })
     runtime.sessions.stubSendAll(sent => ({ sentCount: sent.length, result: { failed: 's3' } }))
     await expect(runtime.sessions.sendAll(content))
-      .resolves.toEqual({ ok: true, value: { sentCount: 1, result: { failed: 's3' } } })
+      .resolves.toEqual({ ok: true, value: { sentCount: 1, result: { failed: 's3' }, founderStamped: true } })
 
     expect(runtime.sessions.calls).toEqual([
       { method: 'stopAll', args: [] },

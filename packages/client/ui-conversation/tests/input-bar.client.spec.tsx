@@ -43,7 +43,7 @@ function snapshotOf(overrides: Partial<ConversationSnapshot> = {}): Conversation
     nodes: [], turnTimings: new Map(), turnEnds: new Map(), partial: null, runningCalls: [],
     pending: [], queue: [], running: false, composerPhase: 'active', removed: false,
     openState: 'open', openError: null, hasMore: false, loadingOlder: false,
-    promptError: null, blank: false, subagent: null, lastAgentError: null,
+    promptError: null, blank: false, subagent: null, lastAgentError: null, founderStamped: null,
     ...overrides,
   }
 }
@@ -72,6 +72,7 @@ interface BenchOptions {
   workspacePickerOpen?: boolean
   onRequestWorkspace?: () => void
   promptError?: ConversationSnapshot['promptError']
+  founderStamped?: ConversationSnapshot['founderStamped']
   /** Authoritative queue rows served to the machine overlay (empty = none). */
   queue?: ConversationSnapshot['queue']
   /** The hub's steer-all face (empty-draft accelerated Enter). */
@@ -109,6 +110,7 @@ function bench(over?: BenchOptions) {
     removed: over?.disabled ?? false,
     promptError: over?.promptError ?? null,
     queue: over?.queue ?? [],
+    founderStamped: over?.founderStamped ?? null,
   }))
   type ShellDeps = ConstructorParameters<typeof SessionInputShell>[0]
   const shell = new SessionInputShell({
@@ -1243,6 +1245,44 @@ describe('strips and variants', () => {
     const { view, shell } = bench()
     act(() => { shell.notify('error', '命令失败了') })
     expect(view.getByText('命令失败了')).toBeTruthy()
+  })
+
+  describe('founder-stamp fence (SWD-125 step 6)', () => {
+    const NOTICE = /未加盖创始人印记/
+    const DISMISS_LABEL = '关闭提示'
+
+    it('shows the not-founder-stamped notice when the resolved prompt carries founderStamped: false', () => {
+      const { view } = bench({ founderStamped: { stamped: false } })
+      expect(view.getByText(NOTICE).closest('[role="status"]')).toBeTruthy()
+    })
+
+    it('shows nothing when the resolved prompt carries founderStamped: true', () => {
+      const { view } = bench({ founderStamped: { stamped: true } })
+      expect(view.queryByText(NOTICE)).toBeNull()
+    })
+
+    it('shows nothing before any prompt has resolved (founderStamped: null)', () => {
+      const { view } = bench()
+      expect(view.queryByText(NOTICE)).toBeNull()
+    })
+
+    it('dismiss hides the notice; a later unstamped response shows it again', () => {
+      const { view, session } = bench({ founderStamped: { stamped: false } })
+      expect(view.getByText(NOTICE)).toBeTruthy()
+      fireEvent.click(view.getByLabelText(DISMISS_LABEL))
+      expect(view.queryByText(NOTICE)).toBeNull()
+      // Same boolean value, but Session mints a new object per resolution —
+      // the dismissed instance no longer matches, so the fence reopens.
+      act(() => { session.set(snapshotOf({ founderStamped: { stamped: false } })) })
+      expect(view.getByText(NOTICE)).toBeTruthy()
+    })
+
+    it('a later stamped response clears a still-open notice', () => {
+      const { view, session } = bench({ founderStamped: { stamped: false } })
+      expect(view.getByText(NOTICE)).toBeTruthy()
+      act(() => { session.set(snapshotOf({ founderStamped: { stamped: true } })) })
+      expect(view.queryByText(NOTICE)).toBeNull()
+    })
   })
 
   it('hero variant adds the hero class and accessory row renders', () => {

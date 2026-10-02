@@ -423,7 +423,7 @@ describe('DetailsPanel Output section (search)', () => {
       nodes: [], turnTimings: new Map(), turnEnds: new Map(), partial: null, runningCalls: [],
       pending: [], queue: [], running: false, composerPhase: 'active', removed: false,
       openState: 'open', openError: null, hasMore: false, loadingOlder: false,
-      promptError: null, blank: false, subagent: null, lastAgentError: null, ...over,
+      promptError: null, blank: false, subagent: null, lastAgentError: null, founderStamped: null, ...over,
     }
   }
 

@@ -101,6 +101,8 @@ export class Session implements SessionFace {
   private removed = false
   private promptError: PromptError | null = null
   private lastAgentError: string | null = null
+  /** See {@link ConversationSnapshot.founderStamped}. */
+  private founderStamped: { readonly stamped: boolean } | null = null
   /** Live events buffered during open/resync and stitched by sequence once history lands. */
   private liveBuffer: { event: SessionEvent; view: ToolEventView | undefined }[] = []
   /** Gap repair in flight; live events detour to the buffer until the tail page lands. */
@@ -199,12 +201,19 @@ export class Session implements SessionFace {
     let result: RpcResult<{ accepted: true }>
     try {
       if (this.address === undefined) {
-        result = (await this.api.sessions.prompt({
+        const response = (await this.api.sessions.prompt({
           sessionId: this.sessionId,
           mode,
           content,
           clientTimeZone: resolvedClientTimeZone(),
         })).result
+        result = response
+        // Only the root-session path carries the fact (subagent.prompt below
+        // has no such field — a continuable child is never the founder's own
+        // direct channel; see the goal-authority hardening this ticket also
+        // shipped). A new object every resolution, win or lose the boolean's
+        // previous value, so a dismissed notice re-opens on a later false.
+        if (response.ok) this.founderStamped = { stamped: response.value.founderStamped }
       } else if (this.address.mode === 'one-shot') {
         result = {
           ok: false,
@@ -541,6 +550,15 @@ export class Session implements SessionFace {
     const same = this.address?.parentSessionId === address?.parentSessionId
       && this.address?.childSessionId === address?.childSessionId
       && this.address?.mode === address?.mode
+    // Entering subagent mode (catalog discovery reclassifies a session that
+    // was being driven as a root channel): drop a founderStamped fact set by
+    // this session's prior root-mode prompts (SWD-125 step 6 follow-up) —
+    // it described loopback origin for THIS session's own root prompts,
+    // which stop once it only accepts subagent-routed ones; a stale `false`
+    // would otherwise linger as a notice nothing can ever dismiss for real.
+    // The reverse transition (subagent -> root) leaves it alone: only a
+    // root prompt ever sets it, so there is nothing stale to clear there.
+    if (this.address === undefined && address !== undefined) this.founderStamped = null
     this.address = address
     this.parentAvailable = parentAvailable
     if (!same && this.openState !== 'cold') void this.resync()
@@ -764,6 +782,7 @@ export class Session implements SessionFace {
       promptError: this.promptError,
       blank: this.blankBit,
       lastAgentError: this.lastAgentError,
+      founderStamped: this.founderStamped,
     }
   }
 

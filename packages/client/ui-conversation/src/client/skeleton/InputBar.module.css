@@ -52,6 +52,53 @@
   color: var(--dsw-alias-state-error-primary);
 }
 
+/* Persistent "not founder-stamped" fence (SWD-125 step 6): same strip shape
+   as .notice/.noticeError, but dismissable rather than machine-owned, so it
+   carries its own row layout and close control. */
+.founderNotice {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  max-width: var(--dsh-composer-card-max-width);
+  margin-bottom: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--dsw-alias-interactive-bg-hover-danger);
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.founderNoticeIcon {
+  flex: none;
+  margin-top: 1px;
+}
+
+.founderNoticeText {
+  flex: 1 1 auto;
+}
+
+.founderNoticeDismiss {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.founderNoticeDismiss:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
 .card {
   box-sizing: border-box;
   position: relative; /* overlay anchor positioning context */

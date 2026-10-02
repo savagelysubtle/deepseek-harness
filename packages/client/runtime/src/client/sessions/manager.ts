@@ -629,7 +629,11 @@ export class SessionManager {
    * @param content - prompt content broadcast to every live top-level session.
    * @returns the host result or a folded transport error.
    */
-  async sendAll(content: PromptContentPart[]): Promise<RpcResult<{ sentCount: number; result: SendAllResult }>> {
+  async sendAll(content: PromptContentPart[]): Promise<RpcResult<{
+    sentCount: number
+    result: SendAllResult
+    founderStamped: boolean
+  }>> {
     try {
       return (await this.api.sessions.sendAll({ content })).result
     } catch (error: unknown) {
