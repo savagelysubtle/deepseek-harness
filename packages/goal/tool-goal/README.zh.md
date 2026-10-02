@@ -18,9 +18,9 @@
 
 ## 权限
 
-执行要求完全相同的活跃 `exec.agent`、其继承的 `AgentRegistry` initiator、running 状态与开放轮次。create、edit、pause 和 resume 还要求运行时根 agent（智能体）的当前轮次中存在已接受的 `{ kind: 'user' }` 消息或 steering 事件。持久 fork 谱系不会降低已恢复根 agent 的等级；活跃 subagent 所有权会降低。
+执行要求完全相同的活跃 `exec.agent`、其继承的 `AgentRegistry` initiator、running 状态与开放轮次。create、edit、pause 和 resume 还要求运行时根 agent（智能体）当前开放轮次中最新一条 `user/message` 事件被标记为创始人。持久 fork 谱系不会降低已恢复根 agent 的等级；活跃 subagent 所有权会降低。
 
-`{ kind: 'user' }` 是宿主证明。`Agent.followup()` 与 `steer()` 会在调用方省略 source 时分配该值，因此插件、调度器与其他非人类生产方必须传入自己的 source，不能继承用户权限。
+裸的 `{ kind: 'user' }` 来源本身不是证明：`Agent.followup()` 与 `steer()` 仍会在调用方省略 source 时分配该值——包括 subagent 任务投递与计划模式 `/plan` 的重新 steer——因此单凭 `kind === 'user'` 已不足以证明是人类输入。人类直接权限现在要求 `MessageSourceMap.user.founder: true`，用 [`@deepseek-ai/dsh-llm`](../../llm/llm/README.md) 的 `isFounderMessage()` 判定。该标记只由受信任的 harness 代码在被独立证明为回环的通道上铸造：Host 的 `session.prompt`／`session.sendAll` RPC 在原始 TCP 对端被证明回环时铸造（[`@deepseek-ai/dsh-host-apiproxy`](../../host/apiproxy/README.md)），headless 一次性 bundle 因为没有可供对端连接的监听端口而无条件铸造（[`@deepseek-ai/dsh-headless`](../../bundle/headless/README.md)）。只检查开放轮次最新的 `user/message`，绝不检查更早的一条：同一轮次中更晚的、未标记的一次 steer——例如一个受信任主机但非回环的浏览器调用方——不能继承更早那条已标记消息的权限。
 
 complete 与 blocked 还接受完全一致的当前 Goal Round：来源为 goal 的 `user/message`，其 id、revision 和 Round 编号与折叠后的当前 goal 相等。在达到 `blockedAfterConsecutiveRounds` 前，Goal Round 的 blocked 调用会被机械拒绝；模型判断同一条件是否确实持续，并必须在 `blocked_reason` 中说明。人类直接授权可以立即停止 goal。
 

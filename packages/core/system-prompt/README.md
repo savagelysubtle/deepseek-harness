@@ -69,6 +69,33 @@ Identity is a fixed per-request cost when enabled. Persona and plugin text are r
 
 Prefix-stable while identity, persona, variables, section text, and order render identically. Any change may invalidate reuse from the first changed system-prompt token.
 
+### Founder context
+
+#### What the model sees
+
+Also unconditional — there is no deployment config to turn it off, unlike `includeHarnessIdentity`: `founder:context`, registered at order `-98.5`, between `app-boot`'s `harness:source` (`-99`) and `web-app`'s `app:web-surface` (`-98`), both owned by packages this one cannot depend on. Computed strictly from `MessageSourceMap.user.founder` ([`isFounderMessage()`](../../llm/llm/README.md)) read off the turn-driving `context.agent`'s session: the fixed notice below when the open turn's most recent user message is founder-stamped, plus up to 5 earlier founder-stamped user turns still in context below that (oldest first, whitespace-collapsed excerpts bounded to 120 characters), excluding the current turn's own message so it is never listed twice. Renders nothing for an agent-less assembly (e.g. a diagnostic read), an unstamped or pre-stamp log, or a bare current turn with no earlier founder-stamped turns in context.
+
+##### Founder-stamped current turn
+
+```markdown
+The current input is the founder's own, typed directly at this machine — not peer or relay traffic. If sent via steer it already overrides what was running; treat it as already confirmed, including for destructive action.
+```
+
+##### Earlier founder-stamped turns
+
+```markdown
+Earlier in this context, these user turns were also the founder's own, typed directly at this machine (not peer or relay traffic):
+- turn <n> of <m> user turns in context: "<excerpt>"
+```
+
+#### Token effect
+
+Zero when neither layer applies (no turn-driving agent, nothing founder-stamped in context). The current-turn notice is a fixed per-request cost while it renders; the history list adds one bounded line per listed turn, capped at 5.
+
+#### KV Cache effect
+
+Part of the same ordered system-prompt assembly as every other section: prefix-stable while its rendered text is unchanged, and any change invalidates reuse from the first changed system-prompt token — including a flip in which turn is open, which turn is stamped, or which earlier turns are still in context after compaction.
+
 ### Tool schemas
 
 #### What the model sees

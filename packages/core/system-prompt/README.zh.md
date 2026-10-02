@@ -71,6 +71,33 @@ You are an AI agent powered by DeepSeek Harness.
 
 只要身份、persona、变量、段文本与顺序的渲染完全相同，前缀就保持稳定。任何变更都可能从第一个变化的系统提示词 token 起使复用失效。
 
+### 创始人上下文
+
+#### 模型看到的内容
+
+同样是无条件的——与 `includeHarnessIdentity` 不同，没有部署配置能关闭它：`founder:context` 注册在 `order` `-98.5`，位于 `app-boot` 的 `harness:source`（`-99`）与 `web-app` 的 `app:web-surface`（`-98`）之间，这两者都由本插件无法依赖的其他包拥有。它严格依据从驱动该轮次的 `context.agent` 的 session 中读到的 `MessageSourceMap.user.founder`（[`isFounderMessage()`](../../llm/llm/README.md)）计算：当开放轮次最新一条用户消息被标记为创始人时，给出下方的固定提示，再加上下方最多 5 条更早的、被标记为创始人的用户轮次（上下文中仍在场的、按时间从旧到新、经空白折叠并截断至 120 字符的摘录），并排除当前轮次自己的消息以避免重复列出。对无 agent 的组装（例如诊断性读取）、未被标记或早于该字段存在的日志，以及上下文中没有更早创始人轮次的裸当前轮次，它都不渲染任何内容。
+
+##### 已标记创始人的当前轮次
+
+```markdown
+The current input is the founder's own, typed directly at this machine — not peer or relay traffic. If sent via steer it already overrides what was running; treat it as already confirmed, including for destructive action.
+```
+
+##### 更早的、已标记创始人的轮次
+
+```markdown
+Earlier in this context, these user turns were also the founder's own, typed directly at this machine (not peer or relay traffic):
+- turn <n> of <m> user turns in context: "<excerpt>"
+```
+
+#### Token 影响
+
+两层都不适用时（没有驱动轮次的 agent，上下文中没有任何创始人标记）为零。当前轮次提示在渲染时是每次请求的固定成本；历史列表为每条列出的轮次增加一行，最多 5 行。
+
+#### KV Cache 影响
+
+与其他每个段一样属于同一个有序系统提示词组装：只要其渲染文本不变，前缀就保持稳定；任何变更——包括开放轮次的切换、标记状态的切换，或压缩后上下文中仍保留哪些更早轮次——都会从第一个变化的系统提示词 token 起使复用失效。
+
 ### 工具 schema
 
 #### 模型看到的内容
