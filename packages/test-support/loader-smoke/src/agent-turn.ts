@@ -59,7 +59,9 @@ export async function runFixtureTurn(ctx: Context, options: FixtureTurnOptions):
 
   const message = createUserMessage({
     content: [{ type: 'text', text: options.task }],
-    source: { kind: 'user' },
+    // Mirrors the one-shot headless bundle's own mint (packages/bundle/headless/src/index.ts):
+    // a local direct driver has no listening socket for a peer, so it is always founder-stamped.
+    source: { kind: 'user', founder: true },
   })
   let received = false
   let output = ''
