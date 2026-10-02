@@ -4,13 +4,12 @@ import SystemPrompt, { AssembleContext, PromptAssembly, formatDateTime, renderCo
 
 /**
  * Every assembly carries the plugin's own built-ins — `harness:identity`
- * (order −100), `founder:context` (order −98.5, SWD-125 — renders empty with
- * no `context.agent`, which none of these registry-mechanics tests supply),
- * and `deployment:persona` (order 0, from config). Tests about registry
- * MECHANICS strip them with {@link contributed} to stay focused on their own
- * sections; each built-in's own behavior is pinned by its own describe.
+ * (order −100) and `deployment:persona` (order 0, from config). Tests about
+ * registry MECHANICS strip them with {@link contributed} to stay focused on
+ * their own sections; each built-in's own behavior is pinned by its own
+ * describe.
  */
-const BUILT_IN = ['harness:identity', 'founder:context', 'deployment:persona']
+const BUILT_IN = ['harness:identity', 'deployment:persona']
 const IDENTITY = 'You are an AI agent powered by DeepSeek Harness.'
 function contributed(assembly: PromptAssembly): PromptAssembly['sections'] {
   return assembly.sections.filter(section => !BUILT_IN.includes(section.name))
@@ -34,7 +33,6 @@ describe('SystemPrompt', () => {
       const assembly = await ctx.systemPrompt.assemble()
       expect(assembly.sections.map(s => s.name)).toEqual([
         'harness:identity',
-        'founder:context',
         'deployment:persona',
       ])
       expect(renderPrompt(assembly)).toBe(`${IDENTITY}\n\nYou are DeepSeek Harness.`)
@@ -57,7 +55,7 @@ describe('SystemPrompt', () => {
       })
 
       const assembly = await ctx.systemPrompt.assemble()
-      expect(assembly.sections.map(section => section.name)).toEqual(['founder:context', 'deployment:persona'])
+      expect(assembly.sections.map(section => section.name)).toEqual(['deployment:persona'])
       expect(renderPrompt(assembly)).toBe('You are a helpful software engineer assistant.')
     })
 
@@ -100,8 +98,8 @@ describe('SystemPrompt', () => {
     ctx.systemPrompt.tools(() => ({ schemas: [{ name: 'echo', description: 'echo back', parameters: {} }] }))
 
     const assembly = await ctx.systemPrompt.assemble()
-    expect(assembly.sections.map(s => s.name)).toEqual(['harness:identity', 'founder:context', 'deployment:persona', 'rules', 'cwd'])
-    expect(assembly.sections.map(s => s.text)).toEqual([IDENTITY, '', 'You are DeepSeek Harness.', 'Be precise.', 'cwd: /tmp'])
+    expect(assembly.sections.map(s => s.name)).toEqual(['harness:identity', 'deployment:persona', 'rules', 'cwd'])
+    expect(assembly.sections.map(s => s.text)).toEqual([IDENTITY, 'You are DeepSeek Harness.', 'Be precise.', 'cwd: /tmp'])
     expect(assembly.contexts).toEqual([
       { name: 'earlier', text: 'context 1' },
       { name: 'later', text: 'context 2' },
@@ -279,8 +277,8 @@ describe('SystemPrompt', () => {
 
     const passed: AssembleContext = {}
     const assembly = await ctx.systemPrompt.assemble(passed)
-    expect(seen).toEqual([['harness:identity', 'founder:context', 'deployment:persona', 'base', 'from-a']])
-    expect(assembly.sections.map(s => s.name)).toEqual(['harness:identity', 'founder:context', 'deployment:persona', 'base', 'from-a'])
+    expect(seen).toEqual([['harness:identity', 'deployment:persona', 'base', 'from-a']])
+    expect(assembly.sections.map(s => s.name)).toEqual(['harness:identity', 'deployment:persona', 'base', 'from-a'])
     expect(contexts[0]).toBe(passed) // the caller's context reaches listeners
   })
 
@@ -340,7 +338,7 @@ describe('SystemPrompt', () => {
     firstParameters.properties['leak'] = { type: 'string' }
 
     const second = await ctx.systemPrompt.assemble()
-    expect(second.sections.map(section => section.name)).toEqual(['harness:identity', 'founder:context', 'deployment:persona', 'base'])
+    expect(second.sections.map(section => section.name)).toEqual(['harness:identity', 'deployment:persona', 'base'])
     expect(second.sections[0]!.text).toBe(IDENTITY)
     expect(second.contexts).toEqual([])
     expect(second.tools).toEqual([{ name: 't', description: 'tool', parameters: { type: 'object', properties: {} } }])

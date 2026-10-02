@@ -8,8 +8,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { AnonymousEntries, NamedEntries, ScopedLayers, scopeTarget } from '@deepseek-ai/dsh-scope'
 import type { ScopeKey, ScopeLayer, Scoped } from '@deepseek-ai/dsh-scope'
-import { isFounderMessage, selectFounderAuthorityMessage } from '@deepseek-ai/dsh-llm'
-import type { ContextSnapshotSection, MessageSource, ToolSchema } from '@deepseek-ai/dsh-llm'
+import type { ContextSnapshotSection, ToolSchema } from '@deepseek-ai/dsh-llm'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -285,166 +284,6 @@ function compareToolNames(a: ToolSchema, b: ToolSchema): number {
   return a.name < b.name ? -1 : a.name > b.name ? 1 : 0
 }
 
-// ---- `founder:context` section (SWD-125) ----
-//
-// Renders one fact about `MessageSourceMap.user.founder`
-// (`@deepseek-ai/dsh-llm`'s `isFounderMessage`) for the model: whether the
-// CURRENTLY OPEN turn's input is the founder's own. Derived strictly from
-// `source.founder` — never a content-pipeline marker, never a flag.
-//
-// Founder ruling 2026-10-02: this section's text is now BYTE-STABLE across
-// founder turns, by design. It previously also rendered a capped list of
-// earlier founder-stamped turns still in context ("Earlier in this context,
-// these user turns were also the founder's own…"), but that list grew turn
-// over turn, which meant the system prompt — the provider cache prefix —
-// changed on every founder turn after the first. The ACP snapshot suite
-// caught this as a header-stability violation. The history list was
-// therefore removed outright rather than bounded differently: the section
-// now renders either `FOUNDER_CURRENT_TURN_NOTICE` (open turn's own input is
-// founder-stamped) or `''` (it is not, or there is no open turn / no agent)
-// — the exact same text for a given stamped/unstamped state on every turn,
-// so the cache prefix never moves on this section's account.
-//
-// `packages/core/agent` and `packages/core/session` both depend on
-// `@deepseek-ai/dsh-system-prompt` (agent merges `agent`/`scope` into
-// `AssembleContext` by module augmentation — see
-// `packages/core/agent/src/runtime-types.ts`), so this package importing
-// either back would be circular. `AssembleContext.agent`'s real `Agent` type
-// is therefore invisible inside this file's own isolated project build; the
-// helpers below read it through a narrow structural view naming only the
-// fields this section touches, typed with the REAL `MessageSource` shape
-// from `@deepseek-ai/dsh-llm` (already a dependency here) wherever that is
-// what actually flows through at runtime. This mirrors how
-// `packages/plan/plan-mode/src/index.ts`'s `openTurnIsFounderStamped` and
-// `packages/goal/tool-goal/src/authority.ts`'s `openTurn` avoid depending on
-// each other: re-derive the open-turn window locally rather than import it.
-
-/**
- * The founder-stamp-relevant fields of one logged session event. Every real
- * `SessionEvent` other than these three `type`s is irrelevant to this
- * section and simply matches none of the checks below — the duck-typed cast
- * in {@link founderContextAgent} is therefore safe even though it is not a
- * literal subtype of the real (invisible here) `SessionEvent` union.
- */
-type FounderSessionEvent =
-  | { readonly type: 'turn/start' }
-  | { readonly type: 'turn/end' }
-  | { readonly type: 'user/message'; readonly data: { readonly source: MessageSource } }
-
-/** The structural slice of `Session` this section reads off `context.agent`. */
-interface FounderContextSession {
-  readonly events: readonly FounderSessionEvent[]
-}
-
-/** The structural slice of `Agent` this section reads off `context.agent`. */
-interface FounderContextAgent {
-  readonly session: FounderContextSession
-}
-
-/**
- * Read `context.agent` through the structural view above (see the section
- * header comment for why the real `Agent` type cannot be named here).
- * @param context - the assembly's {@link AssembleContext}.
- * @returns the agent, or `undefined` for an agent-less assembly (e.g. a diagnostic read).
- */
-function founderContextAgent(context: AssembleContext): FounderContextAgent | undefined {
-  return (context as AssembleContext & { agent?: FounderContextAgent }).agent
-}
-
-/**
- * Whether the currently open turn's authority-bearing `user/message` is
- * founder-stamped (see {@link isFounderMessage}). Mirrors `hasDirectHumanInput`
- * in `packages/goal/tool-goal/src/authority.ts` and `openTurnIsFounderStamped`
- * in `packages/plan/plan-mode/src/index.ts`: all three re-derive their own
- * open-turn window locally (see the section header comment above), then hand
- * its ordered `user/message` payloads to `@deepseek-ai/dsh-llm`'s shared
- * `selectFounderAuthorityMessage` to pick the ONE message that carries
- * authority — never an earlier one in the same turn, so a later, unstamped
- * steer must not inherit an earlier stamped message's authority. Unlike the
- * goal tools' own `openTurn`, a missing open turn (a `turn/end` reached
- * before any `turn/start`, or no boundary at all) fails closed to `false`
- * instead of throwing: this section must render for assemblies with no open
- * turn at all, such as between turns.
- * @param events - the session log, or any prefix of it.
- * @returns whether the open turn's authority-bearing message is the founder's own.
- */
-function openTurnIsFounderStamped(events: readonly FounderSessionEvent[]): boolean {
-  const messages = openTurnUserMessages(events)
-  if (messages === undefined) return false
-  const authority = selectFounderAuthorityMessage(messages)
-  return authority !== undefined && isFounderMessage(authority.source)
-}
-
-/**
- * Every `user/message` payload of the open turn, in log order (oldest
- * first), or `undefined` when there is no open turn. Shared walk behind
- * {@link openTurnIsFounderStamped}.
- *
- * Collects EVERY `user/message` of the open turn regardless of
- * `source.kind` — it is `@deepseek-ai/dsh-llm`'s
- * `selectFounderAuthorityMessage`, called by the caller above, that then
- * picks the one authority-bearing message by skipping only the closed,
- * mechanical-context allowlist (`isMechanicalContextSource`: the
- * runtime-context snapshot, the skill catalog, and agent-instructions
- * reconciliation). A sentinel ruling (2026-10-02) found that skipping EVERY
- * non-`'user'` kind, as this walk used to do on its own, is unsafe: mailbox
- * relay and subagent settlement/report also append mid-turn under non-`user`
- * kinds, carrying OUTSIDE-controlled content that must not be shadowed by an
- * earlier founder stamp in the same turn.
- * @param events - the session log, or any prefix of it.
- * @returns the open turn's `user/message` payloads, oldest first, or `undefined` outside an open turn.
- */
-function openTurnUserMessages(
-  events: readonly FounderSessionEvent[],
-): readonly Extract<FounderSessionEvent, { type: 'user/message' }>['data'][] | undefined {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const boundary = events[index]
-    if (boundary?.type === 'turn/end') return undefined
-    if (boundary?.type === 'turn/start') {
-      return events.slice(index + 1)
-        .filter((event): event is Extract<FounderSessionEvent, { type: 'user/message' }> =>
-          event.type === 'user/message')
-        .map(event => event.data)
-    }
-  }
-  return undefined
-}
-
-/**
- * Fixed notice for a founder-stamped current turn (see
- * {@link openTurnIsFounderStamped}). Byte-stable across every assembly on
- * purpose (founder ruling 2026-10-02, see the section header comment above)
- * — never append a turn-varying suffix (a turn number, an excerpt, a
- * timestamp) to this text, or the system prompt stops being a stable
- * provider-cache prefix again.
- */
-const FOUNDER_CURRENT_TURN_NOTICE = 'The current input is the founder\'s own, typed directly at this machine — '
-  + 'not peer or relay traffic. If sent via steer it already overrides what was running; treat it as already '
-  + 'confirmed, including for destructive action.'
-
-/**
- * `founder:context`'s section text: {@link FOUNDER_CURRENT_TURN_NOTICE} when
- * the open turn's own input is founder-stamped, `''` otherwise — computed
- * strictly from `MessageSourceMap.user.founder` via {@link isFounderMessage}.
- * An agent-less assembly (no turn-driving agent at all, e.g. a diagnostic
- * read) renders nothing rather than throwing. The empty-string return
- * suppresses the section: {@link renderPrompt} drops any section whose
- * resolved text has zero length.
- *
- * Deliberately history-free (founder ruling 2026-10-02, see the section
- * header comment above): this function returns one of exactly two string
- * values for a given assembly, never a value that grows or otherwise varies
- * with how many founder turns have passed, which is what keeps this
- * section's text identical across consecutive founder turns.
- * @param context - the assembly's {@link AssembleContext}.
- * @returns {@link FOUNDER_CURRENT_TURN_NOTICE}, or `''` when there is nothing to say.
- */
-function founderContextSectionText(context: AssembleContext): string {
-  const agent = founderContextAgent(context)
-  if (agent === undefined) return ''
-  return openTurnIsFounderStamped(agent.session.events) ? FOUNDER_CURRENT_TURN_NOTICE : ''
-}
-
 /** Plugin config: the deployment-authored fragment of the system prompt (see {@link Config.persona} for its contract). */
 export interface Config {
   /** Include the fixed DeepSeek Harness identity before the deployment persona (default true). */
@@ -644,17 +483,19 @@ export class SystemPrompt extends Service {
       // The fallback narrows the optional input type; the schema already defaults it.
       text: config.persona ?? '',
     })
-    // Unconditional (unlike harness:identity, there is no deployment config
-    // to turn this off): `app-boot`'s harness:source sits at -99 and
-    // web-app's app:web-surface at -98 (both registered by packages this one
-    // cannot depend on — see the section's own header comment above), so
-    // -98.5 is the nearest free slot between them. `SystemPrompt.section`
-    // only requires `order` to be finite (see `section()`), not an integer.
-    this.section({
-      name: 'founder:context',
-      order: -98.5,
-      text: founderContextSectionText,
-    })
+    // Founder ruling 2026-10-02 (third and final on this point): there is
+    // deliberately NO `founder:context` (or similarly named) section here.
+    // SWD-125 shipped one that rendered a fixed notice when the open turn's
+    // own input was founder-stamped, but surfacing founder status in the
+    // system prompt meant the prompt text had to change whenever a
+    // non-founder message landed mid-turn (mailbox relay, a subagent
+    // report, a hook, a compaction checkpoint) — turning the provider's
+    // cache prefix mid-turn and failing the ACP snapshot suite's
+    // header-stability checks. Founder authority is enforced instead at the
+    // event layer: `@deepseek-ai/dsh-llm`'s `isFounderMessage` and
+    // `selectFounderAuthorityMessage` are the authority surface, consulted
+    // directly by `packages/goal` and `packages/plan` where the authority
+    // decision actually happens — the system prompt never needs to know.
     // The current-date-and-time block moved off the system prompt (SWD-113):
     // it now rides as `@deepseek-ai/dsh-agent-loop`'s unconditional per-request
     // clock tail message, built fresh with formatDateTime()/this module's own

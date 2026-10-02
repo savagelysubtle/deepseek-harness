@@ -578,7 +578,7 @@ export class ReactLoopAgent implements Agent {
           }
           // SWD-125: `preStep`'s assembly was built BEFORE the appends above,
           // so any prompt section that reads the open turn's own messages
-          // off `session.events` (e.g. `founder:context`) rendered from a
+          // off `session.events` (any section keyed to the latest message) rendered from a
           // log one step behind on this step's FIRST assemble. The
           // `agent/pre-step` waterfall never consumed that assembly itself —
           // only `claimed`/`position`/`signal` — so nothing upstream needed
