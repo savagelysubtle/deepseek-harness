@@ -35,7 +35,8 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import { scopeTarget } from '@deepseek-ai/dsh-scope'
 import type { Scoped } from '@deepseek-ai/dsh-scope'
 import { assertObjectJsonSchema } from '@deepseek-ai/dsh-tools'
-import type { ContentBlock, MessageId } from '@deepseek-ai/dsh-llm'
+import { errorChain } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, MessageId, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {
@@ -44,6 +45,7 @@ import type {
   ResolvedSubagentStartRequest,
   SubagentCapabilities,
   SubagentProvider,
+  SubagentResult,
   SubagentRun,
   SubagentRunEndInfo,
   SubagentRunInfo,
@@ -57,6 +59,7 @@ import SubagentContinuationManager from './continuation.ts'
 import type {
   ContinuableStart,
   ContinuableStartSpec,
+  SubagentAwaitSettlementResult,
   SubagentFollowupOptions,
   SubagentInterruptAuthority,
   SubagentReportOptions,
@@ -118,6 +121,7 @@ export type {
   ContinuableStart,
   ContinuableStartSpec,
   CoordinatorMessageSource,
+  SubagentAwaitSettlementResult,
   SubagentFollowupOptions,
   SubagentInterruptAuthority,
   SubagentReportDelivery,
@@ -125,10 +129,18 @@ export type {
   SubagentReportOptions,
   SubagentSettledMessageSource,
 } from './continuation.ts'
+export { MAX_AWAIT_SETTLEMENT_DEADLINE_MS } from './continuation.ts'
 export type { ContinuableSetupContribution } from './activation-setup-registry.ts'
 export type { SubagentDescendantListEntry, SubagentListEntry } from './list-children.ts'
 export type { SubagentRunEndInfo, SubagentRunInfo } from './types.ts'
 export type { SubagentIdentityProjection, SubagentTimingProjection } from './projection-types.ts'
+export type { SubagentSettlementProjection } from './projection-types.ts'
+export {
+  foldSubagentSettlement,
+  snapshotSubagentSettlement,
+  SUBAGENT_SETTLEMENT_VERSION,
+} from './settlement.ts'
+export type { SubagentSettlementData } from './settlement.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -171,6 +183,85 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
+/** Whether one `UserMessage` is a settlement notice/report sourced from `childId`. */
+function isSettlementMessageFrom(message: UserMessage, childId: SessionId): boolean {
+  return (message.source.kind === 'subagent-settled' || message.source.kind === 'subagent-report')
+    && message.source.senderSessionId === childId
+}
+
+/**
+ * Whether `error` is {@link listChildren} reporting that this deployment
+ * never mounted the `sessionProjections` registry its listing read requires
+ * — a permanent, deployment-wide condition, never a transient per-read
+ * failure. Distinguishes that case for
+ * {@link SubagentRuntime.discoverOutstandingSettlements}, which treats it as
+ * "nothing discoverable, ever" rather than something to warn about and retry
+ * on every agent's every step for the rest of the process. The session
+ * store's own equivalent absence ({@link listChildren}'s other permanent
+ * failure mode) is not special-cased here: every deployment that reaches
+ * this seam at all mounts a session store, so that branch would be untested
+ * dead weight rather than a real, observed condition.
+ */
+function isMissingListingCapability(error: unknown): boolean {
+  return error instanceof SubagentError && error.code === 'SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE'
+}
+
+/**
+ * Whether `agent` already carries a settlement notice from `childId` — a
+ * `user/message` sourced `subagent-settled` or `subagent-report` naming it as
+ * sender, committed to the session log, still queued in the inbox awaiting a
+ * later claim, OR already claimed as part of the very step now proposing to
+ * redeliver one. The idempotence check the `agent/pre-step` recheck performs
+ * before ever synthesizing a redelivered notice: if the original push landed
+ * (by either message source — a child that reported for itself before
+ * settling also counts, exactly as `notifySettlement`'s own unconditional
+ * contract treats it), nothing is synthesized.
+ *
+ * `claimedThisStep` matters for a reason the other two sources cannot cover:
+ * `Inbox.claim()` runs before `agent/pre-step` dispatches, so the message a
+ * waking notice is itself delivered through is no longer in `agent.inbox` by
+ * the time this recheck runs on that very step — and it is not yet in
+ * `agent.session.events` either, since the turn loop only appends a step's
+ * claimed messages after every `agent/pre-step` listener (this one included)
+ * has returned. Omitting it would make the recheck redeliver a second,
+ * duplicate notice for the exact child the current step is already
+ * delivering one for.
+ * @param agent - the parent whose own log and pending inbox are scanned.
+ * @param childId - the settled child to look for.
+ * @param claimedThisStep - the current step's own claimed batch, from the
+ *   same `agent/pre-step` dispatch this recheck runs inside of.
+ */
+function hasExistingSettlementNotice(
+  agent: Agent,
+  childId: SessionId,
+  claimedThisStep: readonly UserMessage[],
+): boolean {
+  const logged = agent.session.events.some(event => (
+    event.type === 'user/message' && isSettlementMessageFrom(event.data, childId)
+  ))
+  if (logged) return true
+  const pending = [...agent.inbox.nextStep, ...agent.inbox.nextTurn, ...claimedThisStep]
+  return pending.some(message => isSettlementMessageFrom(message, childId))
+}
+
+/**
+ * One child a parent's process-local bookkeeping still owes an account of:
+ * durably settled, but not yet confirmed delivered to the parent's own log.
+ */
+interface OutstandingSettlement {
+  /** The durable settlement's outcome, ready to redeliver without a re-read. */
+  readonly outcome: SubagentResult['stopReason']
+  /**
+   * Set while the manager's own live push for this exact settlement is in
+   * flight — between its durable append and `notifySettlement()` finishing —
+   * so {@link SubagentRuntime.recheckSubagentSettlement} does not race it
+   * into a duplicate. Cleared once that attempt finishes, successful or
+   * not; the entry itself stays outstanding until a notice is confirmed in
+   * the parent's own log.
+   */
+  pushInFlight: boolean
+}
+
 /** Named provider registry with one-shot runs, durable discovery, and continuable-child operations. */
 export class SubagentRuntime extends Service {
   private providers = new Map<string, SubagentProvider>()
@@ -183,6 +274,55 @@ export class SubagentRuntime extends Service {
    * composes into the carrier.
    */
   private readonly emitLifecycle: LifecycleEmitter
+  /**
+   * Per-parent, process-local settlement bookkeeping: for each parent
+   * {@link discoveredParents} or {@link trackOutstandingSettlement} has ever
+   * touched, which of its direct children are durably settled but not yet
+   * confirmed delivered to that parent's own log. Populated two ways: once,
+   * lazily, by {@link discoverOutstandingSettlements} scanning the durable
+   * `listChildren` ladder on that parent's very first pre-step this process
+   * — so a cold-resumed parent that never spawned a child in THIS process
+   * is still covered after a real restart — and live, by
+   * {@link trackOutstandingSettlement}, as this process settles a child
+   * itself, which may bootstrap this parent's entry before discovery has
+   * ever run for it. An entry with no outstanding children is still present
+   * with an empty inner `Map` once discovery has run: see
+   * {@link discoveredParents} for why that scan's completion, not this
+   * map's mere presence, is what {@link recheckSubagentSettlement} tests to
+   * decide whether to skip the durable read.
+   */
+  private readonly outstandingByParent = new Map<SessionId, Map<SessionId, OutstandingSettlement>>()
+  /**
+   * Parents for which {@link discoverOutstandingSettlements} has completed
+   * at least once this process (successfully, including an empty result;
+   * never on a failed read). Kept independent of {@link outstandingByParent}
+   * because {@link trackOutstandingSettlement} may bootstrap a parent's
+   * entry in that map, live, before this parent has ever taken a pre-step —
+   * e.g. a second child started and settled directly through the service
+   * API without an intervening parent turn. Testing the map's mere presence
+   * for "discovery already ran" would then skip discovery forever for that
+   * parent, silently losing any OTHER child that settled durably before
+   * this process started. This set is the one true "already discovered"
+   * signal; {@link recheckSubagentSettlement} runs discovery once per parent
+   * exactly when this set does not yet name it, regardless of what
+   * {@link outstandingByParent} already holds for that parent.
+   */
+  private readonly discoveredParents = new Set<SessionId>()
+  /**
+   * Child ids whose settlement notice this process has already synthesized,
+   * ever. Process-local and append-only, same shape as
+   * {@link outstandingByParent}. Needed because `inject()` only queues onto
+   * `next-step` — it does not become visible in `agent.session.events` or
+   * `agent.inbox` until a *later* step claims it, and claiming happens before
+   * the `agent/pre-step` dispatch that follows. A redelivered notice makes
+   * `inbox.nextStep` non-empty, which keeps the current turn open for one
+   * more step, whose own pre-step dispatch runs before the prior notice's
+   * claim is committed anywhere observable — exactly the window in which
+   * {@link hasExistingSettlementNotice} cannot yet see it. This memo closes
+   * that window; the session-log scan remains the durable gate a fresh
+   * process (after a restart) falls back to, since this set starts empty.
+   */
+  private readonly redeliveredSettlements = new Set<SessionId>()
 
   constructor(ctx: Context) {
     super(ctx, 'subagents')
@@ -191,6 +331,12 @@ export class SubagentRuntime extends Service {
       const manager = new SubagentContinuationManager(childCtx, {
         prepareContinuable: (name, request) => this.prepareContinuable(name, request),
         observeActivation: (provider, childId, parent) => this.observeActivation(provider, childId, parent),
+        trackOutstandingSettlement: (parentId, childId, outcome) => {
+          this.trackOutstandingSettlement(parentId, childId, outcome)
+        },
+        clearPendingPush: (parentId, childId) => {
+          this.clearPendingPush(parentId, childId)
+        },
       }, this.setupRegistry)
       this.continuations = manager
       childCtx.effect(() => () => {
@@ -202,6 +348,16 @@ export class SubagentRuntime extends Service {
       projectionCtx.sessionProjections.register(subagentTimingProjectionDefinition)
       projectionCtx.sessionProjections.register(subagentIdentityProjectionDefinition)
       projectionCtx.sessionProjections.register(subagentSettlementProjectionDefinition)
+    })
+    // Redeliver a lost settlement notice on the parent's own next step. Cheap
+    // by construction once a parent's first step has cached its (possibly
+    // empty) outstanding set (see `outstandingByParent`) and idempotent (see
+    // `hasExistingSettlementNotice`): a parent with nothing outstanding
+    // returns before any further read, and a parent whose push already
+    // landed synthesizes nothing.
+    ctx.on('agent/pre-step', async ({ agent, messages }, next) => {
+      await this.recheckSubagentSettlement(agent, messages)
+      return next()
     })
   }
 
@@ -262,6 +418,30 @@ export class SubagentRuntime extends Service {
    */
   interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): boolean {
     return this.continuations?.interrupt(targetSessionId, authority) ?? false
+  }
+
+  /**
+   * Wait for one continuable child's durable settlement: the fast
+   * `subagent/end` lifecycle race against a capped deadline, falling back to
+   * exactly one authoritative persistence read on that deadline. See
+   * {@link SubagentContinuationManager.awaitSettlement} for the full
+   * contract — this is a direct pass-through.
+   * @param childId - the durable child session id to await.
+   * @param parent - the exact live direct parent authorizing this wait.
+   * @param deadlineMs - how long to wait before the one authoritative read;
+   *   clamped to {@link MAX_AWAIT_SETTLEMENT_DEADLINE_MS}.
+   * @param signal - caller cancellation, honored for the whole wait.
+   * @returns the settlement, or `pending` when the deadline's read found none.
+   * @throws when continuation services are unavailable, or `parent` is not
+   *   this child's exact live durable direct parent.
+   */
+  async awaitSettlement(
+    childId: SessionId,
+    parent: Agent,
+    deadlineMs: number,
+    signal?: AbortSignal,
+  ): Promise<SubagentAwaitSettlementResult> {
+    return this.requireContinuations().awaitSettlement(childId, parent, deadlineMs, signal)
   }
 
   /**
@@ -512,6 +692,158 @@ export class SubagentRuntime extends Service {
     parent: Agent,
   ): ActivationObserver {
     return createActivationObserver(this.emitLifecycle, provider, childId, parent)
+  }
+
+  /**
+   * Redeliver one continuable parent's missed settlement notices on its own
+   * next step. Discovery ({@link discoverOutstandingSettlements}) runs once
+   * per parent, exactly when {@link discoveredParents} does not yet name
+   * it — never merely when {@link outstandingByParent} already has an entry,
+   * since {@link trackOutstandingSettlement} may have bootstrapped that
+   * entry live, for one child, before this parent ever took a pre-step; a
+   * presence check there would then skip discovery forever and silently
+   * lose any OTHER child that settled durably before this process started.
+   * Once discovered, a cold-resumed parent is covered even after a real
+   * process restart, with no durable read at all on any later step. A child
+   * whose live push is still in flight ({@link trackOutstandingSettlement})
+   * is skipped this step rather than raced into a duplicate; one whose
+   * notice is already present (checked by {@link hasExistingSettlementNotice})
+   * is dropped from the outstanding set with nothing sent. A read failure
+   * during discovery is logged and swallowed — this is a best-effort
+   * recheck on a hot path, never a reason to fail the agent's step.
+   * @param agent - the live agent about to take a step.
+   * @param claimedThisStep - the current step's own claimed batch, forwarded
+   *   to {@link hasExistingSettlementNotice} so a notice this very step is
+   *   already delivering is never mistaken for one still missing.
+   */
+  private async recheckSubagentSettlement(
+    agent: Agent,
+    claimedThisStep: readonly UserMessage[],
+  ): Promise<void> {
+    if (!this.discoveredParents.has(agent.id)) {
+      const discovered = await this.discoverOutstandingSettlements(agent, claimedThisStep)
+      if (discovered === undefined) return
+    }
+    const outstanding = this.outstandingByParent.get(agent.id)
+    if (outstanding === undefined || outstanding.size === 0) return
+    const manager = this.continuations
+    if (manager === undefined) return
+    for (const [childId, entry] of outstanding) {
+      if (entry.pushInFlight) continue
+      if (hasExistingSettlementNotice(agent, childId, claimedThisStep)) {
+        outstanding.delete(childId)
+        continue
+      }
+      try {
+        manager.synthesizeSettlementNotice(agent, childId, entry.outcome)
+        this.redeliveredSettlements.add(childId)
+        outstanding.delete(childId)
+      } catch (error: unknown) {
+        this.ctx.logger.warn(
+          `subagent: settlement notice redelivery for child "${childId}" failed: ${errorChain(error)}`,
+        )
+      }
+    }
+  }
+
+  /**
+   * One-time-per-process durable discovery of one parent's outstanding
+   * settlements, run only the first time {@link recheckSubagentSettlement}
+   * ever sees this parent id absent from {@link discoveredParents}: every
+   * direct child already durably settled (via the same ladder `list_agents`
+   * uses, {@link listChildren}) whose notice is not yet in this parent's own
+   * log. On success — even an empty result — this parent is added to
+   * {@link discoveredParents} so every later step for it skips this read
+   * entirely; the (possibly pre-existing) outstanding map stays in
+   * {@link outstandingByParent} either way. A permanently-missing capability
+   * (no session store or no `sessionProjections` registry mounted — this
+   * deployment can never answer the read, for any agent, ever) counts as
+   * success with an empty scan, so it is marked discovered too, instead of
+   * warning on literally every agent's first step forever; any other,
+   * presumably transient, read failure is logged and leaves this parent
+   * undiscovered, so a later step retries.
+   *
+   * A concurrent live settlement ({@link trackOutstandingSettlement}) may
+   * install this parent's entry while the read above is in flight — or, for
+   * a parent whose first child was only ever tracked live and never took a
+   * pre-step, well before this scan starts at all. Either way this merges
+   * into that same map rather than replacing it; never overwriting an entry
+   * it names, since that entry's `pushInFlight` status is authoritative and
+   * this scan's view of it is necessarily stale.
+   * @param agent - the live parent whose direct children are scanned.
+   * @param claimedThisStep - forwarded to {@link hasExistingSettlementNotice}
+   *   so a notice this very step is already delivering is never counted as
+   *   still missing.
+   * @returns the (possibly empty) outstanding map now cached for this
+   *   parent, or `undefined` when the durable read itself failed.
+   */
+  private async discoverOutstandingSettlements(
+    agent: Agent,
+    claimedThisStep: readonly UserMessage[],
+  ): Promise<Map<SessionId, OutstandingSettlement> | undefined> {
+    let rows: SubagentListEntry[]
+    try {
+      rows = await this.listChildren(agent.id)
+    } catch (error: unknown) {
+      if (!isMissingListingCapability(error)) {
+        this.ctx.logger.warn(
+          `subagent: settlement discovery for parent "${agent.id}" failed: ${errorChain(error)}`,
+        )
+        return undefined
+      }
+      // This deployment never mounted the session store or the
+      // `sessionProjections` registry, so no agent's discovery read can ever
+      // succeed; treat as a successful empty scan rather than warning and
+      // retrying on every step of every agent for the rest of the process.
+      rows = []
+    }
+    let outstanding = this.outstandingByParent.get(agent.id)
+    if (outstanding === undefined) {
+      outstanding = new Map()
+      this.outstandingByParent.set(agent.id, outstanding)
+    }
+    for (const row of rows) {
+      if (row.kind !== 'child' || row.activity !== 'inactive' || row.settlement === undefined) continue
+      if (outstanding.has(row.id)) continue
+      if (this.redeliveredSettlements.has(row.id)) continue
+      if (hasExistingSettlementNotice(agent, row.id, claimedThisStep)) continue
+      outstanding.set(row.id, { outcome: row.settlement.outcome, pushInFlight: false })
+    }
+    this.discoveredParents.add(agent.id)
+    return outstanding
+  }
+
+  /**
+   * Host callback the continuation manager calls right after durably
+   * appending one child's settlement, before the teardown steps that make
+   * it look drained to {@link listChildren}: records it outstanding and
+   * marks its live push in flight, bootstrapping this parent's entry in
+   * {@link outstandingByParent} when this is the first settlement either
+   * path has ever seen for it.
+   */
+  private trackOutstandingSettlement(
+    parentId: SessionId,
+    childId: SessionId,
+    outcome: SubagentResult['stopReason'],
+  ): void {
+    let outstanding = this.outstandingByParent.get(parentId)
+    if (outstanding === undefined) {
+      outstanding = new Map()
+      this.outstandingByParent.set(parentId, outstanding)
+    }
+    outstanding.set(childId, { outcome, pushInFlight: true })
+  }
+
+  /**
+   * Host callback the continuation manager calls once its push attempt for
+   * one child finishes (successfully or not), releasing the guard
+   * {@link trackOutstandingSettlement} set. The entry itself stays
+   * outstanding — eligible for {@link recheckSubagentSettlement} to
+   * redeliver — until a notice is actually confirmed in the parent's log.
+   */
+  private clearPendingPush(parentId: SessionId, childId: SessionId): void {
+    const entry = this.outstandingByParent.get(parentId)?.get(childId)
+    if (entry !== undefined) entry.pushInFlight = false
   }
 
   /** Reject the first requested capability that the provider lacks. */

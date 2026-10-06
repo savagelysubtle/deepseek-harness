@@ -189,6 +189,40 @@ describe('dsh-tool-subagent-control/list-agents', () => {
     )
   })
 
+  it('renders settlement when present and omits it exactly as before when absent', async () => {
+    const { ctx, parent } = await setup([])
+    const settledAt = Date.UTC(2026, 9, 5, 12, 0, 0)
+    const entries: SubagentListEntry[] = [
+      {
+        kind: 'child',
+        id: SessionId('settled-child'),
+        label: 'finished child',
+        mode: 'continuable',
+        activity: 'inactive',
+        hasChildren: false,
+        settlement: { outcome: 'completed', settledAt },
+      },
+      {
+        kind: 'child',
+        id: SessionId('unsettled-child'),
+        label: 'still unsettled',
+        mode: 'continuable',
+        activity: 'inactive',
+        hasChildren: false,
+      },
+    ]
+    ctx.subagents.listChildren = () => Promise.resolve(entries)
+    vi.spyOn(ctx.agents, 'get').mockReturnValue(undefined)
+
+    const result = await callTool(ctx, 'list_agents', {}, parent)
+
+    expect(result.isError).toBe(false)
+    expect(text(result)).toBe(
+      `settled-child [ready] settled=completed@${new Date(settledAt).toISOString()} — finished child\n`
+      + 'unsettled-child [ready] — still unsettled',
+    )
+  })
+
   it('resolves omitted scope to children and forwards the tool cancellation signal', async () => {
     const { ctx, parent } = await setup([])
     const signal = new AbortController().signal
@@ -220,8 +254,17 @@ describe('dsh-tool-subagent-control/list-agents', () => {
     const result = await callTool(ctx, 'list_agents', {}, parent)
     expect(result.isError).toBe(false)
     // The mock parent's resolved route reaches the render through the v3
-    // descriptor: the full spawn→descriptor→fold→row→render chain.
-    expect(text(result)).toBe(`${started.childId} [ready] model=mock/mock — summarize the doc`)
+    // descriptor: the full spawn→descriptor→fold→row→render chain. Disposal
+    // now also appends a real `subagent/settlement` event (SWD-95), so this
+    // real child settles with outcome `completed` at a real wall-clock time —
+    // match the outcome and an ISO-8601 shape rather than a literal instant.
+    expect(text(result)).toMatch(
+      new RegExp(
+        `^${started.childId} \\[ready\\] model=mock/mock `
+        + 'settled=completed@\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z'
+        + ' — summarize the doc$',
+      ),
+    )
   })
 
   it('describes ready as resumable and pins the status vocabulary', async () => {

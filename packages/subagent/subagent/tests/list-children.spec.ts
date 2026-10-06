@@ -200,6 +200,7 @@ describe('SubagentRuntime.listChildren', () => {
         kind: 'child', id: childId, label: 'summarize the doc', mode: 'continuable',
         provider: 'mock', model: 'mock',
         activity: 'inactive', hasChildren: false,
+        settlement: { outcome: 'completed', settledAt: expect.any(Number) as unknown },
       },
     ])
   })
@@ -236,6 +237,7 @@ describe('SubagentRuntime.listChildren', () => {
       model: 'mock',
       activity: 'inactive',
       hasChildren: false,
+      settlement: { outcome: 'completed', settledAt: expect.any(Number) as unknown },
     })
   })
 
@@ -392,6 +394,7 @@ describe('SubagentRuntime.listChildren', () => {
       kind: 'child', id: settled, label: 'settled child', mode: 'continuable',
       provider: 'mock', model: 'mock',
       activity: 'inactive', hasChildren: false,
+      settlement: { outcome: 'completed', settledAt: expect.any(Number) as unknown },
     })
     expect(entries).toContainEqual({
       kind: 'child', id: liveId, label: 'live child', mode: 'continuable',
@@ -425,6 +428,7 @@ describe('SubagentRuntime.listChildren', () => {
       kind: 'child', id: healthy, label: 'healthy sibling', mode: 'continuable',
       provider: 'mock', model: 'mock',
       activity: 'inactive', hasChildren: false,
+      settlement: { outcome: 'completed', settledAt: expect.any(Number) as unknown },
     })
   })
 
@@ -552,6 +556,7 @@ describe('SubagentRuntime.listChildren', () => {
       kind: 'child', id: healthy, label: 'healthy sibling', mode: 'continuable',
       provider: 'mock', model: 'mock',
       activity: 'inactive', hasChildren: false,
+      settlement: { outcome: 'completed', settledAt: expect.any(Number) as unknown },
     })
   })
 
@@ -670,6 +675,7 @@ describe('SubagentRuntime.listChildren', () => {
       kind: 'child', id: healthy, label: 'healthy sibling', mode: 'continuable',
       provider: 'mock', model: 'mock',
       activity: 'inactive', hasChildren: false,
+      settlement: { outcome: 'completed', settledAt: expect.any(Number) as unknown },
     })
   })
 
@@ -727,6 +733,7 @@ describe('SubagentRuntime.listChildren', () => {
       kind: 'child', id: healthy, label: 'healthy sibling', mode: 'continuable',
       provider: 'mock', model: 'mock',
       activity: 'inactive', hasChildren: false,
+      settlement: { outcome: 'completed', settledAt: expect.any(Number) as unknown },
     })
     // Nothing is memoized: with the backend healthy again, the next listing
     // folds the same child to its identity.
@@ -795,6 +802,7 @@ describe('SubagentRuntime.listChildren', () => {
         kind: 'child', id: childId, label: 'direct child', mode: 'continuable',
         provider: 'mock', model: 'mock',
         activity: 'inactive', hasChildren: true,
+        settlement: { outcome: 'completed', settledAt: expect.any(Number) as unknown },
       },
     ])
     // The grandchild contributes only its header to the hasChildren hint.
@@ -845,6 +853,7 @@ describe('SubagentRuntime.listChildren', () => {
       kind: 'child', id: childId, label: 'cached child', mode: 'continuable',
       provider: 'mock', model: 'mock',
       activity: 'inactive', hasChildren: false,
+      settlement: { outcome: 'completed', settledAt: expect.any(Number) as unknown },
     }])
     expect(inspect).not.toHaveBeenCalled()
   })
@@ -918,6 +927,7 @@ describe('SubagentRuntime.listChildren', () => {
       kind: 'child', id: childId, label: 'direct child', mode: 'continuable',
       provider: 'mock', model: 'mock',
       activity: 'inactive', hasChildren: false,
+      settlement: { outcome: 'completed', settledAt: expect.any(Number) as unknown },
     }])
   })
 
@@ -936,6 +946,7 @@ describe('SubagentRuntime.listChildren', () => {
       kind: 'child', id: childId, label: 'direct child', mode: 'continuable',
       provider: 'mock', model: 'mock',
       activity: 'inactive', hasChildren: true,
+      settlement: { outcome: 'completed', settledAt: expect.any(Number) as unknown },
     }])
   })
 

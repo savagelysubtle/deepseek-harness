@@ -9,6 +9,7 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import * as SubagentFork from '@deepseek-ai/dsh-subagent-fork-in-process'
 import type { GenerateOptions, MessageId, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -17,10 +18,12 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import { MockAdapter, maxTokensResponse, textResponse, toolCallResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
 import SubagentRuntime, {
+  foldSubagentSettlement,
+  MAX_AWAIT_SETTLEMENT_DEADLINE_MS,
   SubagentError,
   SUBAGENT_DESCRIPTOR_VERSION,
 } from '../src/index.ts'
-import type { SubagentRunEndInfo, SubagentRunInfo } from '../src/index.ts'
+import type { SubagentAwaitSettlementResult, SubagentRunEndInfo, SubagentRunInfo } from '../src/index.ts'
 import * as SubagentInvariant from '../src/invariant.ts'
 
 type Script = ConstructorParameters<typeof MockAdapter>[0]
@@ -148,6 +151,52 @@ function continuationManager(ctx: Context): { hasLiveDescendants(root: Agent): b
   }).continuations
   if (manager === undefined) throw new Error('expected a bound continuation manager')
   return manager
+}
+
+/**
+ * Reach the process-local "already redelivered" memo the pre-step recheck
+ * consults, the same way {@link drainManager} reaches `drain()`: seeding it
+ * directly lets a test simulate "this exact process already redelivered
+ * this child once" without reconstructing the earlier recheck that would
+ * ordinarily have populated it.
+ */
+function redeliveredSettlementsOf(ctx: Context): Set<SessionId> {
+  return (ctx.subagents as unknown as { redeliveredSettlements: Set<SessionId> }).redeliveredSettlements
+}
+
+/**
+ * Simulate the real `ctx.inject(['agents'], ...)` child-context fiber
+ * disposing -- clearing `continuations` exactly as its own teardown effect
+ * does (`index.ts`'s `childCtx.effect(() => () => { this.continuations =
+ * undefined }, 'subagents.continuationBinding()')`) -- without literally
+ * tearing down the real `agents` service.
+ *
+ * A literal teardown is not reachable from a test: `AgentLoop` statically
+ * requires `agents` (`static inject = ['agents', 'sessions', 'llm', 'tools',
+ * 'systemPrompt']`), so disposing the real `AgentRegistry` fiber forces
+ * `AgentLoop` itself through the same required-dependency unload Cordis
+ * gives any other missing static inject, which disposes every live Agent
+ * it created as part of that unload -- verified directly, including the
+ * tightest case, disposing and immediately (same tick, no intervening
+ * await) replugging `AgentRegistry`: the very next call on the
+ * already-created parent still throws ("agent initiator scope is
+ * disposed") before either promise even settles. There is no live agent
+ * left to drive a pre-step through once that teardown starts.
+ *
+ * This reaches the exact resulting state the real disposal produces
+ * instead -- `continuations` cleared, while the `agent/pre-step` listener
+ * (bound directly on the service's own ctx in the constructor, never
+ * inside that injected child) stays live -- the same way {@link drainManager}
+ * and {@link continuationManager} reach other package-private manager state
+ * no public API exposes.
+ * @param ctx - the context whose `subagents` service to affect.
+ * @returns a restorer that puts the real manager back, for clean disposal.
+ */
+function clearContinuationsBinding(ctx: Context): () => void {
+  const subagents = ctx.subagents as unknown as { continuations?: unknown }
+  const manager = subagents.continuations
+  subagents.continuations = undefined
+  return () => { subagents.continuations = manager }
 }
 
 /** Wait until a child's Activation is gone, i.e. its handle finished disposal. */
@@ -1539,6 +1588,12 @@ function settlementNotices(agent: Agent): { sender: string; text: string; summar
   })
 }
 
+/** The durable `subagent/settlement` record persisted for one child, if any. */
+async function loadSettlement(ctx: Context, childId: SessionId) {
+  const loaded = await ctx.sessionPersistence.load(childId)
+  return foldSubagentSettlement(loaded.events)
+}
+
 describe('continuable settlement delivery', () => {
   it('tells the parent what the child finished with, without being asked', async () => {
     const { ctx, parent } = await setup([textResponse('the answer'), textResponse('parent ack')])
@@ -1800,6 +1855,13 @@ describe('continuable settlement delivery', () => {
       `Background subagent ${started.childId} was stopped before it finished.`
       + '\nIt left no closing message.',
     )
+    // `interrupt()` is covered by the same path as any other stop: the
+    // durable record reuses `epochStopReason()`'s own 'aborted' mapping,
+    // never a fourth near-duplicate "stopped" outcome.
+    expect(await loadSettlement(ctx, started.childId)).toMatchObject({
+      parentSessionId: parent.id,
+      outcome: 'aborted',
+    })
   })
 
   it('reports accepted work cancelled before any turn could open as stopped', async () => {
@@ -2016,6 +2078,12 @@ describe('continuable settlement delivery', () => {
     expect(parent.session.events.some(event => event.type === 'agent/inbox/spliced')).toBe(true)
     expect(parent.session.events.some(event => event.type === 'turn/start')).toBe(false)
     expect(parent.status).toBe('idle')
+    // The durable record survives loss case (b): injected but never woken,
+    // the push lands in the log without ever starting a turn to read it.
+    expect(await loadSettlement(ctx, started.childId)).toMatchObject({
+      parentSessionId: parent.id,
+      outcome: 'aborted',
+    })
   })
 
   it('does not wake a parent below a scoped teardown root', async () => {
@@ -2066,6 +2134,14 @@ describe('continuable settlement delivery', () => {
     expect(persisted.events.flatMap(event => event.type === 'agent/inbox/spliced'
       ? [{ inserted: event.data.inserted.length, removed: event.data.removedCount ?? 0 }]
       : [])).toEqual([{ inserted: 1, removed: 0 }, { inserted: 0, removed: 1 }])
+    // The durable record survives loss case (d): the parent disposed before
+    // the waking send could ever be read, cancelling the notice durably —
+    // but the child's own log still has the fact, unaffected by the parent's
+    // own cancelled inbox.
+    expect(await loadSettlement(ctx, started.childId)).toMatchObject({
+      parentSessionId: parentId,
+      outcome: 'aborted',
+    })
   })
 
   it('drops the notice without disturbing teardown when the parent is gone', async () => {
@@ -2087,6 +2163,13 @@ describe('continuable settlement delivery', () => {
     await waitNoActivation(ctx, started.childId)
     await vi.waitFor(() => { expect(ends).toHaveLength(1) })
     expect(warnings).toEqual([])
+    // The durable record survives loss case (a): the parent is gone from
+    // `ctx.agents` by the time `notifySettlement` runs, so the push is a
+    // silent unconditional no-op, but the child's own log still has the fact.
+    expect(await loadSettlement(ctx, started.childId)).toMatchObject({
+      parentSessionId: host.agent.id,
+      outcome: ends[0]!.stopReason,
+    })
   })
 
   it('logs a rejected notice instead of failing the child\'s teardown', async () => {
@@ -2104,6 +2187,12 @@ describe('continuable settlement delivery', () => {
     await vi.waitFor(() => { expect(ends).toHaveLength(1) })
     expect(ends[0]!.stopReason).toBe('completed')
     expect(warnings.some(warning => warning.includes('settlement notice was not delivered'))).toBe(true)
+    // The durable record survives the lost push: loss case (c), a delivery
+    // that throws, still leaves the fact discoverable on the child's own log.
+    expect(await loadSettlement(ctx, started.childId)).toMatchObject({
+      parentSessionId: parent.id,
+      outcome: 'completed',
+    })
   })
 
   it('stays silent about a child the caller was told does not exist', async () => {
@@ -2115,6 +2204,770 @@ describe('continuable settlement delivery', () => {
       .rejects.toMatchObject({ code: 'DRAINING' })
     await Promise.all(drains)
     expect(settlementNotices(parent)).toEqual([])
+  })
+
+  it('logs an append failure instead of blocking teardown, and still delivers the fast-path notice', async () => {
+    const { ctx, parent } = await setup([textResponse('the answer'), textResponse('parent ack')])
+    const warnings: string[] = []
+    ctx.logger.warn = (text: string) => { warnings.push(text) }
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    const child = await vi.waitFor(() => {
+      const live = ctx.agents.get(started.childId)
+      expect(live).toBeDefined()
+      return live!
+    })
+    const append = child.session.append.bind(child.session)
+    child.session.append = (type: string, data: unknown, ...opts: unknown[]) => {
+      if (type === 'subagent/settlement') throw new Error('disk full')
+      // Forwarding the real generic overload's args verbatim.
+      // oxlint-disable-next-line typescript/no-explicit-any, typescript/no-unsafe-call, typescript/no-unsafe-return
+      return (append as any)(type, data, ...opts)
+    }
+
+    await waitNoActivation(ctx, started.childId)
+    // Teardown completed and the fast-path push still landed, even though the
+    // durable append for this same epoch failed.
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    expect(warnings.some(warning => warning.includes('durable settlement record was not appended'))).toBe(true)
+    // Nothing was appended under the current format version: the throw
+    // happened before the log changed.
+    const persisted = await ctx.sessionPersistence.load(started.childId)
+    expect(persisted.events.some(event => event.type === 'subagent/settlement')).toBe(false)
+  })
+})
+
+describe('SubagentContinuationManager.awaitSettlement', () => {
+  function manager(ctx: Context) {
+    const found = (ctx.subagents as unknown as {
+      continuations?: { awaitSettlement(
+        childId: SessionId, parent: Agent, deadlineMs: number, signal?: AbortSignal,
+      ): Promise<SubagentAwaitSettlementResult> }
+    }).continuations
+    if (found === undefined) throw new Error('expected a bound continuation manager')
+    return found
+  }
+
+  it('resolves on the fast path, well inside a generous deadline, once the child settles', async () => {
+    const hold = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([{ chunks: textResponse('answer'), gate: hold.promise }])
+    const { ctx, parent } = await setupWith(adapter)
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+
+    const waited = ctx.subagents.awaitSettlement(started.childId, parent, 2_000)
+    hold.resolve(undefined)
+    const result = await waited
+
+    expect(result).toMatchObject({ status: 'settled', outcome: 'completed' })
+    await waitNoActivation(ctx, started.childId)
+  })
+
+  it('falls back to the one authoritative persistence read once the deadline passes', async () => {
+    // The child is already fully settled before `awaitSettlement` is ever
+    // called, so the freshly registered fast-path listener cannot have
+    // missed a live event — there is no event left to miss. Resolving here
+    // can only come from the deadline's own read of the durable record.
+    const { ctx, parent } = await setup([textResponse('answer')])
+    await ctx.plugin(SessionProjectionRegistry)
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+
+    const result = await ctx.subagents.awaitSettlement(started.childId, parent, 10)
+    expect(result).toEqual({ status: 'settled', outcome: 'completed', settledAt: expect.any(Number) as unknown })
+  })
+
+  it('reports pending when the deadline passes with no settlement yet', async () => {
+    const hold = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([{ chunks: textResponse('answer'), gate: hold.promise }])
+    const { ctx, parent } = await setupWith(adapter)
+    await ctx.plugin(SessionProjectionRegistry)
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+
+    const result = await ctx.subagents.awaitSettlement(started.childId, parent, 10)
+    expect(result).toEqual({ status: 'pending' })
+
+    hold.resolve(undefined)
+    await waitNoActivation(ctx, started.childId)
+  })
+
+  it('clamps a deadline above the module cap instead of waiting out the caller\'s request', async () => {
+    const { ctx, parent } = await setup([textResponse('answer')])
+    await ctx.plugin(SessionProjectionRegistry)
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const result = manager(ctx).awaitSettlement(
+        started.childId, parent, MAX_AWAIT_SETTLEMENT_DEADLINE_MS * 100,
+      )
+      await vi.advanceTimersByTimeAsync(MAX_AWAIT_SETTLEMENT_DEADLINE_MS)
+      await expect(result).resolves.toMatchObject({ status: 'settled', outcome: 'completed' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('rejects a parent that is not this child\'s durable direct parent', async () => {
+    const { ctx, parent } = await setup([textResponse('answer')])
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+    const other = await ctx.agents.create({
+      sessionId: SessionId('not-the-parent'),
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+
+    await expect(ctx.subagents.awaitSettlement(started.childId, other.agent, 10))
+      .rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+    await other.dispose()
+  })
+
+  it('rejects when the parent reference is no longer the exact live registry entry', async () => {
+    const { ctx } = await setup([textResponse('answer')])
+    const host = await ctx.agents.create({
+      sessionId: SessionId('awaiting-stale-parent'),
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+    const started = await ctx.subagents.startContinuable(startSpec(host.agent))
+    await waitNoActivation(ctx, started.childId)
+    // Captured before disposal: `host.agent` is now a stale reference the
+    // registry no longer backs, even though nothing about its fields changed.
+    const stale = host.agent
+    await host.dispose()
+
+    await expect(ctx.subagents.awaitSettlement(started.childId, stale, 10))
+      .rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+  })
+
+  it('ignores another child\'s end event while racing toward this one\'s', async () => {
+    const holdSibling = Promise.withResolvers<undefined>()
+    const holdTarget = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('sibling done'), gate: holdSibling.promise },
+      { chunks: textResponse('target done'), gate: holdTarget.promise },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    const sibling = await ctx.subagents.startContinuable(startSpec(parent))
+    const target = await ctx.subagents.startContinuable(startSpec(parent))
+
+    // Both children share the same parent carrier, so the fast-path listener
+    // observes the sibling's unrelated `subagent/end` too; it must filter
+    // that one out and keep waiting for the actual target.
+    const waited = ctx.subagents.awaitSettlement(target.childId, parent, 2_000)
+    holdSibling.resolve(undefined)
+    await waitNoActivation(ctx, sibling.childId)
+    holdTarget.resolve(undefined)
+    const result = await waited
+
+    expect(result).toMatchObject({ status: 'settled', outcome: 'completed' })
+    await waitNoActivation(ctx, target.childId)
+  })
+
+  it('throws when the sessionProjections registry is unavailable at the deadline', async () => {
+    // Deliberately no `ctx.plugin(SessionProjectionRegistry)` here, unlike
+    // the deadline tests above: the one authoritative read requires it, and
+    // its absence must surface as this stable, documented failure rather
+    // than hang or silently report `pending`.
+    const { ctx, parent } = await setup([textResponse('answer')])
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+
+    await expect(ctx.subagents.awaitSettlement(started.childId, parent, 10))
+      .rejects.toMatchObject({ code: 'SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE' })
+  })
+
+  it('honors the caller signal over both the fast path and the deadline', async () => {
+    const hold = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([{ chunks: textResponse('answer'), gate: hold.promise }])
+    const { ctx, parent } = await setupWith(adapter)
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    const controller = new AbortController()
+
+    const waited = ctx.subagents.awaitSettlement(started.childId, parent, 2_000, controller.signal)
+    controller.abort(new Error('caller gave up'))
+    await expect(waited).rejects.toThrow('caller gave up')
+
+    hold.resolve(undefined)
+    await waitNoActivation(ctx, started.childId)
+  })
+
+  it('wraps a non-Error abort reason in a stable Error instead of rejecting with it verbatim', async () => {
+    const hold = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([{ chunks: textResponse('answer'), gate: hold.promise }])
+    const { ctx, parent } = await setupWith(adapter)
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    const controller = new AbortController()
+
+    const waited = ctx.subagents.awaitSettlement(started.childId, parent, 2_000, controller.signal)
+    controller.abort('a plain string reason, not an Error')
+    await expect(waited).rejects.toBeInstanceOf(Error)
+    await expect(waited).rejects.toThrow('aborted')
+
+    hold.resolve(undefined)
+    await waitNoActivation(ctx, started.childId)
+  })
+})
+
+describe('SubagentRuntime pre-step settlement recheck', () => {
+  it('synthesizes exactly one redelivered notice once the push was lost, and none again once it has landed', async () => {
+    const hold = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('interrupted'), gate: hold.promise },
+      { chunks: textResponse('resumed turn 1') },
+      { chunks: textResponse('resumed turn 2') },
+    ])
+    const { ctx } = await setupWith(adapter)
+    await ctx.plugin(SessionProjectionRegistry)
+    const parentId = SessionId('recheck-parent')
+    const host = await ctx.agents.create({
+      sessionId: parentId,
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+    const started = await ctx.subagents.startContinuable(startSpec(host.agent))
+    await vi.waitFor(() => { expect(ctx.agents.get(started.childId)).toBeDefined() })
+
+    // Lose the push exactly as the "disposed too" regression above does: the
+    // teardown notice is injected, then durably cancelled before anything
+    // reads it.
+    const drained = ctx.subagents.drainContinuableDescendants([host.agent])
+    hold.resolve(undefined)
+    await drained
+    expect(settlementNotices(host.agent)).toHaveLength(1)
+    await host.dispose()
+
+    const resumed = await ctx.agents.resume({
+      resumeSessionId: parentId,
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+    expect(settlementNotices(resumed.agent)).toEqual([])
+
+    // The resumed parent's own next step is where the recheck runs.
+    resumed.agent.followup(createUserMessage({ content: message('go'), source: { kind: 'user' } }))
+    await vi.waitFor(() => { expect(settlementNotices(resumed.agent)).toHaveLength(1) })
+    expect(settlementNotices(resumed.agent)[0]!.sender).toBe(started.childId)
+    // The durable record carries outcome and timing only, never the child's
+    // final output, so a redelivered notice always reports no closing message.
+    expect(settlementNotices(resumed.agent)[0]!.text).toBe(
+      `Background subagent ${started.childId} was stopped before it finished.`
+      + '\nIt left no closing message.',
+    )
+
+    // A second step must not synthesize a second notice: the redelivered one
+    // is now in the resumed parent's own log, same as any other.
+    resumed.agent.followup(createUserMessage({ content: message('again'), source: { kind: 'user' } }))
+    await vi.waitFor(() => {
+      expect(resumed.agent.session.events.some(event => event.type === 'turn/end' && event.data.turn === 2))
+        .toBe(true)
+    })
+    expect(settlementNotices(resumed.agent)).toHaveLength(1)
+
+    await resumed.dispose()
+  })
+
+  it('synthesizes nothing on the parent\'s next step once the original push has already landed', async () => {
+    const { ctx, parent } = await setup([textResponse('the answer'), textResponse('parent ack')])
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+
+    // The parent's own next step (the "parent ack" turn the live push already
+    // woke) must not pick up a second, redundant notice.
+    await vi.waitFor(() => {
+      expect(parent.session.events.some(event => event.type === 'turn/end' && event.data.turn === 1)).toBe(true)
+    })
+    expect(settlementNotices(parent)).toHaveLength(1)
+  })
+
+  it('treats an already-committed notice in the session log as sufficient', async () => {
+    const { ctx, parent } = await setup([textResponse('settle me'), textResponse('ack'), textResponse('go ack')])
+    await ctx.plugin(SessionProjectionRegistry)
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+    // Let the ordinary fast path's own notice fully land first, so this test
+    // adds a SECOND, independently-committed notice on top of it rather than
+    // racing the first one's own in-flight claim/commit window.
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+
+    const summary = `Background subagent ${started.childId} completed.`
+    parent.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: summary }, { type: 'text', text: 'It left no closing message.' }],
+      source: {
+        kind: 'subagent-settled', form: 'notice', summary, senderSessionId: started.childId,
+      },
+    }), { surfaceOp: 'append' })
+    expect(settlementNotices(parent)).toHaveLength(2)
+
+    // The parent's next step re-runs the recheck for this same child; its
+    // settlement is still durably present, but the log already carries a
+    // matching notice (the one just appended), so nothing is added on top.
+    parent.followup(createUserMessage({ content: message('go'), source: { kind: 'user' } }))
+    await vi.waitFor(() => {
+      expect(parent.session.events.some(event => event.type === 'turn/end' && event.data.turn === 2)).toBe(true)
+    })
+    expect(settlementNotices(parent)).toHaveLength(2)
+  })
+
+  it('treats a pending next-turn message as sufficient, without waiting for it to commit', async () => {
+    const { ctx, parent } = await setup(
+      [textResponse('settle me'), textResponse('ack'), textResponse('trigger ack')],
+    )
+    await ctx.plugin(SessionProjectionRegistry)
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+    // Let the ordinary fast path's own notice fully land first, so this test
+    // adds a SECOND, independently-queued notice on top of it rather than
+    // racing the first one's own in-flight claim/commit window.
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+
+    const summary = `Background subagent ${started.childId} completed.`
+    parent.followup(createUserMessage({ content: message('trigger'), source: { kind: 'user' } }))
+    // Queued onto the *next* turn, behind the trigger above: `next-turn`
+    // claims only its first entry at a turn boundary, so this one stays
+    // genuinely pending -- neither claimed nor committed -- through the
+    // trigger's own (single-step) turn, which is exactly where the recheck
+    // must still find it.
+    parent.followup(createUserMessage({
+      content: [{ type: 'text', text: summary }, { type: 'text', text: 'It left no closing message.' }],
+      source: {
+        kind: 'subagent-settled', form: 'notice', summary, senderSessionId: started.childId,
+      },
+    }))
+    expect(settlementNotices(parent)).toHaveLength(2)
+
+    await vi.waitFor(() => {
+      expect(parent.session.events.some(event => event.type === 'turn/end' && event.data.turn === 2)).toBe(true)
+    })
+    expect(settlementNotices(parent)).toHaveLength(2)
+  })
+
+  it('logs a warning and keeps the step moving when redelivery itself fails', async () => {
+    const hold = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('interrupted'), gate: hold.promise },
+      { chunks: textResponse('resumed turn 1') },
+    ])
+    const { ctx } = await setupWith(adapter)
+    await ctx.plugin(SessionProjectionRegistry)
+    const parentId = SessionId('recheck-redelivery-failure-parent')
+    const host = await ctx.agents.create({
+      sessionId: parentId,
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+    const started = await ctx.subagents.startContinuable(startSpec(host.agent))
+    await vi.waitFor(() => { expect(ctx.agents.get(started.childId)).toBeDefined() })
+
+    // Lose the push exactly as the redelivery test above does.
+    const drained = ctx.subagents.drainContinuableDescendants([host.agent])
+    hold.resolve(undefined)
+    await drained
+    await host.dispose()
+
+    const resumed = await ctx.agents.resume({
+      resumeSessionId: parentId,
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+    const warnings: string[] = []
+    ctx.logger.warn = (text: string) => { warnings.push(text) }
+    resumed.agent.inject = () => { throw new Error('inbox rejected the notice') }
+
+    resumed.agent.followup(createUserMessage({ content: message('go'), source: { kind: 'user' } }))
+    await vi.waitFor(() => {
+      expect(warnings.some(warning => warning.includes('settlement notice redelivery'))).toBe(true)
+    })
+    // The step still completed normally despite the failed redelivery.
+    await vi.waitFor(() => {
+      expect(resumed.agent.session.events.some(event => event.type === 'turn/end' && event.data.turn === 1))
+        .toBe(true)
+    })
+    await resumed.dispose()
+  })
+
+  it('redelivers after a real process restart, not only within one ctx', async () => {
+    const hold = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([{ chunks: textResponse('interrupted'), gate: hold.promise }])
+    const { ctx, root } = await setupWith(adapter)
+    await ctx.plugin(SessionProjectionRegistry)
+    const parentId = SessionId('restart-recheck-parent')
+    const host = await ctx.agents.create({
+      sessionId: parentId,
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+    const started = await ctx.subagents.startContinuable(startSpec(host.agent))
+    await vi.waitFor(() => { expect(ctx.agents.get(started.childId)).toBeDefined() })
+
+    // Lose the push exactly as the same-process regression above does: the
+    // teardown notice is injected, then durably cancelled before anything
+    // reads it -- before this whole process (ctx) is discarded entirely,
+    // never to be resumed again.
+    const drained = ctx.subagents.drainContinuableDescendants([host.agent])
+    hold.resolve(undefined)
+    await drained
+    expect(settlementNotices(host.agent)).toHaveLength(1)
+    // Force the parent's own durable write before disposal: `host.dispose()`
+    // cancels its in-flight wake turn (a `keepInbox: false` cancel) before
+    // that turn's own commit, so without this explicit flush the resumed
+    // process below would find no persisted session at all for it.
+    await ctx.sessions.flush(host.agent.session)
+    await host.dispose()
+
+    // A genuinely NEW process: a brand-new Context and a brand-new
+    // SubagentRuntime instance, sharing no in-memory state at all with the
+    // ctx above -- only the persisted root on disk connects them. Unlike
+    // `ctx.agents.resume` within the first ctx (which keeps that same
+    // SubagentRuntime's bookkeeping alive across the dispose/resume), this
+    // is the actual restart MUST-FIX 1 targets.
+    const fresh = new Context()
+    await mountAgentLoopTestDependencies(fresh)
+    await fresh.plugin(JsonlSessionPersistence, { root: root! })
+    await fresh.plugin(SessionProjectionRegistry)
+    await fresh.plugin(AgentLoop, { agents: [] })
+    await fresh.plugin(SubagentRuntime)
+    await fresh.plugin(SubagentSpawn, { providerName: 'spawn' })
+    fresh.llm.registerAdapter(['mock'], new MockAdapter([textResponse('resumed turn')]))
+
+    const resumed = await fresh.agents.resume({
+      resumeSessionId: parentId,
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+    expect(settlementNotices(resumed.agent)).toEqual([])
+
+    // This fresh process's very first pre-step for this parent is where
+    // discovery must run and redeliver: there is no leftover process-local
+    // "known parent" state from the old process to have gated it.
+    resumed.agent.followup(createUserMessage({ content: message('go'), source: { kind: 'user' } }))
+    await vi.waitFor(() => { expect(settlementNotices(resumed.agent)).toHaveLength(1) })
+    expect(settlementNotices(resumed.agent)[0]!.sender).toBe(started.childId)
+
+    await resumed.dispose()
+  })
+
+  it('never calls persistence.list again once a parent\'s first step finds nothing outstanding', async () => {
+    const { ctx, parent } = await setup([textResponse('first'), textResponse('second')])
+    await ctx.plugin(SessionProjectionRegistry)
+    const listSpy = vi.spyOn(ctx.sessionPersistence, 'list')
+
+    parent.followup(createUserMessage({ content: message('go'), source: { kind: 'user' } }))
+    await vi.waitFor(() => {
+      expect(parent.session.events.some(event => event.type === 'turn/end' && event.data.turn === 1)).toBe(true)
+    })
+    // The parent has never had a continuable child; discovery's one-time scan
+    // still ran on this first step (there is no cheaper way to tell without
+    // it), found nothing, and cached that emptiness.
+    expect(listSpy).toHaveBeenCalledTimes(1)
+
+    parent.followup(createUserMessage({ content: message('again'), source: { kind: 'user' } }))
+    await vi.waitFor(() => {
+      expect(parent.session.events.some(event => event.type === 'turn/end' && event.data.turn === 2)).toBe(true)
+    })
+    // A second step for the same parent must not re-scan: the cached empty
+    // outstanding set is enough to answer "nothing to redeliver" on its own.
+    expect(listSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('caches nothing and retries on a later step when discovery itself fails for a non-capability reason', async () => {
+    const { ctx, parent } = await setup([textResponse('first'), textResponse('second')])
+    await ctx.plugin(SessionProjectionRegistry)
+    const warnings: string[] = []
+    ctx.logger.warn = (text: string) => { warnings.push(text) }
+    const listChildrenSpy = vi.spyOn(ctx.subagents, 'listChildren').mockImplementationOnce(
+      () => Promise.reject(new Error('transient read failure')),
+    )
+
+    parent.followup(createUserMessage({ content: message('go'), source: { kind: 'user' } }))
+    await vi.waitFor(() => {
+      expect(parent.session.events.some(event => event.type === 'turn/end' && event.data.turn === 1)).toBe(true)
+    })
+    expect(warnings.some(warning => warning.includes('settlement discovery'))).toBe(true)
+    expect(listChildrenSpy).toHaveBeenCalledTimes(1)
+
+    parent.followup(createUserMessage({ content: message('again'), source: { kind: 'user' } }))
+    await vi.waitFor(() => {
+      expect(parent.session.events.some(event => event.type === 'turn/end' && event.data.turn === 2)).toBe(true)
+    })
+    // Nothing was cached from the earlier failure, so this later step retries
+    // discovery from scratch rather than treating the parent as "checked".
+    expect(listChildrenSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('merges a concurrently live-tracked settlement into its first discovery scan instead of clobbering it', async () => {
+    const { ctx, parent } = await setup([textResponse('L settles'), textResponse('parent ack')])
+    await ctx.plugin(SessionProjectionRegistry)
+
+    const gate = Promise.withResolvers<undefined>()
+    const realListChildren = ctx.subagents.listChildren.bind(ctx.subagents)
+    const listChildrenSpy = vi.spyOn(ctx.subagents, 'listChildren').mockImplementationOnce(async (...args) => {
+      await gate.promise
+      return realListChildren(...args)
+    })
+
+    // Starts the parent's first-ever pre-step -- discovery begins, blocked
+    // on the gate above -- from unrelated work, independent of any child.
+    parent.followup(createUserMessage({ content: message('go'), source: { kind: 'user' } }))
+    await vi.waitFor(() => { expect(listChildrenSpy).toHaveBeenCalledTimes(1) })
+
+    // While that first scan is still in flight, L settles for real: its own
+    // `finishDisposal` calls `trackOutstandingSettlement` and installs this
+    // parent's outstanding entry before the gated scan below ever resolves.
+    const l = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, l.childId)
+    expect(settlementNotices(parent).filter(notice => notice.sender === l.childId)).toHaveLength(1)
+
+    gate.resolve(undefined)
+    await vi.waitFor(() => {
+      expect(parent.session.events.some(event => event.type === 'turn/end' && event.data.turn === 1)).toBe(true)
+    })
+    // The resolved scan now also lists L as settled; merging into the
+    // already-installed entry (rather than replacing it) must not have
+    // duplicated the notice L's own live push already delivered.
+    expect(settlementNotices(parent).filter(notice => notice.sender === l.childId)).toHaveLength(1)
+  })
+
+  it('never synthesizes a duplicate for a child whose live push races the recheck mid-disposal', async () => {
+    // Two child turns, plus a generous supply for the parent's own wake
+    // turns below (one when B settles, one when A finally does): every wake
+    // still dispatches `agent/pre-step` -- where the recheck runs -- before
+    // any of these responses are needed.
+    const { ctx, parent } = await setup([
+      textResponse('A done'), textResponse('B done'), textResponse('parent ack 1'), textResponse('parent ack 2'),
+    ])
+    await ctx.plugin(SessionProjectionRegistry)
+
+    const manager = (ctx.subagents as unknown as {
+      continuations: { activations: Map<SessionId, { handle: { dispose(): Promise<void> } }> }
+    }).continuations
+
+    const a = await ctx.subagents.startContinuable(startSpec(parent))
+    const aActivation = await vi.waitFor(() => {
+      const found = manager.activations.get(a.childId)
+      expect(found).toBeDefined()
+      return found!
+    })
+    // Widen child A's disposal window: its durable settlement record and
+    // `trackOutstandingSettlement` push-in-flight mark both land well before
+    // this gate opens, exactly the window the MUST-FIX 3 regression targets.
+    const releaseADispose = Promise.withResolvers<undefined>()
+    const realDisposeA = aActivation.handle.dispose.bind(aActivation.handle)
+    aActivation.handle.dispose = async () => {
+      await releaseADispose.promise
+      return realDisposeA()
+    }
+
+    // B settles normally while A is stuck mid-disposal; B's own live push
+    // wakes the parent, whose pre-step recheck runs with A's outstanding
+    // entry still `pushInFlight`.
+    const b = await ctx.subagents.startContinuable(startSpec(parent))
+    await vi.waitFor(() => {
+      expect(settlementNotices(parent).some(notice => notice.sender === b.childId)).toBe(true)
+    })
+    // The recheck has now run at least once with A mid-disposal and must
+    // have skipped it: no notice for A yet at all.
+    expect(settlementNotices(parent).some(notice => notice.sender === a.childId)).toBe(false)
+
+    releaseADispose.resolve(undefined)
+    await waitNoActivation(ctx, a.childId)
+    await vi.waitFor(() => {
+      expect(settlementNotices(parent).some(notice => notice.sender === a.childId)).toBe(true)
+    })
+
+    expect(settlementNotices(parent).filter(notice => notice.sender === a.childId)).toHaveLength(1)
+    expect(settlementNotices(parent).filter(notice => notice.sender === b.childId)).toHaveLength(1)
+  })
+
+  it('on a cold parent\'s first discovery, skips a still-running child, an already-redelivered one, and an already-noticed one', async () => {
+    const dHold = Promise.withResolvers<undefined>()
+    const nHold = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('D done'), gate: dHold.promise },
+      { chunks: textResponse('N done'), gate: nHold.promise },
+    ])
+    const { ctx, root } = await setupWith(adapter)
+    await ctx.plugin(SessionProjectionRegistry)
+    const parentId = SessionId('discovery-skip-parent')
+    const host = await ctx.agents.create({ sessionId: parentId, agentOptions: { provider: 'mock', model: 'mock' } })
+
+    const d = await ctx.subagents.startContinuable(startSpec(host.agent))
+    await vi.waitFor(() => { expect(ctx.agents.get(d.childId)).toBeDefined() })
+    const n = await ctx.subagents.startContinuable(startSpec(host.agent))
+    await vi.waitFor(() => { expect(ctx.agents.get(n.childId)).toBeDefined() })
+
+    // Settle D and N for real, durably, in the OLD process -- same
+    // drain+lose-push+flush+dispose mechanism as the restart test above.
+    const drained = ctx.subagents.drainContinuableDescendants([host.agent])
+    dHold.resolve(undefined)
+    nHold.resolve(undefined)
+    await drained
+    expect(settlementNotices(host.agent)).toHaveLength(2)
+    await ctx.sessions.flush(host.agent.session)
+    await host.dispose()
+
+    // A genuinely new process, sharing nothing in memory with the one above.
+    const fresh = new Context()
+    await mountAgentLoopTestDependencies(fresh)
+    await fresh.plugin(JsonlSessionPersistence, { root: root! })
+    await fresh.plugin(SessionProjectionRegistry)
+    await fresh.plugin(AgentLoop, { agents: [] })
+    await fresh.plugin(SubagentRuntime)
+    await fresh.plugin(SubagentSpawn, { providerName: 'spawn' })
+
+    const rHold = Promise.withResolvers<undefined>()
+    fresh.llm.registerAdapter(['mock'], new GatedAdapter([
+      { chunks: textResponse('R running'), gate: rHold.promise },
+      { chunks: textResponse('parent ack') },
+    ]))
+
+    const resumed = await fresh.agents.resume({
+      resumeSessionId: parentId,
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+
+    // Pre-seed N's notice directly onto the resumed parent's own log, before
+    // its first-ever pre-step: discovery must recognize it is already there
+    // and skip re-synthesizing a duplicate.
+    const nSummary = `Background subagent ${n.childId} completed.`
+    resumed.agent.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: nSummary }, { type: 'text', text: 'It left no closing message.' }],
+      source: { kind: 'subagent-settled', form: 'notice', summary: nSummary, senderSessionId: n.childId },
+    }), { surfaceOp: 'append' })
+
+    // R is a fresh child of this same process, started but never settled --
+    // it stays "running" for the whole test, so discovery must skip it too.
+    const r = await fresh.subagents.startContinuable(startSpec(resumed.agent))
+    await vi.waitFor(() => { expect(fresh.agents.get(r.childId)).toBeDefined() })
+
+    // D is pre-seeded as already redelivered (as if an earlier step in this
+    // same fresh process had already handled it), so discovery must not
+    // re-synthesize a notice for it either.
+    redeliveredSettlementsOf(fresh).add(d.childId)
+
+    // The parent's first-ever pre-step in this fresh process: discovery runs
+    // once here, scanning D (redelivered), N (already noticed) and R
+    // (still running) -- all three skip branches in the same scan.
+    resumed.agent.followup(createUserMessage({ content: message('go'), source: { kind: 'user' } }))
+    await vi.waitFor(() => {
+      expect(resumed.agent.session.events.some(event => event.type === 'turn/end' && event.data.turn === 1)).toBe(true)
+    })
+
+    expect(settlementNotices(resumed.agent).filter(notice => notice.sender === d.childId)).toHaveLength(0)
+    expect(settlementNotices(resumed.agent).filter(notice => notice.sender === n.childId)).toHaveLength(1)
+    expect(settlementNotices(resumed.agent).filter(notice => notice.sender === r.childId)).toHaveLength(0)
+
+    rHold.resolve(undefined)
+    await waitNoActivation(fresh, r.childId)
+    await resumed.dispose()
+  })
+
+  it('discovers an old-process sibling even when a new sibling was live-tracked first, before any pre-step', async () => {
+    const aHold = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([{ chunks: textResponse('A done'), gate: aHold.promise }])
+    const { ctx, root } = await setupWith(adapter)
+    await ctx.plugin(SessionProjectionRegistry)
+    const parentId = SessionId('discovery-live-first-parent')
+    const host = await ctx.agents.create({ sessionId: parentId, agentOptions: { provider: 'mock', model: 'mock' } })
+
+    // A settles durably in the OLD process, its push lost -- same
+    // drain+lose-push+flush+dispose mechanism as the restart test above.
+    const a = await ctx.subagents.startContinuable(startSpec(host.agent))
+    await vi.waitFor(() => { expect(ctx.agents.get(a.childId)).toBeDefined() })
+    const drained = ctx.subagents.drainContinuableDescendants([host.agent])
+    aHold.resolve(undefined)
+    await drained
+    expect(settlementNotices(host.agent)).toHaveLength(1)
+    await ctx.sessions.flush(host.agent.session)
+    await host.dispose()
+
+    // A genuinely new process.
+    const fresh = new Context()
+    await mountAgentLoopTestDependencies(fresh)
+    await fresh.plugin(JsonlSessionPersistence, { root: root! })
+    await fresh.plugin(SessionProjectionRegistry)
+    await fresh.plugin(AgentLoop, { agents: [] })
+    await fresh.plugin(SubagentRuntime)
+    await fresh.plugin(SubagentSpawn, { providerName: 'spawn' })
+
+    const bHold = Promise.withResolvers<undefined>()
+    fresh.llm.registerAdapter(['mock'], new GatedAdapter([
+      { chunks: textResponse('B done'), gate: bHold.promise },
+      { chunks: textResponse('parent ack') },
+    ]))
+
+    const resumed = await fresh.agents.resume({
+      resumeSessionId: parentId,
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
+
+    // Before the parent has taken a single pre-step in this fresh process, a
+    // NEW child B is started directly (service-API use, as this spec file
+    // does throughout, not through a parent turn) and settles, live-tracking
+    // this parent's outstanding entry via `trackOutstandingSettlement` --
+    // bootstrapping `outstandingByParent.get(parentId)` to a defined (but
+    // A-less) map well before `discoverOutstandingSettlements` has ever run
+    // for this parent.
+    const b = await fresh.subagents.startContinuable(startSpec(resumed.agent))
+    await vi.waitFor(() => { expect(fresh.agents.get(b.childId)).toBeDefined() })
+    bHold.resolve(undefined)
+    await waitNoActivation(fresh, b.childId)
+
+    // The parent's first pre-step in this fresh process: discovery must
+    // still run here -- despite `outstandingByParent` already holding a
+    // live-tracked entry for this parent -- and find A on disk, merging
+    // alongside whatever B's own live tracking already left behind.
+    resumed.agent.followup(createUserMessage({ content: message('go'), source: { kind: 'user' } }))
+    await vi.waitFor(() => {
+      expect(settlementNotices(resumed.agent).some(notice => notice.sender === a.childId)).toBe(true)
+      expect(settlementNotices(resumed.agent).some(notice => notice.sender === b.childId)).toBe(true)
+    })
+
+    expect(settlementNotices(resumed.agent).filter(notice => notice.sender === a.childId)).toHaveLength(1)
+    expect(settlementNotices(resumed.agent).filter(notice => notice.sender === b.childId)).toHaveLength(1)
+
+    await resumed.dispose()
+  })
+
+  it('drops a redelivery attempt without throwing when the agents-fiber reload window finds the manager unset', async () => {
+    const adapter = new GatedAdapter([{ chunks: textResponse('parent turn during the reload window') }])
+    const { ctx, parent } = await setupWith(adapter)
+
+    // Seed a process-local outstanding entry directly, the same way
+    // `redeliveredSettlementsOf` seeds its own memo: this isolates the
+    // branch under test from how an entry ordinarily gets there (a real
+    // settlement's live push, or discovery), both already covered by the
+    // other tests in this block, so this one test is solely about what
+    // happens once `continuations` is unset while something is outstanding.
+    const fakeChildId = SessionId('reload-window-fake-child')
+    const outstandingByParent = (ctx.subagents as unknown as {
+      outstandingByParent: Map<SessionId, Map<SessionId, { outcome: string; pushInFlight: boolean }>>
+    }).outstandingByParent
+    const discoveredParents = (ctx.subagents as unknown as { discoveredParents: Set<SessionId> }).discoveredParents
+    discoveredParents.add(parent.id)
+    outstandingByParent.set(parent.id, new Map([[fakeChildId, { outcome: 'completed', pushInFlight: false }]]))
+
+    const warnings: string[] = []
+    ctx.logger.warn = (text: string) => { warnings.push(text) }
+
+    const restore = clearContinuationsBinding(ctx)
+    try {
+      parent.followup(createUserMessage({ content: message('go'), source: { kind: 'user' } }))
+      await vi.waitFor(() => {
+        expect(parent.session.events.some(event => event.type === 'turn/end' && event.data.turn === 1)).toBe(true)
+      })
+    } finally {
+      restore()
+    }
+
+    // No throw propagated out of the step and into the turn: it closed out
+    // `completed`, not `error`.
+    const turnEnd = parent.session.events.find(
+      (event): event is SessionEvent<'turn/end'> => event.type === 'turn/end' && event.data.turn === 1,
+    )
+    expect(turnEnd?.data.reason.kind).toBe('completed')
+    // A clean no-op: unlike every OTHER way this per-entry loop can fail
+    // (caught per entry and logged as a redelivery-failed warning), the
+    // manager being unset during this window returns before the loop ever
+    // starts, so nothing here is logged either.
+    expect(warnings).toEqual([])
+    // Nothing was synthesized for the synthetic entry, and the window left
+    // the bookkeeping exactly as it found it.
+    expect(settlementNotices(parent)).toHaveLength(0)
+    expect(outstandingByParent.get(parent.id)?.has(fakeChildId)).toBe(true)
   })
 })
 

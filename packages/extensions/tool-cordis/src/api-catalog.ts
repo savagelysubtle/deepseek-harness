@@ -1722,6 +1722,13 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         throws: ['{SubagentError} `UNAUTHORIZED` when the authority does not own the live target.'],
       },
       {
+        signature: 'async awaitSettlement( childId: SessionId, parent: Agent, deadlineMs: number, signal?: AbortSignal, ): Promise<SubagentAwaitSettlementResult>',
+        description: 'Wait for one continuable child\'s durable settlement: the fast `subagent/end` lifecycle race against a capped deadline, falling back to exactly one authoritative persistence read on that deadline. See SubagentContinuationManager.awaitSettlement for the full contract — this is a direct pass-through.',
+        parameters: [{ name: 'childId', description: 'the durable child session id to await.' }, { name: 'parent', description: 'the exact live direct parent authorizing this wait.' }, { name: 'deadlineMs', description: 'how long to wait before the one authoritative read; clamped to {@link MAX_AWAIT_SETTLEMENT_DEADLINE_MS}.' }, { name: 'signal', description: 'caller cancellation, honored for the whole wait.' }],
+        returns: 'the settlement, or `pending` when the deadline\'s read found none.',
+        throws: ['when continuation services are unavailable, or `parent` is not this child\'s exact live durable direct parent.'],
+      },
+      {
         signature: 'hasLiveDescendants(root: Agent): boolean',
         description: 'Whether `root` currently has any live continuable descendant Activation. Synchronous and process-local — backed only by the resident Activation map, never a persistence read or a durable-history projection — so a caller like an idle-retire timer can afford to call it on every tick. listDescendants answers a different, more expensive question (the durable tree, including already-settled children); this one exists because that question is the wrong one, and the wrong cost, for a timer callback. A manager-less composition (the `agents` service never mounted) has never materialized an Activation, so it truthfully reports no descendants rather than throwing — the same `?? false` honesty interrupt uses for the same absence.',
         parameters: [{ name: 'root', description: 'the exact live Agent to test for live descendants.' }],
@@ -4501,6 +4508,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type StreamChunk = {\n    type: \'block-start\';\n    index: number;\n    blockType: ContentBlockType;\n} | {\n    type: \'text-delta\';\n    index: number;\n    text: string;\n} | {\n    type: \'reasoning-delta\';\n    index: number;\n    text: string;\n} | {\n    type: \'tool-call-delta\';\n    index: number;\n    id: CallId;\n    name?: string;\n    argumentsDelta: string;\n} | {\n    type: \'block-end\';\n    index: number;\n    block: ContentBlock;\n} | {\n    type: \'usage\';\n    usage: TokenUsage;\n} | {\n    type: \'finish\';\n    reason: FinishReason;\n    replayState?: ReplayEnvelope;\n};',
   },
   {
+    name: 'SubagentAwaitSettlementResult',
+    declaration: 'export type SubagentAwaitSettlementResult = {\n    readonly status: \'settled\';\n    readonly outcome: SubagentResult[\'stopReason\'];\n    readonly settledAt: number;\n} | {\n    readonly status: \'pending\';\n};',
+  },
+  {
     name: 'SubagentCapabilities',
     declaration: 'export interface SubagentCapabilities {\n    readonly outputSchema: boolean;\n    readonly depthLimit: boolean;\n    readonly toolFilter: boolean;\n    readonly persona: boolean;\n}',
   },
@@ -4554,7 +4565,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubagentRuntime',
-    declaration: 'export class SubagentRuntime extends Service {\n    constructor(ctx: Context);\n    async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart>;\n    async followup(parent: Agent, childId: SessionId, content: ContentBlock[], options: SubagentFollowupOptions): Promise<MessageId>;\n    interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): boolean;\n    hasLiveDescendants(root: Agent): boolean;\n    async reportFrom(child: Agent, content: ContentBlock[], options: SubagentReportOptions): Promise<MessageId>;\n    registerContinuableSetup(contribution: ContinuableSetupContribution): () => void;\n    async drainContinuableDescendants(parents: readonly Agent[]): Promise<void>;\n    listChildren(parentSessionId: SessionId, signal?: AbortSignal): Promise<SubagentListEntry[]>;\n    listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<SubagentDescendantListEntry[]>;\n    registerProvider(provider: SubagentProvider): () => void;\n    getProvider(name: string): SubagentProvider | undefined;\n    list(): string[];\n    async start(name: string, request: SubagentStartRequest): Promise<SubagentRun>;\n}',
+    declaration: 'export class SubagentRuntime extends Service {\n    constructor(ctx: Context);\n    async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart>;\n    async followup(parent: Agent, childId: SessionId, content: ContentBlock[], options: SubagentFollowupOptions): Promise<MessageId>;\n    interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): boolean;\n    async awaitSettlement(childId: SessionId, parent: Agent, deadlineMs: number, signal?: AbortSignal): Promise<SubagentAwaitSettlementResult>;\n    hasLiveDescendants(root: Agent): boolean;\n    async reportFrom(child: Agent, content: ContentBlock[], options: SubagentReportOptions): Promise<MessageId>;\n    registerContinuableSetup(contribution: ContinuableSetupContribution): () => void;\n    async drainContinuableDescendants(parents: readonly Agent[]): Promise<void>;\n    listChildren(parentSessionId: SessionId, signal?: AbortSignal): Promise<SubagentListEntry[]>;\n    listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<SubagentDescendantListEntry[]>;\n    registerProvider(provider: SubagentProvider): () => void;\n    getProvider(name: string): SubagentProvider | undefined;\n    list(): string[];\n    async start(name: string, request: SubagentStartRequest): Promise<SubagentRun>;\n}',
   },
   {
     name: 'SubagentStartRequest',
