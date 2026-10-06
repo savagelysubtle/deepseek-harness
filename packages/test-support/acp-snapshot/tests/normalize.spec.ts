@@ -298,6 +298,31 @@ describe('normalizeSessionLog', () => {
     expect(out).not.toContain('/private{{cwd}}')
   })
 
+  it('scrubs the settled=<outcome>@<ISO-8601> wall clock list_agents renders inline', () => {
+    const ev = JSON.stringify({
+      type: 'tool/result', seq: 2, time: 5,
+      data: {
+        content: [{
+          type: 'text',
+          text: 'abc [ready] model=x settled=completed@2026-10-05T19:55:37.537Z',
+        }],
+      },
+    })
+    const out = normalizeSessionLog(`${header({ cwd: ctx.cwd })}\n${ev}\n`, ctx)
+    expect(out).toContain('settled=completed@{{settledAt}}')
+    expect(out).not.toContain('2026-10-05T19:55:37.537Z')
+  })
+
+  it('leaves settled= text with no ISO-8601 suffix untouched', () => {
+    const ev = JSON.stringify({
+      type: 'tool/result', seq: 2, time: 5,
+      data: { content: [{ type: 'text', text: 'abc [ready] model=x settled=pending' }] },
+    })
+    const out = normalizeSessionLog(`${header({ cwd: ctx.cwd })}\n${ev}\n`, ctx)
+    expect(out).toContain('settled=pending')
+    expect(out).not.toContain('{{settledAt}}')
+  })
+
   it('scrubs fixed snapshot spill paths', () => {
     const ev = JSON.stringify({
       type: 'tool/result', seq: 2, time: 5,
