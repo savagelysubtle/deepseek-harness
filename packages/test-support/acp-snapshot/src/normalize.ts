@@ -338,6 +338,13 @@ export function normalizeSessionLog(
         const data = record.data as Record<string, unknown>
         if ('durationMs' in data) data.durationMs = 0
       }
+      // A subagent/settlement carries the wall clock at disposal (`data.settledAt`),
+      // which is run-to-run noise like `time` — zero it so the expected output reflects
+      // the outcome, not when it happened.
+      if (record.type === 'subagent/settlement' && record.data !== null && typeof record.data === 'object') {
+        const data = record.data as Record<string, unknown>
+        if ('settledAt' in data) data.settledAt = 0
+      }
     }
     return scrubValue(record, ctx, cwdPathMode) as Record<string, unknown>
   })
