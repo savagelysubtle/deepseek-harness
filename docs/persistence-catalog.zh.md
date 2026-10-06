@@ -719,6 +719,22 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 
 来源：[`packages/subagent/subagent/src/descriptor.ts:37`](../packages/subagent/subagent/src/descriptor.ts)
 
+<a id="subagentsettlement--log-only"></a>
+
+#### `subagent/settlement` — log-only
+
+```ts persistence-catalog
+/**
+ * Durable terminal outcome of a continuable subagent child, appended once
+ * inside `finishDisposal()`'s critical section, before the best-effort
+ * in-process settlement notice. Log-only: it carries no `surfaceOp`,
+ * never enters model history, and survives compaction.
+ */
+'subagent/settlement': SubagentSettlementData
+```
+
+来源：[`packages/subagent/subagent/src/settlement.ts:30`](../packages/subagent/subagent/src/settlement.ts)
+
 ### `todo/*`
 
 <a id="todowrite--log-only"></a>
