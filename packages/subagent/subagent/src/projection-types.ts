@@ -4,6 +4,9 @@
  * @module @deepseek-ai/dsh-subagent/projection-types
  */
 
+import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { SubagentResult } from './types.ts'
+
 /** Durable active-turn timing for one descriptor-backed child session. */
 export interface SubagentTimingProjection {
   /** Milliseconds accumulated across completed turns after the child's own descriptor. */
@@ -55,6 +58,26 @@ export type SubagentIdentityProjection =
     seq: number
   }
 
+/**
+ * Durable terminal outcome of one continuable subagent child, folded
+ * last-wins from `subagent/settlement` events. The direct parent is recorded
+ * as of settlement time, not re-read live, so a listener sees the outcome
+ * even after the parent lineage itself has been torn down.
+ */
+export interface SubagentSettlementProjection {
+  /** The durable direct parent recorded at settlement time. */
+  readonly parentSessionId: SessionId
+  /**
+   * Why the run ended. Reuses {@link SubagentResult.stopReason}'s
+   * merge-extensible union verbatim — the same vocabulary
+   * {@link SubagentIdentityProjection} and the durable record it is folded
+   * from both avoid duplicating.
+   */
+  readonly outcome: SubagentResult['stopReason']
+  /** Epoch ms the settlement was computed. */
+  readonly settledAt: number
+}
+
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionMap {
     /** Active-turn duration for a descriptor-backed subagent session. */
@@ -69,5 +92,13 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
      * non-optional.
      */
     subagent: SubagentIdentityProjection | null
+    /**
+     * Terminal outcome of a descriptor-backed subagent session. `null` ⟺ not
+     * yet settled, or settled only by a malformed/unrecognized-version event
+     * (deliberately undistinguished — the same serializable-sentinel
+     * discipline as the `subagent` entry above, for the same JSON-transport
+     * reason).
+     */
+    subagentSettlement: SubagentSettlementProjection | null
   }
 }

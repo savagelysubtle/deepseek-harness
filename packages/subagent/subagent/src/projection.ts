@@ -10,7 +10,13 @@ import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { foldSubagentDescriptor } from './descriptor.ts'
 import type { SubagentDescriptorData } from './descriptor.ts'
-import type { SubagentIdentityProjection, SubagentTimingProjection } from './projection-types.ts'
+import { foldSubagentSettlement } from './settlement.ts'
+import type { SubagentSettlementData } from './settlement.ts'
+import type {
+  SubagentIdentityProjection,
+  SubagentSettlementProjection,
+  SubagentTimingProjection,
+} from './projection-types.ts'
 
 interface TimingState {
   /** Milliseconds accumulated across completed post-descriptor turns. */
@@ -168,4 +174,64 @@ ProjectionDefinition<'subagent', IdentityState> = {
   // replay into a value the schema rejects (or silently drop), so it must
   // refold instead.
   stateVersion: 3,
+}
+
+interface SettlementState {
+  /** Settlement from the last valid event; absent before one, and after an invalid one. */
+  settlement?: SubagentSettlementProjection
+}
+
+const settlementSchema = z.object({
+  parentSessionId: z.string(),
+  outcome: z.string(),
+  settledAt: z.number().int().nonnegative(),
+}).strict().nullable() as unknown as z.ZodType<SubagentSettlementProjection | null>
+
+/**
+ * Interpret one `subagent/settlement` event; no value when the payload cannot
+ * be trusted. Reuses {@link foldSubagentSettlement} on a single-event slice —
+ * the same reuse {@link descriptorIdentity} makes of {@link foldSubagentDescriptor}.
+ */
+function settlementFromEvent(event: SessionEvent): SubagentSettlementProjection | undefined {
+  let settlement: SubagentSettlementData | undefined
+  try {
+    settlement = foldSubagentSettlement([event])
+  } catch {
+    // Only a malformed current-version payload throws in settlement parsing;
+    // a projection fold must never throw, so damage folds to no value.
+    settlement = undefined
+  }
+  if (settlement === undefined) return undefined
+  return {
+    parentSessionId: settlement.parentSessionId,
+    outcome: settlement.outcome,
+    settledAt: settlement.settledAt,
+  }
+}
+
+/**
+ * Fold the durable terminal outcome from `subagent/settlement` events,
+ * last-wins: `finishDisposal()` appends this event exactly once per child in
+ * the ordinary path, but a fork seed may still replay an ancestor's
+ * settlement, and the child's own event — should one arrive — must override
+ * it, the same reset discipline as {@link subagentIdentityProjectionDefinition}.
+ * A malformed or unknown-version payload resets to the `null` sentinel
+ * instead of throwing, so a fork of a healthy ancestor never inherits an
+ * outcome its own log failed to establish — and the reset survives every
+ * JSON push frame, so a consumer holding the earlier value replaces it
+ * instead of keeping it stale; `null` ⟺ not yet settled, with the causes of a
+ * failed fold deliberately undistinguished from "still running".
+ */
+export const subagentSettlementProjectionDefinition:
+ProjectionDefinition<'subagentSettlement', SettlementState> = {
+  key: 'subagentSettlement',
+  schema: settlementSchema,
+  init: () => ({}),
+  apply: (state, event) => {
+    if (event.type !== 'subagent/settlement') return state
+    const settlement = settlementFromEvent(event)
+    return settlement === undefined ? {} : { settlement }
+  },
+  view: state => state.settlement ?? null,
+  stateVersion: 1,
 }

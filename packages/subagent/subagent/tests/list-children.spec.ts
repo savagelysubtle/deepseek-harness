@@ -20,6 +20,7 @@ import SubagentRuntime, {
   SUBAGENT_DESCRIPTOR_VERSION,
   SubagentError,
 } from '@deepseek-ai/dsh-subagent'
+import { SUBAGENT_SETTLEMENT_VERSION } from '../src/settlement.ts'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import * as SubagentFork from '@deepseek-ai/dsh-subagent-fork-in-process'
 import { MockAdapter, textResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
@@ -1040,6 +1041,135 @@ describe('SubagentRuntime.listChildren', () => {
     const caught: unknown = await ctx.subagents.listChildren(parent.id).catch((error: unknown) => error)
     expect(caught).toBeInstanceOf(SubagentError)
     expect((caught as SubagentError).code).toBe('SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE')
+  })
+
+  it("reports a live child's durable settlement once its own event lands", async () => {
+    const { ctx, parent } = await setup([])
+    const liveId = SessionId('live-settled-child')
+    const live = ctx.sessions.create(liveId, {
+      meta: { parentSession: parent.id, origin: 'subagent' },
+    })
+    live.append('turn/start', { turn: 1 })
+    live.append('subagent/descriptor', descriptorPayload('live settling child'))
+    live.append('subagent/settlement', {
+      version: SUBAGENT_SETTLEMENT_VERSION,
+      parentSessionId: parent.id,
+      outcome: 'completed',
+      settledAt: 42,
+    })
+    const entries = await ctx.subagents.listChildren(parent.id)
+    expect(entries).toEqual([
+      {
+        kind: 'child', id: liveId, label: 'live settling child', mode: 'continuable',
+        activity: 'running', hasChildren: false,
+        settlement: { outcome: 'completed', settledAt: 42 },
+      },
+    ])
+  })
+
+  it("reports a persisted child's settlement folded through persistence inspection", async () => {
+    const { ctx, parent } = await setup([])
+    const events = childEvents(descriptorPayload('persisted settling child'))
+    events.push({
+      type: 'subagent/settlement',
+      seq: 4,
+      time: 5,
+      data: {
+        version: SUBAGENT_SETTLEMENT_VERSION,
+        parentSessionId: parent.id,
+        outcome: 'aborted',
+        settledAt: 99,
+      },
+    })
+    const childId = await authorChild(ctx, '00000000-0000-4000-8000-00000000se01', {
+      parentSession: parent.id,
+      origin: 'subagent',
+    }, events)
+    const entries = await ctx.subagents.listChildren(parent.id)
+    expect(entries).toEqual([
+      {
+        kind: 'child', id: childId, label: 'persisted settling child', mode: 'continuable',
+        activity: 'inactive', hasChildren: false,
+        settlement: { outcome: 'aborted', settledAt: 99 },
+      },
+    ])
+  })
+
+  it('omits settlement for a settled child whose log carries none', async () => {
+    const { ctx, parent } = await setup([])
+    const childId = await authorChild(ctx, '00000000-0000-4000-8000-00000000se00', {
+      parentSession: parent.id,
+      origin: 'subagent',
+    }, childEvents(descriptorPayload('never settled')))
+    const entries = await ctx.subagents.listChildren(parent.id)
+    expect(entries).toEqual([
+      {
+        kind: 'child', id: childId, label: 'never settled', mode: 'continuable',
+        activity: 'inactive', hasChildren: false,
+      },
+    ])
+  })
+
+  it('serves a cached settlement alongside a cached own-suffix identity', async () => {
+    const { ctx, parent } = await setup([], { projectionCache: true })
+    const child = await authorChild(ctx, '00000000-0000-4000-8000-00000000se02', {
+      parentSession: parent.id,
+      origin: 'subagent',
+    }, childEvents(descriptorPayload('cached settled child')))
+    // seq 2 >= seedLength 0: the cached row provably comes from the child's
+    // own suffix, so both its identity and its paired settlement are final.
+    ctx.sessionProjectionCache.cachedSnapshot = () => ({
+      asOfSeq: 2,
+      values: {
+        subagent: { mode: 'continuable', label: 'cached own', seq: 2 },
+        subagentSettlement: { parentSessionId: parent.id, outcome: 'error', settledAt: 7 },
+      },
+    })
+    const inspect = vi.spyOn(ctx.sessionPersistence, 'inspect')
+    await expect(ctx.subagents.listChildren(parent.id)).resolves.toEqual([{
+      kind: 'child', id: child, label: 'cached own', mode: 'continuable',
+      activity: 'inactive', hasChildren: false,
+      settlement: { outcome: 'error', settledAt: 7 },
+    }])
+    expect(inspect).not.toHaveBeenCalled()
+  })
+
+  it('pins the accepted false negative: a stale cached own-suffix row with no settlement outranks a persisted settlement event', async () => {
+    const { ctx, parent } = await setup([], { projectionCache: true })
+    const events = childEvents(descriptorPayload('settled after checkpoint'))
+    events.push({
+      type: 'subagent/settlement',
+      seq: 4,
+      time: 5,
+      data: {
+        version: SUBAGENT_SETTLEMENT_VERSION,
+        parentSessionId: parent.id,
+        outcome: 'completed',
+        settledAt: 123,
+      },
+    })
+    const child = await authorChild(ctx, '00000000-0000-4000-8000-00000000se03', {
+      parentSession: parent.id,
+      origin: 'subagent',
+    }, events)
+    // The cached row's identity proves LINEAGE (seq 2 >= seedLength 0 — the
+    // child's own suffix, not a replayed ancestor), not RECENCY: it was
+    // checkpointed before the settlement event landed, so it carries no
+    // `subagentSettlement` key at all even though the full persisted log
+    // already has one. The cache rung trusts the own-suffix identity and
+    // never inspects, so this settled child is reported as unsettled — the
+    // accepted false negative the cache's "never wrong, only possibly stale"
+    // contract allows; it self-heals once the cache checkpoints past seq 4.
+    ctx.sessionProjectionCache.cachedSnapshot = () => ({
+      asOfSeq: 2,
+      values: { subagent: { mode: 'continuable', label: 'settled after checkpoint', seq: 2 } },
+    })
+    const inspect = vi.spyOn(ctx.sessionPersistence, 'inspect')
+    await expect(ctx.subagents.listChildren(parent.id)).resolves.toEqual([{
+      kind: 'child', id: child, label: 'settled after checkpoint', mode: 'continuable',
+      activity: 'inactive', hasChildren: false,
+    }])
+    expect(inspect).not.toHaveBeenCalled()
   })
 })
 
