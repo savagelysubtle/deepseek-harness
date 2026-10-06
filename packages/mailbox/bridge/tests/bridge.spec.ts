@@ -1143,6 +1143,56 @@ describe('idle-retire deferral for a seat with live continuable descendants', ()
     // 40, ..., 100) still goes through the ordinary warn path.
     expect(warn.mock.calls.length).toBeGreaterThan(0)
   })
+
+  it('a live-descendant check that throws is reported and deferred, never crashes the timer, and retires once the check succeeds (SWD-139)', async () => {
+    const h = await makeHarness({ persisted: true })
+    const stub = subagentsStub(false)
+    const checkFailure = new Error('continuation registry read failed')
+    // Throws on the first two recheck ticks; once those one-time
+    // implementations are consumed, `hasLiveDescendants` falls back to the
+    // base `subagentsStub(false)` implementation and answers `false`.
+    stub.api.hasLiveDescendants
+      .mockImplementationOnce(() => { throw checkFailure })
+      .mockImplementationOnce(() => { throw checkFailure })
+    h.ctx.provide('subagents', stub.api as never)
+    const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
+    vi.useFakeTimers()
+    await publishHello(h.ctx)
+    const spec = residencySpec(1000)
+    await bridge.internals.drainOnce(h.ctx, spec)
+
+    // Tick 1: the check throws. `advanceTimersByTimeAsync` runs the fired
+    // `setTimeout` callback synchronously within this same call — an
+    // unguarded throw would propagate out of this `await` and fail the test
+    // right here, so simply resolving is itself proof no uncaught exception
+    // escaped the timer (this file has no process-level `uncaughtException`
+    // listener to assert against separately, unlike the `unhandledRejection`
+    // pattern used for async drain failures elsewhere in this file).
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(spec.residents.has('target')).toBe(true)
+    expect(h.disposeCalls()).toBe(0)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('"target"'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('could not be checked for live background subagents'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(String(checkFailure)))
+    const callsAfterFirstTick = warn.mock.calls.length
+
+    // Tick 2: still throws, but this tick is neither the first nor a
+    // multiple of `DESCENDANT_REANNOUNCE_TICKS` — the same cadence rule as
+    // the ordinary live-descendant case, so nothing new is logged.
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(warn.mock.calls.length).toBe(callsAfterFirstTick)
+    expect(spec.residents.has('target')).toBe(true)
+    expect(h.disposeCalls()).toBe(0)
+
+    // Tick 3: the check finally succeeds and reports no live descendant —
+    // retires exactly as the "retires once the live descendant is gone"
+    // case above expects (flush, dispose, lock release, map entry gone).
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.disposeCalls()).toBe(1)
+    expect(h.flushes()).toBe(1)
+    expect(spec.residents.has('target')).toBe(false)
+    expect(existsSync(namedLockPath('target'))).toBe(false)
+  })
 })
 
 /**
@@ -1433,6 +1483,135 @@ describe('seat rename supersedes the old resident instead of releasing it (SWD-1
     expect(spec.residents.get('target')).toBe(current)
     expect(spec.residents.size).toBe(1)
   })
+
+  it('a live-descendant check that throws during supersede is reported and deferred, never touches the map entry, and disposes once the check succeeds (SWD-139)', async () => {
+    const registryPath2 = writePinnedRegistry('session-a')
+    const h = await makeHarness()
+    const stub = perAgentSubagentsStub()
+    h.ctx.provide('subagents', stub.api as never)
+    const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
+    const spec = bridge.resolveBridgeSpec({
+      addresses: ['target'],
+      pollIntervalMs: 5,
+      maxClaimPerCycle: 10,
+      staleClaimMs: 600_000,
+      admitFrom: ['sender'],
+      orgRegistryPath: registryPath2,
+      residencyIdleMs: 1000,
+    })
+    vi.useFakeTimers()
+
+    await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, spec)
+    const agentA = h.agentFor('session-a')
+    // Live, so the rename below goes through the supersede-drain path
+    // (`retireSuperseded`) rather than disposing immediately.
+    stub.setLive(agentA, true)
+    const checkFailure = new Error('continuation registry read failed')
+    // The rename's own first recheck — run synchronously inside
+    // `supersede()` — is the one that throws; every call after this one
+    // falls back to the base `perAgentSubagentsStub` implementation.
+    stub.api.hasLiveDescendants.mockImplementationOnce(() => { throw checkFailure })
+
+    repinSeatSessionId(registryPath2, 'session-b')
+    await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'after rename' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+    // The new (current) resident is marked live too, so ITS OWN ordinary
+    // idle-retire timer — due at the same tick as the old resident's
+    // supersede recheck below — defers rather than coincidentally
+    // hardRetiring on schedule and confusing this test's dispose count, same
+    // reasoning as the pre-existing supersede-disposal test above.
+    stub.setLive(h.agentFor('session-b'), true)
+    const current = spec.residents.get('target')
+    expect(current).toBeDefined()
+    expect(h.disposeCalls()).toBe(0)
+
+    // The rename's own synchronous first check is the throw: never a silent
+    // linger for even one tick, and carrying the SUPERSEDE + unchecked
+    // wording, never the idle-retire wording the current (session-b)
+    // resident's own deferred idle timer would produce instead.
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('could not be checked for live background subagents'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('is being kept alive because the check failed'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(String(checkFailure)))
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('staying resident past its idle window'))
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('is being kept alive after the name moved to a new session'))
+    // The throw never touched `spec.residents` — the map entry is still
+    // exactly the new (session-b) resident the rename installed.
+    expect(spec.residents.get('target')).toBe(current)
+
+    // The check now succeeds and reports no live descendant — the very next
+    // recheck tears the old conversation down, exactly as the pre-existing
+    // supersede-disposal test expects once its background work finishes,
+    // and the current resident's map entry is still untouched throughout.
+    stub.setLive(agentA, false)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.disposeCalls()).toBe(1)
+    expect(h.flushes()).toBe(1)
+    expect(spec.residents.get('target')).toBe(current)
+  })
+
+  it('a thrown check-failure whose own stringification throws does not crash supersede — the new resident is admitted normally and the warn log carries the fallback text (SWD-139 follow-up)', async () => {
+    const registryPath2 = writePinnedRegistry('session-a')
+    const h = await makeHarness()
+    const stub = perAgentSubagentsStub()
+    h.ctx.provide('subagents', stub.api as never)
+    const warn = vi.spyOn(h.ctx.logger, 'warn').mockImplementation(() => {})
+    const spec = bridge.resolveBridgeSpec({
+      addresses: ['target'],
+      pollIntervalMs: 5,
+      maxClaimPerCycle: 10,
+      staleClaimMs: 600_000,
+      admitFrom: ['sender'],
+      orgRegistryPath: registryPath2,
+      residencyIdleMs: 1000,
+    })
+    vi.useFakeTimers()
+
+    await publishHello(h.ctx)
+    await bridge.internals.drainOnce(h.ctx, spec)
+    const agentA = h.agentFor('session-a')
+    // Live, so the rename below goes through `supersede()` → `retireSuperseded()`
+    // → `describeBlockedResident`'s check-failed branch, exactly where the
+    // bare `String(failure)` this follow-up replaces used to run.
+    stub.setLive(agentA, true)
+
+    // A hostile thrown value: a bare `String()` on it (and template-literal
+    // coercion) invokes `toString`, which itself throws — the gap one layer
+    // below the ordinary `Error`-typed `checkFailure` used above. Without
+    // `safeString`, this throw happens INSIDE `supersede()`, which runs
+    // synchronously inside the NEW delivery's own admission try (the one
+    // ending at src/index.ts ~line 1010) — so it would abort the NEW
+    // delivery's admission, not just the old resident's bookkeeping.
+    class Unprintable {
+      toString(): string { throw new Error('toString itself throws') }
+    }
+    stub.api.hasLiveDescendants.mockImplementationOnce(() => { throw new Unprintable() })
+
+    repinSeatSessionId(registryPath2, 'session-b')
+    const secondId = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'after rename' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+
+    // The NEW seat's admission completed completely normally — the
+    // stringification throw one layer down never escaped `supersede()` to
+    // abort the delivery that happened to trigger it.
+    expect(h.createdSessions()).toEqual(['session-a', 'session-b'])
+    await expect(rowState(h.storePath, secondId)).resolves.toMatchObject({ state: 'done' })
+    expect(spec.residents.get('target')).toBeDefined()
+    expect(h.agentFor('session-b')).toBeDefined()
+
+    // The announcement still fired, carrying the fixed fallback (naming the
+    // constructor) instead of a value that cannot be printed.
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('could not be checked for live background subagents'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('<unprintable failure: Unprintable>'))
+
+    // And the seat keeps working normally afterward: a third message rides
+    // the new, live resident with no further creation — proving the throw
+    // left nothing in a half-admitted or stuck state.
+    const thirdId = await h.ctx.mailbox.publish({ to: TARGET, from: 'sender', subject: 'still works' })
+    await bridge.internals.drainOnce(h.ctx, spec)
+    expect(h.createdSessions()).toEqual(['session-a', 'session-b'])
+    await expect(rowState(h.storePath, thirdId)).resolves.toMatchObject({ state: 'done' })
+  })
 })
 
 describe('describeBlockedResident cadence', () => {
@@ -1489,6 +1668,118 @@ describe('describeBlockedResident cadence', () => {
     expect(escalated?.escalate).toBe(true)
     expect(escalated?.message).toContain('this has now run far longer than one idle window is meant to mean')
     expect(escalated?.message).toContain('this conversation should not still be running')
+  })
+
+  describe('the check-failed variant (SWD-139)', () => {
+    const checkFailure = new Error('continuation registry read failed')
+
+    it('tick 1 announces "could not be checked" with the seat, the session id, and the error text — idle reason', () => {
+      const result = describeBlockedResident('target', sid, 1, 'idle', checkFailure)
+      expect(result).toBeDefined()
+      expect(result?.escalate).toBe(false)
+      expect(result?.message).toContain('"target"')
+      expect(result?.message).toContain(sid)
+      expect(result?.message).toContain('could not be checked for live background subagents')
+      expect(result?.message).toContain('it is being kept open rather than retired because the check failed')
+      expect(result?.message).toContain(String(checkFailure))
+      expect(result?.message).not.toContain('staying resident past its idle window')
+    })
+
+    it('tick 1 announces "could not be checked" with the session id and the error text — superseded reason', () => {
+      const result = describeBlockedResident('target', sid, 1, 'superseded', checkFailure)
+      expect(result).toBeDefined()
+      expect(result?.escalate).toBe(false)
+      expect(result?.message).toContain(sid)
+      expect(result?.message).toContain('could not be checked for live background subagents')
+      expect(result?.message).toContain('it is being kept alive because the check failed')
+      expect(result?.message).toContain(String(checkFailure))
+      expect(result?.message).not.toContain('is being kept alive after the name moved to a new session')
+    })
+
+    it('tick 2 reannounces nothing — same cadence as the ordinary live-descendant case', () => {
+      expect(describeBlockedResident('target', sid, 2, 'idle', checkFailure)).toBeUndefined()
+      expect(describeBlockedResident('target', sid, 2, 'superseded', checkFailure)).toBeUndefined()
+    })
+
+    it('reannounces at the reannounce tick, still routine (non-escalated) wording', () => {
+      const idleResult = describeBlockedResident('target', sid, DESCENDANT_REANNOUNCE_TICKS, 'idle', checkFailure)
+      expect(idleResult).toBeDefined()
+      expect(idleResult?.escalate).toBe(false)
+      expect(idleResult?.message).toContain('could not be checked')
+
+      const supersededResult = describeBlockedResident('target', sid, DESCENDANT_REANNOUNCE_TICKS, 'superseded', checkFailure)
+      expect(supersededResult).toBeDefined()
+      expect(supersededResult?.escalate).toBe(false)
+      expect(supersededResult?.message).toContain('could not be checked')
+    })
+
+    it('escalates at the escalate threshold, carrying the same escalate clause as the ordinary case', () => {
+      const idleEscalated = describeBlockedResident('target', sid, DESCENDANT_ESCALATE_TICKS, 'idle', checkFailure)
+      expect(idleEscalated?.escalate).toBe(true)
+      expect(idleEscalated?.message).toContain('this has now run far longer than one idle window is meant to mean')
+      expect(idleEscalated?.message).toContain('this seat should not still be running')
+      expect(idleEscalated?.message).toContain(String(checkFailure))
+
+      const supersededEscalated = describeBlockedResident('target', sid, DESCENDANT_ESCALATE_TICKS, 'superseded', checkFailure)
+      expect(supersededEscalated?.escalate).toBe(true)
+      expect(supersededEscalated?.message).toContain('this has now run far longer than one idle window is meant to mean')
+      expect(supersededEscalated?.message).toContain('this conversation should not still be running')
+      expect(supersededEscalated?.message).toContain(String(checkFailure))
+    })
+
+    it('a thrown value whose own stringification throws does not crash the function — the message carries a fixed fallback instead (SWD-139 follow-up)', () => {
+      // A hostile/broken thrown value: `String()` on it (and template-literal
+      // coercion) invokes `toString`, which itself throws. Nothing upstream
+      // can rely on an arbitrary caught value behaving like a well-formed
+      // `Error` — this is exactly what `safeString` exists to survive.
+      class Unprintable {
+        toString(): string {
+          throw new Error('toString itself throws')
+        }
+      }
+      const unprintable = new Unprintable()
+
+      const idleResult = describeBlockedResident('target', sid, 1, 'idle', unprintable)
+      expect(idleResult).toBeDefined()
+      expect(idleResult?.message).toContain('could not be checked for live background subagents')
+      expect(idleResult?.message).toContain('<unprintable failure: Unprintable>')
+
+      const supersededResult = describeBlockedResident('target', sid, 1, 'superseded', unprintable)
+      expect(supersededResult).toBeDefined()
+      expect(supersededResult?.message).toContain('could not be checked for live background subagents')
+      expect(supersededResult?.message).toContain('<unprintable failure: Unprintable>')
+    })
+
+    it('a thrown value whose constructor name is itself unreadable falls back to the fixed fallback with no constructor name', () => {
+      // Both `toString` AND reading `.constructor.name` throw — `safeString`'s
+      // own inner try/catch must survive this too, never escaping as a throw.
+      const hostile = {
+        toString(): string { throw new Error('toString throws') },
+        get constructor(): never { throw new Error('constructor getter throws') },
+      }
+
+      const result = describeBlockedResident('target', sid, 1, 'idle', hostile)
+      expect(result).toBeDefined()
+      expect(result?.message).toContain('<unprintable failure>')
+      expect(result?.message).not.toContain('<unprintable failure:')
+    })
+
+    it('a thrown value that is not an object at all (e.g. a function) with a throwing toString falls back with no constructor name', () => {
+      // `safeString`'s constructor-name lookup only runs for `typeof value
+      // === 'object'` values — a function is `typeof 'function'`, so this is
+      // the only realistic way to exercise the OTHER side of that guard while
+      // still producing a value whose stringification throws (every JS
+      // primitive stringifies without throwing; only an object or function
+      // with a hostile `toString`/`Symbol.toPrimitive` can make `String()`
+      // itself throw).
+      const hostileFn = (): void => {}
+      hostileFn.toString = (): string => { throw new Error('toString throws') }
+
+      const result = describeBlockedResident('target', sid, 1, 'idle', hostileFn)
+      expect(result).toBeDefined()
+      expect(result?.message).toContain('<unprintable failure>')
+      expect(result?.message).not.toContain('<unprintable failure:')
+    })
   })
 })
 

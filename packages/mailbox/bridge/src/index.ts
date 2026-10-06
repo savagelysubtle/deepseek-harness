@@ -1061,23 +1061,67 @@ const DESCENDANT_REANNOUNCE_TICKS = 20
 const DESCENDANT_ESCALATE_TICKS = 120
 
 /**
+ * Stringify an unknown value for a log message without letting a hostile or
+ * broken `toString`/`Symbol.toPrimitive` crash the caller. The only caller
+ * ({@link describeBlockedResident}'s check-failed branch) reads this directly
+ * off whatever a live-descendant check threw (see `checkLiveDescendants` in
+ * {@link retainResident}), so it carries none of the guarantees a normal
+ * `Error` does — a thrown non-Error value's own stringification can itself
+ * throw, and that throw must not escape a bare `setTimeout` callback (or, on
+ * the rename path, `supersede()`'s synchronous call out of a NEW delivery's
+ * own admission try/catch) any more than the live-descendant check itself may.
+ * @param value - the value to stringify.
+ * @returns `String(value)`, or a fixed fallback — naming the constructor when
+ *   that can be read without itself throwing — if stringifying throws.
+ */
+function safeString(value: unknown): string {
+  try {
+    return String(value)
+  } catch {
+    let label = '<unprintable failure>'
+    try {
+      const ctorName = typeof value === 'object' && value !== null
+        ? (value as { constructor?: { name?: string } }).constructor?.name
+        : undefined
+      if (typeof ctorName === 'string' && ctorName.length > 0) label = `<unprintable failure: ${ctorName}>`
+    } catch {
+      // Even reading the constructor name threw — stick with the fixed fallback.
+    }
+    return label
+  }
+}
+
+/**
  * Decide whether one blocked recheck should log, and how — shared by the
  * idle-retire path and the rename-supersede path (see {@link retainResident}
  * and {@link ResidentSeat.supersede}) so a founder reading the log sees one
  * consistent cadence for "why is this still running" regardless of which
  * path produced it. Pulled out as a pure function so the reannounce and
  * escalate thresholds are unit-testable without waiting on real timers.
+ *
+ * Covers two distinct situations under the same cadence: an ordinary live
+ * descendant (the common case) and a recheck whose OWN live-descendant check
+ * threw (`failure` present) — the founder's ruling treats a check that
+ * cannot be answered the same as one that answers "yes" (never retire on an
+ * unproven answer), so this reuses the identical cadence and escalation
+ * wording shape, just naming the actual situation.
  * @param name - the seat's address (its session name). For `reason:
  *   'superseded'` this is the name the resident USED TO answer to, not one it
  *   can still be reached under.
  * @param sessionId - the resident agent's durable session id.
  * @param blockedTicks - consecutive recheck ticks this resident has spent
- *   blocked on a live continuable descendant, counting the current one.
+ *   blocked on a live continuable descendant (or on a check it could not
+ *   complete), counting the current one.
  * @param reason - `'idle'` (the resident's own idle timer elapsed) or
  *   `'superseded'` (its name was just claimed by a different session while it
  *   still had live descendants) — the two wordings a founder needs to tell
  *   apart "this seat is unusually busy" from "this is an old conversation
  *   finishing up after a rename." Defaults to `'idle'` for existing callers.
+ * @param failure - the error the live-descendant check raised on this tick,
+ *   if the check itself failed rather than answering truthfully. `undefined`
+ *   (the default) means the check ran and the seat is simply still blocked on
+ *   a real live descendant; when present, the message reports that the seat
+ *   could not be checked at all instead of naming a live descendant.
  * @returns the log level and message for this tick, or `undefined` when this
  *   tick reannounces nothing.
  */
@@ -1086,22 +1130,35 @@ function describeBlockedResident(
   sessionId: SessionId,
   blockedTicks: number,
   reason: 'idle' | 'superseded' = 'idle',
+  failure?: unknown,
 ): { readonly escalate: boolean; readonly message: string } | undefined {
   if (blockedTicks !== 1 && blockedTicks % DESCENDANT_REANNOUNCE_TICKS !== 0) return undefined
   const escalate = blockedTicks >= DESCENDANT_ESCALATE_TICKS
-  const message = reason === 'superseded'
-    ? `mailbox-bridge: seat "${name}"'s previous conversation (${sessionId}) is being kept alive after the name moved to a new session — `
-      + 'live background subagents are still running on it, so it has not been disposed yet'
-      + (escalate
-        ? '; this has now run far longer than one idle window is meant to mean — '
-          + 'check its background work if this conversation should not still be running'
-        : '')
-    : `mailbox-bridge: seat "${name}" (${sessionId}) is staying resident past its idle window — `
-      + 'live background subagents are still running, so it is being kept open rather than retired'
-      + (escalate
-        ? '; this has now run far longer than one idle window is meant to mean — '
-          + 'check its background work if this seat should not still be running'
-        : '')
+  const escalateClause = escalate
+    ? '; this has now run far longer than one idle window is meant to mean — '
+      + `check its background work if this ${reason === 'superseded' ? 'conversation' : 'seat'} should not still be running`
+    : ''
+  // `safeString` is called lazily, only in these two branches (never
+  // unconditionally up front) — it is the ONLY place `failure` is ever
+  // stringified, and it is itself throw-proof (see its own doc), closing the
+  // gap where a bare `String(failure)` here could itself throw on a hostile
+  // or broken `toString`/`Symbol.toPrimitive` and crash the caller one layer
+  // up (SWD-139's own crash, one step further down the stack).
+  const message = failure !== undefined
+    ? reason === 'superseded'
+      ? `mailbox-bridge: seat "${name}"'s previous conversation (${sessionId}) could not be checked for live background subagents — `
+        + `it is being kept alive because the check failed: ${safeString(failure)}`
+        + escalateClause
+      : `mailbox-bridge: seat "${name}" (${sessionId}) could not be checked for live background subagents — `
+        + `it is being kept open rather than retired because the check failed: ${safeString(failure)}`
+        + escalateClause
+    : reason === 'superseded'
+      ? `mailbox-bridge: seat "${name}"'s previous conversation (${sessionId}) is being kept alive after the name moved to a new session — `
+        + 'live background subagents are still running on it, so it has not been disposed yet'
+        + escalateClause
+      : `mailbox-bridge: seat "${name}" (${sessionId}) is staying resident past its idle window — `
+        + 'live background subagents are still running, so it is being kept open rather than retired'
+        + escalateClause
   return { escalate, message }
 }
 
@@ -1201,18 +1258,37 @@ function retainResident(
     if (spec.residents.get(name) === resident) spec.residents.delete(name)
     flushAndDispose(ctx, name, handle, lock)
   }
+  // Shared by `retire()` and `retireSuperseded()` below: the live-descendant
+  // read (`hasLiveDescendants` walks the continuation registry, so a
+  // registry or session read failure propagates) must never escape a bare
+  // `setTimeout` callback — an uncaught throw there takes the whole process
+  // down (SWD-139). Catching it here turns "the check itself failed" into
+  // its own outcome rather than a crash: a plain `boolean` is a real answer,
+  // an object means the check could not be answered this tick at all.
+  const checkLiveDescendants = (): boolean | { readonly failure: unknown } => {
+    try {
+      return ctx.get('subagents')?.hasLiveDescendants(handle.agent) ?? false
+    } catch (failure) {
+      return { failure }
+    }
+  }
   // The idle-driven retire: a seat with a live continuable descendant does
   // not retire — the idle clock only starts once every descendant is gone.
   // A manager-less composition (`ctx.get('subagents')` absent) has never
   // materialized a descendant, so it falls straight through to `hardRetire`,
   // exactly reproducing the pre-existing behavior for every deployment that
-  // does not mount the subagent runtime at all.
+  // does not mount the subagent runtime at all. A check that throws is
+  // reported and deferred exactly like a real live descendant, never allowed
+  // to escape this timer and never treated as "no descendants" — retiring on
+  // an unproven answer could orphan work this resident could not see.
   const retire = (): void => {
-    if (ctx.get('subagents')?.hasLiveDescendants(handle.agent) ?? false) {
+    const liveCheck = checkLiveDescendants()
+    if (typeof liveCheck === 'object' || liveCheck) {
       blockedTicks += 1
+      const failure = typeof liveCheck === 'object' ? liveCheck.failure : undefined
       // Never a silent fence: a founder watching the log must be able to
       // learn why this seat has not gone away without reading source.
-      logBlockedAnnouncement(ctx, describeBlockedResident(name, handle.agent.session.id, blockedTicks, 'idle'))
+      logBlockedAnnouncement(ctx, describeBlockedResident(name, handle.agent.session.id, blockedTicks, 'idle', failure))
       timer = setTimeout(retire, Math.min(idleMs, DESCENDANT_RECHECK_MS))
       timer.unref()
       return
@@ -1228,11 +1304,15 @@ function retainResident(
   // this same closure's `timer`/`blockedTicks` rather than allocating fresh
   // ones: once `supersede()` runs, nothing else in this closure (`arm`,
   // `retire`, `keepAlive`) is ever invoked again, so there is no shared-state
-  // hazard in taking them over.
+  // hazard in taking them over. Same throw-safety as `retire()`: a check
+  // that fails here is reported and deferred, never allowed to crash the
+  // timer and never read as the descendant having gone away.
   const retireSuperseded = (): void => {
-    if (ctx.get('subagents')?.hasLiveDescendants(handle.agent) ?? false) {
+    const liveCheck = checkLiveDescendants()
+    if (typeof liveCheck === 'object' || liveCheck) {
       blockedTicks += 1
-      logBlockedAnnouncement(ctx, describeBlockedResident(name, handle.agent.session.id, blockedTicks, 'superseded'))
+      const failure = typeof liveCheck === 'object' ? liveCheck.failure : undefined
+      logBlockedAnnouncement(ctx, describeBlockedResident(name, handle.agent.session.id, blockedTicks, 'superseded', failure))
       timer = setTimeout(retireSuperseded, Math.min(idleMs, DESCENDANT_RECHECK_MS))
       timer.unref()
       return
