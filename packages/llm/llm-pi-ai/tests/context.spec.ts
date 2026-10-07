@@ -162,6 +162,50 @@ describe('pi-ai request context conversion', () => {
     })
   })
 
+  it('serializes a marker-led user message as the marker, a blank line, then the original text (SWD-156)', () => {
+    // The marker block is produced at request-build time by
+    // packages/core/agent-loop/src/founder-marker.ts (markFounderMessages),
+    // never by this adapter. Built literally here (not imported from
+    // agent-loop) to keep llm-pi-ai independent of agent-loop; this proves
+    // only that the existing generic `type:'text'` flattening (flattenText,
+    // context.ts ~line 14) carries a leading marker block to the wire for
+    // free, with no adapter changes.
+    const markerBlock: ContentBlock = {
+      type: 'text',
+      text: "This message is the founder's own, typed at this machine; it is not peer or relay traffic.\n\n",
+    }
+    const markerText = "This message is the founder's own, typed at this machine; it is not peer or relay traffic.\n\n"
+
+    const context = toPiContext(request([
+      createUserMessage({
+        content: [markerBlock, { type: 'text', text: 'what time is it' }],
+        source: { kind: 'user', founder: true },
+      }),
+    ]))
+    expect(context.messages[0]).toEqual({
+      role: 'user',
+      content: `${markerText}what time is it`,
+      timestamp: 0,
+    })
+
+    // Key presence, not prose: the marker's own text legitimately contains
+    // the word "founder" ("founder's own"), so this checks for the
+    // structural `"founder":`/`"source":` fields, never for the word.
+    const payload = JSON.stringify(context)
+    expect(payload).not.toMatch(/"founder"\s*:/)
+    expect(payload).not.toMatch(/"source"\s*:/)
+  })
+
+  it('leaves a message with no marker block unchanged from today (SWD-156)', () => {
+    const context = toPiContext(request([
+      createUserMessage({
+        content: [{ type: 'text', text: 'plain question' }],
+        source: { kind: 'user', founder: true },
+      }),
+    ]))
+    expect(context.messages[0]).toEqual({ role: 'user', content: 'plain question', timestamp: 0 })
+  })
+
   it('handles in-history system and assistant messages explicitly on the image path', async () => {
     await expect(toPiContext(request([
       history('system', [{ type: 'image', attachment: ref }]),
