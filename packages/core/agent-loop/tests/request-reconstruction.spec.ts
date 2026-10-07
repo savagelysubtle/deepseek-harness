@@ -117,6 +117,17 @@ function registerLate(ctx: Context) {
   }))
 }
 
+/** Fail a lifecycle regression promptly instead of waiting for Vitest's suite timeout. */
+async function promptly<T>(job: Promise<T>): Promise<T> {
+  const timeout = Promise.withResolvers<never>()
+  const timer = setTimeout(() => { timeout.reject(new Error('lifecycle task did not settle promptly')) }, 1000)
+  try {
+    return await Promise.race([job, timeout.promise])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 describe('request stability across the loop', () => {
   it('each step request within a turn append-extends the previous, frozen end to end', async () => {
     const adapter = new MockAdapter([
@@ -1268,9 +1279,19 @@ async function raceDisposalAgainstLatchedRecheck() {
   expect(adapter.requests).toHaveLength(1)
 
   const warnCalls: unknown[][] = []
+  // The dangling fire-and-forget recheck armed below ends by logging exactly
+  // this warn call (agent.ts's runToolSnapshotRecheck catch) once its own
+  // blocked send() attempt is refused -- resolving on that call is the
+  // deterministic replacement for a blind sleep: it is the actual signal the
+  // old sleep was giving that chain time to reach.
+  // Annotated binding (not withResolvers<void>()): the tests lint layer runs
+  // no-invalid-void-type with default options, which rejects the explicit
+  // type argument in call position but accepts the inferred form.
+  const recheckSettled: PromiseWithResolvers<void> = Promise.withResolvers()
   const origWarn = agent.ctx.logger.warn.bind(agent.ctx.logger)
   agent.ctx.logger.warn = ((...args: unknown[]) => {
     warnCalls.push(args)
+    if (args.some(arg => String(arg).includes('disposed'))) recheckSettled.resolve()
     origWarn(...(args as [never]))
   }) as typeof agent.ctx.logger.warn
 
@@ -1304,9 +1325,10 @@ async function raceDisposalAgainstLatchedRecheck() {
   maintenanceGate.resolve(undefined)
   await maintenance.catch(() => undefined)
   await disposal
-  // Give the dangling fire-and-forget chain a chance to reach its own
-  // dispatch attempt before inspecting state and removing the listener.
-  await new Promise(resolve => setTimeout(resolve, 50))
+  // Wait for the dangling fire-and-forget chain to actually reach its own
+  // blocked dispatch attempt (the warn call above), rather than a fixed
+  // sleep, before inspecting state and removing the listener.
+  await promptly(recheckSettled.promise)
   process.off('unhandledRejection', onUnhandled)
 
   return { agent, adapter, warnCalls, unhandled, disposeError, preDisposeEventCount }

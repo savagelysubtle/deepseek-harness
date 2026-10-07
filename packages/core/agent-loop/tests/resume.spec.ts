@@ -936,7 +936,17 @@ describe('configured-start failure edges', () => {
     const disposal = loop.dispose()
     gate.reject(new Error('late backend failure'))
     await disposal
-    await new Promise(r => setTimeout(r, 20))
+    // No flush needed here: `disposal` is `loop.dispose()`, which awaits
+    // FactoryOwnership.dispose() (src/index.ts ~82-88), which awaits the
+    // very same `published` promise this resume's `trackWrapper` call
+    // (~745) added to `startupTasks` -- the identical promise the
+    // resumeSessionId call site's own `.catch(... reportConfiguredStartupFailure
+    // ...)` (~409-414) is chained onto. Both reactions attach to `published`
+    // before `disposal` can resolve, and `ownership.dispose()`'s own await
+    // chain is strictly longer than the one hop `.catch` needs, so by the
+    // time `await disposal` returns the report has already been attempted
+    // and dropped. Verified empirically: 5/5 plain runs and 3/3 runs under
+    // 16 busy-loop CPU load stayed green with no wait here.
 
     // Ownership deactivated before the failure landed: the report is dropped.
     expect(failures).toEqual([])
@@ -987,6 +997,15 @@ describe('a disposal-blocked recheck does not orphan a message into a later resu
     }
     expect(adapter1.requests).toHaveLength(1)
 
+    // The dangling fire-and-forget second recheck (armed below) ends in one
+    // call `send()` refuses once disposal has landed -- `send`'s own
+    // `throwError` (agent.ts) is the only place that refusal becomes visible
+    // from outside the agent, as an `agent/error` emission. Waiting on that
+    // event is the deterministic replacement for a blind sleep: it is the
+    // exact signal the old sleep was giving the recheck time to reach.
+    const blockedSend = Promise.withResolvers<unknown>()
+    ctx1.on('agent/error', ({ error }) => { blockedSend.resolve(error) })
+
     // Dispose while the correction is still latched behind maintenance: this
     // durably discards the first latch and re-arms a deferred second
     // recheck (see agent.ts's toolSnapshotRecheckDeferred). Resolving the
@@ -997,9 +1016,11 @@ describe('a disposal-blocked recheck does not orphan a message into a later resu
     maintenanceGate.resolve(undefined)
     await maintenance.catch(() => undefined)
     await disposal
-    // Give the dangling fire-and-forget second recheck a chance to reach its
-    // own blocked send() attempt before tearing the fiber down.
-    await new Promise(resolve => setTimeout(resolve, 50))
+    // Wait for the dangling fire-and-forget second recheck to actually reach
+    // its own blocked send() attempt, rather than a fixed sleep, before
+    // tearing the fiber down.
+    const blockedSendError = await promptly(blockedSend.promise)
+    expect(String(blockedSendError)).toContain('send refused, agent is disposed')
 
     // Full teardown: session-persistence flushes every live session durably
     // as part of this, so no separate write-behind wait is needed.

@@ -163,31 +163,39 @@ describe('keepalive', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
     const logs = new Map([[sessionIdOf('s-ping'), makeLog()]])
     const harness = await makeServer(logs, { keepAliveMs: 1_000 })
-    const pings: string[] = []
-    const raw = await connectRaw(harness.url('/ag-ui/s-ping'))
-    raw.on('data', (chunk: Buffer) => { pings.push(chunk.toString('utf8')) })
-    await vi.advanceTimersByTimeAsync(3_500)
-    expect(pings.join('').match(/: ping/g)).toHaveLength(3)
-    raw.destroy()
+
+    // Observe the ping at the write boundary instead of over the wire: a real
+    // socket's bytes are not guaranteed to have arrived by the time
+    // `advanceTimersByTimeAsync` returns -- it drains the virtual-timer queue
+    // and microtasks, not real libuv I/O -- which is exactly what made this
+    // test's pass depend on real socket timing under load. The keepalive
+    // timer's callback (server.ts's `setInterval`) calls `res.write()`
+    // directly and synchronously, so spying on the live connection's own
+    // `ServerResponse.write` gives a deterministic count with no dependence
+    // on whether, or when, a client ever reads the bytes.
+    // End-to-end wire delivery of SSE bytes is already proven over a real
+    // fetch by the `describe('SSE endpoint', ...)` tests above, so asserting
+    // at the write boundary here does not leave that path unverified.
+    const http = (harness.server as unknown as { http: import('node:http').Server }).http
+    const resPromise = new Promise<import('node:http').ServerResponse>((resolve) => {
+      http.once('request', (_req, res) => { resolve(res) })
+    })
+    const response = await attach(harness, '/ag-ui/s-ping')
+    const res = await resPromise
+    const writeSpy = vi.spyOn(res, 'write')
+    const pingCount = (): number => writeSpy.mock.calls.filter(([payload]) => payload === ': ping\n\n').length
+
+    // Nothing before the first interval.
+    await vi.advanceTimersByTimeAsync(999)
+    expect(pingCount()).toBe(0)
+
+    // Three more intervals land exactly: N pings after N intervals.
+    await vi.advanceTimersByTimeAsync(2_501)
+    expect(pingCount()).toBe(3)
+
+    await response.body?.cancel()
   })
 })
-
-/** Open a raw HTTP request whose response surfaces byte-level writes. */
-async function connectRaw(url: string): Promise<import('node:http').IncomingMessage> {
-  const http = await import('node:http')
-  return await new Promise((resolve, reject) => {
-    const parsed = new URL(url)
-    const req = http.request({
-      host: parsed.hostname,
-      port: parsed.port,
-      path: parsed.pathname,
-      method: 'POST',
-      headers: { authorization: `Bearer ${OPTIONS.bearerToken}` },
-    }, resolve)
-    req.on('error', reject)
-    req.end()
-  })
-}
 
 describe('bounded queue overflow', () => {
   it('closes only the stalled stream with a terminal RUN_ERROR frame; the other watcher continues', async () => {
