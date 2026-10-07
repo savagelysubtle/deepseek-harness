@@ -2843,7 +2843,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/mailbox/tool-mailbox/src/index.ts:49`](../packages/mailbox/tool-mailbox/src/index.ts)
+Source: [`packages/mailbox/tool-mailbox/src/index.ts:55`](../packages/mailbox/tool-mailbox/src/index.ts)
 
 <a id="deepseek-aidsh-tool-pwsh"></a>
 

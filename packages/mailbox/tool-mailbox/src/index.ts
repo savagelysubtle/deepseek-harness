@@ -38,6 +38,12 @@ export {
 export { resolveMailboxIdentity } from './identity.ts'
 export type { IdentitySources } from './identity.ts'
 export type { CheckInboxResult, DirectoryEntry, InboxEntry, MailboxAwaitOutcome, MailboxAwaitResult, MailboxAwaitSentState, MailboxDirectoryResult, SendResult } from './tools.ts'
+export {
+  MAILBOX_AWAIT_EVENT_VERSION,
+  parseMailboxAwaitEvent,
+  snapshotMailboxAwaitEvent,
+} from './await-event.ts'
+export type { MailboxAwaitEventData, MailboxAwaitEventInput } from './await-event.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'tool-mailbox'
