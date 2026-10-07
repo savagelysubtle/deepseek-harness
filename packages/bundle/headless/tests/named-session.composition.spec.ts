@@ -15,7 +15,7 @@ import type { Context as ContextType } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
-import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import AgentLoop, { FOUNDER_MARKER_TEXT } from '@deepseek-ai/dsh-agent-loop'
 import LlmRuntime, { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
@@ -197,9 +197,13 @@ describe('named sessions over the real composition', () => {
     // before it.
     const firstLastMessage = first.requests.at(-1)?.messages.at(-2)
     if (firstLastMessage === undefined) throw new Error('the first run produced no model message')
+    // Headless founder-stamps every task, so the SWD-156 marker leads the content.
     expect(firstLastMessage).toMatchObject({
       role: 'user',
-      content: [{ type: 'text', text: 'first task' }],
+      content: [
+        { type: 'text', text: `${FOUNDER_MARKER_TEXT}\n\n` },
+        { type: 'text', text: 'first task' },
+      ],
     })
 
     const second = new ScriptedAdapter(['second answer'])
@@ -212,9 +216,13 @@ describe('named sessions over the real composition', () => {
     // The last message is the agent loop's unconditional clock tail (SWD-113).
     const lastMessage = second.requests.at(-1)?.messages.at(-2)
     if (lastMessage === undefined) throw new Error('the resumed run produced no model message')
+    // Headless founder-stamps every task, so the SWD-156 marker leads the content.
     expect(lastMessage).toMatchObject({
       role: 'user',
-      content: [{ type: 'text', text: 'second task' }],
+      content: [
+        { type: 'text', text: `${FOUNDER_MARKER_TEXT}\n\n` },
+        { type: 'text', text: 'second task' },
+      ],
     })
   })
 })

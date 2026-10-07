@@ -2,6 +2,7 @@ import { createUserMessage, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { FOUNDER_MARKER_TEXT } from '@deepseek-ai/dsh-agent-loop'
 import {
   errorResponse,
   makeBridgeHarness,
@@ -208,6 +209,33 @@ describe('ACP prompt lifecycle', () => {
       .flatMap(event => event.data.inserted)
       .find(message => message.source.kind === 'user')
     expect(logged?.source).toEqual({ kind: 'user', founder: true })
+  })
+
+  it('dispatches a founder-marked request for a session/prompt turn while the logged event stays unmarked (SWD-156)', async () => {
+    harness = await makeBridgeHarness({ script: [textResponse('answer')] })
+    const sessionId = await newSession(harness)
+    const agent = harness.ctx.agents.get(SessionId(sessionId))!
+
+    // Every ACP session/prompt founder-stamps its own message (SWD-125,
+    // asserted above), so the dispatched request must carry the marker.
+    await harness.client.prompt({ sessionId, prompt: [{ type: 'text', text: 'go' }] })
+
+    expect(harness.adapter.requests).toHaveLength(1)
+    const dispatchedUserMessage = harness.adapter.requests[0]!.messages.find(message => message.role === 'user')!
+    expect(dispatchedUserMessage.content).toEqual([
+      { type: 'text', text: `${FOUNDER_MARKER_TEXT}\n\n` },
+      { type: 'text', text: 'go' },
+    ])
+
+    // Never persisted: the logged user/message event carries the founder
+    // stamp but not the marker.
+    const loggedUserMessage = agent.session.events.find(event => event.type === 'user/message')
+    expect(loggedUserMessage?.type === 'user/message' && loggedUserMessage.data.content).toEqual([
+      { type: 'text', text: 'go' },
+    ])
+    expect(loggedUserMessage?.type === 'user/message' && loggedUserMessage.data.source).toEqual({
+      kind: 'user', founder: true,
+    })
   })
 
   it('ignores an autonomous message turn while correlating the client turn', async () => {
