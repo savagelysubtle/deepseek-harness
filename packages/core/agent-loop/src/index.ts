@@ -203,6 +203,13 @@ export {
 } from './loop-guard.ts'
 
 /**
+ * Per-message founder marker (SWD-156), re-exported so a consumer (e.g.
+ * `compaction-basic`) can recognize it outside this package's own
+ * request/invariant path.
+ */
+export { FOUNDER_MARKER_TEXT, markFounderMessages } from './founder-marker.ts'
+
+/**
  * One launcher-selected session identity for a configured agent. `resume`
  * distinguishes rehydrating existing persisted history from creating the
  * session fresh under that exact id, which the two config keys express as

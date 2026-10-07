@@ -35,6 +35,7 @@ import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import type { Context } from '@deepseek-ai/cordis'
 import { buildClockMessage } from './clock.ts'
 import { TOOL_SNAPSHOT_SETTLE_MS } from './constants.ts'
+import { markFounderMessages } from './founder-marker.ts'
 import { RuntimeContextProjection } from './runtime-context.ts'
 import { executeToolCalls } from './tool-calls.ts'
 import { ReasoningDriftDetector, ToolRepeatDetector, toolCallSignature } from './loop-guard.ts'
@@ -840,13 +841,18 @@ export class ReactLoopAgent implements Agent {
     }
     signal.throwIfAborted()
 
+    // Per-message founder marker (SWD-156, see `./founder-marker.ts`): applied
+    // here, to the outgoing array only — never through `session.append` — so
+    // it never enters the session log or perturbs `boundaryMessages`' own
+    // reconstructability from `session.deriveMessages()`.
+    //
     // Unconditional per-request clock tail (SWD-113, see `./clock.ts`):
     // appended here — never through `session.append` — so it is fresh on
     // every dispatch without ever entering the session log or perturbing
     // `boundaryMessages`' own reconstructability from `session.deriveMessages()`.
     const request = markAgentLoopRequest(deepFreeze({
       ...header.config,
-      messages: [...boundaryMessages, buildClockMessage(this.now)],
+      messages: [...markFounderMessages(boundaryMessages), buildClockMessage(this.now)],
       ...header.system !== undefined ? { system: header.system } : {},
       ...header.tools !== undefined ? { tools: header.tools } : {},
       sessionId: this.session.id,

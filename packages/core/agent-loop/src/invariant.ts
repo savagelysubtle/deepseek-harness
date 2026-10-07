@@ -8,20 +8,30 @@ import { isAgentLoopRequest, type GenerateOptions, type Message } from '@deepsee
 import type { InvariantFailure, InvariantInstaller } from '@deepseek-ai/dsh-invariants'
 import { foldRequestHeader } from '@deepseek-ai/dsh-session'
 import { isClockMessage } from './clock.ts'
+import { markFounderMessages } from './founder-marker.ts'
 
 const PACKAGE_NAME = '@deepseek-ai/dsh-agent-loop'
 
 /**
  * Whether `dispatched` (a request's `messages`) reconstructs from `expected`
- * (`session.deriveMessages()` at dispatch time): byte-equal once the
- * REQUIRED trailing message recognized as the unconditional per-request
- * clock tail (SWD-113, see `./clock.ts`) is set aside. `buildRequest` appends
- * that one message WITHOUT ever logging it, so a dispatched request
- * legitimately carries exactly one message `expected` has no counterpart
- * for — never more, and never anywhere but the very end. A request whose
- * last message is not the clock tail never reconstructs, full stop: the
- * absence is caught here rather than left to silently pass (a code path
- * that omitted the clock would otherwise never be caught by this check).
+ * (`session.deriveMessages()` at dispatch time): byte-equal once two known,
+ * deterministic divergences are set aside. First, the REQUIRED trailing
+ * message recognized as the unconditional per-request clock tail (SWD-113,
+ * see `./clock.ts`) — `buildRequest` appends that one message WITHOUT ever
+ * logging it, so a dispatched request legitimately carries exactly one
+ * message `expected` has no counterpart for, never more, and never anywhere
+ * but the very end. A request whose last message is not the clock tail
+ * never reconstructs, full stop: the absence is caught here rather than left
+ * to silently pass (a code path that omitted the clock would otherwise never
+ * be caught by this check). Second, the per-message founder marker (SWD-156,
+ * see `./founder-marker.ts`) — `buildRequest` applies `markFounderMessages`
+ * to its boundary messages before dispatch, also without ever logging it, so
+ * `expected` is put through the identical transform here before the
+ * byte-equal comparison. Because that transform is pure and reference-
+ * preserving for non-founder messages, this stays an exact check either way:
+ * a marker on a message that is not founder-stamped in `expected`, or a
+ * founder-stamped message dispatched without its marker, both still fail to
+ * reconstruct.
  * @param dispatched - the frozen request's `messages` array.
  * @param expected - `session.deriveMessages()` at dispatch time.
  * @returns whether `dispatched` reconstructs from `expected` under that rule.
@@ -33,7 +43,7 @@ function messagesReconstruct(dispatched: readonly Message[], expected: readonly 
   /* v8 ignore next -- duplicated by install()'s identical check immediately before this function is ever called (messagesReconstruct is
      module-private, its only caller is install()) */
   if (last === undefined || !isClockMessage(last)) return false
-  return JSON.stringify(dispatched.slice(0, -1)) === JSON.stringify(expected)
+  return JSON.stringify(dispatched.slice(0, -1)) === JSON.stringify(markFounderMessages(expected))
 }
 
 /** Cordis companion plugin name. */

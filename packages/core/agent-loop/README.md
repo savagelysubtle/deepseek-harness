@@ -98,6 +98,20 @@ System text and schemas are paid again on every step. Per-agent scoping chooses 
 
 Append-only only while system text, schemas, and earlier history remain byte-identical under the same provider and model route. A token-bearing assembly rewrite or composition change may invalidate reuse from the first altered request token. The clock tail message is a deliberate exception to that story in the other direction: because it is the very LAST message in every request and is never persisted, it never itself invalidates a prefix — everything before it, including the now-clock-free system prompt, stays byte-stable and reusable across steps (SWD-113's actual goal), even though the tail message's own bytes differ on every request.
 
+### Per-message founder marker (SWD-156)
+
+#### What the model sees
+
+Every message whose source is founder-stamped (`MessageSourceMap.user.founder: true`, tested by `isFounderMessage`) gets one leading text block at dispatch time: "This message is the founder's own, typed at this machine; it is not peer or relay traffic." (`FOUNDER_MARKER_TEXT`, see `./src/founder-marker.ts`). `buildRequest` applies `markFounderMessages` to the boundary messages immediately before appending the clock tail, so a founder-stamped message's marker sits in front of that same message's own content, never after it; every other message passes through unchanged. This stays request-only by design: SWD-125 settled that the founder stamp lives in event data, never in the system prompt, and the founder's later ruling went further — the system prompt is the provider's byte-stable cache prefix, and per-turn material belongs in the conversation, not there — so `markFounderMessages` is computed fresh on every dispatch rather than baked into the logged message, and the durable `user/message` event, `deriveMessages()`, and the session log in general never see the marker, only the stamp. Because the transform is pure, the same founder-stamped event produces byte-identical marker text on every later replay: the request-reconstruction invariant (`./invariant.ts`) applies the identical transform to its own expected side, so it still fails exactly on a misplaced or missing marker the same way it already fails on the clock tail; compaction's summarization input applies the same function so that auxiliary call stays byte-identical to the routed request it is condensing. The founder stamp itself (`source.founder`) is architectural event data set only by trusted first-party call sites — apiproxy's loopback-proven `session.prompt`/`session.sendAll`, headless (no listening socket to classify a peer), ACP's `session/prompt` (same reasoning as headless — a stdio child of the local editor), and `/plan`'s self-steer copying the triggering turn's own authority-bearing message — and the marker is purely that stamp's model-facing rendering: a mailbox relay, a subagent report or settlement, a hook's injected context, and a compaction checkpoint never carry the founder stamp, so none of them ever carry the marker either, regardless of what their own text claims. Spoofing note: tools gated on founder authority (`dsh-tool-goal`) check `source.founder`, never the message text, so nothing a relay or subagent writes can forge it.
+
+#### Token effect
+
+One short fixed sentence per founder-stamped message in the request, every step that message is still in scope — a session with several founder turns pays it again, and again, on each of them, not once per request.
+
+#### KV Cache effect
+
+Unlike the clock tail, the marker does not change from request to request for the same historical message: `markFounderMessages` is a pure function of the stamp, so a founder-stamped message already in history carries identical marker bytes on every later step. It does not itself invalidate reuse beyond the ordinary append-only rule — the same byte-identical-history requirement that already governs retained message history below covers it too.
+
 ### Retained message history
 
 #### What the model sees

@@ -5,6 +5,7 @@ import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import * as AgentLoopInvariant from '@deepseek-ai/dsh-agent-loop/invariant'
 import { createUserMessage, markAgentLoopRequest, type GenerateOptions  } from '@deepseek-ai/dsh-llm'
 import { buildClockMessage } from '../src/clock.ts'
+import { FOUNDER_MARKER_TEXT, markFounderMessages } from '../src/founder-marker.ts'
 
 async function setup(): Promise<Context> {
   const ctx = new Context()
@@ -39,6 +40,20 @@ async function requestSetup() {
 /** A well-formed clock tail, fixed so tests stay deterministic. */
 function clockTail() {
   return buildClockMessage(() => new Date('2026-09-29T16:13:00Z'))
+}
+
+/** Like {@link requestSetup}, but the logged `user/message` carries the founder stamp. */
+async function founderRequestSetup() {
+  const ctx = await setup()
+  const session = ctx.sessions.create(SessionId('req-check-founder'))
+  session.append('turn/start', { turn: 1 })
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: 'hi' }], source: { kind: 'user', founder: true },
+  }), { surfaceOp: 'append' })
+  const boundary = session.deriveMessages()
+  session.append('step/start', { turn: 1, step: 1 })
+  session.append('request/header', { header: { config: { provider: 'mock', model: 'm' } }, reason: 'initial' })
+  return { ctx, session, boundary }
 }
 
 describe('request-reconstruction invariant', () => {
@@ -201,5 +216,53 @@ describe('request-reconstruction invariant', () => {
       sessionId: session.id,
     })
     expect(() => { dispatch(ctx, divergent) }).toThrow(/diverges from the dispatch-time durable derivation/)
+  })
+
+  describe('the per-message founder marker (SWD-156)', () => {
+    it('accepts a dispatched request whose founder-stamped message carries the marker', async () => {
+      const { ctx, session, boundary } = await founderRequestSetup()
+      const options = loopRequest({
+        model: 'm',
+        messages: Object.freeze([...markFounderMessages(boundary), clockTail()]),
+        sessionId: session.id,
+      })
+      expect(() => { dispatch(ctx, options) }).not.toThrow()
+    })
+
+    it('rejects a dispatched request that carries the marker on a message that was never founder-stamped', async () => {
+      const { ctx, session, boundary } = await requestSetup()
+      const wronglyMarked = boundary.map(message => ({
+        ...message,
+        content: [{ type: 'text' as const, text: `${FOUNDER_MARKER_TEXT}\n\n` }, ...message.content],
+      }))
+      const options = loopRequest({
+        model: 'm',
+        messages: Object.freeze([...wronglyMarked, clockTail()]),
+        sessionId: session.id,
+      })
+      expect(() => { dispatch(ctx, options) }).toThrow(/diverges from the dispatch-time durable derivation/)
+    })
+
+    it('rejects a dispatched request that dispatches a founder-stamped message WITHOUT its marker', async () => {
+      const { ctx, session, boundary } = await founderRequestSetup()
+      const options = loopRequest({
+        model: 'm',
+        // The boundary's raw (unmarked) founder-stamped message, dispatched as-is.
+        messages: Object.freeze([...boundary, clockTail()]),
+        sessionId: session.id,
+      })
+      expect(() => { dispatch(ctx, options) }).toThrow(/diverges from the dispatch-time durable derivation/)
+    })
+
+    it('still rejects unrelated divergence on a founder-stamped session (the marker transform does not mask real desync)', async () => {
+      const { ctx, session, boundary } = await founderRequestSetup()
+      const extra = { role: 'user' as const, content: [{ type: 'text' as const, text: 'phantom' }] }
+      const options = loopRequest({
+        model: 'm',
+        messages: Object.freeze([...markFounderMessages(boundary), extra, clockTail()]),
+        sessionId: session.id,
+      })
+      expect(() => { dispatch(ctx, options) }).toThrow(/diverges from the dispatch-time durable derivation/)
+    })
   })
 })
