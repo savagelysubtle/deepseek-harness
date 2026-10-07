@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { AttachmentError } from '@deepseek-ai/dsh-attachment'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { FOUNDER_MARKER_TEXT } from '@deepseek-ai/dsh-agent-loop'
 import { makeBridgeHarness, textResponse, type BridgeHarness } from './harness.ts'
 
 describe('automation-only ACP bridge', () => {
@@ -66,7 +67,12 @@ describe('automation-only ACP bridge', () => {
     // The dispatched request's very last message is the agent loop's
     // unconditional clock tail (SWD-113); the real user message sits just
     // before it.
-    expect(harness.adapter.requests[0]?.messages.at(-2)?.content).toEqual([{ type: 'text', text: 'say hello' }])
+    // ACP founder-stamps every session/prompt, so the dispatched content
+    // leads with the SWD-156 marker block; the logged event never carries it.
+    expect(harness.adapter.requests[0]?.messages.at(-2)?.content).toEqual([
+      { type: 'text', text: `${FOUNDER_MARKER_TEXT}\n\n` },
+      { type: 'text', text: 'say hello' },
+    ])
   })
 
   it('leaves absent agent targets for request listeners to supply', async () => {
@@ -90,7 +96,11 @@ describe('automation-only ACP bridge', () => {
     })
 
     // The last message is the agent loop's unconditional clock tail (SWD-113).
-    expect(harness.adapter.requests[0]?.messages.at(-2)?.content).toEqual([{ type: 'text', text: 'first second' }])
+    // ACP founder-stamps this prompt, so the SWD-156 marker leads the content.
+    expect(harness.adapter.requests[0]?.messages.at(-2)?.content).toEqual([
+      { type: 'text', text: `${FOUNDER_MARKER_TEXT}\n\n` },
+      { type: 'text', text: 'first second' },
+    ])
   })
 
   it('admits mixed text/image prompts in wire order and logs references only', async () => {
@@ -113,13 +123,16 @@ describe('automation-only ACP bridge', () => {
     expect(resolve).toHaveBeenCalledWith('mock', 'mock', expect.any(AbortSignal))
     expect(harness.attachments?.saved.map(input => [...input.data])).toEqual([[1], [2]])
     // The last message is the agent loop's unconditional clock tail (SWD-113).
+    // ACP founder-stamps this prompt, so the SWD-156 marker leads the content,
+    // shifting every other block's index by one.
     const requestContent = harness.adapter.requests[0]?.messages.at(-2)?.content
-    expect(requestContent?.map(block => block.type)).toEqual(['text', 'image', 'text', 'image', 'text'])
-    expect(requestContent?.[0]).toEqual({ type: 'text', text: 'before' })
-    expect(requestContent?.[2]).toEqual({ type: 'text', text: 'between' })
-    expect(requestContent?.[4]).toEqual({ type: 'text', text: 'after' })
-    const firstImage = requestContent?.[1]
-    const secondImage = requestContent?.[3]
+    expect(requestContent?.map(block => block.type)).toEqual(['text', 'text', 'image', 'text', 'image', 'text'])
+    expect(requestContent?.[0]).toEqual({ type: 'text', text: `${FOUNDER_MARKER_TEXT}\n\n` })
+    expect(requestContent?.[1]).toEqual({ type: 'text', text: 'before' })
+    expect(requestContent?.[3]).toEqual({ type: 'text', text: 'between' })
+    expect(requestContent?.[5]).toEqual({ type: 'text', text: 'after' })
+    const firstImage = requestContent?.[2]
+    const secondImage = requestContent?.[4]
     if (firstImage?.type !== 'image' || secondImage?.type !== 'image') throw new Error('expected ordered image blocks')
     expect(firstImage.attachment.mediaType).toBe('image/png')
     expect(firstImage.attachment.bytes).toBe(1)
@@ -217,10 +230,14 @@ describe('automation-only ACP bridge', () => {
       ],
     })
     // The last message is the agent loop's unconditional clock tail (SWD-113).
-    expect(harness.adapter.requests[0]?.messages.at(-2)?.content).toEqual([{
-      type: 'text',
-      text: 'summarize\n[resource_link name="notes.txt" uri="file:///tmp/notes.txt"]\n',
-    }])
+    // ACP founder-stamps this prompt, so the SWD-156 marker leads the content.
+    expect(harness.adapter.requests[0]?.messages.at(-2)?.content).toEqual([
+      { type: 'text', text: `${FOUNDER_MARKER_TEXT}\n\n` },
+      {
+        type: 'text',
+        text: 'summarize\n[resource_link name="notes.txt" uri="file:///tmp/notes.txt"]\n',
+      },
+    ])
   })
 
   it('rejects prompts for unknown sessions and ignores unknown cancellation', async () => {

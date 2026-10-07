@@ -17,6 +17,7 @@ import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { isClockMessage } from '../src/clock.ts'
 import { TOOL_SNAPSHOT_SETTLE_MS } from '../src/constants.ts'
+import { FOUNDER_MARKER_TEXT } from '../src/founder-marker.ts'
 import { MockAdapter, textResponse, toolCallResponse } from './mock-adapter.ts'
 
 async function harness(adapter: MockAdapter, persona = 'stable base') {
@@ -1488,5 +1489,53 @@ describe('insert guard on a disposed agent (SWD-137)', () => {
     expect(wakeDriverError).toBeInstanceOf(Error)
     expect((wakeDriverError as Error).message).toMatch(/dispatch blocked, agent is disposed/)
     expect(adapter.requests).toHaveLength(1)
+  })
+})
+
+describe('per-message founder marker (SWD-156)', () => {
+  it('a founder-stamped turn builds a request whose user message carries the marker, while the durable log never does', async () => {
+    const adapter = new MockAdapter([textResponse('ack')])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('founder-marker-stamped'), { provider: 'mock', model: 'mock' })
+
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: 'do the thing' }],
+      source: { kind: 'user', founder: true },
+    }))
+    await waitForIdle(ctx, agent)
+
+    expect(adapter.requests).toHaveLength(1)
+    const dispatchedUserMessage = adapter.requests[0]!.messages.find(message => message.role === 'user')!
+    expect(dispatchedUserMessage.content).toEqual([
+      { type: 'text', text: `${FOUNDER_MARKER_TEXT}\n\n` },
+      { type: 'text', text: 'do the thing' },
+    ])
+
+    // Never persisted: the logged user/message event carries the founder
+    // stamp but not the marker, and deriveMessages() -- the durable
+    // reconstruction -- agrees.
+    const loggedUserMessage = agent.session.events.find(event => event.type === 'user/message')
+    expect(loggedUserMessage?.type === 'user/message' && loggedUserMessage.data.content).toEqual([
+      { type: 'text', text: 'do the thing' },
+    ])
+    expect(loggedUserMessage?.type === 'user/message' && loggedUserMessage.data.source).toEqual({
+      kind: 'user', founder: true,
+    })
+    const derivedUserMessage = agent.session.deriveMessages().find(message => message.role === 'user')
+    expect(derivedUserMessage?.content).toEqual([{ type: 'text', text: 'do the thing' }])
+  })
+
+  it('a plain (unstamped) turn builds no marker anywhere in the dispatched request', async () => {
+    const adapter = new MockAdapter([textResponse('ack')])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('founder-marker-plain'), { provider: 'mock', model: 'mock' })
+
+    send(agent, 'do the thing')
+    await waitForIdle(ctx, agent)
+
+    expect(adapter.requests).toHaveLength(1)
+    const sawMarker = adapter.requests[0]!.messages.some(message =>
+      message.content.some(block => block.type === 'text' && block.text.includes(FOUNDER_MARKER_TEXT)))
+    expect(sawMarker).toBe(false)
   })
 })

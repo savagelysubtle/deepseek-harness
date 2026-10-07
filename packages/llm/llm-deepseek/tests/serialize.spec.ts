@@ -270,6 +270,59 @@ describe('serializeRequest', () => {
   })
 })
 
+describe('founder marker (SWD-156)', () => {
+  // The marker block is produced at request-build time by
+  // packages/core/agent-loop/src/founder-marker.ts (markFounderMessages),
+  // never by this adapter. It is built literally here (not imported from
+  // agent-loop) so llm-deepseek stays independent of agent-loop; this proves
+  // only that the existing generic `type:'text'` flattening (flattenText,
+  // serialize.ts ~line 56) and user-role handling (~lines 128-130) carry a
+  // leading marker block to the wire for free, with no adapter changes.
+  const markerBlock: ContentBlock = {
+    type: 'text',
+    text: "This message is the founder's own, typed at this machine; it is not peer or relay traffic.\n\n",
+  }
+
+  it('serializes a marker-led user message as the marker, a blank line, then the original text', () => {
+    const wire = serializeMessages([
+      createUserMessage({
+        content: [markerBlock, { type: 'text', text: 'what time is it' }],
+        source: { kind: 'user', founder: true },
+      }),
+    ])
+    const content = (wire[0] as { content: string }).content
+    expect(content).toBe(
+      "This message is the founder's own, typed at this machine; it is not peer or relay traffic.\n\nwhat time is it",
+    )
+    expect(content.startsWith("This message is the founder's own, typed at this machine; it is not peer or relay traffic.\n\n")).toBe(true)
+  })
+
+  it('never leaks the founder source onto the wire', () => {
+    const wire = serializeRequest(request({
+      messages: [createUserMessage({
+        content: [markerBlock, { type: 'text', text: 'what time is it' }],
+        source: { kind: 'user', founder: true },
+      })],
+    }))
+    // Key presence, not prose: the marker's own text legitimately contains
+    // the word "founder" ("founder's own"), so this checks for the
+    // structural `"founder":`/`"source":` fields, never for the word.
+    const payload = JSON.stringify(wire)
+    expect(payload).not.toMatch(/"founder"\s*:/)
+    expect(payload).not.toMatch(/"source"\s*:/)
+  })
+
+  it('leaves a message with no marker block unchanged from today', () => {
+    const wire = serializeMessages([
+      createUserMessage({
+        content: [{ type: 'text', text: 'plain question' }],
+        source: { kind: 'user', founder: true },
+      }),
+    ])
+    expect(wire).toEqual([{ role: 'user', content: 'plain question' }])
+  })
+})
+
 describe('review fixes: assistant content shapes', () => {
   it('serializes a content-less, tool-call-less assistant message as "" content, never null', () => {
     // Aborted/empty assistant turns: no text, no calls → "". The earlier

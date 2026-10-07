@@ -16,6 +16,7 @@ import {
 } from '@deepseek-ai/dsh-compaction'
 import type { CompactionResult } from '@deepseek-ai/dsh-compaction'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
+import { markFounderMessages } from '@deepseek-ai/dsh-agent-loop'
 import { createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { Message, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { TokenMeasurement, TokenMeter } from '@deepseek-ai/dsh-token-meter'
@@ -509,7 +510,14 @@ function buildSummarizationInput(
   return {
     ...header?.system === undefined ? {} : { system: header.system },
     ...header?.tools === undefined ? {} : { tools: header.tools },
-    messages: regionMessages,
+    // The last routed request this call mimics (SWD-156, buildRequest) marks
+    // founder-stamped messages with a leading request-only text block before
+    // dispatch; this replay must carry the identical marker on the identical
+    // messages, or the auxiliary call stops being a byte-exact prefix of that
+    // request and the provider's warm prefix cache this input exists to reuse
+    // is lost on every founder session. Never persisted: `regionMessages`
+    // itself (and the session log it was derived from) is untouched.
+    messages: markFounderMessages(regionMessages),
   }
 }
 
