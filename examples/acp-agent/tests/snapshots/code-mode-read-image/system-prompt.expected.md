@@ -40,6 +40,13 @@ The available tools:
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 
 interface ToolArgsMap {
+  /** Wait for one of your background subagents to settle (finish, for any reason) by its subagent id. The target must be your exact direct child — the same caller `send_message` requires. This call blocks for at most 600000ms (default 10000ms, set with `deadline_ms`, always capped at the maximum regardless of what you request): it returns as soon as settlement is observed, or, once the deadline passes, after exactly one direct check of the durable record — never a polling loop. A `pending` result means the subagent had not settled by the deadline: call `list_agents` to check later, or call `await_subagent` again. */
+  await_subagent: {
+    /** The subagent id returned when the background subagent was started. */
+    subagent_id: string;
+    /** How long to wait, in milliseconds, before returning a pending result instead of blocking further. Default 10000; capped at 600000 regardless of the value given. */
+    deadline_ms?: number;
+  } & Record<string, JsonValue>;
   /** Execute a bash command (`bash -c`) and return its stdout/stderr. Each call runs in a fresh shell: no state (cwd, variables, functions) persists between calls — pass `workdir` instead of using `cd`. Non-zero exits are reported as `[exit code: N]`. Current harness environment facts are exposed through managed `$DSH_*` variables; inspect them when needed. Commands may run under a file sandbox; a blocked file operation is reported as `[sandbox: file access denied under <mode> mode]` — a policy denial, not a bug in the command; do not retry another way. Long output is truncated to its tail; the full output is saved to a file whose path is reported when available. Set `run_in_background: true` for long-running commands: the call returns a job id immediately; read its output with `job_output` and stop it with `job_kill`. Attempting a command the sandbox may deny is safe and expected: run it and read the marker rather than assuming the denial. When a command is denied and a wider mode would let it succeed, escalate immediately in the same turn — the one sanctioned exception to a denial: retry the exact same command once with `sandbox_permissions` (the narrowest wider mode that suffices) plus a one-sentence `justification`. Do not detour through chat to ask permission first — the approval prompt raised by that retry is how the user consents. If the session states approval prompts are disabled, there is no exception: a denial is final — do not set `sandbox_permissions`. Never escalate speculatively: ground the request in a real denial — normally the one this command just hit; escalating up front is fine only when this session already denied the same access. A rejected escalation is final for that command — stop and explain, never work around it — but it does not forbid attempting or escalating other commands later. */
   bash: {
     /** The bash command to execute. */
@@ -224,6 +231,13 @@ interface ToolArgsMap {
 }
 
 interface ToolOutputMap {
+  await_subagent: {
+    status: "settled";
+    outcome: string;
+    settledAt: number;
+  } | {
+    status: "pending";
+  };
   bash: {
     kind: "background";
     jobId: string;
@@ -333,6 +347,10 @@ interface ToolOutputMap {
     status: "running" | "idle" | "ready";
     provider?: string;
     model?: string;
+    settlement?: {
+      outcome: string;
+      settledAt: number;
+    };
     parent?: string;
     depth?: number;
   } | {

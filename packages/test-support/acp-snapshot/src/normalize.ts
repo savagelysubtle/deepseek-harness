@@ -13,6 +13,7 @@ const TOOLS = '{{tools}}'
 const EVENT_TIME = '{{eventTime}}'
 const EVENT_OMITTED_BYTES = '{{eventOmittedBytes}}'
 const LOG_TIME = '{{logTime}}'
+const SETTLED_AT = '{{settledAt}}'
 
 /** A cwd-rooted path after volatile cwd replacement, through its last separator-delimited segment. */
 const CWD_ROOTED_PATH_RE = /\{\{cwd\}\}(?:[\\/][^\s<>"'`]+)+/g
@@ -24,6 +25,13 @@ const EVENT_READ_TARGET_REGION_RE
   = /^Session [^\r\n]+ — [^\r\n]+\r?\nTarget event seq \d+:\r?\n```json\r?\n\{\r?\n[\s\S]*?(?=\r?\n```(?:\r?\n|$)|\r?\n\r?\n\(Omitted )/
 const PATH_TEXT_BOUNDARY_RE = /[\s<>'"`()\[\]{},;:!?=]/
 const FILE_URI_PATH_PREFIX_RE = /(?:^|[^a-z0-9+.-])file:\/\/\/?$/i
+/**
+ * `list_agents`' rendered `settled=<outcome>@<ISO-8601>` suffix (`list-agents.ts`'s
+ * `new Date(settledAt).toISOString()`) — the wall clock baked into tool-result text,
+ * run-to-run noise like the event `time` fields. Scoped to the `settled=...@` prefix
+ * so it only ever consumes that one timestamp, not any other ISO string in the text.
+ */
+const SETTLED_AT_RE = /(settled=\w+@)\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/g
 
 /** A UUID v4 string, the shape `randomUUID()` produces for session ids. */
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
@@ -179,6 +187,9 @@ function scrubString(value: string, ctx: NormalizeContext, cwdPathMode: CwdPathM
     )
     out = out.replace(EVENT_READ_OMITTED_BYTES_RE, `$1${EVENT_OMITTED_BYTES}$2`)
   }
+  // `list_agents` renders each child's settlement wall clock inline; scrub just the
+  // timestamp so the outcome word stays regression-visible.
+  out = out.replace(SETTLED_AT_RE, `$1${SETTLED_AT}`)
   for (const id of ctx.sessionIds) out = out.split(id).join(SESSION_ID)
   out = out.replace(UUID_RE, SESSION_ID)
   return out
@@ -337,6 +348,13 @@ export function normalizeSessionLog(
       if (record.type === 'hook/result' && record.data !== null && typeof record.data === 'object') {
         const data = record.data as Record<string, unknown>
         if ('durationMs' in data) data.durationMs = 0
+      }
+      // A subagent/settlement carries the wall clock at disposal (`data.settledAt`),
+      // which is run-to-run noise like `time` — zero it so the expected output reflects
+      // the outcome, not when it happened.
+      if (record.type === 'subagent/settlement' && record.data !== null && typeof record.data === 'object') {
+        const data = record.data as Record<string, unknown>
+        if ('settledAt' in data) data.settledAt = 0
       }
     }
     return scrubValue(record, ctx, cwdPathMode) as Record<string, unknown>

@@ -24,6 +24,7 @@ subagent seam 允许一个 agent（智能体）通过具名提供方把工作委
 | `drainContinuableDescendants(parents)` | 在由 host 拥有的确切在线父级 Agent 之下关闭准入，只停止这些父级可见的可继续后代；等待已在这些根节点下获准的物化过程完成发布或回滚后，再按子级优先顺序释放所选的各棵树。该截止状态会持续到每个确切父级离开注册表；无关的父级树仍在线，管理器全局准入仍保持开放。 |
 | `listChildren(parentSessionId, signal?)` | 按 `createdAt`、再按 id 的顺序列出由会话支撑的直接 subagent，包括其 `one-shot`／`continuable` 模式、`running`／`inactive` 活动状态、描述符记录的子 agent 声明 LLM 路由（存在时）、根据 origin 分类得出的一层 `hasChildren` 提示，以及每个子级的诊断信息，且不会加载或恢复它们。该操作直接读取在线会话存储和可选的会话持久化（没有持久化时只枚举在线子级），并要求已挂载 `sessionProjections` 注册表；不要求 `ctx.agents`、继续执行管理器或任何查询服务。 |
 | `listDescendants(rootSessionId, signal?)` | 从同一份在线优先语料按稳定 pre-order 展平根的完整会话树，并为每个 subagent 条目附加持久 `parentId` 与相对根的 `depth`。普通会话与一次性 child 仍作为遍历节点，因此其下的可继续后代仍可发现。身份、diagnostic、依赖与取消约定均沿用 `listChildren()`。 |
+| `awaitSettlement(childId, parent, deadlineMs, signal?)` | 等待一个可继续 child 的持久化结算：让既有的、限定作用域的 `subagent/end` 事件与一个有上限的 deadline 赛跑，deadline 触发后——只触发一次，没有重试、没有轮询——执行一次直接的持久化读取，折叠出持久化结算投影。`deadlineMs` 会被限制到 `MAX_AWAIT_SETTLEMENT_DEADLINE_MS`（10 分钟），无论调用方请求什么。`parent` 必须是注册表中确切在线的条目，且必须是该 child 自己持久化的直接 parent；与 `interrupt()` 不同，位于更上层的在线 ancestor 不被接受。参见[持久化结算记录](#the-durable-settlement-record)。 |
 
 `SubagentStartRequest.label` 是由会话支撑的一次性 child 所使用的可选简短持久化显示标签。面向模型的委派会提供其已有的 `description`；底层调用方无需凭空构造展示元数据。可继续启动始终携带自身的必填标签。`signal` 是必填项，也是一次性 `start` 的规范取消通道。发布前中止会使 `start()` 在回滚后拒绝；发布后中止会取消已返回 run 的剩余轮次工作，但不会隐藏其 id。请求还可以选择模型、要求结构化输出、限制委派深度、约束子 agent 工具或设置子 agent persona。对于可继续启动或后续操作，调用方信号只负责 inbox 接受前的查找、物化和准入；此后，Activation 由管理器独立拥有，因此调用方取消既不会取消已接受的轮次，也不会 dispose（资源释放）子 agent。
 
@@ -86,6 +87,24 @@ subagent seam 允许一个 agent（智能体）通过具名提供方把工作委
 
 受继续执行管理的父级 Activation 会在子 agent 能够运行之前，把每个子 agent 的会话 id 记录到 `ownedChildren` 集合中，并且只有在每个所拥有的子 agent Activation 完成 `AgentHandle` dispose 之后才会 dispose（子先于父）。拆卸会先自顶向下传播 Agent 取消，再等待缓慢的后代，而 handle 释放仍保持 child-first。顶层及其他非继续执行的 Agent 没有 Activation，处于该等待图之外。最终结算会在 dispose handle 前等待 best-effort 的 `ctx.sessions.flush(child.session)`。监听器拒绝会被记录，但不会使 Activation 失败，因为监听器参与本身不能标识持久化后端；因此恢复时的持久化状态仍可能缺失或陈旧。
 
+<a id="the-durable-settlement-record"></a>
+
+### 持久化结算记录
+
+上文的通知是一次 best-effort 推送：只有在 Activation 结算的那一刻，管理器与父级的 inbox 都仍可达时，它才能送达。管理器还会向子级自己的日志追加一条不可变的 `subagent/settlement` 会话事件——位于计算该 epoch `stopReason` 的同一个 disposal 关键区段内，紧随该结局被捕获之后、推送尝试之前——因此即便推送丢失、父级从未在线以接收它，或父级在投递前就被拆卸，子级已结算、以及如何结算的事实仍会留存。只有当调用方曾真正拿到过该 Activation 的 id 时（`activation.announced`）才会追加；在首次被接受之前就回滚的物化既不产生事件，也不产生通知。追加失败只会被记录日志，拆卸照常继续——追加绝不能阻塞拆卸。该记录（`src/settlement.ts`，与 `src/descriptor.ts` 的版本化、经校验、已分离的结构相同）形如 `{ version, parentSessionId, outcome: SubagentResult['stopReason'], settledAt }`。
+
+一个与 `subagentTiming`、`subagent` 同级的 `subagentSettlement` 会话投影单元（见下文[生命周期事件](#lifecycle-events)）以 last-wins 方式折叠最近一条这样的事件，得到 `{ parentSessionId, outcome, settledAt } | null`。三条读取路径负责排空它：
+
+- **`listChildren()`／`listDescendants()`** 把它折叠进每个 `child` 条目的可选字段 `settlement: { outcome, settledAt }`，与既有的身份折叠一样是附加式的；`list_agents` 会把它渲染为追加在既有输出之后的 ` settled=<outcome>@<ISO-timestamp>`。冷路径的投影缓存阶梯对"已结算"给出权威答案，但对"未结算"只给出**临时性**答案——若缓存行记录于结算事件到达上一次 checkpoint 之前，即便完整日志此时已经有了结算记录，它仍会报告没有，这是一个被接受的假阴性，会在下一次 checkpoint 自我修复，绝不会是假阳性。
+- **`awaitSettlement(childId, parent, deadlineMs, signal?)`**——面向模型的 `await_subagent` 工具背后的操作——让限定作用域的 `subagent/end` 事件与一个有上限的 deadline 赛跑；deadline 触发后（只触发一次，没有重试、没有轮询），它会直接从持久化存储读取并据此折叠投影，而绝不使用那个只能给出临时答案的缓存阶梯。这正是把 08-31 创始人裁定的等待模式（一次 deadline、一次权威重读，绝不使用 watcher 或 cron）应用到结算场景。`deadlineMs` 会被限制到 `MAX_AWAIT_SETTLEMENT_DEADLINE_MS`（10 分钟，定义于 `continuation.ts`），无论调用方请求什么；`await_subagent` 工具还会进一步限制到它自己的 `MAX_AWAIT_DEADLINE_MS`（60 秒，默认 `DEFAULT_AWAIT_DEADLINE_MS` 10 秒，定义于 `tool-subagent-control/src/await-subagent.ts`）——真正约束模型调用方的是工具这道更紧的上限。鉴权要求 `parent` 是确切在线的注册表条目，并且在 deadline 路径上还必须是该子级自己持久化的直接父级——这比 `interrupt()` 的在线 ancestor 作用域更窄：`interrupt()` 还接受更上层的 ancestor，而 `awaitSettlement` 不接受。
+- **一次 pre-step 重检**，挂载在 `agent/pre-step` 上：对于本进程曾见其建立过可继续子级的父级，在该父级自己的下一个 step 上，服务会读取 `listChildren()`；对每一个 Activation 已经消失、且已有结算记录但尚未出现在父级自己的日志与 inbox 中的子级，会合成且仅合成一条补投通知（始终报告没有 closing message，因为持久化记录只携带结局与时间）。这条路径覆盖了推送和 `await_subagent` 都覆盖不到的情形：子级结算时父级自身恰好已被拆卸或处于冷态。
+
+该事件不携带已投递/已确认标志；幂等性是在补投的那一刻强制执行的，不是在写入那一刻。pre-step 重检会在合成之前，先扫描父级自己的会话日志、待处理 inbox 与当前 step 已认领的批次，查找一条来源于该子级的 `subagent-settled`／`subagent-report` 消息，另外还有一个进程内备忘用于补上那条窄窗口——刚被 inject 的通知尚未在日志或 inbox 中可见的那一刻；`list_agents` 从不 inject 任何内容，因此在结构上就不存在幂等性风险。这一切都建立在一条被明确陈述、而非刻意规避的限制之上：同一时刻每个子级至多只有一条尚未排空的结算，这源于子级绝不会在没有中间 `followup()` 调用的情况下被冷恢复进入新的 epoch，而调用方只会在已经认为该子级有了说法之后才发送 followup。
+
+**为何不用 mailbox。** 跨 seat 的 `packages/mailbox` 传输按地址解析收件方——seat 别名、按会话的锁、驻留唤醒、租约——因为它的发送方与接收方本来就没有彼此的引用。可继续子级的父级恰恰相反：调用方早已持有一个确切在线的 `Agent` 对象，这正是 `interrupt()` 的 ancestor 授权与 `followup()` 的直接父级授权本就要求的同一个引用。把结算经由 mailbox 投递，意味着先把这个在线引用解析成一个地址，再把地址解析回去——这会为一种本就不需要寻址的关系，重新引入 mailbox 传输自身已被记录在案的静默误投风险。服务转而扩展了自己既有的持久化事实模型——一个版本化的会话事件，由投影折叠，经与 `subagent/descriptor` 相同的枚举路径供给——而不是再采用第二套、并行的投递机制。
+
+<a id="lifecycle-events"></a>
+
 ## 生命周期事件
 
 服务会为每次一次性运行以及每个已驻留的可继续 Activation 时段发出一对 `subagent/start`/`subagent/end`，因此可继续子 agent 可用与一次性运行相同的词汇观察，且不会暴露管理器是物化、唤醒还是冷恢复了它们。对于一次性启动，它会在同步的 `subagent/start` 之前附加结果观察器，因此即使子 agent 已经结算，也仍会先产生 `subagent/start`，再产生 `subagent/end`；在驻留前失败的可继续时段不会发出这对生命周期事件中的任何一个。这对事件共享由服务生成的 `runId`；`local` 标志根据提供方返回的确切 `localAgent` 是否存在取得快照（可继续子级恒为 true），因此观察器不会根据可复用的提供方名称或会话名称推断运行身份或本地性。`provider` 字段包含子 agent 初次创建时记录的提供方名称，不表示该提供方当前仍在注册：已接受的一次性 run 可在提供方移除后才结算；冷恢复时段会从描述符读取初始提供方名称，不会调用或注册该提供方。
@@ -96,7 +115,7 @@ subagent seam 允许一个 agent（智能体）通过具名提供方把工作委
 
 可继续子级不会创建 `SubagentRun` 或 Task。继续执行管理器为每个驻留子会话直接拥有一个仅存在于当前进程的 Activation 和一个留存的 `AgentHandle`，使用 Agent inbox 作为唯一 FIFO，并从持久化描述符冷恢复。父到子投递由确切在线的直接父级身份授权。上报则由确切在线的子级身份授权；管理器根据持久化的 `parentSession` 推导接收方，`MessageSource` 记录发送方，但不授予权限。中断权限被刻意设计得比投递权限更宽：人类出示持久化直接 parent 地址，因此即使 parent Agent 离线，在线 child 仍可被停止；Activation 物化时记录的任何确切在线 ancestor 也可以停止其后代，因为停止一个轮次是幂等的，且不投递任何内容。
 
-当 `ctx.sessionProjections` 可用时，服务会注册两个投影单元。`subagentTiming` 会在每个描述符处重置，使 fork 种子中的祖先工作不会计入 child 总量，随后累加 `turn/start` → `turn/end` 活跃时间，并为未结束的轮次保留同一切面的 `active.since` 和 `active.through` 边界；在该轮次保持未结束期间，`active.through` 会跟随最近折叠的事件，从而为 inactive 消费方提供保守的崩溃上界，又不会混入更新的会话元数据。`subagent` 以同样的 last-wins 重置纪律从 `subagent/descriptor` 事件折叠持久化身份——模式、创建标签，以及记录在案的声明路由——因此 fork 种子中的祖先描述符只在 child 自身的描述符覆盖之前有效；畸形或版本无法识别的载荷折叠为可序列化的 `null` 哨兵——与没有描述符的日志不可区分，且能完好通过每个 JSON 推送帧，让消费方以之替换掉手中的陈旧身份而非继续保留该身份——绝不抛错。
+当 `ctx.sessionProjections` 可用时，服务会注册三个投影单元。`subagentTiming` 会在每个描述符处重置，使 fork 种子中的祖先工作不会计入 child 总量，随后累加 `turn/start` → `turn/end` 活跃时间，并为未结束的轮次保留同一切面的 `active.since` 和 `active.through` 边界；在该轮次保持未结束期间，`active.through` 会跟随最近折叠的事件，从而为 inactive 消费方提供保守的崩溃上界，又不会混入更新的会话元数据。`subagent` 以同样的 last-wins 重置纪律从 `subagent/descriptor` 事件折叠持久化身份——模式、创建标签，以及记录在案的声明路由——因此 fork 种子中的祖先描述符只在 child 自身的描述符覆盖之前有效；畸形或版本无法识别的载荷折叠为可序列化的 `null` 哨兵——与没有描述符的日志不可区分，且能完好通过每个 JSON 推送帧，让消费方以之替换掉手中的陈旧身份而非继续保留该身份——绝不抛错。`subagentSettlement` 以同样的 last-wins 方式折叠最近一条 `subagent/settlement` 事件，得到 `{ parentSessionId, outcome, settledAt } | null`；写入与排空方式见上文[持久化结算记录](#the-durable-settlement-record)。
 
 `registerContinuableSetup()` 允许可选包添加子级作用域能力，而无需让继续执行管理器知道这些能力的名称。贡献会在 Activation 发布前同步安装，在设置失败时一并回滚，并随子级作用域释放。新授权须等到下一个 Activation，移除贡献则会立即撤销每个驻留安装项。
 
@@ -152,3 +171,5 @@ You are a delegated subagent: your permission scope was fixed when you were star
 - **不回放已接受但未记录的消息**：只有写入子 agent 会话日志的消息才能连同提供该消息的来源一起重建。崩溃可能丢失从未写入日志、已被接受的初始提示词或后续消息；此后一条经授权的消息可以冷恢复该子 agent，但丢失的消息不会自动回放。
 - **没有持久化的上报 mailbox**：上报需要在线直接父级，提供的是接受标识，不保证恰好一次投递，也不提供已读回执。
 - **生命周期事件只供观察**：影响运行的 `subagent/end` 延续或决策接口仍需等待具体消费方。
+- **同一时刻每个子级至多只有一条尚未排空的结算**：结算补投（`await_subagent` 的 deadline 路径与 `agent/pre-step` 重检）假定子级绝不会在没有中间 `followup()` 调用的情况下被冷恢复进入新的 epoch，而调用方只会在已经认为该子级有了说法之后才发送 followup。这是被明确陈述、而非刻意规避的限制。
+- **冷路径 `listChildren()` 的结算结果对"未结算"只是临时性的**：其可选的投影缓存阶梯可能对一个结算事件在上一次 checkpoint 之后才落盘的子级回答"尚无结算"；这个缺口会在下一次 checkpoint 自我修复，绝不会产生假的"已结算"。需要即时权威答案的调用方应使用 `awaitSettlement` 的 deadline 路径，它始终直接读取持久化存储。

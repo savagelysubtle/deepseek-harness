@@ -22,7 +22,7 @@ import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import type { SessionProjectionCache } from '@deepseek-ai/dsh-session-projection-cache'
 import { SubagentError } from './error.ts'
-import type { SubagentIdentityProjection } from './projection-types.ts'
+import type { SubagentIdentityProjection, SubagentSettlementProjection } from './projection-types.ts'
 
 /**
  * Concurrent cold inspections per listing; a constant because it bounds one
@@ -55,6 +55,19 @@ export type SubagentListEntry =
     readonly activity: 'running' | 'inactive'
     /** Whether a direct descendant has durable `origin: 'subagent'`. */
     readonly hasChildren: boolean
+    /**
+     * Durable terminal outcome from the child's own `subagent/settlement`
+     * event, when the `subagentSettlement` projection unit served one.
+     * Absent means not yet settled, or settled only by a
+     * malformed/unrecognized-version event (deliberately undistinguished,
+     * the same sentinel discipline the identity projection uses).
+     */
+    readonly settlement?: {
+      /** Why the run ended. */
+      readonly outcome: SubagentSettlementProjection['outcome']
+      /** Epoch ms the settlement was computed. */
+      readonly settledAt: SubagentSettlementProjection['settledAt']
+    }
   } & (
     | {
       /** A terminal one-shot child. */
@@ -264,10 +277,15 @@ async function resolveCandidateRows(
     }
     // The registry's watermark cache serves the live value with zero log
     // reads; a live child without an identity yet is the creation window
-    // before the establishing provider appends its descriptor.
+    // before the establishing provider appends its descriptor. Settlement is
+    // read from the same snapshot cut so a live listing never mixes
+    // identity and settlement from two different folds.
     let identity: SubagentIdentityProjection | null | undefined
+    let settlement: SubagentSettlementProjection | null | undefined
     try {
-      identity = projections.snapshot(candidate.live).values.subagent
+      const values = projections.snapshot(candidate.live).values
+      identity = values.subagent
+      settlement = values.subagentSettlement
     } catch {
       // The snapshot folds EVERY registered unit over this child's log, so
       // any unit's fold or schema can reject damaged payloads. That is
@@ -279,7 +297,7 @@ async function resolveCandidateRows(
     // The unit's serializable no-value sentinel is `null`; `undefined` can
     // only mean the key was dropped at a JSON boundary. Both are no value.
     if (identity === undefined || identity === null) return
-    rows[index] = childRow(childId, identity, 'running', subagentParents.has(childId))
+    rows[index] = childRow(childId, identity, 'running', subagentParents.has(childId), settlement)
   })
 
   // Cold candidates exist only when persistence listed them, so the narrow
@@ -363,14 +381,18 @@ async function resolveColdIdentity(
 ): Promise<SubagentListEntry> {
   const childId = header.id
   if (cache !== undefined) {
-    let cached: SubagentIdentityProjection | null | undefined
+    let cachedIdentity: SubagentIdentityProjection | null | undefined
+    let cachedSettlement: SubagentSettlementProjection | null | undefined
     try {
-      cached = cache.cachedSnapshot(header)?.values.subagent
+      const cachedValues = cache.cachedSnapshot(header)?.values
+      cachedIdentity = cachedValues?.subagent
+      cachedSettlement = cachedValues?.subagentSettlement
     } catch {
       // Unlike the preparation fold below, a throwing cache read renders no
       // verdict: the cache is derived data, so its damage (a poisoned stored
       // row of ANY unit) silently falls through to the authoritative re-fold.
-      cached = undefined
+      cachedIdentity = undefined
+      cachedSettlement = undefined
     }
     // A child's OWN descriptor is immutable once appended, so a cached
     // identity is final only when the seq gate proves it was folded from the
@@ -379,9 +401,21 @@ async function resolveColdIdentity(
     // must not outrank the re-fold. Everything else also falls through to
     // preparation: an absent key (a cut before any descriptor) and the
     // `null` sentinel, whose verdict belongs to the authoritative re-fold,
-    // not to a derived row.
-    if (cached !== undefined && cached !== null && cached.seq >= (header.seedLength ?? 0)) {
-      return childRow(childId, cached, 'inactive', hasChildren)
+    // not to a derived row. The settlement value rides along on the same
+    // cached row: the seq gate proves LINEAGE (this row is the child's own
+    // suffix, not a replayed ancestor), not RECENCY — `subagentSettlement`
+    // carries no seq of its own, and the cache's contract is "never wrong,
+    // only possibly stale" (`SessionProjectionCache`'s own doc). A
+    // continuable child whose settlement event landed in the persisted log
+    // after the cache's last checkpoint (disposal raced the session leaving
+    // `ctx.sessions`, or a write-behind loss) is served here with no
+    // settlement, even though the full log has one. This rung therefore
+    // answers "settled" authoritatively (a served settlement did happen) but
+    // "unsettled" only PROVISIONALLY (absence just means not yet
+    // checkpointed) — an accepted false negative that self-heals on the next
+    // checkpoint, never a false positive.
+    if (cachedIdentity !== undefined && cachedIdentity !== null && cachedIdentity.seq >= (header.seedLength ?? 0)) {
+      return childRow(childId, cachedIdentity, 'inactive', hasChildren, cachedSettlement)
     }
   }
   assertListingNotCancelled(signal)
@@ -402,8 +436,11 @@ async function resolveColdIdentity(
     return { kind: 'diagnostic', id: childId, reason: 'corrupt' }
   }
   let identity: SubagentIdentityProjection | null | undefined
+  let settlement: SubagentSettlementProjection | null | undefined
   try {
-    identity = projections.restore({}, inspected.events, 0).snapshot.values.subagent
+    const values = projections.restore({}, inspected.events, 0).snapshot.values
+    identity = values.subagent
+    settlement = values.subagentSettlement
   } catch {
     // The restore folds EVERY registered unit over this child's log, so any
     // unit's fold or schema can reject damaged payloads — deterministic data
@@ -413,21 +450,30 @@ async function resolveColdIdentity(
   if (identity === undefined || identity === null) {
     return { kind: 'diagnostic', id: childId, reason: 'corrupt' }
   }
-  return childRow(childId, identity, 'inactive', hasChildren)
+  return childRow(childId, identity, 'inactive', hasChildren, settlement)
 }
 
-/** Materialize one served identity as its child row. */
+/**
+ * Materialize one served identity, and its optional settlement, as its child
+ * row. `settlement` accepts the unit's serializable `null` sentinel and
+ * `undefined` (e.g. an older cache row that predates this unit) alike — both
+ * mean the row omits the field.
+ */
 function childRow(
   id: SessionId,
   identity: SubagentIdentityProjection,
   activity: 'running' | 'inactive',
   hasChildren: boolean,
+  settlement?: SubagentSettlementProjection | null,
 ): SubagentListEntry {
   const route = identity.provider !== undefined || identity.model !== undefined
     ? {
       ...identity.provider !== undefined ? { provider: identity.provider } : {},
       ...identity.model !== undefined ? { model: identity.model } : {},
     }
+    : {}
+  const settled = settlement !== undefined && settlement !== null
+    ? { settlement: { outcome: settlement.outcome, settledAt: settlement.settledAt } }
     : {}
   return identity.mode === 'one-shot'
     ? {
@@ -436,6 +482,7 @@ function childRow(
       mode: 'one-shot',
       ...identity.label !== undefined ? { label: identity.label } : {},
       ...route,
+      ...settled,
       activity,
       hasChildren,
     }
@@ -445,6 +492,7 @@ function childRow(
       mode: 'continuable',
       label: identity.label,
       ...route,
+      ...settled,
       activity,
       hasChildren,
     }

@@ -298,6 +298,31 @@ describe('normalizeSessionLog', () => {
     expect(out).not.toContain('/private{{cwd}}')
   })
 
+  it('scrubs the settled=<outcome>@<ISO-8601> wall clock list_agents renders inline', () => {
+    const ev = JSON.stringify({
+      type: 'tool/result', seq: 2, time: 5,
+      data: {
+        content: [{
+          type: 'text',
+          text: 'abc [ready] model=x settled=completed@2026-10-05T19:55:37.537Z',
+        }],
+      },
+    })
+    const out = normalizeSessionLog(`${header({ cwd: ctx.cwd })}\n${ev}\n`, ctx)
+    expect(out).toContain('settled=completed@{{settledAt}}')
+    expect(out).not.toContain('2026-10-05T19:55:37.537Z')
+  })
+
+  it('leaves settled= text with no ISO-8601 suffix untouched', () => {
+    const ev = JSON.stringify({
+      type: 'tool/result', seq: 2, time: 5,
+      data: { content: [{ type: 'text', text: 'abc [ready] model=x settled=pending' }] },
+    })
+    const out = normalizeSessionLog(`${header({ cwd: ctx.cwd })}\n${ev}\n`, ctx)
+    expect(out).toContain('settled=pending')
+    expect(out).not.toContain('{{settledAt}}')
+  })
+
   it('scrubs fixed snapshot spill paths', () => {
     const ev = JSON.stringify({
       type: 'tool/result', seq: 2, time: 5,
@@ -371,6 +396,19 @@ describe('normalizeSessionLog', () => {
     expect(out).toContain('"decision":"block"') // the decision is the behavior — kept
   })
 
+  it('zeroes a subagent/settlement settledAt (run-to-run noise) but keeps the outcome', () => {
+    const ev = JSON.stringify({
+      type: 'subagent/settlement', seq: 37, time: 5,
+      data: { version: 1, parentSessionId: '{{sessionId}}', outcome: 'error', settledAt: 1791255218436 },
+    })
+    const out = normalizeSessionLog(`${header({})}\n${ev}\n`, ctx)
+    expect(out).toContain('"settledAt":0')
+    expect(out).not.toContain('1791255218436')
+    expect(out).toContain('"outcome":"error"') // the outcome is the behavior — kept
+    expect(out).toContain('"version":1')
+    expect(out).toContain('"parentSessionId":"{{sessionId}}"')
+  })
+
   it('zeroes a packed chunk row\'s time0 and dt gaps but keeps seq0 and payload', () => {
     const row = JSON.stringify({
       type: 'text-chunks', seq0: 7, time0: 999,
@@ -403,10 +441,17 @@ describe('normalizeSessionLog', () => {
     const timeless = JSON.stringify({ type: 'note', seq: 1 })
     const bareHook = JSON.stringify({ type: 'hook/result', seq: 2, time: 5, data: { decision: 'allow' } })
     const nullDataHook = JSON.stringify({ type: 'hook/result', seq: 3, time: 6, data: null })
-    const out = normalizeSessionLog(`${bareHeader}\n${timeless}\n${bareHook}\n${nullDataHook}\n`, ctx)
+    const bareSettlement = JSON.stringify({ type: 'subagent/settlement', seq: 4, time: 7, data: { outcome: 'ok' } })
+    const nullDataSettlement = JSON.stringify({ type: 'subagent/settlement', seq: 5, time: 8, data: null })
+    const out = normalizeSessionLog(
+      `${bareHeader}\n${timeless}\n${bareHook}\n${nullDataHook}\n${bareSettlement}\n${nullDataSettlement}\n`,
+      ctx,
+    )
     expect(out).toContain('"type":"note","seq":1')
     expect(out).toContain('"decision":"allow"')
     expect(out).not.toContain('durationMs')
+    expect(out).toContain('"outcome":"ok"')
+    expect(out).not.toContain('settledAt')
   })
 })
 

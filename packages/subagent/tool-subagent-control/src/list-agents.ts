@@ -27,6 +27,15 @@ interface ListAgentsSpec {
   readonly scope: ListAgentsScope
 }
 
+/** Child row shape of the service's own list entry, isolated from its diagnostic sibling. */
+type SubagentChildListEntry = Extract<SubagentListEntry, { kind: 'child' }>
+
+/**
+ * Rendered durable settlement summary, mirrored verbatim from the service's
+ * own `settlement` field so this module declares no parallel vocabulary.
+ */
+type ListAgentsSettlement = NonNullable<SubagentChildListEntry['settlement']>
+
 type ListAgentsEntry =
   | {
     readonly kind: 'child'
@@ -37,6 +46,12 @@ type ListAgentsEntry =
     readonly provider?: string
     /** Declared LLM model route from the child's descriptor, when present. */
     readonly model?: string
+    /**
+     * Durable terminal outcome, when the child's `subagentSettlement`
+     * projection has served one. Absent means not yet settled (or settled
+     * only by a record this runtime cannot classify).
+     */
+    readonly settlement?: ListAgentsSettlement
     readonly parent?: SessionId
     readonly depth?: number
   }
@@ -86,6 +101,7 @@ function project(
     status: statusOf(agents, entry.id),
     ...entry.provider !== undefined ? { provider: entry.provider } : {},
     ...entry.model !== undefined ? { model: entry.model } : {},
+    ...entry.settlement !== undefined ? { settlement: entry.settlement } : {},
     ...at,
   }
 }
@@ -131,6 +147,14 @@ export function apply(ctx: Context): void {
                 status: { type: 'string', required: true, enum: ['running', 'idle', 'ready'] },
                 provider: { type: 'string' },
                 model: { type: 'string' },
+                settlement: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    outcome: { type: 'string', required: true },
+                    settledAt: { type: 'number', required: true },
+                  },
+                },
                 parent: { type: 'string' },
                 depth: { type: 'number' },
               },
@@ -166,8 +190,13 @@ export function apply(ctx: Context): void {
                 ? [entry.provider, entry.model].filter(part => part !== undefined).join('/')
                 : ''
               const withRoute = entry.kind === 'child' && route.length > 0 ? ` model=${route}` : ''
+              // Additive-only: a row with no settlement renders exactly as it
+              // did before this field existed.
+              const withSettlement = entry.kind === 'child' && entry.settlement !== undefined
+                ? ` settled=${entry.settlement.outcome}@${new Date(entry.settlement.settledAt).toISOString()}`
+                : ''
               return entry.kind === 'child'
-                ? `${entry.id} [${entry.status}]${withRoute}${at} — ${entry.label}`
+                ? `${entry.id} [${entry.status}]${withRoute}${withSettlement}${at} — ${entry.label}`
                 : `${entry.id} [diagnostic: ${entry.reason}]${at}`
             }).join('\n'),
         }]

@@ -240,6 +240,35 @@ interface SubagentReportOptions {
 }
 ```
 
+<a id="durable-settlement"></a>
+
+### 持久化结算
+
+上文的通知是一次 best-effort 推送：只有当管理器与 parent 的 inbox 在 Activation 结算的那一刻都仍可达时，它才能送达。管理器还会向 CHILD 自己的日志追加一条不可变的 `subagent/settlement` 会话事件——位于计算 `terminal.stopReason` 的同一个 disposal 关键区段内，紧随该 epoch 的输出被捕获之后、推送尝试之前——因此即便推送丢失、parent 从未在线以接收它，或 parent 在投递前就被拆卸，child 已结算、以及如何结算的事实仍会留存。只有当调用方曾真正拿到过该 Activation 的 id 时（`activation.announced`）才会追加；在首次被接受之前就回滚的物化既不产生事件，也不产生通知。追加失败只会被记录日志，拆卸照常继续——追加绝不能阻塞拆卸。
+
+```ts
+/** The durable terminal-outcome fact about one continuable subagent child. */
+interface SubagentSettlementData {
+  readonly version: number
+  /** The durable direct parent at settlement time. */
+  readonly parentSessionId: SessionId
+  /** Why the run ended — {@link SubagentResult.stopReason} verbatim. */
+  readonly outcome: SubagentResult['stopReason']
+  /** Epoch ms the settlement was computed. */
+  readonly settledAt: number
+}
+```
+
+一个与 `subagentTiming`、`subagent` 同级的 `subagentSettlement` 会话投影单元——在 `ctx.sessionProjections` 挂载之处一并注册——以 last-wins 方式折叠最近一条这样的事件，得到 `{ parentSessionId, outcome, settledAt } | null`。三条读取路径负责排空它：
+
+- **`listChildren()`／`listDescendants()`** 把它折叠进每个 `child` 条目的可选字段 `settlement: { outcome, settledAt }`，与既有的身份折叠一样是附加式的。冷路径的投影缓存阶梯对"已结算"给出权威答案，但对"未结算"只给出**临时性**答案：若缓存行记录于结算事件到达上一次 checkpoint 之前，即便完整日志此时已经有了结算记录，它仍会报告没有——这是一个被接受的假阴性，会在下一次 checkpoint 自我修复，绝不会是假阳性。
+- **`SubagentRuntime.awaitSettlement(childId, parent, deadlineMs, signal?)`**——面向模型的 `await_subagent` 工具背后的操作——让既有的、限定作用域的 `subagent/end` 生命周期事件与一个有上限的 deadline 赛跑；deadline 触发后（只触发一次，没有重试、没有轮询），它会执行一次直接的 `persistence.inspect()` 读取，并据此折叠出持久化投影，而绝不使用那个只能给出临时答案的缓存阶梯。这正是把 08-31 创始人裁定的等待模式（一次 deadline、一次对权威源的直接重读，绝不使用 watcher 或 cron）应用到结算场景。服务会把 `deadlineMs` 限制到 `MAX_AWAIT_SETTLEMENT_DEADLINE_MS`（10 分钟），无论调用方请求什么；`await_subagent` 工具还会进一步限制到它自己的 `MAX_AWAIT_DEADLINE_MS`（60 秒，默认 `DEFAULT_AWAIT_DEADLINE_MS` 10 秒）——真正约束模型调用方的是工具这道更紧的上限。鉴权要求 `parent` 是注册表中确切在线的条目，并且在 deadline 路径上，还必须是该 child 自己持久化的直接 parent（`inspected.meta.parentSession === parent.id`）：这比 `interrupt()` 的在线 ancestor 作用域更窄——`interrupt()` 还接受 grandparent 或更深的 ancestor，而 `awaitSettlement` 不接受。
+- **一次 pre-step 重检**，挂载在 `agent/pre-step` 上：对于本进程曾见其建立过可继续 child 的 parent，在该 parent 自己的下一个 step 上，服务会读取 `listChildren()`；对每一个 Activation 已经消失（`activity: 'inactive'`）、且已有结算记录，但该结算尚未出现在 parent 自己的日志与 inbox 中的 child——通过扫描 parent 的会话事件、待处理 inbox，以及当前 step 自己已认领的批次，查找一条来源为该 child 的 `subagent-settled`／`subagent-report` 消息来判定——会合成且仅合成一条补投通知。补投通知始终报告没有 closing message，因为持久化记录只携带结局与时间，不携带内容。一个进程内、仅追加的备忘还会记住本进程生命周期内已经补投过的每个 child，从而关闭刚被 inject 的通知尚未在日志或 inbox 中可见的那条窄窗口。这条路径覆盖了推送和 `await_subagent` 都覆盖不到的情形：child 结算时 parent 自身恰好已被拆卸或处于冷态。
+
+该事件不携带已投递/已确认标志：仅追加日志没有什么可以翻转。幂等性是在补投的那一刻强制执行的，不是在写入那一刻——pre-step 重检会在合成之前先扫描 parent 自己的日志和待处理 inbox，而 `list_agents` 从不 inject 任何内容，因此在结构上就不存在幂等性风险。这一切都建立在一条被明确陈述、而非刻意规避的限制之上：同一时刻每个 child 至多只有一条尚未排空的结算，这源于 child 绝不会在没有中间 `followup()` 调用的情况下被冷恢复进入新的 epoch，而调用方只会在已经认为该 child 有了说法之后才发送 followup。
+
+**为何不用 mailbox。** 跨 seat 的 `packages/mailbox` 传输按地址解析收件方——seat 别名、按会话的锁、驻留唤醒、租约——因为它的发送方与接收方本来就没有彼此的引用。可继续 child 的 parent 恰恰相反：调用方早已持有一个确切在线的 `Agent` 对象，这正是 `interrupt()` 的 ancestor 授权与 `followup()` 的直接 parent 授权本就要求的同一个引用。把结算经由 mailbox 投递，意味着先把这个在线引用解析成一个地址，再把地址解析回去——这会为一种本就不需要寻址的关系，重新引入 mailbox 传输自身已被记录在案的静默误投风险。服务转而扩展了自己既有的持久化事实模型——一个版本化的会话事件，由投影折叠，经与 `subagent/descriptor` 相同的枚举路径供给——而不是再采用第二套、并行的投递机制。
+
 提供方只参与准备初始创建 spec，`spawn` 与 `fork` 在此有所不同。其返回的 spec 只携带分离的、提供方专属的创建输入——目前是可选的父级历史种子——不含 Agent、`AgentHandle`、提示词投递、结果、dispose 或恢复操作。冷恢复根本不经由提供方分发：管理器折叠通用描述符，通过同一个 activation-owner 作用域调用 `ctx.agents.resume()`，并提交等待中的轮次。
 
 ```ts type-equiv
@@ -286,7 +315,7 @@ interface ContinuableCreateSpec {
 
 ## 持久化枚举：`listChildren()`、`listDescendants()` 与其条目
 
-`SubagentRuntime.listChildren(parentSessionId)` 从 `ctx.sessions.list()` 与可选 `ctx.sessionPersistence.list()` 的实时优先合并中枚举 parent 直接且由会话支撑的 subagent——不经查询服务，也不会加载或恢复任何 Agent。候选是持久 header 携带 `origin: 'subagent'` 的直接 child；该标记只负责枚举分类与粗粒度的通用路由拒绝，不能证明描述符有效、child 可恢复或操作已获授权——身份由投影折叠负责，恢复由 Activation 约定负责。每行的 `mode`／`label` 是已注册 `subagent` projection unit 的值，经三级阶梯供值：存活 child 由注册表水位缓存供值（零日志读取）；冷 child 先读可选的投影 checkpoint 缓存（`cachedSnapshot`——过 own-suffix seq 门的身份即定值，own descriptor 一经追加不可变）；否则在一次 `persistence.inspect()` 读取上经注册表折叠（有界并发，每次列表重新计算）。该缓存是纯可选加速层：服务缺席、行里是 `null` 哨兵或 key 缺席、seq 门不过、读取出错，都静默落到权威重折。折叠规则是 `subagent/descriptor` last-wins 且没有失败通道：子 agent 自己的描述符覆盖 fork seed 中祖先的描述符，格式错误或版本不认识的载荷折叠为可序列化的 `null` 哨兵，视同无值。结果是按 `createdAt`、再按 id 排序的 `SubagentListEntry[]`：取到身份即生成带有 `mode: 'one-shot' | 'continuable'` 和 `activity: 'running' | 'inactive'` 的 `child` 条目；可继续条目始终携带 `label`，一次性条目则只在启动调用方提供展示元数据时携带该字段。已定局而折叠无身份的候选生成 `corrupt` diagnostic——缺失、格式错误与版本不认识的描述符有意不再细分（`unsupported` 仍保留在类型中但从不产出）；运行中而无身份的候选被省略（描述符落盘前的创建窗口）；冷检查失败生成一条 `unavailable` diagnostic 并在下次列表自然重试，因此一个损坏的 sibling 不会隐藏健康 child。`hasChildren` 标记存在持久 subagent origin 的直接后代，读取自同一份合并材料。活动状态只表示逻辑记录是否在 `ctx.sessions` 中存活，而不表示结果或可恢复性。缺少持久化时，枚举退化为仅存活枚举而不是报错——此时冷 child 本就无法恢复。缺少 `ctx.sessionProjections` 注册表时，`listChildren()` 抛出携带错误码 `SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE` 的 `SubagentError`，缺少会话存储时则抛出 `SUBAGENT_CONTROL_SESSION_STORE_UNAVAILABLE`，两者都在任何读取之前检查，因此零 child 的部署同样确定失败；列表工具在插件加载时要求 `ctx.subagents` 与 `ctx.agents`。UI 等服务消费方可以展示两种模式，并为无标签的一次性 child 选择回退展示；面向模型的 `list_agents` 适配器（[dsh-tool-subagent-control](../../packages/subagent/tool-subagent-control) 中可单独加载的 `/list-agents` 插件）则只保留可继续条目，并通过在线 Agent 注册表将状态细化为自己的 `running`／`idle`／`ready` 词汇，其中 `ready` 把仅存于存储的 child 命名为可恢复而非终态。枚举不会查询继续执行管理器的 Activation map、Agent 注册表或提供方可用性；`send_message` 仍是消息送达时的权威操作，列表中的运行中可继续 child 仍可能因所有权冲突而拒绝投递。读路径的设计理由见[列表身份投影 Agent Note](../../.agents/notes/implemented/architecture/2026-08-06-subagent-list-identity-projection.md)。
+`SubagentRuntime.listChildren(parentSessionId)` 从 `ctx.sessions.list()` 与可选 `ctx.sessionPersistence.list()` 的实时优先合并中枚举 parent 直接且由会话支撑的 subagent——不经查询服务，也不会加载或恢复任何 Agent。候选是持久 header 携带 `origin: 'subagent'` 的直接 child；该标记只负责枚举分类与粗粒度的通用路由拒绝，不能证明描述符有效、child 可恢复或操作已获授权——身份由投影折叠负责，恢复由 Activation 约定负责。每行的 `mode`／`label` 是已注册 `subagent` projection unit 的值，经三级阶梯供值：存活 child 由注册表水位缓存供值（零日志读取）；冷 child 先读可选的投影 checkpoint 缓存（`cachedSnapshot`——过 own-suffix seq 门的身份即定值，own descriptor 一经追加不可变）；否则在一次 `persistence.inspect()` 读取上经注册表折叠（有界并发，每次列表重新计算）。该缓存是纯可选加速层：服务缺席、行里是 `null` 哨兵或 key 缺席、seq 门不过、读取出错，都静默落到权威重折。折叠规则是 `subagent/descriptor` last-wins 且没有失败通道：子 agent 自己的描述符覆盖 fork seed 中祖先的描述符，格式错误或版本不认识的载荷折叠为可序列化的 `null` 哨兵，视同无值。结果是按 `createdAt`、再按 id 排序的 `SubagentListEntry[]`：取到身份即生成带有 `mode: 'one-shot' | 'continuable'` 和 `activity: 'running' | 'inactive'` 的 `child` 条目；可继续条目始终携带 `label`，一次性条目则只在启动调用方提供展示元数据时携带该字段。已定局而折叠无身份的候选生成 `corrupt` diagnostic——缺失、格式错误与版本不认识的描述符有意不再细分（`unsupported` 仍保留在类型中但从不产出）；运行中而无身份的候选被省略（描述符落盘前的创建窗口）；冷检查失败生成一条 `unavailable` diagnostic 并在下次列表自然重试，因此一个损坏的 sibling 不会隐藏健康 child。`hasChildren` 标记存在持久 subagent origin 的直接后代，读取自同一份合并材料。活动状态只表示逻辑记录是否在 `ctx.sessions` 中存活，而不表示结果或可恢复性。每个 `child` 条目还携带一个可选的 `settlement: { outcome, settledAt }`，由同一阶梯上的一个同级投影单元折叠而来——写入与排空方式见[持久化结算](#durable-settlement)。缺少持久化时，枚举退化为仅存活枚举而不是报错——此时冷 child 本就无法恢复。缺少 `ctx.sessionProjections` 注册表时，`listChildren()` 抛出携带错误码 `SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE` 的 `SubagentError`，缺少会话存储时则抛出 `SUBAGENT_CONTROL_SESSION_STORE_UNAVAILABLE`，两者都在任何读取之前检查，因此零 child 的部署同样确定失败；列表工具在插件加载时要求 `ctx.subagents` 与 `ctx.agents`。UI 等服务消费方可以展示两种模式，并为无标签的一次性 child 选择回退展示；面向模型的 `list_agents` 适配器（[dsh-tool-subagent-control](../../packages/subagent/tool-subagent-control) 中可单独加载的 `/list-agents` 插件）则只保留可继续条目，并通过在线 Agent 注册表将状态细化为自己的 `running`／`idle`／`ready` 词汇，其中 `ready` 把仅存于存储的 child 命名为可恢复而非终态。枚举不会查询继续执行管理器的 Activation map、Agent 注册表或提供方可用性；`send_message` 仍是消息送达时的权威操作，列表中的运行中可继续 child 仍可能因所有权冲突而拒绝投递。读路径的设计理由见[列表身份投影 Agent Note](../../.agents/notes/implemented/architecture/2026-08-06-subagent-list-identity-projection.md)。
 
 `SubagentRuntime.listDescendants(rootSessionId)` 将同一份实时优先语料与基于投影的解释应用到根的完整后代树，并按稳定 pre-order 输出。普通会话和一次性 child 仍作为遍历节点，因此其下的可继续后代仍可发现；只有 `origin: 'subagent'` 的候选会生成条目。每个返回的 child 或 diagnostic 都从枚举所得的持久 header 附加树位置；冷检查在提供身份前还会重新校验完整生命周期：
 
@@ -533,6 +562,23 @@ async followup( parent: Agent, childId: SessionId, content: ContentBlock[], opti
 interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): boolean
 
 /**
+ * Wait for one continuable child's durable settlement: the fast
+ * `subagent/end` lifecycle race against a capped deadline, falling back to
+ * exactly one authoritative persistence read on that deadline. See
+ * {@link SubagentContinuationManager.awaitSettlement} for the full
+ * contract — this is a direct pass-through.
+ * @param childId - the durable child session id to await.
+ * @param parent - the exact live direct parent authorizing this wait.
+ * @param deadlineMs - how long to wait before the one authoritative read;
+ *   clamped to {@link MAX_AWAIT_SETTLEMENT_DEADLINE_MS}.
+ * @param signal - caller cancellation, honored for the whole wait.
+ * @returns the settlement, or `pending` when the deadline's read found none.
+ * @throws when continuation services are unavailable, or `parent` is not
+ *   this child's exact live durable direct parent.
+ */
+async awaitSettlement( childId: SessionId, parent: Agent, deadlineMs: number, signal?: AbortSignal, ): Promise<SubagentAwaitSettlementResult>
+
+/**
  * Whether `root` currently has any live continuable descendant Activation.
  * Synchronous and process-local — backed only by the resident Activation
  * map, never a persistence read or a durable-history projection — so a
@@ -668,7 +714,7 @@ async start(name: string, request: SubagentStartRequest): Promise<SubagentRun>
 
 Types: [Agent](core.md) · [ContentBlock](llm-streaming.md) · [MessageId](llm-streaming.md) · [SessionId](core.md)
 
-Source: [`packages/subagent/subagent/src/index.ts:171`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:266`](../../packages/subagent/subagent/src/index.ts)
 
 <a id="subagent-events"></a>
 
@@ -694,7 +740,7 @@ A published child settled. Scope-filtered dispatch uses the same delegating pare
 
 Types: [Scoped](scope.md)
 
-Source: [`packages/subagent/subagent/src/index.ts:166`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:182`](../../packages/subagent/subagent/src/index.ts)
 
 <a id="subagentprovider-added--emit"></a>
 
@@ -711,7 +757,7 @@ A provider became resolvable in the registry.
 'subagent/provider-added'(provider: SubagentProvider): void
 ```
 
-Source: [`packages/subagent/subagent/src/index.ts:140`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:156`](../../packages/subagent/subagent/src/index.ts)
 
 <a id="subagentprovider-removed--emit"></a>
 
@@ -728,7 +774,7 @@ A provider left the registry. Accepted runs remain holder-owned.
 'subagent/provider-removed'(name: string): void
 ```
 
-Source: [`packages/subagent/subagent/src/index.ts:146`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:162`](../../packages/subagent/subagent/src/index.ts)
 
 <a id="subagentstart--emit"></a>
 
@@ -752,5 +798,5 @@ A provider established a published child. For in-process providers, `ctx.agents.
 
 Types: [Scoped](scope.md)
 
-Source: [`packages/subagent/subagent/src/index.ts:157`](../../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:173`](../../packages/subagent/subagent/src/index.ts)
 <!-- END GENERATED cordis-surface -->

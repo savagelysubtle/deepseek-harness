@@ -415,6 +415,21 @@ describe('FollowTailer', () => {
   })
 
   it('uses the default poll interval when none is given', async () => {
+    // Plain `start()` + `vi.waitFor(() => isFollowing(...))` is NOT
+    // deterministic here: `start()` synchronously marks the id "starting",
+    // and `isFollowing()` is `timers.has(id) || starting.has(id)`, so the
+    // waitFor can pass on its very first poll — before `initCursor`'s own
+    // `await stat(path)` (the real, unmocked filesystem) has resolved. The
+    // line this test exists to cover — `this.deps.intervalMs ??
+    // DEFAULT_POLL_INTERVAL_MS`, reached only in initCursor's post-stat
+    // continuation — was then free to run at any later, unobserved moment,
+    // including after `disposeAll()`'s teardown; under an isolated run that
+    // race always happened to land before teardown, but under the full
+    // coverage run's many forked workers it sometimes lost the race, leaving
+    // the fallback branch uncovered. Arming `stat()` (the same technique the
+    // adjacent deterministic tests use) and awaiting its resolution makes
+    // `initCursor` run to completion — intervalMs fallback included — before
+    // any assertion or disposeAll() can observe or tear it down.
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     const root = tempDir('dsh-follow-tail-default-interval-')
@@ -423,16 +438,47 @@ describe('FollowTailer', () => {
     await ctx.sessionPersistence.create(header)
     const baseline = oneTurnLog()
     await ctx.sessionPersistence.append(header.id, baseline)
+    const location = ctx.sessionPersistence.locate(header)
+    if (location === undefined) throw new Error('unreachable: fixture session has no locatable artifact')
+    const fullSize = statSync(location.path).size
 
-    const tailer = new FollowTailer({
-      locate: h => ctx.sessionPersistence.locate(h),
-      liveOwner: () => Promise.resolve({ pid: 1 }),
-      push: () => {},
-      // intervalMs omitted: exercises the `?? DEFAULT_POLL_INTERVAL_MS` fallback.
-    })
-    tailer.start(header.id, header, baseline)
-    await vi.waitFor(() => { expect(tailer.isFollowing(header.id)).toBe(true) })
-    tailer.disposeAll()
+    vi.useFakeTimers()
+    try {
+      const { resolve: resolveInitialStat } = armPendingStat()
+      const liveOwner = vi.fn((_sessionId: SessionId) => Promise.resolve({ pid: 1 }))
+      const tailer = new FollowTailer({
+        locate: h => ctx.sessionPersistence.locate(h),
+        liveOwner,
+        push: () => {},
+        // intervalMs omitted: exercises the `?? DEFAULT_POLL_INTERVAL_MS` fallback.
+      })
+      tailer.start(header.id, header, baseline)
+      // Pins the moment initCursor's own `await stat(path)` settles: once
+      // this resolves, the fallback at line 199 has already run and the
+      // timer is actually registered, not merely "starting".
+      await resolveInitialStat(fullSize)
+      expect(tailer.isFollowing(header.id)).toBe(true)
+
+      // Prove the fallback actually took effect — not just that SOME timer
+      // got registered: DEFAULT_POLL_INTERVAL_MS is 1000ms (private to the
+      // module, so mirrored here literally; it is not exported). Arms
+      // drain()'s own stat() call up front with the unchanged size, so the
+      // one tick below has no real, unmocked fs call anywhere on its path
+      // (same reasoning as the shrink test above). One tick short of 1000ms
+      // must fire no poll; the final 1ms must fire exactly one.
+      const { resolve: resolveDrainStat } = armPendingStat()
+      await resolveDrainStat(fullSize) // size unchanged: drain's stat sees no growth and returns early
+
+      await vi.advanceTimersByTimeAsync(999)
+      expect(liveOwner).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      await flushMicrotasks()
+      expect(liveOwner).toHaveBeenCalledTimes(1)
+
+      tailer.disposeAll()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('disposeAll stops every currently active tail, not just ones already self-stopped', async () => {

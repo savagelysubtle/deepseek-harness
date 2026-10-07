@@ -34,6 +34,7 @@ const FILE_REFERENCE_PROMPT = fileURLToPath(new URL(
  */
 const EXPECTED_TOOLS = [
   'ask_user_question',
+  'await_subagent',
   'bash',
   'create_goal',
   'edit',
@@ -44,10 +45,12 @@ const EXPECTED_TOOLS = [
   'job_list',
   'job_output',
   'list_agents',
+  'memory',
   'ralph',
   'read',
   'read_image',
   'send_message',
+  'session_title',
   'skill',
   'subagent',
   'subagent_fork',

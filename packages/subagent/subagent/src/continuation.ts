@@ -18,6 +18,22 @@
  * disposed by then, and the release that wakes the parent's own settlement
  * watcher has already run. See {@link SubagentContinuationManager.notifySettlement}.
  *
+ * "Outcome", wherever this module uses the word for a settling child, means
+ * the delivered settlement outcome, including a descendant's own teardown
+ * failure that overrides the epoch's own `stopReason` to `'error'`.
+ * {@link SubagentContinuationManager.finishDisposal} computes that value
+ * exactly once, right after capturing the epoch's facts, and reuses it for
+ * both the durable `subagent/settlement` record and the live push's
+ * bookkeeping — so a child whose DESCENDANT failed teardown can never leave
+ * a durable record that disagrees with what the same disposal is about to
+ * report. The parent-facing notice and the `subagent/end` edge, built only
+ * once every teardown step (including this activation's OWN handle
+ * disposal, necessarily discovered later) has run, may legitimately know
+ * more than that earlier record: a handle-disposal failure is this
+ * harness's own bookkeeping, not something the child's durable record
+ * should blame on the child, and durability makes it impossible to
+ * reconcile the already-flushed record after the fact anyway.
+ *
  * @module @deepseek-ai/dsh-subagent
  */
 
@@ -38,6 +54,7 @@ import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
 import { foldSubagentDescriptor, snapshotSubagentDescriptor } from './descriptor.ts'
 import type { SubagentDescriptorData } from './descriptor.ts'
+import { snapshotSubagentSettlement } from './settlement.ts'
 import {
   appendDelegatedPolicyOverrides,
   applyChildComposition,
@@ -49,7 +66,13 @@ import {
 import type { DelegatedPolicyOverrides } from './child-agent.ts'
 import { assertSubagentMaxDepth } from './depth.ts'
 import { seedDescriptorTurn } from './descriptor-seed.ts'
-import type { ContinuableCreateRequest, ContinuableCreateSpec, SubagentResult, SubagentStartRequest } from './types.ts'
+import type {
+  ContinuableCreateRequest,
+  ContinuableCreateSpec,
+  SubagentResult,
+  SubagentRunEndInfo,
+  SubagentStartRequest,
+} from './types.ts'
 import type { ActivationObserver, ActivationTerminal } from './lifecycle.ts'
 import { SubagentError } from './error.ts'
 import type SubagentActivationSetupRegistry from './activation-setup-registry.ts'
@@ -181,6 +204,27 @@ interface ContinuationHost {
    * @returns the observer whose edges this epoch publishes.
    */
   observeActivation(provider: string, childId: SessionId, parent: Agent): ActivationObserver
+  /**
+   * Record that this child's settlement is about to be (or already is)
+   * durable and that a live push to its parent is in flight, so the host's
+   * own `agent/pre-step` recheck — which a sibling settling concurrently can
+   * trigger mid-disposal — does not race this delivery into a duplicate
+   * notice. Idempotent: calling it again for the same pair only refreshes
+   * the recorded outcome.
+   * @param parentId - the durable direct parent's session id.
+   * @param childId - the settling child's durable session id.
+   * @param outcome - the settlement outcome {@link finishDisposal} computed.
+   */
+  trackOutstandingSettlement(parentId: SessionId, childId: SessionId, outcome: SubagentResult['stopReason']): void
+  /**
+   * Release the "push in flight" guard {@link trackOutstandingSettlement} set,
+   * once that live push attempt has finished (successfully or not). The
+   * entry itself stays outstanding — eligible for the recheck to redeliver —
+   * until a notice is actually confirmed in the parent's own log.
+   * @param parentId - the durable direct parent's session id.
+   * @param childId - the settling child's durable session id.
+   */
+  clearPendingPush(parentId: SessionId, childId: SessionId): void
 }
 
 /**
@@ -326,6 +370,54 @@ function settlementSummary(childId: SessionId, stopReason: SubagentResult['stopR
     default:
       return `${subject} ended abnormally (${String(stopReason)}) before it finished.`
   }
+}
+
+/**
+ * Server-side ceiling on {@link SubagentContinuationManager.awaitSettlement}'s
+ * `deadlineMs`. A caller — ultimately a model request through `await_subagent`
+ * — can never pin a turn open indefinitely by naming a huge deadline: any
+ * value above this is silently clamped, never rejected, because the
+ * founder-ruled 08-31 wait pattern this method implements always fires its
+ * one deadline and re-reads, however long the caller asked to wait.
+ */
+export const MAX_AWAIT_SETTLEMENT_DEADLINE_MS = 10 * 60 * 1000
+
+/** One {@link SubagentContinuationManager.awaitSettlement} outcome. */
+export type SubagentAwaitSettlementResult =
+  | {
+    /** The durable projection served a settlement for this child. */
+    readonly status: 'settled'
+    /** Why the child's epoch ended. */
+    readonly outcome: SubagentResult['stopReason']
+    /** Epoch ms the settlement was computed (the fast path uses the observed time instead). */
+    readonly settledAt: number
+  }
+  | {
+    /** The deadline's one authoritative read found no settlement yet. */
+    readonly status: 'pending'
+  }
+
+/**
+ * Resolve once `ms` elapses, or reject with the signal's own abort reason if
+ * it fires first. The sole timer `awaitSettlement` is permitted: no retry, no
+ * poll, exactly one deadline per call. The caller is already guaranteed not
+ * aborted at the moment this is constructed (its one call site checks
+ * `signal?.throwIfAborted()` synchronously, with no intervening await), so
+ * this only ever needs to watch for a *later* abort, never an already-fired
+ * one.
+ */
+function awaitDeadline(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    const onAbort = (): void => {
+      clearTimeout(timer)
+      reject(signal?.reason instanceof Error ? signal.reason : new Error('aborted'))
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 /** Whether one settlement attempt opened the disposal transaction. */
@@ -586,6 +678,96 @@ export class SubagentContinuationManager {
       authority.kind === 'user' ? { kind: 'user' } : { kind: 'parent' },
       { keepInbox: true },
     )
+  }
+
+  /**
+   * Wait for one continuable child's durable settlement: race the existing
+   * scoped `subagent/end` lifecycle emission (fast path, zero extra reads)
+   * against a capped deadline, and on that deadline — fired exactly once, no
+   * retry loop, no polling — perform exactly one authoritative read of the
+   * child's settlement straight from persistence (the same full-restore rung
+   * `resolveColdIdentity`'s cache-miss fallback uses in `list-children.ts`,
+   * never the projection cache's `cachedSnapshot` rung, which can answer
+   * "unsettled" only provisionally). This is the founder-ruled 08-31 wait
+   * pattern applied verbatim: one deadline, one direct re-read, never a
+   * watcher or a cron — so a child already settled before this call still
+   * waits out the deadline, by design, rather than short-circuiting.
+   *
+   * Authorization on the fast path is structural, not an extra check: the
+   * listener is registered on `parent.ctx`, so Cordis's own scoped dispatch
+   * (the same mechanism {@link createLifecycleEmitter} uses for every other
+   * `subagent/end` consumer) admits only settlement edges actually carried
+   * for that exact parent. The deadline path has no such structural guard, so
+   * it verifies the persisted header's `parentSession` itself, using the very
+   * read that already fetched the settlement — never a second one.
+   * @param childId - the durable child session id to await.
+   * @param parent - the exact live direct parent authorizing this wait.
+   * @param deadlineMs - how long to wait before the one authoritative read;
+   *   clamped to {@link MAX_AWAIT_SETTLEMENT_DEADLINE_MS}.
+   * @param signal - caller cancellation, honored for the whole wait.
+   * @returns the settlement, or `pending` when the deadline's read found none.
+   * @throws {@link SubagentError} `UNAUTHORIZED` when `parent` is not the
+   *   exact live registry entry, or is not this child's durable direct parent.
+   */
+  async awaitSettlement(
+    childId: SessionId,
+    parent: Agent,
+    deadlineMs: number,
+    signal?: AbortSignal,
+  ): Promise<SubagentAwaitSettlementResult> {
+    signal?.throwIfAborted()
+    if (this.ctx.agents.get(parent.id) !== parent) {
+      throw new SubagentError(
+        `awaiting subagent "${childId}" settlement requires the exact live parent agent`,
+        'UNAUTHORIZED',
+      )
+    }
+    const deadline = Math.min(Math.max(0, deadlineMs), MAX_AWAIT_SETTLEMENT_DEADLINE_MS)
+    const fast = Promise.withResolvers<SubagentRunEndInfo>()
+    const offEnd = parent.ctx.on('subagent/end', (info) => {
+      if (info.id === childId) fast.resolve(info)
+    })
+    try {
+      const race = await Promise.race([
+        fast.promise.then((info): { kind: 'fast'; info: SubagentRunEndInfo } => ({ kind: 'fast', info })),
+        awaitDeadline(deadline, signal).then((): { kind: 'deadline' } => ({ kind: 'deadline' })),
+      ])
+      if (race.kind === 'fast') {
+        return { status: 'settled', outcome: race.info.stopReason, settledAt: Date.now() }
+      }
+      return await this.readDurableSettlement(childId, parent, signal)
+    } finally {
+      offEnd()
+    }
+  }
+
+  /**
+   * The one authoritative settlement read {@link awaitSettlement} performs on
+   * its deadline. Also authorizes: the single `persistence.inspect()` read's
+   * header carries the durable `parentSession`, checked against the caller
+   * before any settlement is returned, so a mismatched caller is rejected
+   * without a second read.
+   */
+  private async readDurableSettlement(
+    childId: SessionId,
+    parent: Agent,
+    signal: AbortSignal | undefined,
+  ): Promise<SubagentAwaitSettlementResult> {
+    const persistence = this.requirePersistence()
+    const inspected = await persistence.inspect(childId, signal)
+    if (inspected.meta.parentSession !== parent.id) {
+      throw new SubagentError(`subagent "${childId}" belongs to another parent session`, 'UNAUTHORIZED')
+    }
+    const projections = this.ctx.get('sessionProjections')
+    if (projections === undefined) {
+      throw new SubagentError(
+        'awaiting subagent settlement requires the sessionProjections registry (load @deepseek-ai/dsh-session-projection)',
+        'SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE',
+      )
+    }
+    const settlement = projections.restore({}, inspected.events, 0).snapshot.values.subagentSettlement
+    if (settlement === undefined || settlement === null) return { status: 'pending' }
+    return { status: 'settled', outcome: settlement.outcome, settledAt: settlement.settledAt }
   }
 
   /**
@@ -1329,6 +1511,18 @@ export class SubagentContinuationManager {
 
   /**
    * Propagate stop synchronously, then finish the child-first release.
+   * Appends the durable `subagent/settlement` record to the child's own log
+   * — when this child was ever announced to a caller — before attempting the
+   * best-effort `notifySettlement()` push, so the fact survives a lost push, a
+   * torn-down parent, or a cold-resumed listener even though delivery is not
+   * guaranteed. The append and the outstanding-settlement bookkeeping both
+   * read one `outcome` computed exactly once right after capture (see the
+   * module doc), so a descendant teardown failure can never leave the
+   * record disagreeing with what gets redelivered later. The notice and the
+   * `subagent/end` edge are built once the FULL teardown outcome is known —
+   * including a later failure disposing THIS activation's own handle, which
+   * the already-flushed record never gets a chance to reflect. An append
+   * failure is logged and teardown continues; it must never block disposal.
    * @param activation - the Activation whose disposal transaction is installed.
    * @returns once the handle and ownership edge are released.
    */
@@ -1345,6 +1539,13 @@ export class SubagentContinuationManager {
     const childDisposals = children.map(child => this.dispose(child))
 
     const failures: SubagentError[] = []
+    // Set once {@link outcome} below is computed, right after capture and
+    // right before the durable append reads it (left `undefined` when the
+    // outer catch fires before that point, so there is no record for the
+    // outstanding-settlement bookkeeping below to agree or disagree with).
+    // See the module doc for what "outcome" means.
+    let outcome: ActivationTerminal | undefined
+    let childTeardownFailure: SubagentError | undefined
     try {
       // Release remains child-first even though cancellation propagated
       // top-down: every owned child completes before this handle is removed.
@@ -1358,18 +1559,48 @@ export class SubagentContinuationManager {
       }))
       const reasons = childFailures.filter(reason => reason !== undefined)
       if (reasons.length > 0) {
-        failures.push(new SubagentError(
+        childTeardownFailure = new SubagentError(
           `subagent "${childId}" child teardown failed: ${reasons.map(reason => errorChain(reason)).join('; ')}`,
           'ACTIVATION_TEARDOWN_FAILED',
-        ))
+        )
+        failures.push(childTeardownFailure)
       }
-      // Quiesce before the flush: a turn still running would keep
-      // appending events the flush cannot cover.
+      // Quiesce before capturing or flushing: a turn still running would keep
+      // appending events neither step can see yet.
       await idle
-      await this.flushFinalState(activation)
       // Capture the child-dependent edge data while the child is still live:
       // handle disposal unregisters it, and consumers read its log and scope.
       activation.observer.capture(activation.handle.agent)
+      // Compute the outcome ONCE, from exactly the failure already known at
+      // this point (descendant teardown only -- this activation's OWN handle
+      // disposal failing below is a separate "activation teardown failed"
+      // concern, not part of how the child itself settled). Every consumer
+      // of "how did this epoch end" below reads this one value.
+      outcome = activation.observer.terminal(childTeardownFailure)
+      // Append the durable settlement record BEFORE the flush that follows,
+      // so the same best-effort final flush durs this fact too — never a
+      // second flush call for it.
+      if (activation.announced) {
+        try {
+          activation.handle.agent.session.append('subagent/settlement', snapshotSubagentSettlement({
+            parentSessionId: activation.parentSession,
+            outcome: outcome.stopReason,
+            settledAt: Date.now(),
+          }))
+        } catch (error: unknown) {
+          this.ctx.logger.warn(
+            `subagent "${childId}" durable settlement record was not appended: ${errorChain(error)}`,
+          )
+        }
+        // From here until `notifySettlement` below completes, `listChildren`
+        // can already report this child inactive and durably settled with no
+        // notice yet in the parent's own log -- a sibling settling
+        // concurrently and waking the parent could otherwise race the
+        // pre-step recheck into synthesizing a duplicate. Marked before the
+        // steps below that make the child look drained.
+        this.host.trackOutstandingSettlement(activation.parentSession, childId, outcome.stopReason)
+      }
+      await this.flushFinalState(activation)
     } catch (error: unknown) {
       failures.push(new SubagentError(
         `subagent "${childId}" activation teardown failed: ${errorChain(error)}`,
@@ -1406,7 +1637,11 @@ export class SubagentContinuationManager {
     // therefore cannot be judged settled. Delivering after the release would
     // race a parent watcher that resumes one microtask later, finds itself
     // childless and quiet, and disposes an Agent whose `cancel()` clears the
-    // inbox this notice is sitting in.
+    // inbox this notice is sitting in. Reads the FULLY-known failure here —
+    // unlike the durable record above, computed too early to see a failure
+    // disposing THIS activation's own handle — because that later failure is
+    // exactly what a parent needs to hear about and the already-flushed
+    // record has no way to reconcile after the fact.
     this.notifySettlement(activation, activation.observer.terminal(failure))
     // Release ownership even on failure: a retained failed child would pin its
     // ancestors in `waiting` forever.
@@ -1414,6 +1649,7 @@ export class SubagentContinuationManager {
     // Emit once the disposal outcome is known, so a rejecting scoped cleanup
     // cannot be reported as a successful epoch.
     activation.observer.settle(failure)
+    if (activation.announced) this.host.clearPendingPush(activation.parentSession, childId)
     if (failure !== undefined) throw failure
   }
 
@@ -1484,6 +1720,36 @@ export class SubagentContinuationManager {
         + errorChain(error),
       )
     }
+  }
+
+  /**
+   * Redeliver one durable settlement as the parent-facing notice
+   * {@link notifySettlement} would have sent, for a caller that has already
+   * confirmed — via the durable projection, outside this method — that the
+   * push never reached the parent's own log. The notice always reports no
+   * closing message: the durable settlement record this redelivers carries
+   * outcome and timing only, never the child's final assistant output, so
+   * there is nothing to restate. Trusts the caller's own idempotence scan and
+   * parent/child pairing; this method performs neither.
+   * @param parent - the exact live parent to inject the notice into.
+   * @param childId - the settled child's durable session id.
+   * @param outcome - the durable record's stop reason.
+   */
+  synthesizeSettlementNotice(parent: Agent, childId: SessionId, outcome: SubagentResult['stopReason']): void {
+    const summary = settlementSummary(childId, outcome)
+    const message = createUserMessage({
+      content: [
+        { type: 'text' as const, text: summary },
+        { type: 'text' as const, text: 'It left no closing message.' },
+      ],
+      source: {
+        kind: 'subagent-settled' as const,
+        form: 'notice' as const,
+        summary: boundContextSummary(summary),
+        senderSessionId: childId,
+      },
+    })
+    parent.inject(message)
   }
 
   /**

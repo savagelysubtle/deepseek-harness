@@ -1,11 +1,11 @@
 /**
- * The globally named `send_message` and `interrupt_agent` tools: thin
- * model-facing adapters over `ctx.subagents.followup()` and
- * `ctx.subagents.interrupt()`. They perform no lifecycle routing of their own —
- * residency, cold resume, and interrupt authorization belong to the subagent
- * service — and they live apart from the provider-bound
- * `@deepseek-ai/dsh-tool-subagent` instances so multiple delegation tools share
- * one control API.
+ * The globally named `send_message`, `interrupt_agent`, and `await_subagent`
+ * tools: thin model-facing adapters over `ctx.subagents.followup()`,
+ * `ctx.subagents.interrupt()`, and `ctx.subagents.awaitSettlement()`. They
+ * perform no lifecycle routing of their own — residency, cold resume, and
+ * interrupt/await authorization belong to the subagent service — and they
+ * live apart from the provider-bound `@deepseek-ai/dsh-tool-subagent`
+ * instances so multiple delegation tools share one control API.
  * @module @deepseek-ai/dsh-tool-subagent-control
  */
 
@@ -14,12 +14,13 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-subagent'
+import { registerAwaitSubagent } from './await-subagent.ts'
 
 export const name = 'tool-subagent-control'
 export const inject = ['tools', 'subagents']
 
 /**
- * Register the `send_message` and `interrupt_agent` tools.
+ * Register the `send_message`, `interrupt_agent`, and `await_subagent` tools.
  * @param ctx - context carrying the tool registry and subagent service.
  */
 export function apply(ctx: Context): void {
@@ -117,4 +118,6 @@ export function apply(ctx: Context): void {
       return Promise.resolve({ accepted: true })
     },
   }))
+
+  registerAwaitSubagent(ctx)
 }
