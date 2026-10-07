@@ -184,6 +184,9 @@ describe('ACP prompt lifecycle', () => {
     harness.ctx.on('agent/inbox/inserted', ({ agent: subject, message }) => {
       if (subject === agent && message.source.kind === 'user' && !injected) {
         injected = true
+        // SWD-125: ACP has no peer socket to classify, so its own prompt
+        // message is founder-stamped by construction.
+        expect(message.source).toEqual({ kind: 'user', founder: true })
         agent.inject(createUserMessage({ content: [{ type: 'text', text: 'context' }], source: { kind: 'plugin', plugin: 'test' } }))
       }
     })
@@ -191,6 +194,20 @@ describe('ACP prompt lifecycle', () => {
     const result = await harness.client.prompt({ sessionId, prompt: [{ type: 'text', text: 'go' }] })
     expect(result.stopReason).toBe('end_turn')
     await vi.waitFor(() => { expect(messageText(harness!)).toBe('real answer') })
+  })
+
+  it('persists the ACP prompt message to the session log founder-stamped (SWD-125)', async () => {
+    harness = await makeBridgeHarness({ script: [textResponse('answer')] })
+    const sessionId = await newSession(harness)
+    const agent = harness.ctx.agents.get(SessionId(sessionId))!
+
+    await harness.client.prompt({ sessionId, prompt: [{ type: 'text', text: 'go' }] })
+
+    const logged = agent.session.events
+      .filter(event => event.type === 'agent/inbox/spliced')
+      .flatMap(event => event.data.inserted)
+      .find(message => message.source.kind === 'user')
+    expect(logged?.source).toEqual({ kind: 'user', founder: true })
   })
 
   it('ignores an autonomous message turn while correlating the client turn', async () => {

@@ -27,7 +27,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import { z as zod } from 'zod'
 import type { ZodType } from 'zod'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, isFounderMessage, selectFounderAuthorityMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, UserMessage } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
@@ -164,6 +164,52 @@ function hasOpenTurn(events: readonly SessionEvent[]): boolean {
   return open
 }
 
+/**
+ * Whether the currently open turn's authority-bearing `user/message` is
+ * founder-stamped (see {@link isFounderMessage}). Re-derives the open-turn
+ * window locally from `session.events` — the same source this module already
+ * reads for {@link foldPlanMode} and {@link hasOpenTurn} — rather than
+ * importing `openTurn` from `@deepseek-ai/dsh-tool-goal`, which plan-mode does
+ * not and must not depend on. Mirrors `hasDirectHumanInput` in
+ * `packages/goal/tool-goal/src/authority.ts`: both hand every `user/message`
+ * of the open turn, in order and regardless of `source.kind`, to
+ * `@deepseek-ai/dsh-llm`'s shared `selectFounderAuthorityMessage`, which picks
+ * the ONE authority-bearing message by skipping only the closed,
+ * mechanical-context allowlist (`isMechanicalContextSource`: the
+ * runtime-context snapshot, the skill catalog, and agent-instructions
+ * reconciliation) — per a sentinel ruling (2026-10-02) that found skipping
+ * EVERY non-`'user'` kind unsafe, since outside-controlled kinds like mailbox
+ * relay and subagent settlement/report also append mid-turn. Only that one
+ * selected message counts, never an earlier one: an earlier stamped message
+ * followed by a later unstamped one (for example a trusted-host but
+ * non-loopback caller steering mid-turn) must not leak authority forward. In
+ * particular the agent loop appends a `plugin`-sourced runtime-context
+ * snapshot immediately after the human's own message within the same step
+ * (`packages/core/agent-loop/src/agent.ts`), and that snapshot can never carry
+ * `founder` (only `kind: 'user'` can) but IS on the mechanical allowlist, so
+ * it does not shadow the human message. No open turn, or no such event in
+ * it, fails closed to `false` — it never throws, since a `/plan` command
+ * always runs inside the turn it was typed in, but a malformed or missing log
+ * must still resolve to "not the founder" rather than crash the command.
+ *
+ * @param events The session log or any prefix of it.
+ * @returns Whether the open turn's authority-bearing message is the founder's own.
+ */
+function openTurnIsFounderStamped(events: readonly SessionEvent[]): boolean {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const boundary = events[index]
+    if (boundary?.type === 'turn/end') return false
+    if (boundary?.type === 'turn/start') {
+      const messages = events.slice(index + 1)
+        .filter(event => event.type === 'user/message')
+        .map(event => event.data)
+      const authority = selectFounderAuthorityMessage(messages)
+      return authority !== undefined && isFounderMessage(authority.source)
+    }
+  }
+  return false
+}
+
 /** Plan state at the last logged request header, or `undefined` before the first header. */
 function planModeAtLastHeader(events: readonly SessionEvent[]): boolean | undefined {
   let lastHeader = -1
@@ -291,7 +337,19 @@ export class PlanModeController extends Service {
             }
           }
           const outcome = this.set(agent, true)
-          if (message !== '') agent.steer(createUserMessage({ content: [{ type: 'text', text: message }], source: { kind: 'user' } }))
+          if (message !== '') {
+            // Copy the founder stamp from the triggering turn's own logged
+            // input, never mint it here: this command layer has no socket
+            // and cannot itself prove a loopback channel (sentinel review,
+            // SWD-125). An unstamped triggering turn yields an unstamped
+            // re-steer, so goal authority never flows through this path.
+            agent.steer(createUserMessage({
+              content: [{ type: 'text', text: message }],
+              source: openTurnIsFounderStamped(agent.session.events)
+                ? { kind: 'user', founder: true }
+                : { kind: 'user' },
+            }))
+          }
           return {
             kind: 'success',
             text: outcome === 'committed'

@@ -72,8 +72,29 @@
 }
 
 .banner[data-variant='partial'],
-.banner[data-variant='error'] {
+.banner[data-variant='error'],
+.banner[data-variant='founderStamp'] {
   color: var(--dsw-alias-status-danger, #e5484d);
+}
+
+/* Send All only: stacks the result banner and the not-founder-stamped fence
+   (SWD-125 step 6) — two independent facts about the same resolution that
+   can both be present at once (a successful-but-unstamped broadcast).
+   Takes over .banner's own absolute positioning so each child banner lays
+   out in normal flow inside the stack; Stop All never nests inside this
+   wrapper, so its lone .banner is untouched. */
+.bannerStack {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bannerStack .banner {
+  position: static;
 }
 
 .dismiss {

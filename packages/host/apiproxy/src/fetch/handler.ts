@@ -191,12 +191,15 @@ function fullResponse(narrow: RpcResponse<unknown>): Response {
  * the row's schema/invoke pairing typechecks; the only cast collapses the
  * Wire<> widening back to the exact payload (undefined-valued properties and
  * absent ones are indistinguishable after JSON transport).
+ * @param peerIsLoopback - the raw TCP peer fact threaded in from
+ * {@link toFetchHandler}'s caller; placed on the `RpcRequest` handed to the
+ * impl so a route can gate on it the same way the carrier does.
  */
 // K appears once in the signature but ties the UNARY_ROUTES[K] row lookup to its own
 // schema/invoke pairing; a union parameter degrades the row to an uninvokable intersection.
 // oxlint-disable-next-line typescript/no-unnecessary-type-parameters
 async function handleUnary<K extends keyof RpcMethodMap>(
-  api: ApiProxy, method: K, message: ClientRequest, signal: AbortSignal,
+  api: ApiProxy, method: K, message: ClientRequest, signal: AbortSignal, peerIsLoopback: boolean,
 ): Promise<Response> {
   const route = UNARY_ROUTES[method]
   const payload = route.schema.safeParse(message.payload)
@@ -204,7 +207,7 @@ async function handleUnary<K extends keyof RpcMethodMap>(
     return errorResponse(message.rpcId, { code: 'bad-request', message: `invalid payload for ${method}`, details: { issues: payload.error.issues } })
   }
   try {
-    return fullResponse(await route.invoke(api, { rpcId: message.rpcId, payload: payload.data }, signal))
+    return fullResponse(await route.invoke(api, { rpcId: message.rpcId, payload: payload.data, peerIsLoopback }, signal))
   } catch (error: unknown) {
     // The impl never throws business errors; reaching here means the implementation itself crashed — 500, carrier layer.
     return new Response(`handler failure: ${String(error)}`, { status: 500 })
@@ -238,7 +241,11 @@ function sseResponse(frames: AsyncIterable<RpcRequest<MuxFrame | HostFrame>>): R
         // rpcId is minted — this is a server-initiated push like any other frame.
         const failure: MuxFrame | HostFrame = { type: 'stream/error', error: { code: 'internal', message: String(error), details: {} } }
         try {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(fullFrame({ rpcId: RpcId(randomUUID()), payload: failure }))}\n\n`))
+          // Server-initiated push, not a reply to any one peer's request: peerIsLoopback is
+          // absent (never set outside host-inbound unary dispatch), not a hardcoded false.
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(fullFrame({
+            rpcId: RpcId(randomUUID()), payload: failure,
+          }))}\n\n`))
         } catch {
           // Consumer already cancelled the stream: enqueue-after-cancel is the
           // only reachable error, and there is no one left to tell.
@@ -258,13 +265,17 @@ function sseResponse(frames: AsyncIterable<RpcRequest<MuxFrame | HostFrame>>): R
 /**
  * Wraps an ApiProxy into a pure fetch function (isomorphic point: feed the returned fetch straight to InProcessApiClient).
  * @param api - the host-side ApiProxy implementation.
- * @returns an object holding `fetch(Request)`; paths outside /api/ return 404.
+ * @returns an object holding `fetch(Request, init?, peerIsLoopback?)`; paths outside /api/ return 404.
  */
-export function toFetchHandler(api: ApiProxy): { fetch: typeof fetch } {
+export function toFetchHandler(api: ApiProxy): {
+  fetch: (input: RequestInfo | URL, init?: RequestInit, peerIsLoopback?: boolean) => Promise<Response>
+} {
   return {
-    // Signature matches global fetch: the isomorphic point hands this function to InProcessApiClient as its transport aspect,
-    // Clients call in (url, init) form — normalize to Request before handling.
-    async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    // Signature is a superset of global fetch — `typeof fetch` callers (InProcessApiClient)
+    // keep working unchanged, while a carrier that has proven the peer loopback (the connection
+    // package's real /api route) can additionally forward that in-process fact as a 3rd
+    // argument, never a header. Clients call in (url, init) form — normalize to Request first.
+    async fetch(input: RequestInfo | URL, init?: RequestInit, peerIsLoopback = false): Promise<Response> {
       const req = input instanceof Request ? input : new Request(input, init)
       const url = new URL(req.url)
       const path = url.pathname
@@ -334,7 +345,7 @@ export function toFetchHandler(api: ApiProxy): { fetch: typeof fetch } {
       if (message.method !== method) {
         return errorResponse(message.rpcId, { code: 'bad-request', message: `method "${message.method}" does not match path "${method}"`, details: { issues: [] } })
       }
-      return handleUnary(api, method, message, req.signal)
+      return handleUnary(api, method, message, req.signal, peerIsLoopback)
     },
   }
 }

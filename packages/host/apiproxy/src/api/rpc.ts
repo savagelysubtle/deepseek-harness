@@ -218,6 +218,18 @@ export function transportError<T>(error: unknown): RpcResult<T> {
 export interface RpcRequest<P> {
   rpcId: RpcId
   payload: P
+  /**
+   * Whether the raw TCP peer that originated this request was independently
+   * proven loopback, computed in-process by the connection carrier from
+   * `req.socket.remoteAddress` — never derived from a request header, which
+   * any client can set freely. Set ONLY by host-inbound unary dispatch
+   * (`handleUnary`, from the real socket); absent everywhere else — push
+   * frames, client-side SSE frame receipt, and test fixtures that are not
+   * exercising the inbound path. Absence means "not proven loopback", the
+   * same as `false`: a consumer must test `=== true`, never treat a missing
+   * value as true.
+   */
+  readonly peerIsLoopback?: boolean
 }
 
 /** Signature-layer narrow form, response side: rpcId always echoes the matching request. */

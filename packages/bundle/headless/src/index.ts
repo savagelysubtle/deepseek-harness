@@ -284,7 +284,10 @@ async function run(ctx: Context, config: Config, io: HeadlessIo): Promise<void> 
     try {
       agent.followup(createUserMessage({
         content: [{ type: 'text', text: config.task }],
-        source: { kind: 'user' },
+        // Always founder-stamped: this one-shot process has no listening
+        // socket for a peer to reach, so by construction the only source of
+        // this message is the local operator driving this machine.
+        source: { kind: 'user', founder: true },
       }))
       await agent.whenIdle()
       await sessions.flush(agent.session)

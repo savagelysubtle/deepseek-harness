@@ -382,7 +382,11 @@ export function apply(ctx: Context, config: AcpConfig): void {
           if (ctx.agents.get(record.agent.id) !== record.agent) {
             throw internalError('prompt was not queued: the agent was disposed outside the bridge')
           }
-          const message = createUserMessage({ content, source: { kind: 'user' } })
+          // Always founder-stamped: ACP runs as a stdio child of the local
+          // editor that launched it, with no peer socket for a remote caller
+          // to reach, so the operator at the keyboard is the founder by
+          // construction (founder ruling 2026-10-02).
+          const message = createUserMessage({ content, source: { kind: 'user', founder: true } })
           inflight.messageId = message.id
           inflight.messageQueued = true
           try {

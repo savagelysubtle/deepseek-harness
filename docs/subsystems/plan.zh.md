@@ -32,7 +32,7 @@ interface PlanModeConfig {
 
 [`exit_plan_mode`](../tool-catalog.md#deepseek-aidsh-plan-mode) 在计划模式未激活时仍保持注册，因此进入或离开计划模式只改变提示词段落，绝不改变请求的工具目录；在计划模式之外执行会失败。在计划模式中，它要求一份以 `#` 标题开头的完整 markdown 计划，并通过[用户交互 seam](user-questions.md) 呈交评审。批准返回 `{ approved: true }`，并记录一个静默（不叙述）的待生效退出，由下一个被接受的轮内 pre-step 追加。因此，计划指引在 assistant 当前这批工具调用的剩余部分继续生效，而工具结果本身会报告这次转换。「继续规划」则是一次携带用户反馈的失败调用，模型据此修订并再次呈交；评审期间交互通道缺失或服务重载同样使调用失败，而不是静默离开计划模式。
 
-当 [`ctx.commands`](commands.md) 被组合时，插件注册 `/plan [off|message]`：单独的 `/plan` 选择计划模式；任何其他非空消息先选择计划模式，再通过 `agent.steer()` 提交该文本，使其在计划指引下成为下一步骤的普通已记录用户消息；确切参数 `off` 选择未激活，这还会在待生效条目被追加并对请求可见之前将其取消。
+当 [`ctx.commands`](commands.md) 被组合时，插件注册 `/plan [off|message]`：单独的 `/plan` 选择计划模式；任何其他非空消息先选择计划模式，再通过 `agent.steer()` 提交该文本，使其在计划指引下成为下一步骤的普通已记录用户消息——当触发它的开放轮次的权限承载消息被标记为创始人时，这条消息复制 `MessageSourceMap.user.founder: true`，否则携带裸的 `{ kind: 'user' }` 来源，因为命令层没有自己的 socket 可以铸造该标记。该权限承载消息是开放轮次中、来源不是机械式 harness 上下文来源的最新一条用户角色消息，由 `@deepseek-ai/dsh-llm` 共享的 `selectFounderAuthorityMessage` 挑选，它依据一项 sentinel 裁定（2026-10-02）只跳过封闭白名单（`isMechanicalContextSource`——system-prompt 插件的 runtime-context 快照、`skill-catalog` 与 `agent-instructions`）。其他任何来源——mailbox relay、subagent 的 report 与 settlement、coordinator 消息、Goal Round 消息、session-reference、skill-invocation，以及任何其他插件来源——都会被当作最新输入，在没有标记时拒绝授权，因为 mailbox 与 subagent 的投递会把第三方内容带入开放轮次，更早的创始人标记绝不能在它们之后继续存活。确切参数 `off` 选择未激活，这还会在待生效条目被追加并对请求可见之前将其取消。
 
 ## 服务
 
@@ -83,5 +83,5 @@ set(agent: Agent, active: boolean): 'committed' | 'queued' | 'cancelled' | 'noop
 
 Types: [Agent](core.md)
 
-Source: [`packages/plan/plan-mode/src/index.ts:184`](../../packages/plan/plan-mode/src/index.ts)
+Source: [`packages/plan/plan-mode/src/index.ts:230`](../../packages/plan/plan-mode/src/index.ts)
 <!-- END GENERATED cordis-surface -->

@@ -21,8 +21,15 @@ export interface StopAllFace {
  * session with the same content, immediately and mid-turn. The component
  * reads back `result` to decide whether to show success or a surfaced
  * partial failure — never folds a `{ failed }` outcome into a clean message.
+ * `founderStamped` (SWD-125 step 6) is read back independently of `result`:
+ * the component shows the not-founder-stamped fence whenever it is `false`,
+ * regardless of delivery outcome.
  */
 export interface SendAllFace {
   // Arrow-typed property, not a method shorthand: same `unbound-method` reason as StopAllFace above.
-  onSendAll: (content: PromptContentPart[]) => Promise<RpcResult<{ sentCount: number; result: SendAllResult }>>
+  onSendAll: (content: PromptContentPart[]) => Promise<RpcResult<{
+    sentCount: number
+    result: SendAllResult
+    founderStamped: boolean
+  }>>
 }

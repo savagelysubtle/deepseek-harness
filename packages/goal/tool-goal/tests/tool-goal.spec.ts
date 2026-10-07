@@ -13,6 +13,35 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import * as toolGoal from '@deepseek-ai/dsh-tool-goal'
 
+/**
+ * Minimal real-shaped `MailboxRelaySource` / `SubagentSettledMessageSource`
+ * literals (`packages/mailbox/mailbox/src/source.ts:19-50,82-88`,
+ * `packages/subagent/subagent/src/continuation.ts:82-96`). Both augmenting
+ * packages are already part of this repo's single `tsc -b tsconfig.host.json`
+ * program (every package's `tests/**` is swept into that one program by
+ * `tsconfig.host.json`'s own `include`), so their real `MessageSourceMap`
+ * merges are already visible here — no local `declare module` is needed, or
+ * safe: a locally-redeclared member with a DIFFERENT type than the real one
+ * is a duplicate-declaration error in that shared program, not a shadow.
+ * Each source's branded id field (`MailboxAddress`/`MailboxMessageId`,
+ * `SessionId`) cannot be minted here without adding `@deepseek-ai/dsh-mailbox`
+ * / `@deepseek-ai/dsh-subagent` as a dependency of this package purely for a
+ * test fixture, so the boundary cast below bridges only that nominal brand —
+ * every field name and plain-string value is the real shape.
+ */
+function mailboxRelaySource(): MessageSource {
+  return {
+    kind: 'mailbox', form: 'relay', address: 'addr', from: 'sender', messageId: 'msg-1',
+  } as unknown as MessageSource
+}
+
+/** See {@link mailboxRelaySource}'s doc comment. */
+function subagentSettledSource(): MessageSource {
+  return {
+    kind: 'subagent-settled', form: 'notice', summary: 'settled', senderSessionId: 'child-1',
+  } as unknown as MessageSource
+}
+
 const testToolSignal = new AbortController().signal
 
 interface StubAgent {
@@ -198,7 +227,7 @@ describe('goal tool registration and presentation', () => {
 describe('goal tool execution authority', () => {
   it('lets a root model infer create intent from its accepted human turn', async () => {
     const { ctx, root } = await harness()
-    openTurn(root, { kind: 'user' }, '请持续工作直到这个功能完成')
+    openTurn(root, { kind: 'user', founder: true }, '请持续工作直到这个功能完成')
     const result = await execute(ctx, 'create_goal', {
       objective: 'Finish the feature', max_goal_rounds: 9,
     }, root.agent)
@@ -207,6 +236,102 @@ describe('goal tool execution authority', () => {
     })
     expect(resultJson(result)['activation']).toBe('armed')
     expect(ctx.goals.get(root.agent)?.objective).toBe('Finish the feature')
+  })
+
+  it('rejects a bare unstamped user source even on a runtime root', async () => {
+    const { ctx, root } = await harness()
+    openTurn(root, { kind: 'user' }, 'not actually proven to be the founder')
+    const result = await execute(ctx, 'create_goal', { objective: 'should not be created' }, root.agent)
+    expect(result.error?.info?.code).toBe('GOAL_TOOL_AUTHORITY_REQUIRED')
+    expect(ctx.goals.get(root.agent)).toBeUndefined()
+  })
+
+  it('refuses authority when the open turn\'s latest message is unstamped, despite an earlier founder stamp', async () => {
+    const { ctx, root } = await harness()
+    openTurn(root, { kind: 'user', founder: true }, 'first, stamped')
+    // A later, unstamped steer in the same open turn (e.g. a trusted-host but
+    // non-loopback caller) must not inherit authority from the earlier stamp.
+    root.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'second, bare' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    const result = await execute(ctx, 'create_goal', { objective: 'should not be created' }, root.agent)
+    expect(result.error?.info?.code).toBe('GOAL_TOOL_AUTHORITY_REQUIRED')
+    expect(ctx.goals.get(root.agent)).toBeUndefined()
+  })
+
+  it('grants authority when the open turn\'s latest message is stamped, even though an earlier one was bare', async () => {
+    const { ctx, root } = await harness()
+    openTurn(root, { kind: 'user' }, 'first, bare')
+    root.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'second, stamped' }],
+      source: { kind: 'user', founder: true },
+    }), { surfaceOp: 'append' })
+    const result = await execute(ctx, 'create_goal', { objective: 'created from the later stamp' }, root.agent)
+    expect(resultGoal(result)).toMatchObject({ objective: 'created from the later stamp' })
+  })
+
+  it('grants authority when a plugin-sourced runtime-context snapshot follows the stamped human message', async () => {
+    const { ctx, root } = await harness()
+    openTurn(root, { kind: 'user', founder: true }, 'stamped, then a snapshot lands after it')
+    // Exactly what the agent loop appends immediately after the human's own
+    // message within the same step (packages/core/agent-loop/src/agent.ts,
+    // RuntimeContextProjection#project): a plugin-sourced message that can
+    // never carry `founder`. It must not shadow the human message above.
+    root.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'Current runtime context: ...' }],
+      source: {
+        kind: 'plugin',
+        plugin: '@deepseek-ai/dsh-system-prompt',
+        form: 'snapshot',
+        sections: [{ name: 'test-section', text: 'context' }],
+      },
+    }), { surfaceOp: 'append' })
+    const result = await execute(ctx, 'create_goal', { objective: 'created despite the trailing snapshot' }, root.agent)
+    expect(resultGoal(result)).toMatchObject({ objective: 'created despite the trailing snapshot' })
+  })
+
+  it('denies authority when a mailbox relay follows a stamped message in the same open turn '
+    + '(mailbox is outside-controlled content, not on the closed mechanical-context allowlist, '
+    + 'so it counts as the latest message — sentinel ruling, 2026-10-02)', async () => {
+    const { ctx, root } = await harness()
+    openTurn(root, { kind: 'user', founder: true }, 'stamped, then a relay lands after it')
+    root.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'mail from outside' }],
+      source: mailboxRelaySource(),
+    }), { surfaceOp: 'append' })
+    const result = await execute(ctx, 'create_goal', { objective: 'should not be created' }, root.agent)
+    expect(result.error?.info?.code).toBe('GOAL_TOOL_AUTHORITY_REQUIRED')
+    expect(ctx.goals.get(root.agent)).toBeUndefined()
+  })
+
+  it('denies authority when a subagent-settled notice follows a stamped message in the same open turn', async () => {
+    const { ctx, root } = await harness()
+    openTurn(root, { kind: 'user', founder: true }, 'stamped, then a settlement notice lands after it')
+    root.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'It left no closing message.' }],
+      source: subagentSettledSource(),
+    }), { surfaceOp: 'append' })
+    const result = await execute(ctx, 'create_goal', { objective: 'should not be created' }, root.agent)
+    expect(result.error?.info?.code).toBe('GOAL_TOOL_AUTHORITY_REQUIRED')
+    expect(ctx.goals.get(root.agent)).toBeUndefined()
+  })
+
+  it('still rejects authority when the open turn\'s only user-kind message is bare, even with a trailing snapshot', async () => {
+    const { ctx, root } = await harness()
+    openTurn(root, { kind: 'user' }, 'bare, then a snapshot lands after it')
+    root.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'Current runtime context: ...' }],
+      source: {
+        kind: 'plugin',
+        plugin: '@deepseek-ai/dsh-system-prompt',
+        form: 'snapshot',
+        sections: [{ name: 'test-section', text: 'context' }],
+      },
+    }), { surfaceOp: 'append' })
+    const result = await execute(ctx, 'create_goal', { objective: 'should not be created' }, root.agent)
+    expect(result.error?.info?.code).toBe('GOAL_TOOL_AUTHORITY_REQUIRED')
+    expect(ctx.goals.get(root.agent)).toBeUndefined()
   })
 
   it('rejects agentless, driverless, non-human, and live-child creation', async () => {
@@ -233,7 +358,8 @@ describe('goal tool execution authority', () => {
     const child = stubAgent('goal-tool-child')
     ctx.agents.enter(child.agent, root.agent)
     ctx.agents.announce(child.agent)
-    openTurn(child, { kind: 'user' })
+    // Founder-stamped even on the child: the root check excludes it regardless.
+    openTurn(child, { kind: 'user', founder: true })
     const childResult = await execute(ctx, 'create_goal', { objective: 'child goal' }, child.agent)
     expect(childResult.error?.info?.code).toBe('GOAL_TOOL_AUTHORITY_REQUIRED')
   })
@@ -254,7 +380,7 @@ describe('goal tool execution authority', () => {
 
   it('treats a fork resumed as a runtime root as direct-human authority', async () => {
     const { ctx, root } = await harness()
-    const originalTurn = openTurn(root, { kind: 'user' })
+    const originalTurn = openTurn(root, { kind: 'user', founder: true })
     const created = ctx.goals.create(root.agent, { objective: 'resume the fork' })
     closeTurn(root, originalTurn)
     const forkId = SessionId('goal-tool-resumed-fork')
@@ -269,7 +395,7 @@ describe('goal tool execution authority', () => {
     ctx.agents.register(fork.agent)
     expect(ctx.goals.get(fork.agent)).toMatchObject({ id: created.id, activation: 'disarmed' })
 
-    openTurn(fork, { kind: 'user' }, '继续这个目标')
+    openTurn(fork, { kind: 'user', founder: true }, '继续这个目标')
     const resumed = await execute(ctx, 'update_goal', {
       goal_id: created.id, revision: created.revision, action: 'resume',
     }, fork.agent)
@@ -302,12 +428,34 @@ describe('goal tool execution authority', () => {
 
   it('accepts direct human steering in a goal-sourced root turn', async () => {
     const { ctx, root } = await harness()
-    const humanTurn = openTurn(root, { kind: 'user' })
+    const humanTurn = openTurn(root, { kind: 'user', founder: true })
     const created = ctx.goals.create(root.agent, { objective: 'steer me' })
     closeTurn(root, humanTurn)
     openTurn(root, {
       kind: 'goal', goalId: created.id, revision: created.revision, round: 1,
     })
+    // Stamped, as a founder-stamped plan-mode re-steer (or any other
+    // loopback-proven steer) would copy forward — not minted here.
+    root.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'pause now' }],
+      source: { kind: 'user', founder: true },
+    }), { surfaceOp: 'append' })
+    const paused = await execute(ctx, 'update_goal', {
+      goal_id: created.id, revision: created.revision, action: 'pause',
+    }, root.agent)
+    expect(resultGoal(paused)).toMatchObject({ phase: 'paused', revision: 2 })
+  })
+
+  it('rejects an unstamped steer into a goal-sourced root turn', async () => {
+    const { ctx, root } = await harness()
+    const humanTurn = openTurn(root, { kind: 'user', founder: true })
+    const created = ctx.goals.create(root.agent, { objective: 'steer me unstamped' })
+    closeTurn(root, humanTurn)
+    openTurn(root, {
+      kind: 'goal', goalId: created.id, revision: created.revision, round: 1,
+    })
+    // Bare: exactly what plan-mode's re-steer now sends when the triggering
+    // turn was not itself founder-stamped. Must not grant direct-human authority.
     root.session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'pause now' }],
       source: { kind: 'user' },
@@ -315,7 +463,7 @@ describe('goal tool execution authority', () => {
     const paused = await execute(ctx, 'update_goal', {
       goal_id: created.id, revision: created.revision, action: 'pause',
     }, root.agent)
-    expect(resultGoal(paused)).toMatchObject({ phase: 'paused', revision: 2 })
+    expect(paused.error?.info?.code).toBe('GOAL_TOOL_AUTHORITY_REQUIRED')
   })
 
   it('rejects an initiator different from exec.agent', async () => {
@@ -331,7 +479,7 @@ describe('goal tool execution authority', () => {
 describe('goal tool state transitions', () => {
   it('reads null, then edits, pauses, and resumes by exact revision in one human turn', async () => {
     const { ctx, root } = await harness()
-    openTurn(root, { kind: 'user' })
+    openTurn(root, { kind: 'user', founder: true })
     expect(resultJson(await execute(ctx, 'get_goal', {}, root.agent))).toEqual({ goal: null })
     let goal = resultGoal(await execute(ctx, 'create_goal', { objective: 'old' }, root.agent))
     goal = resultGoal(await execute(ctx, 'update_goal', {
@@ -351,7 +499,7 @@ describe('goal tool state transitions', () => {
 
   it('injects one wrap-up instruction for an autonomous completion but leaves a human pause interactive', async () => {
     const { ctx, root } = await harness()
-    const humanTurn = openTurn(root, { kind: 'user' })
+    const humanTurn = openTurn(root, { kind: 'user', founder: true })
     const created = ctx.goals.create(root.agent, { objective: 'pause cleanly' })
     const paused = await execute(ctx, 'update_goal', {
       goal_id: created.id, revision: created.revision, action: 'pause',
@@ -389,7 +537,7 @@ describe('goal tool state transitions', () => {
 
   it('completes without a wrap-up instruction under direct human authority', async () => {
     const { ctx, root } = await harness()
-    openTurn(root, { kind: 'user' })
+    openTurn(root, { kind: 'user', founder: true })
     const created = ctx.goals.create(root.agent, { objective: 'finish now' })
     const complete = await execute(ctx, 'update_goal', {
       goal_id: created.id, revision: created.revision, action: 'complete',
@@ -401,12 +549,12 @@ describe('goal tool state transitions', () => {
 
   it('rearms a restored active goal only after a new direct human prompt', async () => {
     const { ctx, root } = await harness()
-    let turn = openTurn(root, { kind: 'user' })
+    let turn = openTurn(root, { kind: 'user', founder: true })
     const created = ctx.goals.create(root.agent, { objective: 'continue later' })
     closeTurn(root, turn)
     agentEvents(ctx, root.agent).emit('agent/session-start', { source: 'resume' })
     expect(ctx.goals.get(root.agent)?.activation).toBe('disarmed')
-    turn = openTurn(root, { kind: 'user' }, '继续')
+    turn = openTurn(root, { kind: 'user', founder: true }, '继续')
     const resumed = await execute(ctx, 'update_goal', {
       goal_id: created.id, revision: created.revision, action: 'resume',
     }, root.agent)
@@ -417,7 +565,7 @@ describe('goal tool state transitions', () => {
 
   it('returns structured domain and conditional-argument failures', async () => {
     const { ctx, root } = await harness()
-    openTurn(root, { kind: 'user' })
+    openTurn(root, { kind: 'user', founder: true })
     const invalidCreate = await execute(ctx, 'create_goal', { objective: ' ' }, root.agent)
     expect(invalidCreate.error?.info?.code).toBe('GOAL_INVALID_OBJECTIVE')
     const created = ctx.goals.create(root.agent, { objective: 'valid' })
@@ -463,7 +611,7 @@ describe('goal tool state transitions', () => {
 
   it('accepts only empty fillers in fields unused by the selected action', async () => {
     const { ctx, root } = await harness()
-    openTurn(root, { kind: 'user' })
+    openTurn(root, { kind: 'user', founder: true })
     let goal = ctx.goals.create(root.agent, { objective: 'valid' })
 
     const edited = await execute(ctx, 'update_goal', {
@@ -534,7 +682,7 @@ describe('goal tool state transitions', () => {
 
   it('allows exact goal rounds to complete but not edit or pause', async () => {
     const { ctx, root } = await harness()
-    const humanTurn = openTurn(root, { kind: 'user' })
+    const humanTurn = openTurn(root, { kind: 'user', founder: true })
     const created = ctx.goals.create(root.agent, { objective: 'round-owned' })
     closeTurn(root, humanTurn)
     openTurn(root, { kind: 'goal', goalId: created.id, revision: created.revision, round: 1 })
@@ -550,7 +698,7 @@ describe('goal tool state transitions', () => {
 
   it('enforces the configured model self-block lower bound across admitted rounds', async () => {
     const { ctx, root } = await harness({ blockedAfterConsecutiveRounds: 3 })
-    let turn = openTurn(root, { kind: 'user' })
+    let turn = openTurn(root, { kind: 'user', founder: true })
     const created = ctx.goals.create(root.agent, { objective: 'blocked eventually' })
     closeTurn(root, turn)
     const ref: GoalRef = { id: GoalId(created.id), revision: created.revision }
@@ -590,7 +738,7 @@ describe('goal tool state transitions', () => {
 
   it('lets direct human authority block before the model threshold', async () => {
     const { ctx, root } = await harness({ blockedAfterConsecutiveRounds: 9 })
-    openTurn(root, { kind: 'user' })
+    openTurn(root, { kind: 'user', founder: true })
     const created = ctx.goals.create(root.agent, { objective: 'human stop' })
     const blocked = await execute(ctx, 'update_goal', {
       goal_id: created.id,

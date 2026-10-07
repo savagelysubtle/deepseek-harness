@@ -6,7 +6,8 @@ import SystemPrompt, { AssembleContext, PromptAssembly, formatDateTime, renderCo
  * Every assembly carries the plugin's own built-ins — `harness:identity`
  * (order −100) and `deployment:persona` (order 0, from config). Tests about
  * registry MECHANICS strip them with {@link contributed} to stay focused on
- * their own sections; the built-ins' behavior is pinned by its own describe.
+ * their own sections; each built-in's own behavior is pinned by its own
+ * describe.
  */
 const BUILT_IN = ['harness:identity', 'deployment:persona']
 const IDENTITY = 'You are an AI agent powered by DeepSeek Harness.'

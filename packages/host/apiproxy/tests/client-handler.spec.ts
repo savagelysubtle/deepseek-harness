@@ -58,7 +58,7 @@ function scriptedApi(overrides: {
       }),
       rename: r => ok(r, { title: 'renamed', seq: 0 }),
       fork: r => ok(r, { sessionId: sid('s-fork') }),
-      prompt: r => ok(r, { accepted: true as const }),
+      prompt: r => ok(r, { accepted: true as const, founderStamped: false }),
       attachment: r => ok(r, {
         attachment: { attachmentId: 'a' as never, mediaType: 'image/png', bytes: 1, width: 1, height: 1 },
         data: 'AA==',
@@ -67,7 +67,7 @@ function scriptedApi(overrides: {
       cancel: r => ok(r, { accepted: true as const }),
       stopTree: r => ok(r, { ownTurnStopped: true, descendants: 'ok' as const }),
       stopAll: r => ok(r, { stoppedCount: 0, descendants: 'ok' as const }),
-      sendAll: r => ok(r, { sentCount: 0, result: 'ok' as const }),
+      sendAll: r => ok(r, { sentCount: 0, result: 'ok' as const, founderStamped: false }),
       ...overrides.sessions,
     },
     subagents: {
@@ -837,7 +837,7 @@ describe('session-lifecycle-broadcast / worktree / org / mailbox unary surface',
       sessions: {
         stopTree: record('session.stopTree', r => ok(r, { ownTurnStopped: true, descendants: 'ok' as const })),
         stopAll: record('session.stopAll', r => ok(r, { stoppedCount: 3, descendants: 'ok' as const })),
-        sendAll: record('session.sendAll', r => ok(r, { sentCount: 2, result: 'ok' as const })),
+        sendAll: record('session.sendAll', r => ok(r, { sentCount: 2, result: 'ok' as const, founderStamped: false })),
       },
     })
     const c = client(api)
@@ -847,7 +847,7 @@ describe('session-lifecycle-broadcast / worktree / org / mailbox unary surface',
     const stoppedAll = await c.sessions.stopAll({})
     expect(stoppedAll.result).toEqual({ ok: true, value: { stoppedCount: 3, descendants: 'ok' } })
     const sent = await c.sessions.sendAll({ content: [{ type: 'text', text: 'stand down' }] })
-    expect(sent.result).toEqual({ ok: true, value: { sentCount: 2, result: 'ok' } })
+    expect(sent.result).toEqual({ ok: true, value: { sentCount: 2, result: 'ok', founderStamped: false } })
 
     expect(seen.map(call => call.method)).toEqual(['session.stopTree', 'session.stopAll', 'session.sendAll'])
     expect(seen[0]?.payload).toEqual({ sessionId: sid('s1') })

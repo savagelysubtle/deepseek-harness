@@ -68,7 +68,7 @@ describe('plugin registration', () => {
   })
 
   it('routes the Send All injected face straight through to ctx.sessions.sendAll with the given content', async () => {
-    const sendAll = vi.fn().mockResolvedValue({ ok: true, value: { sentCount: 0, result: 'ok' } })
+    const sendAll = vi.fn().mockResolvedValue({ ok: true, value: { sentCount: 0, result: 'ok', founderStamped: true } })
     const b = await bench({ sendAll })
     const entry = b.slots.entries('sidebar.footer.action').find(e => e.options.id === 'send-all')
     const face = (entry?.inject as (() => { onSendAll: (c: unknown) => unknown }) | undefined)?.()

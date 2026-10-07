@@ -8,6 +8,7 @@ import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
 import { API_PATH, HOST_EVENTS_PATH, MUX_EVENTS_PATH } from './api-path.ts'
 import { bridge, DEFAULT_MAX_REQUEST_BODY_BYTES } from './http-bridge.ts'
 import { assertTrustedAuthority, isTrustedApiRequest } from './api-request-trust.ts'
+import { isLoopbackAddress } from './loopback-hostname.ts'
 import { HostConnectionService } from './rpc-host.ts'
 import { rejectWebSocketUpgrade, WebSocketDownlinks } from './websocket-downlink.ts'
 
@@ -137,7 +138,7 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
   if (ctx.get('apiProxy') !== undefined) assertImageBodyCapacity(ctx, maxRequestBodyBytes)
   const connection = new HostConnectionService(ctx, trustedHosts)
   const fetchHandler = connection.createSharedFetchHandler(API_PATH, {
-    async fetch(request) {
+    async fetch(request, peerIsLoopback) {
       const pathname = new URL(request.url).pathname
       const method = pathname.startsWith(`${API_PATH}/`)
         ? pathname.slice(API_PATH.length + 1)
@@ -155,7 +156,7 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
       }
       const apiProxy = ctx.get('apiProxy')
       if (apiProxy === undefined) return new Response('not found', { status: 404 })
-      return toFetchHandler(apiProxy).fetch(request)
+      return toFetchHandler(apiProxy).fetch(request, undefined, peerIsLoopback)
     },
   })
   const route: WebRoute = {
@@ -167,7 +168,10 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
         res.end('forbidden')
         return
       }
-      await bridge(req, res, fetchHandler, maxRequestBodyBytes)
+      // Computed from the raw socket, never from a request header: a client
+      // cannot set or spoof this fact (see FetchHandler.fetch).
+      const peerIsLoopback = isLoopbackAddress(req.socket.remoteAddress)
+      await bridge(req, res, fetchHandler, maxRequestBodyBytes, peerIsLoopback)
     },
   }
   ctx.effect(() => ctx.webServer.register(route), 'client-connection: /api route')

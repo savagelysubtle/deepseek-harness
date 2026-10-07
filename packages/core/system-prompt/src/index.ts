@@ -483,6 +483,19 @@ export class SystemPrompt extends Service {
       // The fallback narrows the optional input type; the schema already defaults it.
       text: config.persona ?? '',
     })
+    // Founder ruling 2026-10-02 (third and final on this point): there is
+    // deliberately NO `founder:context` (or similarly named) section here.
+    // SWD-125 shipped one that rendered a fixed notice when the open turn's
+    // own input was founder-stamped, but surfacing founder status in the
+    // system prompt meant the prompt text had to change whenever a
+    // non-founder message landed mid-turn (mailbox relay, a subagent
+    // report, a hook, a compaction checkpoint) — turning the provider's
+    // cache prefix mid-turn and failing the ACP snapshot suite's
+    // header-stability checks. Founder authority is enforced instead at the
+    // event layer: `@deepseek-ai/dsh-llm`'s `isFounderMessage` and
+    // `selectFounderAuthorityMessage` are the authority surface, consulted
+    // directly by `packages/goal` and `packages/plan` where the authority
+    // decision actually happens — the system prompt never needs to know.
     // The current-date-and-time block moved off the system prompt (SWD-113):
     // it now rides as `@deepseek-ai/dsh-agent-loop`'s unconditional per-request
     // clock tail message, built fresh with formatDateTime()/this module's own

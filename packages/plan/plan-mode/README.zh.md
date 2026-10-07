@@ -16,7 +16,7 @@
 
 评审问题声明 `plan-review` 呈现意图，并指名 `Approve` 为表示批准的标签，因此有能力的 UI 会把计划呈现为一次决定而非通用问题；两种情况下该工具读到的回答完全相同。放弃审阅——用户关闭请求，转而发言——会如实报告给模型，要求它留在 plan mode 中等待那条消息；其余每一种评审失败都保留 seam 自身的消息。
 
-组合 `ctx.commands` 时，该包会注册 `/plan [message]`，并将参数恰好为 `off` 的情况保留给直接退出。不带参数的 `/plan` 会启用 plan mode；任何其他非空参数都会先启用 plan mode，再通过 `agent.steer()` 提交，因此它会在 plan 引导下成为下一步骤的常规已记录用户消息。`/plan off` 会选择停用状态，不发送模型输入；它还可以在启用 plan mode 的待处理选择由轮内 pre-step 追加之前将其取消。
+组合 `ctx.commands` 时，该包会注册 `/plan [message]`，并将参数恰好为 `off` 的情况保留给直接退出。不带参数的 `/plan` 会启用 plan mode；任何其他非空参数都会先启用 plan mode，再通过 `agent.steer()` 提交，因此它会在 plan 引导下成为下一步骤的常规已记录用户消息——当触发它的开放轮次的权限承载消息被标记为创始人时，这条消息携带 `MessageSourceMap.user.founder: true`，否则携带裸的 `{ kind: 'user' }` 来源。该权限承载消息是触发它的开放轮次中、来源不是机械式 harness 上下文来源的最新一条用户角色消息：`@deepseek-ai/dsh-llm` 共享的 `selectFounderAuthorityMessage` 通过只跳过封闭白名单（`isMechanicalContextSource`——system-prompt 插件的 runtime-context 快照、`skill-catalog` 与 `agent-instructions`）来挑选它，依据的是一项 sentinel 裁定（2026-10-02）。其他任何来源——mailbox relay、subagent 的 report 与 settlement、coordinator 消息、Goal Round 消息、session-reference、skill-invocation，以及任何其他插件来源——都会被当作最新输入，在没有标记时拒绝授权，因为 mailbox 与 subagent 的投递会把第三方内容带入开放轮次，更早的创始人标记绝不能在它们之后继续存活。命令层本身绝不铸造该标记：它没有自己的 socket 可以证明回环，因此只会复制触发轮次原本携带的内容；未被标记的触发轮次会产生一次未被标记的重新 steer。`/plan off` 会选择停用状态，不发送模型输入；它还可以在启用 plan mode 的待处理选择由轮内 pre-step 追加之前将其取消。
 
 Web 客户端使用该插件提供的 `/plan` 命令；其他入口可以直接驱动同一服务，无需定义第二套 mode 词汇。
 

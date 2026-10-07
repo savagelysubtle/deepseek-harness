@@ -65,7 +65,8 @@ export class FakeApiClient implements IApiClient {
   onSelectModel: (payload: ModelSelection & { sessionId: SessionId })
   => Promise<RpcResponse<{ selected: ModelSelection }>> =
     payload => Promise.resolve(ok({ selected: { provider: payload.provider, model: payload.model } }))
-  onPrompt: (payload: unknown) => Promise<RpcResponse<{ accepted: true }>> = () => Promise.resolve(ok({ accepted: true as const }))
+  onPrompt: (payload: unknown) => Promise<RpcResponse<{ accepted: true; founderStamped: boolean }>> =
+    () => Promise.resolve(ok({ accepted: true as const, founderStamped: true }))
   onAttachment: (payload: unknown) => Promise<RpcResponse<{ attachment: { attachmentId: never; mediaType: 'image/png'; bytes: number; width: number; height: number }; data: string }>> =
     () => Promise.resolve(ok({ attachment: { attachmentId: 'a' as never, mediaType: 'image/png', bytes: 1, width: 1, height: 1 }, data: 'AA==' }))
   onUpdateQueue: (payload: unknown) => Promise<RpcResponse<{ accepted: true }>> = () => Promise.resolve(ok({ accepted: true as const }))
@@ -74,8 +75,8 @@ export class FakeApiClient implements IApiClient {
     = () => Promise.resolve(ok({ ownTurnStopped: true, descendants: 'ok' as const }))
   onStopAll: (payload: unknown) => Promise<RpcResponse<{ stoppedCount: number; descendants: 'ok' }>>
     = () => Promise.resolve(ok({ stoppedCount: 0, descendants: 'ok' as const }))
-  onSendAll: (payload: unknown) => Promise<RpcResponse<{ sentCount: number; result: 'ok' }>>
-    = () => Promise.resolve(ok({ sentCount: 0, result: 'ok' as const }))
+  onSendAll: (payload: unknown) => Promise<RpcResponse<{ sentCount: number; result: 'ok'; founderStamped: boolean }>>
+    = () => Promise.resolve(ok({ sentCount: 0, result: 'ok' as const, founderStamped: true }))
   onDescribe: (payload: unknown) => Promise<RpcResponse<{
     version: string
     cwd: string

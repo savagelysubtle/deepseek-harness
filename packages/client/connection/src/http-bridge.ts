@@ -16,9 +16,13 @@ export interface FetchHandler {
   /**
    * Handle one standard Fetch request.
    * @param request - request produced by the active transport bridge.
+   * @param peerIsLoopback - whether the raw TCP peer was independently proven
+   * loopback, computed in-process by the carrier from `req.socket.remoteAddress`
+   * — never derived from a request header, which any client can set freely.
+   * `false` wherever the carrier has not established it.
    * @returns complete or streaming Fetch response.
    */
-  fetch(request: Request): Promise<Response>
+  fetch(request: Request, peerIsLoopback: boolean): Promise<Response>
 }
 
 /**
@@ -28,12 +32,16 @@ export interface FetchHandler {
  * @param res - node:http response the bridge writes and owns to completion.
  * @param apiHandler - fetch-shaped API carrier the request is dispatched to.
  * @param maxRequestBodyBytes - maximum body bytes buffered before dispatch.
+ * @param peerIsLoopback - whether the caller independently proved the raw
+ * socket peer loopback (see {@link FetchHandler.fetch}); defaults to `false`
+ * (fails closed) when the caller has not computed it.
  */
 export async function bridge(
   req: IncomingMessage,
   res: ServerResponse,
   apiHandler: FetchHandler,
   maxRequestBodyBytes = DEFAULT_MAX_REQUEST_BODY_BYTES,
+  peerIsLoopback = false,
 ): Promise<void> {
   const abort = new AbortController()
   // Client-disconnect detection MUST hang off the response, not the request:
@@ -72,7 +80,7 @@ export async function bridge(
     ...chunks.length > 0 ? { body: Buffer.concat(chunks) } : {},
     signal: abort.signal,
   })
-  const response = await apiHandler.fetch(request)
+  const response = await apiHandler.fetch(request, peerIsLoopback)
   res.writeHead(response.status, Object.fromEntries(response.headers.entries()))
   if (response.body === null) {
     res.end()

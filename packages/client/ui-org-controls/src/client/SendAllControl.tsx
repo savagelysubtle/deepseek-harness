@@ -46,6 +46,18 @@ export function SendAllControl({ wide, useSessions, onSendAll, t }: SendAllContr
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<ResultBanner | undefined>(undefined)
+  // Not-founder-stamped fence (SWD-125 step 6; REALITY RULES: a state that
+  // changes what the operator's input is worth must say so on screen with
+  // reason and remedy). Independent of `result` above — a broadcast can
+  // succeed and still be unstamped. A fresh object every resolution (set
+  // directly from the resolved call, not via a shared snapshot — sendAll
+  // deliberately never mutates one, see SendAllFace's doc) means a dismissed
+  // notice re-opens on a later unstamped answer even though the boolean
+  // repeats, exactly like the composer's own fence in ui-conversation.
+  const [founderStamped, setFounderStamped] = useState<{ readonly stamped: boolean } | null>(null)
+  const [dismissedFounderStamp, setDismissedFounderStamp] = useState<{ readonly stamped: boolean } | null>(null)
+  const showFounderNotice = founderStamped !== null && !founderStamped.stamped
+    && founderStamped !== dismissedFounderStamp
 
   // `attached` (a live host Agent exists), not `running`: the host's own
   // sendAll root selection reaches an idle-between-turns session exactly as
@@ -73,7 +85,13 @@ export function SendAllControl({ wide, useSessions, onSendAll, t }: SendAllContr
     onSendAll([{ type: 'text', text: trimmed }]).then((answer) => {
       if (!answer.ok) {
         setResult({ kind: 'error', reason: answer.error.message })
-      } else if (answer.value.result === 'ok') {
+        return
+      }
+      // founderStamped is set on every resolved answer, success or partial —
+      // it is orthogonal to delivery outcome (a `{ failed }` broadcast can
+      // still have been founder-stamped, and a clean one can still not be).
+      setFounderStamped({ stamped: answer.value.founderStamped })
+      if (answer.value.result === 'ok') {
         setResult({ kind: 'success', count: answer.value.sentCount })
       } else {
         // Founder ruling: a `{ failed }` result must surface as a failure,
@@ -93,21 +111,38 @@ export function SendAllControl({ wide, useSessions, onSendAll, t }: SendAllContr
 
   return (
     <div className={wide ? css.root : `${css.root} ${css.rail}`}>
-      {result !== undefined && (
-        <div className={css.banner} data-variant={result.kind} role="alert">
-          <span>
-            {result.kind === 'success' && t('sendAll.result.success', { count: result.count })}
-            {result.kind === 'partial' && t('sendAll.result.partial', { count: result.count, reason: result.reason })}
-            {result.kind === 'error' && t('sendAll.result.error', { reason: result.reason })}
-          </span>
-          <button
-            type="button"
-            className={css.dismiss}
-            aria-label={t('sendAll.result.dismiss')}
-            onClick={() => { setResult(undefined) }}
-          >
-            <span aria-hidden="true">{'×'}</span>
-          </button>
+      {(result !== undefined || showFounderNotice) && (
+        <div className={css.bannerStack}>
+          {result !== undefined && (
+            <div className={css.banner} data-variant={result.kind} role="alert">
+              <span>
+                {result.kind === 'success' && t('sendAll.result.success', { count: result.count })}
+                {result.kind === 'partial' && t('sendAll.result.partial', { count: result.count, reason: result.reason })}
+                {result.kind === 'error' && t('sendAll.result.error', { reason: result.reason })}
+              </span>
+              <button
+                type="button"
+                className={css.dismiss}
+                aria-label={t('sendAll.result.dismiss')}
+                onClick={() => { setResult(undefined) }}
+              >
+                <span aria-hidden="true">{'×'}</span>
+              </button>
+            </div>
+          )}
+          {showFounderNotice && (
+            <div className={css.banner} data-variant="founderStamp" role="status">
+              <span>{t('sendAll.founderStamp.notice')}</span>
+              <button
+                type="button"
+                className={css.dismiss}
+                aria-label={t('sendAll.founderStamp.dismiss')}
+                onClick={() => { setDismissedFounderStamp(founderStamped) }}
+              >
+                <span aria-hidden="true">{'×'}</span>
+              </button>
+            </div>
+          )}
         </div>
       )}
       <button

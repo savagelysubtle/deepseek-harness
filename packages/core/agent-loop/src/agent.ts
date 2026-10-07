@@ -576,9 +576,30 @@ export class ReactLoopAgent implements Agent {
           for (const message of decision.messages) {
             this.session.append('user/message', message, { surfaceOp: 'append' })
           }
+          // SWD-125: `preStep`'s assembly was built BEFORE the appends above,
+          // so any prompt section that reads the open turn's own messages
+          // off `session.events` (any section keyed to the latest message) rendered from a
+          // log one step behind on this step's FIRST assemble. The
+          // `agent/pre-step` waterfall never consumed that assembly itself —
+          // only `claimed`/`position`/`signal` — so nothing upstream needed
+          // the early one; it exists solely to build the pre-append context
+          // snapshot message and to run before the waterfall could still
+          // reject these messages. Always re-assemble now that this step's
+          // own messages are logged, so `step()` renders from a log that
+          // contains them: `decision.messages` is not the only way this
+          // step's own `agent/pre-step` waterfall can have changed the log
+          // between the early assembly and here — a listener can append
+          // directly to `session.events` instead (e.g.
+          // `compaction-basic`'s pressure check calling `commitCompactionBody`,
+          // which replaces the open turn's checkpoint via `session.append`,
+          // not `decision.messages`), so an empty `decision.messages` is not
+          // proof the log is unchanged. Unconditional, not gated on message
+          // count: the extra per-step `assemble()` cost is accepted.
+          const assembly = await this.loopCtx.systemPrompt.assemble(assembleContextFor(this, signal))
+          signal.throwIfAborted()
           // max-tokens is sticky: once any step hits the ceiling, later steps
           // that complete normally must not downgrade the turn outcome.
-          const stepEnd = await this.step(decision.assembly)
+          const stepEnd = await this.step(assembly)
           // max-tokens stays sticky: a later completed step must not
           // downgrade the turn outcome.
           if (turnEnds === null || turnEnds.kind !== 'max-tokens') turnEnds = stepEnd

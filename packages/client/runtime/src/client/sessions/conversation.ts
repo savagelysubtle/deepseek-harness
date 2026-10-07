@@ -500,4 +500,13 @@ export interface ConversationSnapshot {
    */
   blank: boolean
   lastAgentError: string | null
+  /**
+   * Founder-stamp fact of the most recently resolved `prompt()` RPC (never
+   * set from the subagent-routed path, which carries no such field): a new
+   * object each resolution, even when `stamped` repeats, so a dismissed
+   * notice re-opens on a later unstamped response (see the on-screen
+   * "not founder-stamped" indicator, SWD-125 step 6). Null before any prompt
+   * has resolved on this session.
+   */
+  founderStamped: { readonly stamped: boolean } | null
 }

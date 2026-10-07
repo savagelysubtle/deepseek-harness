@@ -601,7 +601,11 @@ export class SessionRuntime implements ISessions {
    * @param content - prompt content broadcast to every live top-level session.
    * @returns the host result or a folded transport error.
    */
-  sendAll(content: PromptContentPart[]): Promise<RpcResult<{ sentCount: number; result: SendAllResult }>> {
+  sendAll(content: PromptContentPart[]): Promise<RpcResult<{
+    sentCount: number
+    result: SendAllResult
+    founderStamped: boolean
+  }>> {
     return this.manager.sendAll(content)
   }
 

@@ -542,6 +542,42 @@ describe('prompt and cancel errors', () => {
     expect(session.getSnapshot().composerPhase).toBe('active')
   })
 
+  it('mirrors the host founderStamped fact into the snapshot; a new object every resolution', async () => {
+    const { api, session } = makeSession()
+    api.onPrompt = () => Promise.resolve(ok({ accepted: true as const, founderStamped: false }))
+    await session.prompt([{ type: 'text', text: '非回环' }], 'queue')
+    const first = session.getSnapshot().founderStamped
+    expect(first).toEqual({ stamped: false })
+    await session.prompt([{ type: 'text', text: '再来一次' }], 'queue')
+    const second = session.getSnapshot().founderStamped
+    // Same boolean, but a new object per resolution (see ConversationSnapshot.founderStamped doc):
+    // a client that dismissed the first notice by object identity must see the second as new.
+    expect(second).toEqual({ stamped: false })
+    expect(second).not.toBe(first)
+    api.onPrompt = () => Promise.resolve(ok({ accepted: true as const, founderStamped: true }))
+    await session.prompt([{ type: 'text', text: '回环了' }], 'queue')
+    expect(session.getSnapshot().founderStamped).toEqual({ stamped: true })
+  })
+
+  it('leaves founderStamped untouched on a business failure (no response.value to read)', async () => {
+    const { api, session } = makeSession()
+    api.onPrompt = () => Promise.resolve(err({ code: 'agent-busy', message: 'busy', details: { reason: 'x' } }))
+    await session.prompt([{ type: 'text', text: 'x' }], 'queue')
+    expect(session.getSnapshot().founderStamped).toBeNull()
+  })
+
+  it('entering subagent mode drops a stale root-mode founderStamped notice', async () => {
+    const { api, session } = makeSession()
+    api.onPrompt = () => Promise.resolve(ok({ accepted: true as const, founderStamped: false }))
+    await session.prompt([{ type: 'text', text: '非回环' }], 'queue')
+    expect(session.getSnapshot().founderStamped).toEqual({ stamped: false })
+    // Catalog discovery reclassifies this session as a subagent: the fact
+    // was about this session's own prior life as a direct root channel, and
+    // no longer describes anything once it stops accepting root prompts.
+    session.configureSubagent({ parentSessionId: PARENT, childSessionId: SID, mode: 'continuable' })
+    expect(session.getSnapshot().founderStamped).toBeNull()
+  })
+
   it('business failure lands in promptError with op=send; the phase stays engaging (retry, no hero bounce)', async () => {
     const { api, session } = makeSession()
     session.handleBlank(true)

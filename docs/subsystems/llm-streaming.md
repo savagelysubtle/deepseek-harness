@@ -72,12 +72,29 @@ Where a message came from is itself a merge-extensible sum type:
  * Merge-extensible sum type — plugins add their own `kind`s.
  */
 interface MessageSourceMap {
-  user: { kind: 'user' }
+  user: {
+    kind: 'user'
+    /**
+     * Whether this message is the founder's own, typed directly at this
+     * machine. Minted only by trusted harness code at loopback-proven direct
+     * channels — never derived from tool arguments, mailbox payloads, or
+     * model output; there is no signature, so the guarantee is entirely
+     * architectural (which first-party call sites are allowed to set it),
+     * the same boundary `ToolMessageSource.callId` already relies on.
+     * Literal `true` only; no other source kind carries this field, and its
+     * absence means "not the founder" and fails closed — a resumed log
+     * written before this field existed renders as unstamped, never as an
+     * error.
+     */
+    founder?: true
+  }
   plugin: { kind: 'plugin'; plugin: string } & ContextFormed
   model: ModelMessageSource
   tool: ToolMessageSource
 }
 ```
+
+`isFounderMessage(source)`, exported beside the message constructors, tests `kind === 'user' && founder === true`; every other source kind, and a bare `user` source without the field, tests false. Call sites that mint it are architectural, not cryptographic: the Host's `session.prompt`/`session.sendAll` RPCs set it only when the raw TCP peer is independently proven loopback ([`@deepseek-ai/dsh-host-apiproxy`](../../packages/host/apiproxy/README.md)); the headless one-shot bundle sets it unconditionally because it has no listening socket for a peer to reach ([`@deepseek-ai/dsh-headless`](../../packages/bundle/headless/README.md)); and the ACP automation bridge sets it unconditionally on every `session/prompt`, since it runs as a stdio child of the local editor that launched it with no peer socket to classify — the same reasoning as headless ([`@deepseek-ai/dsh-acp`](../../packages/acp/acp/README.md)). [`@deepseek-ai/dsh-tool-goal`](../../packages/goal/tool-goal/README.md) is the main consumer: only a founder-stamped message grants direct-human authority over goal mutations. The stamp is never rendered into the system prompt itself (founder ruling 2026-10-02): the model is told nothing about it, so the prompt text — the provider's own cache prefix — stays byte-identical regardless of who is typing; founder authority is enforced only by these event-stamp checks, plus the client's own not-founder-stamped banner shown to the human.
 
 Producer identity and presentation form are independent. `kind` answers *who produced this*; the optional `form` answers *what kind of information this is*, and consumers decide how to present it. Several producers may share one form, and one producer may emit more than one form over a session. The values are semantic and grow one at a time; an absent or unrecognized value uses the documented default and is presented as opaque content:
 

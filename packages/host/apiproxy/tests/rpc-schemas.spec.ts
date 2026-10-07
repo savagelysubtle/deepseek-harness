@@ -11,7 +11,7 @@ import {
   sessionIdSchema, sessionListRequestSchema, sessionListValueSchema, sessionModelsRequestSchema,
   sessionModelsValueSchema, sessionPromptRequestSchema, sessionPromptValueSchema,
   sessionSearchRequestSchema, sessionSearchValueSchema, sessionSelectModelRequestSchema,
-  sessionSelectModelValueSchema, sessionSummarySchema,
+  sessionSelectModelValueSchema, sessionSendAllValueSchema, sessionSummarySchema,
   sessionUpdateQueueRequestSchema, sessionUpdateQueueValueSchema,
 } from '../src/api/sessions.schema.ts'
 import {
@@ -270,12 +270,18 @@ describe('sessions domain schemas', () => {
       sessionId: 's1', mode: 'queue', content: [],
     }).clientTimeZone).toBeUndefined()
     expect(() => sessionPromptRequestSchema.parse({ sessionId: 's1', mode: 'inject', content: [] })).toThrow()
-    expect(sessionPromptValueSchema.parse({ accepted: true }).accepted).toBe(true)
+    expect(sessionPromptValueSchema.parse({ accepted: true, founderStamped: true }).accepted).toBe(true)
     // The command slot appears only when the prompt dispatched a slash command.
-    const dispatched = sessionPromptValueSchema.parse({ accepted: true, command: { kind: 'success', text: 'Goal set' } })
+    const dispatched = sessionPromptValueSchema.parse({
+      accepted: true, command: { kind: 'success', text: 'Goal set' }, founderStamped: false,
+    })
     expect(dispatched.command?.text).toBe('Goal set')
-    expect(sessionPromptValueSchema.parse({ accepted: true, command: { kind: 'success' } }).command).toEqual({ kind: 'success' })
-    expect(() => sessionPromptValueSchema.parse({ accepted: true, command: { kind: 'failure' } })).toThrow()
+    expect(sessionPromptValueSchema.parse({
+      accepted: true, command: { kind: 'success' }, founderStamped: false,
+    }).command).toEqual({ kind: 'success' })
+    expect(() => sessionPromptValueSchema.parse({
+      accepted: true, command: { kind: 'failure' }, founderStamped: false,
+    })).toThrow()
     expect(sessionCancelRequestSchema.parse({ sessionId: 's1' }).sessionId).toBe('s1')
     expect(sessionUpdateQueueRequestSchema.parse({
       sessionId: 's1',
@@ -291,6 +297,21 @@ describe('sessions domain schemas', () => {
     expect(sessionCancelValueSchema.parse({ accepted: true }).accepted).toBe(true)
     expect(sessionUpdateQueueValueSchema.parse({ accepted: true }).accepted).toBe(true)
     expect(contentBlockSchema.parse({ type: 'text', text: 'x', extra: 1 })).toMatchObject({ extra: 1 })
+  })
+
+  it('SWD-125: founderStamped is required on session.prompt and session.sendAll responses, not optional', () => {
+    // These two value schemas are also the client-side second-level parse
+    // (fetch/client.ts callUnary, UNARY_VALUE_SCHEMAS[method].safeParse) that
+    // validates the host's wire response before the client ever sees it. A
+    // server reply that omits `founderStamped` — a stale host build, or a
+    // handler bug that drops the field — must fail that parse loudly rather
+    // than silently resolving to "every prompt looks unstamped".
+    expect(() => sessionPromptValueSchema.parse({ accepted: true })).toThrow()
+    expect(sessionPromptValueSchema.parse({ accepted: true, founderStamped: true }).founderStamped).toBe(true)
+    expect(() => sessionSendAllValueSchema.parse({ sentCount: 1, result: 'ok' })).toThrow()
+    expect(sessionSendAllValueSchema.parse({
+      sentCount: 1, result: 'ok', founderStamped: false,
+    }).founderStamped).toBe(false)
   })
 })
 

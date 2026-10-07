@@ -110,6 +110,7 @@ function historySnapshot(
     promptError: null,
     blank: nodes.length === 0,
     lastAgentError: null,
+    founderStamped: null,
   }
 }
 

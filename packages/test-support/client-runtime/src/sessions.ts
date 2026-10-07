@@ -199,7 +199,9 @@ export class TestSessions implements ISessions {
   private stopAllStub: (() => { stoppedCount: number; descendants: StopDescendantsResult }) | undefined
 
   /** Replaceable sendAll behavior (see {@link TestSessions.stubSendAll}). */
-  private sendAllStub: ((content: PromptContentPart[]) => { sentCount: number; result: SendAllResult }) | undefined
+  private sendAllStub:
+    | ((content: PromptContentPart[]) => { sentCount: number; result: SendAllResult; founderStamped?: boolean })
+    | undefined
 
   /**
    * @param stabilize - the owning runtime's act wrapper.
@@ -484,10 +486,15 @@ export class TestSessions implements ISessions {
   }
 
   /**
-   * Replace the sendAll outcome (the call is still recorded).
+   * Replace the sendAll outcome (the call is still recorded). `founderStamped`
+   * defaults to `true` when the stub omits it — most scenarios stub this to
+   * assert delivery counts/failures, not the founder-stamp fact, so leaving
+   * it out must not read as "not founder-stamped" (SWD-125 step 6).
    * @param impl - the outcome a scenario wants sendAll to answer.
    */
-  stubSendAll(impl: (content: PromptContentPart[]) => { sentCount: number; result: SendAllResult }): void {
+  stubSendAll(
+    impl: (content: PromptContentPart[]) => { sentCount: number; result: SendAllResult; founderStamped?: boolean },
+  ): void {
     this.sendAllStub = impl
   }
 
@@ -538,9 +545,14 @@ export class TestSessions implements ISessions {
    */
   sendAll(content: PromptContentPart[]): ReturnType<ISessions['sendAll']> {
     this.calls.push({ method: 'sendAll', args: [content] })
+    const stubbed = this.sendAllStub?.(content)
     return Promise.resolve({
       ok: true,
-      value: this.sendAllStub?.(content) ?? { sentCount: 0, result: 'ok' as const },
+      value: {
+        sentCount: stubbed?.sentCount ?? 0,
+        result: stubbed?.result ?? 'ok' as const,
+        founderStamped: stubbed?.founderStamped ?? true,
+      },
     })
   }
 

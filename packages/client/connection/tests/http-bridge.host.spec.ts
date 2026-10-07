@@ -73,3 +73,40 @@ describe('HTTP bridge abort', () => {
     expect(carrierSignal?.aborted).toBe(true)
   })
 })
+
+describe('HTTP bridge peerIsLoopback forwarding', () => {
+  function fakeResponse(): ServerResponse {
+    return Object.assign(new EventEmitter(), {
+      writableEnded: false,
+      writeHead() { return this },
+      write() { return true },
+      end(this: { writableEnded: boolean }) { this.writableEnded = true; return this },
+    }) as unknown as ServerResponse
+  }
+
+  it('defaults to false (fails closed) when the caller does not compute it', async () => {
+    const request = Readable.from([]) as unknown as IncomingMessage
+    Object.assign(request, { url: '/api/session.list', method: 'GET', headers: {} })
+    let received: boolean | undefined
+    await bridge(request, fakeResponse(), {
+      fetch: async (_request, peerIsLoopback) => {
+        received = peerIsLoopback
+        return new Response(null, { status: 204 })
+      },
+    })
+    expect(received).toBe(false)
+  })
+
+  it('forwards the caller-computed value through to the fetch-shaped handler', async () => {
+    const request = Readable.from([]) as unknown as IncomingMessage
+    Object.assign(request, { url: '/api/session.list', method: 'GET', headers: {} })
+    let received: boolean | undefined
+    await bridge(request, fakeResponse(), {
+      fetch: async (_request, peerIsLoopback) => {
+        received = peerIsLoopback
+        return new Response(null, { status: 204 })
+      },
+    }, undefined, true)
+    expect(received).toBe(true)
+  })
+})

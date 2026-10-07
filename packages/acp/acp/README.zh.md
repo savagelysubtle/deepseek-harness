@@ -17,6 +17,10 @@
 
 两个字段都是可选的，以便由另一个 agent/request 监听器提供目标。可运行的 ACP 组合同时要求两者。
 
+每条 `session/prompt` 消息都无条件被标记为创始人消息（`MessageSourceMap.user.founder: true`，[`isFounderMessage()`](../../llm/llm/README.md)）：桥接层作为启动它的本地编辑器的 stdio 子进程运行，没有可供远程调用方连接的对端套接字，因此键盘前的操作者在构造上就是创始人——与 headless 一次性 bundle 的理由一致（创始人裁定，2026-10-02）。这也是 ACP 会话能够使用要求人类直接权限的 `create_goal`／`update_goal`（[`@deepseek-ai/dsh-tool-goal`](../../goal/tool-goal/README.md)）的原因。
+
+该前提只在本进程的 stdin 由人类启动的编辑器驱动时成立。当该组合是由 [`@deepseek-ai/dsh-subagent-acp`](../../subagent/subagent-acp/README.md) 或任何其他程序化启动器 spawn 时，该前提**不**成立：此时打标记会把子进程的 goal 工具（`create_goal`／`update_goal`／`complete`）的权限交给决定 spawn 它的那一方。除非委托调用方本身就被信任拥有创始人权限，否则不要在可通过非交互式 ACP 启动器到达的组合中挂载 `@deepseek-ai/dsh-command-goal`／`@deepseek-ai/dsh-tool-goal`。
+
 ## 协议约定
 
 | 方法 | 行为 |

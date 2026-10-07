@@ -4,7 +4,7 @@ English | [中文](README.zh.md)
 
 The dsh one-shot bundle. [`cordis.patch.yml`](cordis.patch.yml) rides directly over [`dsh-base`](../base/README.md): it supplies the coding persona and tool mode, disables HMR, mounts Code Mode's worker as a core execution capability, and inserts this package's `headless-runner` plugin (config `{task}`, resolved from the injected `headlessStartup` provider). It mounts no Host, HTTP server, Web runtime, or browser plugin.
 
-After the Loader settles, the runner reads the shared [`ctx.agentDefaultModel`](../../core/agent-default-model/README.md), creates or resumes one persisted Agent through `ctx.agents`, submits the task as an ordinary user message, and waits for quiescence. It flushes the Session before folding the owned durable event interval, reports the assistant output in the requested format, and requests exit through the launcher-provided `ctx.appExit` host hook ([`dsh-cmdline`](../../boot/cmdline/README.md)) (final `turn/end` completed → 0, otherwise 1). A terminal `error` reason also writes its code and message to stderr; successful runs keep stderr empty. The process opens no listening port.
+After the Loader settles, the runner reads the shared [`ctx.agentDefaultModel`](../../core/agent-default-model/README.md), creates or resumes one persisted Agent through `ctx.agents`, submits the task as the founder's own user message (`MessageSourceMap.user.founder: true` — this one-shot process has no listening socket for a peer to reach, so by construction the local operator driving it is the only possible source), and waits for quiescence. It flushes the Session before folding the owned durable event interval, reports the assistant output in the requested format, and requests exit through the launcher-provided `ctx.appExit` host hook ([`dsh-cmdline`](../../boot/cmdline/README.md)) (final `turn/end` completed → 0, otherwise 1). A terminal `error` reason also writes its code and message to stderr; successful runs keep stderr empty. The process opens no listening port.
 
 The task text and output flags are this app's command line: the ordinary `headless-startup` provider ([`src/startup.ts`](src/startup.ts)) injects `ctx.cmdlineArgs` ([`dsh-cmdline`](../../boot/cmdline/README.md)), parses `dsh --profile headless [flags] "task"`, prints the app's `--help`, and provides `headlessStartup`; the runner injects that service and resolves lazy config from it (`resolveRunSpec()` in [`src/index.ts`](src/index.ts)). A missing or whitespace-only task is rejected before the runner activates.
 
@@ -35,7 +35,7 @@ Concurrent invocations of one name exclude each other through a per-name lock ar
 
 ## Model Experience
 
-None, as the runner submits the task as an ordinary user message; prompts and tools belong to the base and headless bundle rows.
+None, as the runner submits the task as the founder's own user message (`MessageSourceMap.user.founder: true`; see [`@deepseek-ai/dsh-llm`](../../llm/llm/README.md)); prompts and tools belong to the base and headless bundle rows.
 
 #### KV Cache effect
 

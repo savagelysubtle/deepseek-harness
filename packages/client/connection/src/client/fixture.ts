@@ -2523,7 +2523,8 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         if (mode === 'steer' && replays.has(id)) {
           // Steering: the durable user/message lands inside the current turn; the replay continues.
           append(id, { type: 'user/message', surfaceOp: 'append', data: userMessage(durable) })
-          return ok(request, { accepted: true as const })
+          // The fixture fakes a non-loopback host unless a test asserts otherwise (SWD-125).
+          return ok(request, { accepted: true as const, founderStamped: false })
         }
         const turn = nextTurn.get(id) ?? 0
         nextTurn.set(id, turn + 1)
@@ -2559,7 +2560,8 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
               })()
               : `回声：${userText}。这是 fixture 的流式回复，用于验证打字机增长与定稿切换。`,
         )
-        return ok(request, { accepted: true as const })
+        // The fixture fakes a non-loopback host unless a test asserts otherwise (SWD-125).
+        return ok(request, { accepted: true as const, founderStamped: false })
       },
       attachment: (request) => {
         const stored = attachments.get(String(request.payload.attachmentId))
@@ -2626,7 +2628,8 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         for (const root of roots) {
           append(root.sessionId, { type: 'user/message', surfaceOp: 'append', data: userMessage(durable) })
         }
-        return ok(request, { sentCount: roots.length, result: 'ok' as const })
+        // The fixture fakes a non-loopback host unless a test asserts otherwise (SWD-125).
+        return ok(request, { sentCount: roots.length, result: 'ok' as const, founderStamped: false })
       },
     },
     subagents: {
