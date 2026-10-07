@@ -138,7 +138,7 @@ interface SessionEventSearchDocument extends SessionEventRecord {
 }
 ```
 
-`ctx.sessionQuery.filterSessions(filters)` applies `SessionResultFilter` to the complete logical corpus; `ctx.sessionQuery.filterEvents(sessionId, filters)` returns matching documents in ascending seq order. Messages, reasoning, tool calls/results, blocked prompts, todos, and failure/status detail contribute semantic text; structural events and stream chunks do not.
+`ctx.sessionQuery.filterSessions(filters)` applies `SessionResultFilter` to the complete logical corpus; `ctx.sessionQuery.filterEvents(sessionId, filters)` returns matching documents in ascending seq order. Messages, reasoning, tool calls/results, blocked prompts, todos, and failure/status detail contribute semantic text; structural events and stream chunks do not. Two cross-package exceptions, `mailbox/await` and `subagent/settlement`, are matched by type string rather than a typed case, since their owning packages sit outside this package's dependency graph; see [`packages/session-query/session-query/src/extraction.ts`](../../packages/session-query/session-query/src/extraction.ts).
 
 ## Full-text search pages
 

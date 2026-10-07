@@ -5905,6 +5905,9 @@ importers:
       '@deepseek-ai/dsh-mailbox-local':
         specifier: workspace:^
         version: link:../local
+      '@deepseek-ai/dsh-session':
+        specifier: workspace:^
+        version: link:../../core/session
       '@deepseek-ai/dsh-system-prompt':
         specifier: workspace:^
         version: link:../../core/system-prompt

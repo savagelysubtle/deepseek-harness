@@ -18,6 +18,9 @@ import { loadOrgRegistry } from '@deepseek-ai/dsh-mailbox'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import type { Session } from '@deepseek-ai/dsh-session'
+import { snapshotMailboxAwaitEvent } from './await-event.ts'
+import type { MailboxAwaitEventInput } from './await-event.ts'
 import { resolveMailboxIdentityWithRegistry } from './identity.ts'
 import type { IdentitySources } from './identity.ts'
 
@@ -914,6 +917,266 @@ function renderAwaitOutcome(traceId: string | undefined, value: MailboxAwaitResu
 }
 
 /**
+ * What the single `mailbox/await` append point needs, beyond the
+ * model-facing {@link MailboxAwaitResult}: the sent row's recipient, when a
+ * traceId resolved to one this seat sent. Kept out of `MailboxAwaitResult`
+ * itself — that type is the tool's public output schema, and `counterpart`
+ * is a durable-record-only field (SWD-99), never model-visible.
+ */
+interface MailboxAwaitAttempt {
+  /** The canonical outcome, exactly as returned to the model. */
+  readonly result: MailboxAwaitResult
+  /** `sent.to`, when the traceId resolved to a row this seat sent. */
+  readonly counterpart?: string
+}
+
+/**
+ * Pair one computed result with its sent row's recipient, when there is
+ * one. A plain `{ result, counterpart: sent?.to }` literal fails
+ * `exactOptionalPropertyTypes` the moment `sent` is undefined (the field
+ * would be explicitly `undefined` rather than absent), so every return site
+ * below goes through this instead of repeating the conditional spread.
+ * @param result - the computed outcome.
+ * @param sent - the last-observed sent row, when any.
+ * @returns the paired attempt.
+ */
+function attemptOf(result: MailboxAwaitResult, sent: MailboxTraceEntry | undefined): MailboxAwaitAttempt {
+  return { result, ...sent !== undefined ? { counterpart: sent.to } : {} }
+}
+
+/**
+ * Run `mailbox_await`'s wait loop to its one natural exit: a pre-storage or
+ * stored refusal, a reply (read-detected or claimed), or an expired
+ * deadline. Extracted from `execute()` (SWD-99) so every one of this loop's
+ * internal return sites funnels through `execute()`'s single append point
+ * instead of each carrying its own durable-record write.
+ * @param mailbox - the mailbox registry whose default provider holds the queue.
+ * @param own - the calling seat's resolved address.
+ * @param traceId - the caller's correlation id, when supplied.
+ * @param startedAt - epoch milliseconds at which the wait began.
+ * @param deadline - epoch milliseconds at which the wait expires.
+ * @param signal - caller cancellation forwarded into every store read and sleep.
+ * @returns the wait's outcome, plus the sent row's recipient when known.
+ */
+async function runMailboxAwait(
+  mailbox: MailboxRegistry,
+  own: MailboxAddress,
+  traceId: string | undefined,
+  startedAt: number,
+  deadline: number,
+  signal: AbortSignal,
+): Promise<MailboxAwaitAttempt> {
+  for (;;) {
+    // Pre-storage refusal first: a destination refused before storage
+    // (see mailboxSendTool's known-recipient check) never becomes a row,
+    // so the store read below could never find it and this wait would
+    // otherwise poll out its full deadline and report "untraceable" —
+    // the exact defect this ticket exists to remove, wearing a five
+    // -minute hang instead of a silent park.
+    if (traceId !== undefined) {
+      const preStorage = takePreStorageRefusal(traceId)
+      if (preStorage !== undefined) {
+        return { result: refusedResult(preStorage, Date.now() - startedAt) }
+      }
+    }
+    // Then the stored row: a terminally failed send means no reply can
+    // ever come, so the known outcome ends the wait immediately — even
+    // when unrelated mail is queued behind it, which stays pending for
+    // the next drain.
+    const sent = traceId !== undefined
+      ? await pickSentRow(mailbox, traceId, own, signal)
+      : undefined
+    if (sent?.state === 'failed') {
+      return {
+        result: refusedResult(
+          sent.failureReason ?? 'refused: the recipient\'s row is terminally failed but recorded no reason',
+          Date.now() - startedAt,
+        ),
+        counterpart: sent.to,
+      }
+    }
+    // Then read-detection: a reply the bridge already claimed, steered
+    // as a turn, and settled done is invisible to the claim below, and
+    // any reply faster than this seat's model round trip loses that race
+    // deterministically. The reads see the row whatever consumer won it.
+    const arrivals = await detectArrivals(mailbox, own, traceId, sent, startedAt, signal)
+    if (arrivals.length > 0) {
+      const messages = arrivals.map(toReadEntry)
+      const result: MailboxAwaitResult = {
+        outcome: 'reply',
+        messages,
+        count: messages.length,
+        waitedMs: Date.now() - startedAt,
+      }
+      return attemptOf(result, sent)
+    }
+    // Then the own-address queue, drained and settled exactly as
+    // mailbox_check_inbox does — one claim, no duplicate delivery. The
+    // reads above have already released anything the bridge took, so
+    // what reaches this claim is mail still queued for a claimer.
+    const leases = await mailbox.claim({
+      addresses: [own],
+      limit: CHECK_INBOX_DRAIN_LIMIT,
+      staleClaimMs: CHECK_INBOX_STALE_CLAIM_MS,
+    }, signal)
+    if (leases.length > 0) {
+      const pairs = leases.map(lease => ({ lease, entry: toEntry(lease) }))
+      for (const { lease, entry } of pairs) {
+        await mailbox.settle(lease.leaseRef, {
+          state: 'done',
+          result: { deliveredAt: Date.now(), messageId: entry.messageId as MailboxMessageId },
+        }, signal)
+      }
+      const messages = pairs.map(({ entry }) => entry)
+      const result: MailboxAwaitResult = {
+        outcome: 'reply',
+        messages,
+        count: messages.length,
+        waitedMs: Date.now() - startedAt,
+      }
+      return attemptOf(result, sent)
+    }
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) {
+      return attemptOf(timeoutResult(sent, Date.now() - startedAt), sent)
+    }
+    await waitPollInterval(Math.min(remaining, AWAIT_POLL_INTERVAL_MS), signal)
+  }
+}
+
+/** Longest durable text {@link redactAndCapForRecord} ever persists. */
+const AWAIT_ERROR_MESSAGE_MAX_LENGTH = 200
+
+/**
+ * Matches one whole DOUBLE-quoted absolute POSIX path, quotes included,
+ * capturing nothing past the closing quote — applied BEFORE the bare-segment
+ * pass below so a path containing a space or another character the bare
+ * pass's character class excludes (e.g. `"/home/user/My Mailbox/db.sqlite"`)
+ * is replaced as one unit instead of in pieces, which would otherwise leak
+ * the middle segment (`"<path> Mailbox<path>"`) — found in SWD-99 sentinel
+ * review 2026-10-06, SHOULD-FIX 2.
+ */
+const AWAIT_QUOTED_DOUBLE_PATH_RE = /"(\/[^"]*)"/g
+
+/** Same as {@link AWAIT_QUOTED_DOUBLE_PATH_RE}, for single-quoted paths. */
+const AWAIT_QUOTED_SINGLE_PATH_RE = /'(\/[^']*)'/g
+
+/**
+ * Matches one absolute POSIX path segment run (e.g. the paths the local
+ * sqlite store embeds in its own error text, `packages/mailbox/local/src/sqlite.ts:132,138,141,191`)
+ * — the fallback pass for a path that was never quoted at all. Windows paths
+ * (`C:\...`) are out of scope: this tool's only deployment target is Linux.
+ */
+const AWAIT_ABSOLUTE_PATH_RE = /\/(?:[^\s"'<>]+\/)*[^\s"'<>]+/g
+
+/**
+ * Redact absolute filesystem path segments from durable text and cap its
+ * length, shared by every text field this module persists (`errorMessage`,
+ * and `refusalReason` at the record point — SWD-99 sentinel review
+ * 2026-10-06, SHOULD-FIX 3). Quoted paths are replaced whole FIRST
+ * ({@link AWAIT_QUOTED_DOUBLE_PATH_RE}, {@link AWAIT_QUOTED_SINGLE_PATH_RE})
+ * so a space or other character inside the quotes cannot split one path
+ * into a leaked fragment; the bare pass ({@link AWAIT_ABSOLUTE_PATH_RE}) is
+ * the fallback for whatever a path was never quoted at all.
+ * @param text - the text to redact and cap.
+ * @returns the durable text.
+ */
+function redactAndCapForRecord(text: string): string {
+  const scrubbed = text
+    .replace(AWAIT_QUOTED_DOUBLE_PATH_RE, '"<path>"')
+    .replace(AWAIT_QUOTED_SINGLE_PATH_RE, '\'<path>\'')
+    .replace(AWAIT_ABSOLUTE_PATH_RE, '<path>')
+  return scrubbed.length > AWAIT_ERROR_MESSAGE_MAX_LENGTH
+    ? scrubbed.slice(0, AWAIT_ERROR_MESSAGE_MAX_LENGTH)
+    : scrubbed
+}
+
+/**
+ * Stringify a caught value without ever throwing — not when it is not an
+ * `Error`, not when it carries a hostile `toString`/`Symbol.toPrimitive`,
+ * and not when an `Error`'s own `message` getter is hostile. The SWD-99
+ * sentinel review (2026-10-06, item 1) found the plan's cited `safeString()`
+ * helper (SWD-139) is not on this branch, so this is written fresh rather
+ * than imported.
+ * @param error - the thrown value.
+ * @returns a best-effort string; never throws.
+ */
+function safeAwaitStringify(error: unknown): string {
+  try {
+    if (error instanceof Error) return error.message
+  } catch {
+    // A hostile `message` getter: fall through to the generic attempt below.
+  }
+  try {
+    return typeof error === 'string' ? error : String(error)
+  } catch {
+    return '<unstringifiable error>'
+  }
+}
+
+/**
+ * The durable `errorName` for the `error` outcome: the caught value's
+ * `Error.name` when readable, else its constructor's name, else the literal
+ * fallback — never thrown from, regardless of how hostile the value is.
+ * @param error - the thrown value.
+ * @returns a non-empty name.
+ */
+function safeAwaitErrorName(error: unknown): string {
+  try {
+    if (error instanceof Error) {
+      if (typeof error.name === 'string' && error.name.length > 0) return error.name
+      const ctorName: unknown = error.constructor.name
+      if (typeof ctorName === 'string' && ctorName.length > 0) return ctorName
+    }
+  } catch {
+    // Fall through to the fallback below.
+  }
+  return 'Error'
+}
+
+/**
+ * The durable `errorMessage` for the `error` outcome: safely stringified
+ * ({@link safeAwaitStringify}), then redacted and capped
+ * ({@link redactAndCapForRecord}).
+ * @param error - the thrown value.
+ * @returns the durable message text.
+ */
+function safeAwaitErrorMessage(error: unknown): string {
+  return redactAndCapForRecord(safeAwaitStringify(error))
+}
+
+/**
+ * Append the durable `mailbox/await` record, never throwing — SWD-99
+ * sentinel + reviewer follow-up 2026-10-06, MUST-FIX 1. `Session.append`
+ * throws synchronously on non-JSON-serializable data, a surface-contract
+ * violation, or a reentrant append
+ * (`packages/core/session/src/index.ts:590-626`), and
+ * `snapshotMailboxAwaitEvent` throws on input that is not losslessly
+ * JSON-serializable. Letting either throw out of this call site would mean
+ * a durable-record failure after a successful wait replaces the real reply
+ * with a fabricated second "error" record and loses the reply entirely, or
+ * — on the already-exceptional path — replaces the original thrown error
+ * with the append's own. Both are worse than losing the one record.
+ *
+ * No logger is reachable from here to report a dropped append: the tool
+ * builder (`mailboxAwaitTool`) takes no `ctx`, and `ToolExecutionInput`
+ * carries none either (checked against this file and
+ * `packages/mailbox/bridge/src/index.ts`'s `ctx.logger.warn` precedent,
+ * which has a `ctx` in scope that this call site does not). Dropped
+ * silently rather than inventing a new diagnostic channel for this one
+ * call site.
+ * @param session - the calling agent's session, when the call has one.
+ * @param data - the event payload to persist.
+ */
+function recordMailboxAwait(session: Session | undefined, data: MailboxAwaitEventInput): void {
+  try {
+    session?.append('mailbox/await', snapshotMailboxAwaitEvent(data))
+  } catch {
+    // Dropped — see this function's doc comment.
+  }
+}
+
+/**
  * Build the `mailbox_await` tool: hold the calling turn until a matching
  * reply arrives, the awaited send is refused, or the deadline expires. The
  * wait polls the same store the other two tools use — never busy-looping —
@@ -973,76 +1236,54 @@ export function mailboxAwaitTool(mailbox: MailboxRegistry, identity: IdentitySou
     async execute(args, exec) {
       const own = await resolveMailboxIdentityWithRegistry(callerIdentity(identity, exec.agent?.id))
       const startedAt = Date.now()
-      const deadline = startedAt + clampAwaitDeadlineMs(args.deadlineMs)
-      for (;;) {
-        // Pre-storage refusal first: a destination refused before storage
-        // (see mailboxSendTool's known-recipient check) never becomes a row,
-        // so the store read below could never find it and this wait would
-        // otherwise poll out its full deadline and report "untraceable" —
-        // the exact defect this ticket exists to remove, wearing a five
-        // -minute hang instead of a silent park.
-        if (args.traceId !== undefined) {
-          const preStorage = takePreStorageRefusal(args.traceId)
-          if (preStorage !== undefined) return refusedResult(preStorage, Date.now() - startedAt)
-        }
-        // Then the stored row: a terminally failed send means no reply can
-        // ever come, so the known outcome ends the wait immediately — even
-        // when unrelated mail is queued behind it, which stays pending for
-        // the next drain.
-        const sent = args.traceId !== undefined
-          ? await pickSentRow(mailbox, args.traceId, own, exec.signal)
-          : undefined
-        if (sent?.state === 'failed') {
-          return refusedResult(
-            sent.failureReason ?? 'refused: the recipient\'s row is terminally failed but recorded no reason',
-            Date.now() - startedAt,
-          )
-        }
-        // Then read-detection: a reply the bridge already claimed, steered
-        // as a turn, and settled done is invisible to the claim below, and
-        // any reply faster than this seat's model round trip loses that race
-        // deterministically. The reads see the row whatever consumer won it.
-        const arrivals = await detectArrivals(mailbox, own, args.traceId, sent, startedAt, exec.signal)
-        if (arrivals.length > 0) {
-          const messages = arrivals.map(toReadEntry)
-          const result: MailboxAwaitResult = {
-            outcome: 'reply',
-            messages,
-            count: messages.length,
-            waitedMs: Date.now() - startedAt,
-          }
-          return result
-        }
-        // Then the own-address queue, drained and settled exactly as
-        // mailbox_check_inbox does — one claim, no duplicate delivery. The
-        // reads above have already released anything the bridge took, so
-        // what reaches this claim is mail still queued for a claimer.
-        const leases = await mailbox.claim({
-          addresses: [own],
-          limit: CHECK_INBOX_DRAIN_LIMIT,
-          staleClaimMs: CHECK_INBOX_STALE_CLAIM_MS,
-        }, exec.signal)
-        if (leases.length > 0) {
-          const pairs = leases.map(lease => ({ lease, entry: toEntry(lease) }))
-          for (const { lease, entry } of pairs) {
-            await mailbox.settle(lease.leaseRef, {
-              state: 'done',
-              result: { deliveredAt: Date.now(), messageId: entry.messageId as MailboxMessageId },
-            }, exec.signal)
-          }
-          const messages = pairs.map(({ entry }) => entry)
-          const result: MailboxAwaitResult = {
-            outcome: 'reply',
-            messages,
-            count: messages.length,
-            waitedMs: Date.now() - startedAt,
-          }
-          return result
-        }
-        const remaining = deadline - Date.now()
-        if (remaining <= 0) return timeoutResult(sent, Date.now() - startedAt)
-        await waitPollInterval(Math.min(remaining, AWAIT_POLL_INTERVAL_MS), exec.signal)
+      // From here on, every exit — reply, refusal, timeout, abort, or any
+      // thrown store error — is recorded exactly once: the loop's five
+      // internal return sites all funnel through runMailboxAwait's one
+      // return into the success record below; an exceptional exit funnels
+      // through the catch's own record instead (SWD-99). The try/catch
+      // guards ONLY runMailboxAwait — not the success record itself — so a
+      // record-append failure (via recordMailboxAwait, which never throws)
+      // can never fabricate a second "error" record over a real reply, nor
+      // replace a real thrown error with its own (sentinel + reviewer
+      // follow-up 2026-10-06, MUST-FIX 1). Log-only: no surfaceOp, so the
+      // model never sees this event, only renderAwaitOutcome's prose via the
+      // ordinary tool/result.
+      let attempt: MailboxAwaitAttempt
+      try {
+        const deadline = startedAt + clampAwaitDeadlineMs(args.deadlineMs)
+        attempt = await runMailboxAwait(mailbox, own, args.traceId, startedAt, deadline, exec.signal)
+      } catch (error: unknown) {
+        const aborted = exec.signal.aborted
+        recordMailboxAwait(exec.agent?.session, {
+          outcome: aborted ? 'aborted' : 'error',
+          ...args.traceId !== undefined ? { traceId: args.traceId } : {},
+          startedAt,
+          endedAt: Date.now(),
+          waitedMs: Date.now() - startedAt,
+          messageCount: 0,
+          ...aborted ? {} : { errorName: safeAwaitErrorName(error), errorMessage: safeAwaitErrorMessage(error) },
+        })
+        throw error
       }
+      recordMailboxAwait(exec.agent?.session, {
+        outcome: attempt.result.outcome,
+        ...args.traceId !== undefined ? { traceId: args.traceId } : {},
+        ...attempt.counterpart !== undefined ? { counterpart: attempt.counterpart } : {},
+        startedAt,
+        endedAt: Date.now(),
+        waitedMs: attempt.result.waitedMs,
+        messageCount: attempt.result.count,
+        // Redacted/capped at the record point only — the rendered tool text
+        // the model sees (attempt.result.refusalReason itself) is untouched
+        // (sentinel review 2026-10-06, SHOULD-FIX 3): registryRecipientRefusal
+        // embeds an absolute registry path verbatim in this text.
+        ...attempt.result.refusalReason !== undefined
+          ? { refusalReason: redactAndCapForRecord(attempt.result.refusalReason) }
+          : {},
+        ...attempt.result.sentState !== undefined ? { sentState: attempt.result.sentState } : {},
+        ...attempt.result.deliveredAt !== undefined ? { deliveredAt: attempt.result.deliveredAt } : {},
+      })
+      return attempt.result
     },
   })
 }

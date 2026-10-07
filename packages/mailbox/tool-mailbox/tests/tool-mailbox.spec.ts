@@ -20,6 +20,7 @@ import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import MailboxRegistry from '@deepseek-ai/dsh-mailbox'
 import type { MailboxLease, MailboxRegistry as MailboxRegistryShape } from '@deepseek-ai/dsh-mailbox'
 import MailboxLocal from '@deepseek-ai/dsh-mailbox-local'
+import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import * as tool from '../src/index.ts'
 import { AWAIT_MAX_DEADLINE_MS, AWAIT_MIN_DEADLINE_MS, AWAIT_POLL_INTERVAL_MS, clampAwaitDeadlineMs, mailboxAwaitTool, mailboxCheckInboxTool, mailboxDirectoryTool, mailboxSendTool } from '../src/tools.ts'
 import { deriveNamedSessionId } from '@deepseek-ai/dsh-named-sessions'
@@ -95,14 +96,31 @@ function call(ctx: Context, name: string, args: unknown = {}) {
  * it under the same seat identity to prove the BLOCKING-1 refusal handoff.
  */
 function callAs(ctx: Context, seat: string, name: string, args: unknown) {
+  return callAsWithSession(ctx, seat, Session.create(SessionId(`callAs-${seat}-${callCounter}`)), name, args)
+}
+
+/**
+ * Like {@link callAs}, but takes the session explicitly instead of building
+ * a throwaway one, so a caller can inspect what the tool durably appended to
+ * it — SWD-99's `mailbox/await` event, in particular. `callAs` itself always
+ * attaches a (real, but disposable) session now: `exec.agent?.session.append(...)`
+ * throws on an agent with no `.session` at all, which every `callAs` caller
+ * was before this change.
+ */
+function callAsWithSession(ctx: Context, seat: string, session: Session, name: string, args: unknown) {
   callCounter += 1
   return ctx.tools.execute({
     signal: testSignal,
     callId: CallId(`call-${callCounter}`),
     name,
     arguments: args,
-    agent: { id: String(deriveNamedSessionId(seat)) } as never,
+    agent: { id: String(deriveNamedSessionId(seat)), session } as never,
   })
+}
+
+/** The durable `mailbox/await` events a session's log carries, in order. */
+function mailboxAwaitEvents(session: Session): Array<{ data: Record<string, unknown> }> {
+  return session.events.filter(event => event.type === 'mailbox/await') as never
 }
 
 /** Read one address's rows straight out of the store the plugin opened. */
@@ -122,6 +140,33 @@ function storedRows(dbPath: string, address: string): StoredRow[] {
   } finally {
     db.close()
   }
+}
+
+/**
+ * Drain one address the way the bridge does — claim, then settle the
+ * outcome the bridge records — so tests can stage delivered and refused
+ * rows without running the bridge itself. Shared by the `mailbox_await`
+ * describe block and the SWD-99 durable-event one below it.
+ */
+async function drainOnce(ctx: Context, address: string, outcome: 'done' | { readonly failed: string }): Promise<boolean> {
+  const leases = await ctx.mailbox.claim({ addresses: [address as never], limit: 10, staleClaimMs: 60_000 })
+  if (leases.length === 0) return false
+  for (const lease of leases) {
+    if (lease.message.id === undefined) throw new Error('claim returned an id-less message')
+    await ctx.mailbox.settle(lease.leaseRef, outcome === 'done'
+      ? { state: 'done', result: { deliveredAt: Date.now(), messageId: lease.message.id } }
+      : { state: 'failed', result: { reason: outcome.failed } })
+  }
+  return true
+}
+
+/**
+ * The traceId of a successful send, for correlating an await. Shared by the
+ * `mailbox_await` describe block and the SWD-99 durable-event one below it.
+ */
+function sentTraceId(send: { isError: boolean; value?: unknown; error?: { message: string } }): string {
+  if (send.isError) throw new Error(`expected mailbox_send success: ${send.error?.message ?? ''}`)
+  return (send.value as { traceId: string }).traceId
 }
 
 describe('mailbox tool schemas', () => {
@@ -678,28 +723,6 @@ describe('mailbox_check_inbox', () => {
 })
 
 describe('mailbox_await', () => {
-  /**
-   * Drain one address the way the bridge does — claim, then settle the
-   * outcome the bridge records — so tests can stage delivered and refused
-   * rows without running the bridge itself.
-   */
-  async function drainOnce(ctx: Context, address: string, outcome: 'done' | { readonly failed: string }): Promise<boolean> {
-    const leases = await ctx.mailbox.claim({ addresses: [address as never], limit: 10, staleClaimMs: 60_000 })
-    if (leases.length === 0) return false
-    for (const lease of leases) {
-      if (lease.message.id === undefined) throw new Error('claim returned an id-less message')
-      await ctx.mailbox.settle(lease.leaseRef, outcome === 'done'
-        ? { state: 'done', result: { deliveredAt: Date.now(), messageId: lease.message.id } }
-        : { state: 'failed', result: { reason: outcome.failed } })
-    }
-    return true
-  }
-
-  /** The traceId of a successful send, for correlating an await. */
-  function sentTraceId(send: { isError: boolean; value?: unknown; error?: { message: string } }): string {
-    if (send.isError) throw new Error(`expected mailbox_send success: ${send.error?.message ?? ''}`)
-    return (send.value as { traceId: string }).traceId
-  }
 
   it('exposes optional deadlineMs and traceId and teaches the timeout contract', async () => {
     const { ctx } = await setup('batman')
@@ -1235,6 +1258,453 @@ describe('mailbox_await', () => {
     expect(clampAwaitDeadlineMs(-5000)).toBe(AWAIT_MIN_DEADLINE_MS)
     expect(clampAwaitDeadlineMs(Number.MAX_SAFE_INTEGER)).toBe(AWAIT_MAX_DEADLINE_MS)
     expect(clampAwaitDeadlineMs(45_000)).toBe(45_000)
+  })
+})
+
+describe('mailbox_await durable mailbox/await event (SWD-99)', () => {
+  /** Build a fresh, empty session to append into and inspect afterward. */
+  function freshSession(label: string): Session {
+    return Session.create(SessionId(`swd99-${label}`))
+  }
+
+  /**
+   * A session stub whose `append` always throws — proving recordMailboxAwait
+   * swallows the failure instead of letting it replace a real result or a
+   * real thrown error (MUST-FIX 1, reviewer + sentinel 2026-10-06). Carries
+   * its own empty `events` so {@link mailboxAwaitEvents} can assert nothing
+   * was durably recorded even though the append was attempted.
+   */
+  function throwingAppendSession(): { session: Session; append: ReturnType<typeof vi.fn> } {
+    const append = vi.fn(() => {
+      throw new Error('append boom')
+    })
+    return { session: { append, events: [] } as unknown as Session, append }
+  }
+
+  /**
+   * Call mailbox_await directly against the given registry, bypassing the
+   * tool registry entirely — mirrors this file's existing direct-execute
+   * tests above (e.g. "rejects promptly with the abort reason", "never
+   * calls the underlying publish") — so a throwing stub registry and a real
+   * session can both be supplied with no sqlite setup at all.
+   */
+  function directAwait(
+    registry: MailboxRegistryShape,
+    config: { sessionName: string },
+    args: Record<string, unknown>,
+    session: Session,
+    signal: AbortSignal = testSignal,
+  ) {
+    callCounter += 1
+    const callId = CallId(`call-${callCounter}`)
+    return mailboxAwaitTool(registry, config).execute(args, {
+      signal,
+      callId,
+      name: 'mailbox_await',
+      arguments: args,
+      agent: { id: 'recorder', session } as never,
+      token: Symbol('token') as never,
+      rootCallId: callId,
+      deferContext: () => {},
+    } as never)
+  }
+
+  it('records exactly one refused event with no counterpart for the pre-storage refusal exit', async () => {
+    const { ctx } = await setup('batman', { addresses: ['batman', 'alfred'] })
+    const sent = await callAs(ctx, 'batman', 'mailbox_send', { to: 'robin', subject: 's', body: 'b' })
+    if (sent.isError) throw new Error('expected a graceful refusal')
+    const traceId = (sent.value as { traceId: string }).traceId
+
+    const session = freshSession('prestorage')
+    vi.useFakeTimers()
+    try {
+      const pending = callAsWithSession(ctx, 'batman', session, 'mailbox_await', { traceId, deadlineMs: AWAIT_MAX_DEADLINE_MS })
+      // Zero real time advanced: an immediate refusal resolves on its own
+      // promise chain, needing no poll-interval tick at all (same proof
+      // shape as the existing pre-storage-refusal test above).
+      await vi.advanceTimersByTimeAsync(0)
+      const result = await pending
+      expect(result.isError).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+    const events = mailboxAwaitEvents(session)
+    expect(events).toHaveLength(1)
+    expect(events[0]!.data).toMatchObject({ outcome: 'refused', traceId, messageCount: 0 })
+    expect(events[0]!.data['counterpart']).toBeUndefined()
+    await ctx.fiber.dispose()
+  })
+
+  it('records exactly one refused event carrying the counterpart for the failed-sent-row exit', async () => {
+    const { ctx } = await setup('batman')
+    const send = await call(ctx, 'mailbox_send', { to: 'alfred', subject: 'request', body: 'approve the leave' })
+    const traceId = sentTraceId(send)
+    expect(await drainOnce(ctx, 'alfred', { failed: 'sender-not-admitted' })).toBe(true)
+    const session = freshSession('failed-row')
+    const result = await callAsWithSession(ctx, 'batman', session, 'mailbox_await', { traceId, deadlineMs: AWAIT_MAX_DEADLINE_MS })
+    expect(result.isError).toBe(false)
+    const events = mailboxAwaitEvents(session)
+    expect(events).toHaveLength(1)
+    expect(events[0]!.data).toMatchObject({
+      outcome: 'refused', traceId, counterpart: 'alfred', refusalReason: 'sender-not-admitted', messageCount: 0,
+    })
+    await ctx.fiber.dispose()
+  })
+
+  it('records exactly one reply event for the detectArrivals (threaded read-detection) exit', async () => {
+    const { ctx } = await setup('batman')
+    const send = await call(ctx, 'mailbox_send', { to: 'alfred', subject: 'request', body: 'status?' })
+    const traceId = sentTraceId(send)
+    await ctx.mailbox.publish({ to: 'batman' as never, from: 'alfred', subject: 'answer', payload: 'all clear', traceId })
+    expect(await drainOnce(ctx, 'batman', 'done')).toBe(true)
+    const session = freshSession('detect-arrivals')
+    const result = await callAsWithSession(ctx, 'batman', session, 'mailbox_await', { traceId, deadlineMs: AWAIT_MAX_DEADLINE_MS })
+    expect(result.isError).toBe(false)
+    const events = mailboxAwaitEvents(session)
+    expect(events).toHaveLength(1)
+    expect(events[0]!.data).toMatchObject({ outcome: 'reply', traceId, counterpart: 'alfred', messageCount: 1 })
+    await ctx.fiber.dispose()
+  })
+
+  it('records exactly one reply event for the own-address claim/settle exit', async () => {
+    const { ctx } = await setup('alfred')
+    await ctx.mailbox.publish({ to: 'alfred' as never, from: 'batman', subject: 'answer', payload: 'gate code is 4-1' })
+    const session = freshSession('claim-settle')
+    const result = await callAsWithSession(ctx, 'alfred', session, 'mailbox_await', { deadlineMs: AWAIT_MAX_DEADLINE_MS })
+    expect(result.isError).toBe(false)
+    const events = mailboxAwaitEvents(session)
+    expect(events).toHaveLength(1)
+    expect(events[0]!.data).toMatchObject({ outcome: 'reply', messageCount: 1 })
+    expect(events[0]!.data['traceId']).toBeUndefined()
+    expect(events[0]!.data['counterpart']).toBeUndefined()
+    await ctx.fiber.dispose()
+  })
+
+  it('records exactly one timeout event carrying sentState and deliveredAt', async () => {
+    const { ctx } = await setup('batman')
+    const send = await call(ctx, 'mailbox_send', { to: 'alfred', subject: 'request', body: 'status?' })
+    const traceId = sentTraceId(send)
+    expect(await drainOnce(ctx, 'alfred', 'done')).toBe(true)
+    const session = freshSession('timeout')
+    vi.useFakeTimers()
+    try {
+      const pending = callAsWithSession(ctx, 'batman', session, 'mailbox_await', { traceId, deadlineMs: AWAIT_MIN_DEADLINE_MS })
+      await vi.advanceTimersByTimeAsync(AWAIT_MIN_DEADLINE_MS + 1)
+      const result = await pending
+      expect(result.isError).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+    const events = mailboxAwaitEvents(session)
+    expect(events).toHaveLength(1)
+    expect(events[0]!.data).toMatchObject({
+      outcome: 'timeout', traceId, counterpart: 'alfred', sentState: 'delivered', messageCount: 0,
+    })
+    expect(typeof events[0]!.data['deliveredAt']).toBe('number')
+    await ctx.fiber.dispose()
+  })
+
+  it('records exactly one aborted event (no errorName/errorMessage) when the caller signal fires mid-wait', async () => {
+    const { ctx } = await setup('alfred')
+    const session = freshSession('abort')
+    const controller = new AbortController()
+    callCounter += 1
+    const pending = ctx.tools.execute({
+      signal: controller.signal,
+      callId: CallId(`call-${callCounter}`),
+      name: 'mailbox_await',
+      arguments: { deadlineMs: AWAIT_MAX_DEADLINE_MS },
+      agent: { id: String(deriveNamedSessionId('alfred')), session } as never,
+    })
+    // Past every microtask of the dispatch pipeline and inside the poll sleep.
+    await new Promise(resolve => setTimeout(resolve, 20))
+    controller.abort()
+    const result = await pending
+    expect(result.isError).toBe(true)
+    const events = mailboxAwaitEvents(session)
+    expect(events).toHaveLength(1)
+    expect(events[0]!.data).toMatchObject({ outcome: 'aborted', messageCount: 0 })
+    expect(events[0]!.data['errorName']).toBeUndefined()
+    expect(events[0]!.data['errorMessage']).toBeUndefined()
+    await ctx.fiber.dispose()
+  })
+
+  it('records exactly one error event, path-scrubbed and length-capped, carrying the traceId, for a thrown store Error', async () => {
+    const longPath = '/tmp/dsh-tool-mailbox-abcdefghijklmnopqrstuvwxyz0123456789/mailbox.db'
+    const thrown = new Error(`mailbox database at "${longPath}" is not a mailbox store: no mailbox_meta table. ${'x'.repeat(200)}`)
+    const session = freshSession('error-path')
+    const registry = {
+      lookupByTraceId: async () => [],
+      lookupInboundSince: async () => [],
+      claim: async () => { throw thrown },
+    } as unknown as MailboxRegistryShape
+    await expect(directAwait(
+      registry, { sessionName: 'alfred' }, { traceId: 'trace-error-path', deadlineMs: AWAIT_MAX_DEADLINE_MS }, session,
+    )).rejects.toBe(thrown)
+    const events = mailboxAwaitEvents(session)
+    expect(events).toHaveLength(1)
+    expect(events[0]!.data['outcome']).toBe('error')
+    expect(events[0]!.data['traceId']).toBe('trace-error-path')
+    expect(events[0]!.data['errorName']).toBe('Error')
+    const message = events[0]!.data['errorMessage'] as string
+    expect(message.length).toBeLessThanOrEqual(200)
+    expect(message).toContain('<path>')
+    expect(message).not.toContain(longPath)
+    expect(message).not.toContain('/tmp')
+  })
+
+  it('falls back to the constructor name when a thrown Error carries no usable .name', async () => {
+    const nameless = new Error('boom')
+    // Force the empty-name branch: a real .name getter that happens to read
+    // as '' is the exact shape safeAwaitErrorName's first check rejects
+    // (typeof 'string' but zero-length), driving it to the constructor-name
+    // fallback instead of the final literal 'Error' fallback.
+    Object.defineProperty(nameless, 'name', { value: '', enumerable: true })
+    const session = freshSession('nameless-error')
+    const registry = {
+      lookupByTraceId: async () => [],
+      lookupInboundSince: async () => [],
+      claim: async () => { throw nameless },
+    } as unknown as MailboxRegistryShape
+    await expect(directAwait(registry, { sessionName: 'alfred' }, { deadlineMs: AWAIT_MAX_DEADLINE_MS }, session))
+      .rejects.toBe(nameless)
+    const events = mailboxAwaitEvents(session)
+    expect(events).toHaveLength(1)
+    // nameless.constructor is the ordinary Error constructor, whose own
+    // .name is 'Error' — this proves the ctorName branch ran and returned
+    // SOMETHING usable, not that it coincidentally matches the final
+    // fallback's literal.
+    expect(events[0]!.data['errorName']).toBe(nameless.constructor.name)
+  })
+
+  it('falls back to the literal "Error" when neither .name nor the constructor name is usable', async () => {
+    // An Error subclass whose own .name is forced empty, like above, PLUS a
+    // constructor whose own .name is also forced empty — defeating even the
+    // ctorName fallback and driving safeAwaitErrorName to its final literal.
+    const AnonymousErrorClass = class extends Error {}
+    Object.defineProperty(AnonymousErrorClass, 'name', { value: '' })
+    const doublyNameless = new AnonymousErrorClass('boom')
+    Object.defineProperty(doublyNameless, 'name', { value: '' })
+    const session = freshSession('doubly-nameless-error')
+    const registry = {
+      lookupByTraceId: async () => [],
+      lookupInboundSince: async () => [],
+      claim: async () => { throw doublyNameless },
+    } as unknown as MailboxRegistryShape
+    await expect(directAwait(registry, { sessionName: 'alfred' }, { deadlineMs: AWAIT_MAX_DEADLINE_MS }, session))
+      .rejects.toBe(doublyNameless)
+    const events = mailboxAwaitEvents(session)
+    expect(events).toHaveLength(1)
+    expect(events[0]!.data['errorName']).toBe('Error')
+  })
+
+  it('records exactly one error event for a non-Error throw, with the Error fallback name', async () => {
+    const session = freshSession('non-error-throw')
+    const registry = {
+      lookupByTraceId: async () => [],
+      lookupInboundSince: async () => [],
+      claim: async () => { throw 'plain string failure' },
+    } as unknown as MailboxRegistryShape
+    await expect(directAwait(registry, { sessionName: 'alfred' }, { deadlineMs: AWAIT_MAX_DEADLINE_MS }, session))
+      .rejects.toBe('plain string failure')
+    const events = mailboxAwaitEvents(session)
+    expect(events).toHaveLength(1)
+    expect(events[0]!.data).toMatchObject({ outcome: 'error', errorName: 'Error', errorMessage: 'plain string failure' })
+  })
+
+  it('records exactly one error event without itself throwing when the rejected value\'s toString throws', async () => {
+    class HostileReject {
+      toString(): string {
+        throw new Error('toString boom')
+      }
+    }
+    const hostile = new HostileReject()
+    const session = freshSession('hostile-tostring')
+    const registry = {
+      lookupByTraceId: async () => [],
+      lookupInboundSince: async () => [],
+      claim: async () => { throw hostile },
+    } as unknown as MailboxRegistryShape
+    await expect(directAwait(registry, { sessionName: 'alfred' }, { deadlineMs: AWAIT_MAX_DEADLINE_MS }, session))
+      .rejects.toBe(hostile)
+    const events = mailboxAwaitEvents(session)
+    expect(events).toHaveLength(1)
+    expect(events[0]!.data['outcome']).toBe('error')
+    expect(events[0]!.data['errorName']).toBe('Error')
+    // The exact fallback literal safeAwaitStringify's second try/catch
+    // returns — not merely "some string" (sentinel review 2026-10-06,
+    // SHOULD-FIX 4): String(hostile) throws via the hostile toString, is
+    // caught, and the literal has no path to scrub and is well under the
+    // length cap, so redactAndCapForRecord passes it through unchanged.
+    expect(events[0]!.data['errorMessage']).toBe('<unstringifiable error>')
+  })
+
+  it('still returns the real reply result when the success-path append throws, and records nothing (MUST-FIX 1)', async () => {
+    const { ctx } = await setup('alfred')
+    await ctx.mailbox.publish({ to: 'alfred' as never, from: 'batman', subject: 'answer', payload: 'gate code is 4-1' })
+    const { session, append } = throwingAppendSession()
+    const result = await callAsWithSession(ctx, 'alfred', session, 'mailbox_await', { deadlineMs: AWAIT_MAX_DEADLINE_MS })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected mailbox_await success despite the append failure')
+    expect(result.value).toMatchObject({ outcome: 'reply', count: 1 })
+    // The append was attempted exactly once and it failed, so nothing was
+    // ever durably recorded — recordMailboxAwait swallowed the failure
+    // rather than fabricating a second "error" record over the real reply.
+    expect(append).toHaveBeenCalledTimes(1)
+    expect(mailboxAwaitEvents(session)).toHaveLength(0)
+    await ctx.fiber.dispose()
+  })
+
+  it('still rethrows the ORIGINAL store error when the error-path append also throws, and records nothing (MUST-FIX 1)', async () => {
+    const storeError = new Error('store exploded')
+    const { session, append } = throwingAppendSession()
+    const registry = {
+      lookupByTraceId: async () => [],
+      lookupInboundSince: async () => [],
+      claim: async () => { throw storeError },
+    } as unknown as MailboxRegistryShape
+    await expect(directAwait(registry, { sessionName: 'alfred' }, { deadlineMs: AWAIT_MAX_DEADLINE_MS }, session))
+      // The ORIGINAL error, not the append's own "append boom" — the catch
+      // records via recordMailboxAwait (which never throws) and rethrows
+      // the error it caught, unchanged.
+      .rejects.toBe(storeError)
+    expect(append).toHaveBeenCalledTimes(1)
+    expect(mailboxAwaitEvents(session)).toHaveLength(0)
+  })
+
+  it('redacts a double-quoted absolute path containing a space as one unit, not in pieces (SHOULD-FIX 2)', async () => {
+    const path = '/home/user/My Mailbox/db.sqlite'
+    const thrown = new Error(`mailbox database at "${path}" is not a mailbox store`)
+    const session = freshSession('space-double-quoted')
+    const registry = {
+      lookupByTraceId: async () => [],
+      lookupInboundSince: async () => [],
+      claim: async () => { throw thrown },
+    } as unknown as MailboxRegistryShape
+    await expect(directAwait(registry, { sessionName: 'alfred' }, { deadlineMs: AWAIT_MAX_DEADLINE_MS }, session))
+      .rejects.toBe(thrown)
+    const message = mailboxAwaitEvents(session)[0]!.data['errorMessage'] as string
+    // The whole quoted path replaced as one unit: a naive bare-segment-only
+    // pass would split on the space and leak "Mailbox" in the middle
+    // (`"<path> Mailbox<path>"`) — found in sentinel review 2026-10-06.
+    expect(message).toBe('mailbox database at "<path>" is not a mailbox store')
+    expect(message).not.toContain('Mailbox')
+    expect(message).not.toContain('/home')
+  })
+
+  it('redacts a single-quoted absolute path containing a space as one unit, not in pieces (SHOULD-FIX 2)', async () => {
+    const path = '/home/user/My Mailbox/db.sqlite'
+    const thrown = new Error(`mailbox database at '${path}' is not a mailbox store`)
+    const session = freshSession('space-single-quoted')
+    const registry = {
+      lookupByTraceId: async () => [],
+      lookupInboundSince: async () => [],
+      claim: async () => { throw thrown },
+    } as unknown as MailboxRegistryShape
+    await expect(directAwait(registry, { sessionName: 'alfred' }, { deadlineMs: AWAIT_MAX_DEADLINE_MS }, session))
+      .rejects.toBe(thrown)
+    const message = mailboxAwaitEvents(session)[0]!.data['errorMessage'] as string
+    expect(message).toBe('mailbox database at \'<path>\' is not a mailbox store')
+    expect(message).not.toContain('Mailbox')
+    expect(message).not.toContain('/home')
+  })
+
+  it('redacts each of the three real local-sqlite error message shapes without leaking the path (SHOULD-FIX 2)', async () => {
+    // Mirrors packages/mailbox/local/src/sqlite.ts's assertCompatibleSchema,
+    // lines ~132, ~138, ~141.
+    const path = '/tmp/dsh-tool-mailbox-test/mailbox.db'
+    const messages = [
+      `mailbox database at "${path}" is not a mailbox store: no mailbox_meta table`,
+      `mailbox database at "${path}" has no readable schema version stamp`,
+      `mailbox database at "${path}" has schema version 3, incompatible with this build (4)`,
+    ]
+    for (const [index, text] of messages.entries()) {
+      const thrown = new Error(text)
+      const session = freshSession(`sqlite-shape-${index}`)
+      const registry = {
+        lookupByTraceId: async () => [],
+        lookupInboundSince: async () => [],
+        claim: async () => { throw thrown },
+      } as unknown as MailboxRegistryShape
+      await expect(directAwait(registry, { sessionName: 'alfred' }, { deadlineMs: AWAIT_MAX_DEADLINE_MS }, session))
+        .rejects.toBe(thrown)
+      const message = mailboxAwaitEvents(session)[0]!.data['errorMessage'] as string
+      expect(message).not.toContain(path)
+      expect(message).toContain('<path>')
+    }
+  })
+
+  it('redacts the org-registry path from the recorded refusalReason without touching the rendered/returned text (SHOULD-FIX 3)', async () => {
+    const registryPath = writeSeatRegistry(['batman', 'alfred'])
+    const { ctx } = await setup('batman', { orgRegistryPath: registryPath })
+    const sent = await callAs(ctx, 'batman', 'mailbox_send', { to: 'anyone-at-all', subject: 's', body: 'b' })
+    if (sent.isError) throw new Error('expected a graceful refusal')
+    const sentValue = sent.value as { traceId: string; refusalReason: string }
+    // The model-facing text (mailbox_send's own result) is untouched — only
+    // the durable record below is redacted.
+    expect(sentValue.refusalReason).toContain(registryPath)
+
+    const session = freshSession('refusal-redaction')
+    vi.useFakeTimers()
+    try {
+      const pending = callAsWithSession(
+        ctx, 'batman', session, 'mailbox_await', { traceId: sentValue.traceId, deadlineMs: AWAIT_MAX_DEADLINE_MS },
+      )
+      await vi.advanceTimersByTimeAsync(0)
+      const result = await pending
+      expect(result.isError).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+    const recordedReason = mailboxAwaitEvents(session)[0]!.data['refusalReason'] as string
+    expect(recordedReason).toContain('<path>')
+    expect(recordedReason).not.toContain(registryPath)
+    expect(recordedReason).not.toContain('/home')
+    await ctx.fiber.dispose()
+  })
+
+  it('appends exactly one event even though the wait loop polls the store multiple times', async () => {
+    const { ctx } = await setup('alfred')
+    const send = await call(ctx, 'mailbox_send', { to: 'batman', subject: 'question', body: 'gate code?' })
+    const traceId = sentTraceId(send)
+    const session = freshSession('multi-poll')
+    vi.useFakeTimers()
+    try {
+      const pending = callAsWithSession(ctx, 'alfred', session, 'mailbox_await', { traceId, deadlineMs: AWAIT_MAX_DEADLINE_MS })
+      // Tick one finds nothing and arms the poll sleep; the reply lands; the
+      // next tick claims, settles, and ends the wait — three store reads
+      // across two poll iterations, feeding one single append.
+      await vi.advanceTimersByTimeAsync(AWAIT_POLL_INTERVAL_MS + 1)
+      await ctx.mailbox.publish({ to: 'alfred' as never, from: 'batman', subject: 'answer', payload: 'it is 4-1' })
+      await vi.advanceTimersByTimeAsync(AWAIT_POLL_INTERVAL_MS + 1)
+      const result = await pending
+      expect(result.isError).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(mailboxAwaitEvents(session)).toHaveLength(1)
+    await ctx.fiber.dispose()
+  })
+
+  it('never surfaces the recorded event in session.deriveMessages()', async () => {
+    const { ctx } = await setup('alfred')
+    await ctx.mailbox.publish({ to: 'alfred' as never, from: 'batman', subject: 'answer', payload: 'gate code is 4-1' })
+    const session = freshSession('derive-messages')
+    const result = await callAsWithSession(ctx, 'alfred', session, 'mailbox_await', { deadlineMs: AWAIT_MAX_DEADLINE_MS })
+    expect(result.isError).toBe(false)
+    expect(mailboxAwaitEvents(session)).toHaveLength(1)
+    expect(session.deriveMessages()).toEqual([])
+    await ctx.fiber.dispose()
+  })
+
+  it('does not throw and appends nothing when exec.agent is absent', async () => {
+    const { ctx } = await setup('alfred')
+    await ctx.mailbox.publish({ to: 'alfred' as never, from: 'batman', subject: 'answer', payload: 'gate code is 4-1' })
+    const result = await call(ctx, 'mailbox_await', { deadlineMs: AWAIT_MAX_DEADLINE_MS })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected mailbox_await success')
+    expect(result.value).toMatchObject({ outcome: 'reply' })
+    await ctx.fiber.dispose()
   })
 })
 

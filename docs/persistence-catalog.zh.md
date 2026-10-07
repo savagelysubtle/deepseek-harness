@@ -507,6 +507,24 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 
 来源：[`packages/llm/llm-retry/src/types.ts:11`](../packages/llm/llm-retry/src/types.ts)
 
+### `mailbox/*`
+
+<a id="mailboxawait--log-only"></a>
+
+#### `mailbox/await` — log-only
+
+```ts persistence-catalog
+/**
+ * Durable outcome of one `mailbox_await` tool call, appended once inside
+ * `mailboxAwaitTool.execute()`, on the single path that actually exits
+ * (happy return or thrown error). Log-only: it carries no `surfaceOp`,
+ * never enters model history, and survives compaction.
+ */
+'mailbox/await': MailboxAwaitEventData
+```
+
+来源：[`packages/mailbox/tool-mailbox/src/await-event.ts:32`](../packages/mailbox/tool-mailbox/src/await-event.ts)
+
 ### `permission/*`
 
 <a id="permissionpreset--log-only"></a>
