@@ -6,7 +6,9 @@
  *
  * With `sessionName` the durable session id is derived from the name and a
  * per-name lock serializes concurrent runners; a persisted log is resumed,
- * its absence creates the session for the first time.
+ * its absence creates the session for the first time. A named run also pins
+ * its launch name as the session's title (unless a user has already pinned
+ * one) before the first turn is driven; see {@link pinNamedSessionTitle}.
  *
  * @module @deepseek-ai/dsh-headless
  */
@@ -27,6 +29,12 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-cmdline'
+// Empty type import: resolves ctx.get('sessionTitle') to the service. The
+// service itself is host-plane (mounted once in the base bundle's patch,
+// ahead of this one) and optional here — a composition that does not mount
+// it, such as this bundle's own minimal test compositions, leaves the pin a
+// silent no-op exactly as before this feature existed.
+import type {} from '@deepseek-ai/dsh-session-title'
 import {
   acquireSessionLock,
   assertValidSessionName,
@@ -190,6 +198,35 @@ function streamAssistantText(ctx: Context, sessionId: SessionId, firstSeq: numbe
   })
 }
 
+/**
+ * Pin a named run's launch name as its session title, unless a user has
+ * already pinned one (an earlier run of this same name, or a rename through
+ * a surface like the UI or the `session_title` tool). Anonymous runs never
+ * call this. The session-title service is optional host-plane wiring: a
+ * composition that does not mount it leaves the session untitled, exactly as
+ * it would without this feature.
+ *
+ * A title problem must never stop a seat from starting: `get()`/`rename()`
+ * can throw (service disposing, session no longer live in the store), and an
+ * uncaught throw here would propagate out of `run()` into `apply()`'s catch
+ * and exit the process before the task's own user message is ever sent. Any
+ * failure is swallowed and logged as a warning instead.
+ * @param ctx - plugin context optionally carrying the session-title service.
+ * @param session - the just-created or just-resumed named session.
+ * @param name - the validated `--session-name` this run was launched with.
+ */
+function pinNamedSessionTitle(ctx: Context, session: Session, name: string): void {
+  const sessionTitle = ctx.get('sessionTitle')
+  if (sessionTitle === undefined) return
+  try {
+    const current = sessionTitle.get(session)
+    if (current?.source.kind === 'user') return
+    sessionTitle.rename(session, name)
+  } catch (error: unknown) {
+    ctx.logger.warn(`session "${session.id}": failed to pin the title to "${name}": ${String(error)}`)
+  }
+}
+
 /** Report an unexpected direct-driver failure and request a failing exit. */
 function fail(io: HeadlessIo, error: unknown): void {
   io.stderr.write(`dsh: ${error instanceof Error ? error.message : String(error)}\n`)
@@ -278,6 +315,7 @@ async function run(ctx: Context, config: Config, io: HeadlessIo): Promise<void> 
         agentOptions,
         setup,
       })
+    if (spec.kind === 'named') pinNamedSessionTitle(ctx, agent.session, spec.name)
     await agent.whenIdle()
     const firstSeq = agent.session.seq
     const stopStreaming = spec.json ? streamAssistantText(ctx, agent.session.id, firstSeq, io) : undefined

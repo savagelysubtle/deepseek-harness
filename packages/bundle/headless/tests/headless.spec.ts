@@ -11,6 +11,8 @@ import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
 import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
+import SessionTitleService from '@deepseek-ai/dsh-session-title'
+import type { Config as SessionTitleConfig } from '@deepseek-ai/dsh-session-title'
 import { apply, Config, internals, resolveRunSpec } from '../src/index.ts'
 import {
   acquireNamedSessionLock,
@@ -23,6 +25,13 @@ afterEach(() => {
   Object.assign(internals, originalInternals)
   delete process.env.DSH_HOME
 })
+
+/** The same limits the base bundle patch mounts `session-title` with. */
+const SESSION_TITLE_CONFIG: SessionTitleConfig = {
+  fallbackMaxWords: 5,
+  fallbackMaxBytes: 40,
+  maxTitleBytes: 80,
+}
 
 interface Script {
   before?(session: Session): void
@@ -489,5 +498,140 @@ describe('headless named sessions', () => {
     await new Promise(resolve => setImmediate(resolve))
     expect(err).toContain('named sessions require a configured session-persistence backend')
     await ctx.fiber.dispose()
+  })
+})
+
+describe('headless named-session title pin (SWD-85)', () => {
+  /** A temp DSH_HOME so lock artifacts land outside the user home. */
+  function useTempHome(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-headless-title-pin-'))
+    process.env.DSH_HOME = dir
+    return dir
+  }
+
+  it('pins a newly created named session\'s title to its launch name, before the first user message', async () => {
+    useTempHome()
+    const test = await bench({
+      afterPrompt(session, message) { appendTurn(session, 1, message, 'first answer', true) },
+    })
+    await test.ctx.plugin(SessionTitleService, SESSION_TITLE_CONFIG)
+    const result = await test.run({ sessionName: 'titled' })
+    expect(result.code).toBe(0)
+    const id = deriveNamedSessionId('titled')
+    const session = test.ctx.sessions.get(id)
+    if (session === undefined) throw new Error('session missing after run')
+    const snapshot = test.ctx.sessionTitle.get(session)
+    expect(snapshot?.title).toBe('titled')
+    expect(snapshot?.source).toEqual({ kind: 'user' })
+    const titleEvents = session.events.filter(event => event.type === 'session/title')
+    expect(titleEvents).toHaveLength(1)
+    // The pin lands before the first user message in the log.
+    const titleEvent = session.events.find(event => event.type === 'session/title')
+    const userMessageEvent = session.events.find(event => event.type === 'user/message')
+    if (titleEvent === undefined || userMessageEvent === undefined) {
+      throw new Error('expected both a title event and a user message event')
+    }
+    expect(titleEvent.seq).toBeLessThan(userMessageEvent.seq)
+    await test.ctx.fiber.dispose()
+  })
+
+  it('re-pins a resumed named session whose title is still the deterministic fallback', async () => {
+    useTempHome()
+    const id = deriveNamedSessionId('refresh-me')
+    const test = await bench({
+      persisted: [id],
+      before(session) {
+        session.append('session/title', {
+          title: 'old fallback',
+          messageSeqs: [0],
+          source: { kind: 'fallback' },
+        })
+      },
+      afterPrompt(session, message) { appendTurn(session, 1, message, 'answer', true) },
+    })
+    await test.ctx.plugin(SessionTitleService, SESSION_TITLE_CONFIG)
+    const result = await test.run({ sessionName: 'refresh-me' })
+    expect(result.code).toBe(0)
+    const session = test.ctx.sessions.get(id)
+    if (session === undefined) throw new Error('session missing after run')
+    const snapshot = test.ctx.sessionTitle.get(session)
+    expect(snapshot?.title).toBe('refresh-me')
+    expect(snapshot?.source).toEqual({ kind: 'user' })
+    const titleEvents = session.events.filter(event => event.type === 'session/title')
+    expect(titleEvents).toHaveLength(2)
+    await test.ctx.fiber.dispose()
+  })
+
+  it('leaves a resumed session\'s existing user-pinned title untouched and appends nothing', async () => {
+    useTempHome()
+    const id = deriveNamedSessionId('already-named')
+    const test = await bench({
+      persisted: [id],
+      before(session) {
+        session.append('session/title', {
+          title: 'Founder Renamed',
+          messageSeqs: [],
+          source: { kind: 'user' },
+        })
+      },
+      afterPrompt(session, message) { appendTurn(session, 1, message, 'answer', true) },
+    })
+    await test.ctx.plugin(SessionTitleService, SESSION_TITLE_CONFIG)
+    const result = await test.run({ sessionName: 'already-named' })
+    expect(result.code).toBe(0)
+    const session = test.ctx.sessions.get(id)
+    if (session === undefined) throw new Error('session missing after run')
+    const titleEvents = session.events.filter(event => event.type === 'session/title')
+    expect(titleEvents).toHaveLength(1)
+    expect(test.ctx.sessionTitle.get(session)?.title).toBe('Founder Renamed')
+    await test.ctx.fiber.dispose()
+  })
+
+  it('never pins a title for an anonymous run (no --session-name)', async () => {
+    const test = await bench({
+      afterPrompt(session, message) { appendTurn(session, 1, message, 'answer', true) },
+    })
+    await test.ctx.plugin(SessionTitleService, SESSION_TITLE_CONFIG)
+    const result = await test.run()
+    expect(result.code).toBe(0)
+    const id = test.created[0]
+    if (id === undefined) throw new Error('anonymous run created no session id')
+    const session = test.ctx.sessions.get(id)
+    if (session === undefined) throw new Error('session missing after run')
+    // The unrelated, pre-existing fallback mechanism may still fire from the
+    // task text; only a `user`-sourced event would mean this feature pinned
+    // an anonymous run, which must never happen.
+    const userPinned = session.events.filter(
+      event => event.type === 'session/title' && event.data.source.kind === 'user',
+    )
+    expect(userPinned).toHaveLength(0)
+    await test.ctx.fiber.dispose()
+  })
+
+  it('never fails the run when the title service throws while pinning', async () => {
+    useTempHome()
+    const warnings: string[] = []
+    const test = await bench({
+      afterPrompt(session, message) { appendTurn(session, 1, message, 'answer', true) },
+    })
+    test.ctx.logger.warn = (message: string) => { warnings.push(message) }
+    test.ctx.provide('sessionTitle', {
+      get: () => undefined,
+      rename: () => { throw new Error('title service exploded') },
+    } as never)
+    const result = await test.run({ sessionName: 'throws-on-pin' })
+    // The pin failure never stops the task: the run still completes and the
+    // user message still goes out.
+    expect(result.code).toBe(0)
+    expect(result.out).toBe('answer\n')
+    const id = deriveNamedSessionId('throws-on-pin')
+    const session = test.ctx.sessions.get(id)
+    if (session === undefined) throw new Error('session missing after run')
+    expect(session.events.some(event => event.type === 'user/message')).toBe(true)
+    expect(session.events.filter(event => event.type === 'session/title')).toHaveLength(0)
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('throws-on-pin')
+    expect(warnings[0]).toContain('title service exploded')
+    await test.ctx.fiber.dispose()
   })
 })

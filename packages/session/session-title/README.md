@@ -17,6 +17,8 @@ Automatic work never delays the main agent response. A provider starts only afte
 
 Forks inherit title events in their seed unchanged. The first-prompt cadence does not automatically retitle a child; the all-messages cadence may append a new revision after the child receives a later human prompt.
 
+A consumer that launches a durable session under its own name — the [`@deepseek-ai/dsh-headless`](../../bundle/headless/README.md) bundle's `--session-name`, for example — may pin that name as the title via `rename()` right after create/resume, before driving any turn. A user-sourced title always wins: both the deferred fallback write and the automatic provider write re-check `get(session)` immediately before they would otherwise commit, and skip when a pin landed between their scheduling and their firing, so neither can race past a pin to overwrite it. `refresh()` remains the one deliberate exception — it is the explicit unpin, by design.
+
 ## Configuration
 
 All limits are required; the library supplies no defaults.

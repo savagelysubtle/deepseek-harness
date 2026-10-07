@@ -22,6 +22,8 @@ With `--session-name <name>`, the session id derives deterministically from the 
 
 Concurrent invocations of one name exclude each other through a per-name lock artifact at `<home>/headless/locks/<hash>.lock` (`DSH_HOME`, default `~/.dsh`). The artifact is created with `O_EXCL` holding `{pid, createdAt}`. A holder whose pid is dead (`ESRCH`) is stale and its artifact is taken over; a live holder makes the invocation fail loud with `session "<name>" is active in another process` (exit 1). The lock is released when the run settles, including failure paths.
 
+A named run also pins `--session-name` as the session's title, through the optional host-plane [`@deepseek-ai/dsh-session-title`](../../session/session-title/README.md) service, right after the session is created or resumed and before the task's user message is appended. It is skipped when the current title is already a `user`-sourced pin (an earlier run's pin, or a rename from the UI or the `session_title` tool) — that pin always wins. Without the service mounted (this bundle's own minimal test compositions, for example) the pin is a silent no-op, same as an anonymous run. Automatic title generation never overwrites a pin once it stands.
+
 ### Output formats
 
 - `text` (default) prints the last non-empty assistant message of the run's interval.

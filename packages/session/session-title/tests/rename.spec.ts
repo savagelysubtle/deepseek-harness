@@ -162,6 +162,61 @@ describe('SessionTitleService.rename', () => {
     expect(latest?.data).toMatchObject({ title: 'User wins', source: { kind: 'user' } })
   })
 
+  it('stays race-safe: a title pinned between the deferred fallback\'s schedule and its fire is not overwritten (SWD-85)', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionTitleService, CONFIG)
+    const session = ctx.sessions.create(SessionId('fallback-race'))
+    session.append('turn/start', { turn: 1 })
+    // Appending this message synchronously schedules the deferred fallback
+    // write (no provider is registered here) before any microtask runs.
+    appendHumanPrompt(session, 'Some race-prone words')
+    // Pin synchronously, in the same tick, before that deferred write fires.
+    // This exercises the ensureFallback() re-check and the explicit guard
+    // added at the defer() call site together — either alone already covers
+    // this ordering, so the assertion is about the end-to-end invariant, not
+    // about which specific check is load-bearing.
+    ctx.sessionTitle.rename(session, 'Raced pin wins')
+    await settle()
+    expect(ctx.sessionTitle.get(session)?.title).toBe('Raced pin wins')
+    expect(ctx.sessionTitle.get(session)?.source).toEqual({ kind: 'user' })
+    const titleEvents = session.events.filter(event => event.type === 'session/title')
+    expect(titleEvents).toHaveLength(1)
+  })
+
+  it('stays race-safe: a title pinned between the automatic provider call\'s schedule and its fire never starts that call (SWD-85)', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionTitleService, CONFIG)
+    const generate = vi.fn(async (request: SessionTitleProviderRequest) => ({
+      title: 'Should never be used',
+      messageSeqs: request.messages.map(message => message.seq),
+    }))
+    ctx.sessionTitle.register({
+      id: SessionTitleProviderId('race-provider'),
+      automatic: 'first-prompt',
+      generate,
+    })
+    const session = ctx.sessions.create(SessionId('provider-race'))
+    session.append('turn/start', { turn: 1 })
+    appendHumanPrompt(session, 'First prompt')
+    // The matching header schedules startPending's deferred activation.
+    session.append('request/header', {
+      header: { config: { provider: 'main-route', model: 'chat-model' } },
+      reason: 'change',
+    })
+    // Pin synchronously, in the same tick, before that deferred activation
+    // fires. This exercises the pre-existing revision check and the explicit
+    // guard added at the defer() call site together — either alone already
+    // covers this ordering (rename() always bumps the revision), so the
+    // assertion is about the end-to-end invariant, not about which specific
+    // check is load-bearing.
+    ctx.sessionTitle.rename(session, 'Raced pin wins')
+    await settle()
+    expect(generate).not.toHaveBeenCalled()
+    expect(ctx.sessionTitle.get(session)?.title).toBe('Raced pin wins')
+  })
+
   it('fallback-only refresh keeps the user title when no fallback is derivable', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)

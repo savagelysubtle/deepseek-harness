@@ -22,6 +22,8 @@ Loader 结算后，runner 读取共享的 [`ctx.agentDefaultModel`](../../core/a
 
 同一名称的并发调用通过 `<home>/headless/locks/<hash>.lock`（`DSH_HOME`，默认 `~/.dsh`）的每名称锁工件互斥。该工件以 `O_EXCL` 创建，内容为 `{pid, createdAt}`。持有进程 pid 已死（`ESRCH`）即视为过期并接管其工件；持有进程仍存活则调用大声失败：`session "<name>" is active in another process`（退出码 1）。锁在本次运行落定后释放，包括失败路径。
 
+具名运行还会通过可选的宿主层 [`@deepseek-ai/dsh-session-title`](../../session/session-title/README.md) 服务，将 `--session-name` 钉为会话标题——就在会话被创建或恢复之后、任务的用户消息被追加之前完成。若当前标题已经是 `user` 来源的钉定（来自更早一次运行的钉定，或来自 UI 或 `session_title` 工具的改名），则跳过——该钉定始终优先。若该服务未被挂载（例如本组合包自身的最小化测试组合），钉定操作就是一次静默空操作，与匿名运行一样。标题一旦被钉定，自动标题生成就不会再覆盖它。
+
 ### 输出格式
 
 - `text`（默认）：打印本次运行区间内最后一条非空 assistant 消息。

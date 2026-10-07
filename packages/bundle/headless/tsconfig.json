@@ -63,6 +63,9 @@
       "path": "../../session/session-persistence-jsonl"
     },
     {
+      "path": "../../session/session-title"
+    },
+    {
       "path": "../../util/home-paths"
     },
     {

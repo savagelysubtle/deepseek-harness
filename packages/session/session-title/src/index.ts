@@ -477,6 +477,10 @@ export class SessionTitleService extends Service {
     }
     this.defer(async () => {
       try {
+        // A user rename can land between the synchronous check above (this
+        // schedule) and this deferred callback actually running (this fire);
+        // re-check here so the fallback never overwrites a pin it raced past.
+        if (this.get(session)?.source.kind === 'user') return
         await this.ensureFallback(session)
       } catch (error: unknown) {
         if (!this.serviceActive()) return
@@ -527,6 +531,12 @@ export class SessionTitleService extends Service {
         || pending.registration.closing
         || this.work.get(session) !== state
         || state.revision !== pending.revision) return
+      // Automatic generation never overrides an explicit user pin. The
+      // revision check above already catches a rename that superseded this
+      // work, but re-check the pin explicitly so this guard does not depend
+      // on that bookkeeping; the explicit refresh() unpin path calls
+      // startProvider directly and is unaffected.
+      if (this.get(session)?.source.kind === 'user') return
       const work = this.activate(pending, state)
       try {
         await this.startProvider(session, work, route)
