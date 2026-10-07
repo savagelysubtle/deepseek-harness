@@ -3,6 +3,34 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
 /**
+ * Loose shape of a `mailbox/await` event's data, mirrored from
+ * `packages/mailbox/tool-mailbox/src/await-event.ts` (SWD-99). That package
+ * is not a dependency of session-query (see its package.json), so the
+ * `SessionEventMap['mailbox/await']` type augmentation it declares is never
+ * part of this package's compiled program and `event.type` cannot narrow to
+ * it in a `switch` — fields are read through this locally-mirrored shape
+ * instead of importing the owning package.
+ */
+interface MailboxAwaitEventData {
+  outcome: 'reply' | 'refused' | 'timeout' | 'aborted' | 'error'
+  sentState?: 'delivered' | 'claimed' | 'pending' | 'unknown'
+  refusalReason?: string
+  errorMessage?: string
+  counterpart?: string
+}
+
+/**
+ * Loose shape of a `subagent/settlement` event's data, mirrored from
+ * `packages/subagent/subagent/src/settlement.ts` (SWD-95). session-query
+ * does not depend on the subagent package either, for the same reason the
+ * `mailbox/await` shape above is mirrored rather than imported.
+ */
+interface SubagentSettlementEventData {
+  outcome: string
+  parentSessionId: string
+}
+
+/**
  * Extract searchable semantic text from one first-party session event.
  *
  * Structural boundaries, raw stream chunks, request envelopes, and unknown
@@ -35,10 +63,33 @@ export function extractSessionEventText(event: SessionEvent): string {
     case 'request/header':
       return ''
     // SessionEventMap is merge-extensible. Unknown events remain
-    // non-searchable until a concrete first-party consumer defines semantics.
+    // non-searchable until a concrete first-party consumer defines semantics
+    // — except `mailbox/await` and `subagent/settlement`, whose owning
+    // packages are outside session-query's dependency graph (see the
+    // interfaces above) and so cannot appear as typed `case` labels here.
     default:
+      if ((event.type as string) === 'mailbox/await') {
+        return mailboxAwaitText(event.data as unknown as MailboxAwaitEventData)
+      }
+      if ((event.type as string) === 'subagent/settlement') {
+        return settlementText(event.data as unknown as SubagentSettlementEventData)
+      }
       return ''
   }
+}
+
+function mailboxAwaitText(data: MailboxAwaitEventData): string {
+  return joinText([
+    data.outcome,
+    data.sentState ?? '',
+    data.refusalReason ?? '',
+    data.errorMessage ?? '',
+    data.counterpart ?? '',
+  ])
+}
+
+function settlementText(data: SubagentSettlementEventData): string {
+  return joinText([data.outcome, data.parentSessionId])
 }
 
 function turnEndText(reason: SessionEvent<'turn/end'>['data']['reason']): string {

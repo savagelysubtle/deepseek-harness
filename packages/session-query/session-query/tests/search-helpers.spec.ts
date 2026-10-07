@@ -117,6 +117,33 @@ describe('session-query semantic extraction', () => {
     expect(extractSessionEventText(events[6]!)).toBe('in_progress\nship search')
   })
 
+  it('extracts mailbox await and subagent settlement outcomes', () => {
+    expect(extractSessionEventText({
+      type: 'mailbox/await',
+      seq: 0,
+      time: 1,
+      data: {
+        outcome: 'timeout',
+        sentState: 'delivered',
+        refusalReason: 'busy',
+        errorMessage: 'no response',
+        counterpart: 'alfred',
+      },
+    } as never)).toBe('timeout\ndelivered\nbusy\nno response\nalfred')
+    expect(extractSessionEventText({
+      type: 'mailbox/await',
+      seq: 1,
+      time: 2,
+      data: { outcome: 'reply' },
+    } as never)).toBe('reply')
+    expect(extractSessionEventText({
+      type: 'subagent/settlement',
+      seq: 2,
+      time: 3,
+      data: { version: 1, parentSessionId: 'parent-session', outcome: 'completed', settledAt: 4 },
+    } as never)).toBe('completed\nparent-session')
+  })
+
   it('extracts meaningful turn outcomes and skips structural or unknown events', () => {
     const reasons: Array<[SessionEvent<'turn/end'>['data']['reason'], string]> = [
       [{ kind: 'error', error: { message: 'boom', code: 'UNKNOWN' } }, 'error\nboom'],
