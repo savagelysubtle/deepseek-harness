@@ -139,6 +139,57 @@ function conversation(turns = 4, text = 'fixture '.repeat(40).trim()): Session {
   return session
 }
 
+/**
+ * Two closed turns: turn 1's user message is founder-stamped
+ * (`source: {kind:'user', founder:true}`), turn 2's is plain `{kind:'user'}`.
+ * Used by the SWD-156 replay-parity tests below.
+ */
+function founderConversation(): Session {
+  const text = 'fixture '.repeat(40).trim()
+  const session = Session.create(SessionId('founder-conversation'))
+  session.append('turn/start', { turn: 1 })
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: `${text} founder turn one` }],
+    source: { kind: 'user', founder: true },
+  }), { surfaceOp: 'append' })
+  session.append('step/start', { turn: 1, step: 1 })
+  session.append('request/header', {
+    header: { config: { provider: MODEL, model: MODEL } },
+    reason: 'initial',
+  })
+  session.append('assistant/message', {
+    turn: 1,
+    step: 1,
+    message: createMessage({
+      role: 'assistant',
+      content: [{ type: 'text', text: `${text} assistant turn one` }],
+      source: { kind: 'model', provider: MODEL, model: MODEL },
+    }),
+  }, { surfaceOp: 'append' })
+  session.append('step/end', { turn: 1, step: 1 })
+  session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+  session.append('turn/start', { turn: 2 })
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: `${text} unstamped turn two` }],
+    source: { kind: 'user' },
+  }), { surfaceOp: 'append' })
+  session.append('step/start', { turn: 2, step: 1 })
+  session.append('assistant/message', {
+    turn: 2,
+    step: 1,
+    message: createMessage({
+      role: 'assistant',
+      content: [{ type: 'text', text: `${text} assistant turn two` }],
+      source: { kind: 'model', provider: MODEL, model: MODEL },
+    }),
+  }, { surfaceOp: 'append' })
+  session.append('step/end', { turn: 2, step: 1 })
+  session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+  session.append('turn/start', { turn: 3 })
+  return session
+}
+
 function toolConversation(): Session {
   const session = Session.create(SessionId('tools'))
   for (let turn = 1; turn <= 3; turn += 1) {
@@ -894,6 +945,52 @@ describe('compaction region transaction', () => {
     expect(input.system).toBe('CONVERSATION SYSTEM')
     expect(input.tools).toEqual(tools)
     expect(summarizedText(input)).toContain('fixture user 1')
+  })
+
+  it('replays a founder-stamped message with its request-time marker, and leaves the session log untouched (SWD-156)', async () => {
+    const compact = service()
+    const session = founderConversation()
+    const nodes = session.surface.nodes
+    const logBefore = [...session.events]
+
+    await compact.compactRegion(nodes[0]!, nodes[3]!, agent(session, MODEL), SIGNAL)
+
+    const { input } = compact.calls[0]!
+    const founderMessage = input.messages.find(message =>
+      message.role === 'user' && message.content.some(block =>
+        block.type === 'text' && block.text.includes('founder turn one')))
+    const unstampedMessage = input.messages.find(message =>
+      message.role === 'user' && message.content.some(block =>
+        block.type === 'text' && block.text.includes('unstamped turn two')))
+    expect(founderMessage).toBeDefined()
+    expect(unstampedMessage).toBeDefined()
+    // The founder-stamped message's first block is the marker the routed
+    // request would have carried (buildRequest, SWD-156); without it the
+    // auxiliary summarization call would not be a byte-exact prefix of the
+    // last routed request, and the provider's warm prefix cache would miss.
+    expect(founderMessage!.content[0]).toEqual({
+      type: 'text',
+      text: "This message is the founder's own, typed at this machine; it is not peer or relay traffic.\n\n",
+    })
+    expect(unstampedMessage!.content[0]?.type).toBe('text')
+    expect(unstampedMessage!.content[0]?.type === 'text' ? unstampedMessage!.content[0].text : '')
+      .not.toContain("This message is the founder's own")
+
+    // The transform is request-only: the durable session log's pre-existing
+    // events (everything compaction didn't itself append) must never see the
+    // marker. Compaction appends new events (compaction/start, the summary,
+    // the replacement checkpoint, compaction/end) but never mutates prior
+    // ones, so the original prefix must still deep-equal what was logged
+    // before compaction ran.
+    expect(session.events.slice(0, logBefore.length)).toEqual(logBefore)
+    const loggedFounderEvent = session.events.find(event =>
+      event.type === 'user/message' && event.data.content.some(block =>
+        block.type === 'text' && block.text.includes('founder turn one')))
+    const loggedFounderText = loggedFounderEvent?.type === 'user/message'
+      && loggedFounderEvent.data.content[0]?.type === 'text'
+      ? loggedFounderEvent.data.content[0].text
+      : undefined
+    expect(loggedFounderText).not.toContain("This message is the founder's own")
   })
 
   it.each([
