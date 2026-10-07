@@ -18,7 +18,9 @@ import { loadOrgRegistry } from '@deepseek-ai/dsh-mailbox'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import type { Session } from '@deepseek-ai/dsh-session'
 import { snapshotMailboxAwaitEvent } from './await-event.ts'
+import type { MailboxAwaitEventInput } from './await-event.ts'
 import { resolveMailboxIdentityWithRegistry } from './identity.ts'
 import type { IdentitySources } from './identity.ts'
 
@@ -1042,16 +1044,52 @@ async function runMailboxAwait(
   }
 }
 
-/** Longest `errorMessage` {@link safeAwaitErrorMessage} ever persists. */
+/** Longest durable text {@link redactAndCapForRecord} ever persists. */
 const AWAIT_ERROR_MESSAGE_MAX_LENGTH = 200
+
+/**
+ * Matches one whole DOUBLE-quoted absolute POSIX path, quotes included,
+ * capturing nothing past the closing quote — applied BEFORE the bare-segment
+ * pass below so a path containing a space or another character the bare
+ * pass's character class excludes (e.g. `"/home/user/My Mailbox/db.sqlite"`)
+ * is replaced as one unit instead of in pieces, which would otherwise leak
+ * the middle segment (`"<path> Mailbox<path>"`) — found in SWD-99 sentinel
+ * review 2026-10-06, SHOULD-FIX 2.
+ */
+const AWAIT_QUOTED_DOUBLE_PATH_RE = /"(\/[^"]*)"/g
+
+/** Same as {@link AWAIT_QUOTED_DOUBLE_PATH_RE}, for single-quoted paths. */
+const AWAIT_QUOTED_SINGLE_PATH_RE = /'(\/[^']*)'/g
 
 /**
  * Matches one absolute POSIX path segment run (e.g. the paths the local
  * sqlite store embeds in its own error text, `packages/mailbox/local/src/sqlite.ts:132,138,141,191`)
- * so {@link safeAwaitErrorMessage} can replace it with `<path>` before the
- * message becomes a durable, searchable field.
+ * — the fallback pass for a path that was never quoted at all. Windows paths
+ * (`C:\...`) are out of scope: this tool's only deployment target is Linux.
  */
 const AWAIT_ABSOLUTE_PATH_RE = /\/(?:[^\s"'<>]+\/)*[^\s"'<>]+/g
+
+/**
+ * Redact absolute filesystem path segments from durable text and cap its
+ * length, shared by every text field this module persists (`errorMessage`,
+ * and `refusalReason` at the record point — SWD-99 sentinel review
+ * 2026-10-06, SHOULD-FIX 3). Quoted paths are replaced whole FIRST
+ * ({@link AWAIT_QUOTED_DOUBLE_PATH_RE}, {@link AWAIT_QUOTED_SINGLE_PATH_RE})
+ * so a space or other character inside the quotes cannot split one path
+ * into a leaked fragment; the bare pass ({@link AWAIT_ABSOLUTE_PATH_RE}) is
+ * the fallback for whatever a path was never quoted at all.
+ * @param text - the text to redact and cap.
+ * @returns the durable text.
+ */
+function redactAndCapForRecord(text: string): string {
+  const scrubbed = text
+    .replace(AWAIT_QUOTED_DOUBLE_PATH_RE, '"<path>"')
+    .replace(AWAIT_QUOTED_SINGLE_PATH_RE, '\'<path>\'')
+    .replace(AWAIT_ABSOLUTE_PATH_RE, '<path>')
+  return scrubbed.length > AWAIT_ERROR_MESSAGE_MAX_LENGTH
+    ? scrubbed.slice(0, AWAIT_ERROR_MESSAGE_MAX_LENGTH)
+    : scrubbed
+}
 
 /**
  * Stringify a caught value without ever throwing — not when it is not an
@@ -1098,17 +1136,44 @@ function safeAwaitErrorName(error: unknown): string {
 
 /**
  * The durable `errorMessage` for the `error` outcome: safely stringified
- * ({@link safeAwaitStringify}), absolute filesystem path segments replaced
- * with `<path>`, and capped at {@link AWAIT_ERROR_MESSAGE_MAX_LENGTH}
- * characters.
+ * ({@link safeAwaitStringify}), then redacted and capped
+ * ({@link redactAndCapForRecord}).
  * @param error - the thrown value.
  * @returns the durable message text.
  */
 function safeAwaitErrorMessage(error: unknown): string {
-  const scrubbed = safeAwaitStringify(error).replace(AWAIT_ABSOLUTE_PATH_RE, '<path>')
-  return scrubbed.length > AWAIT_ERROR_MESSAGE_MAX_LENGTH
-    ? scrubbed.slice(0, AWAIT_ERROR_MESSAGE_MAX_LENGTH)
-    : scrubbed
+  return redactAndCapForRecord(safeAwaitStringify(error))
+}
+
+/**
+ * Append the durable `mailbox/await` record, never throwing — SWD-99
+ * sentinel + reviewer follow-up 2026-10-06, MUST-FIX 1. `Session.append`
+ * throws synchronously on non-JSON-serializable data, a surface-contract
+ * violation, or a reentrant append
+ * (`packages/core/session/src/index.ts:590-626`), and
+ * `snapshotMailboxAwaitEvent` throws on input that is not losslessly
+ * JSON-serializable. Letting either throw out of this call site would mean
+ * a durable-record failure after a successful wait replaces the real reply
+ * with a fabricated second "error" record and loses the reply entirely, or
+ * — on the already-exceptional path — replaces the original thrown error
+ * with the append's own. Both are worse than losing the one record.
+ *
+ * No logger is reachable from here to report a dropped append: the tool
+ * builder (`mailboxAwaitTool`) takes no `ctx`, and `ToolExecutionInput`
+ * carries none either (checked against this file and
+ * `packages/mailbox/bridge/src/index.ts`'s `ctx.logger.warn` precedent,
+ * which has a `ctx` in scope that this call site does not). Dropped
+ * silently rather than inventing a new diagnostic channel for this one
+ * call site.
+ * @param session - the calling agent's session, when the call has one.
+ * @param data - the event payload to persist.
+ */
+function recordMailboxAwait(session: Session | undefined, data: MailboxAwaitEventInput): void {
+  try {
+    session?.append('mailbox/await', snapshotMailboxAwaitEvent(data))
+  } catch {
+    // Dropped — see this function's doc comment.
+  }
 }
 
 /**
@@ -1174,29 +1239,22 @@ export function mailboxAwaitTool(mailbox: MailboxRegistry, identity: IdentitySou
       // From here on, every exit — reply, refusal, timeout, abort, or any
       // thrown store error — is recorded exactly once: the loop's five
       // internal return sites all funnel through runMailboxAwait's one
-      // return into the single append below; an exceptional exit funnels
-      // through the catch's own single append instead (SWD-99). Log-only:
-      // no surfaceOp, so the model never sees this event, only
-      // renderAwaitOutcome's prose via the ordinary tool/result.
+      // return into the success record below; an exceptional exit funnels
+      // through the catch's own record instead (SWD-99). The try/catch
+      // guards ONLY runMailboxAwait — not the success record itself — so a
+      // record-append failure (via recordMailboxAwait, which never throws)
+      // can never fabricate a second "error" record over a real reply, nor
+      // replace a real thrown error with its own (sentinel + reviewer
+      // follow-up 2026-10-06, MUST-FIX 1). Log-only: no surfaceOp, so the
+      // model never sees this event, only renderAwaitOutcome's prose via the
+      // ordinary tool/result.
+      let attempt: MailboxAwaitAttempt
       try {
         const deadline = startedAt + clampAwaitDeadlineMs(args.deadlineMs)
-        const attempt = await runMailboxAwait(mailbox, own, args.traceId, startedAt, deadline, exec.signal)
-        exec.agent?.session.append('mailbox/await', snapshotMailboxAwaitEvent({
-          outcome: attempt.result.outcome,
-          ...args.traceId !== undefined ? { traceId: args.traceId } : {},
-          ...attempt.counterpart !== undefined ? { counterpart: attempt.counterpart } : {},
-          startedAt,
-          endedAt: Date.now(),
-          waitedMs: attempt.result.waitedMs,
-          messageCount: attempt.result.count,
-          ...attempt.result.refusalReason !== undefined ? { refusalReason: attempt.result.refusalReason } : {},
-          ...attempt.result.sentState !== undefined ? { sentState: attempt.result.sentState } : {},
-          ...attempt.result.deliveredAt !== undefined ? { deliveredAt: attempt.result.deliveredAt } : {},
-        }))
-        return attempt.result
+        attempt = await runMailboxAwait(mailbox, own, args.traceId, startedAt, deadline, exec.signal)
       } catch (error: unknown) {
         const aborted = exec.signal.aborted
-        exec.agent?.session.append('mailbox/await', snapshotMailboxAwaitEvent({
+        recordMailboxAwait(exec.agent?.session, {
           outcome: aborted ? 'aborted' : 'error',
           ...args.traceId !== undefined ? { traceId: args.traceId } : {},
           startedAt,
@@ -1204,9 +1262,28 @@ export function mailboxAwaitTool(mailbox: MailboxRegistry, identity: IdentitySou
           waitedMs: Date.now() - startedAt,
           messageCount: 0,
           ...aborted ? {} : { errorName: safeAwaitErrorName(error), errorMessage: safeAwaitErrorMessage(error) },
-        }))
+        })
         throw error
       }
+      recordMailboxAwait(exec.agent?.session, {
+        outcome: attempt.result.outcome,
+        ...args.traceId !== undefined ? { traceId: args.traceId } : {},
+        ...attempt.counterpart !== undefined ? { counterpart: attempt.counterpart } : {},
+        startedAt,
+        endedAt: Date.now(),
+        waitedMs: attempt.result.waitedMs,
+        messageCount: attempt.result.count,
+        // Redacted/capped at the record point only — the rendered tool text
+        // the model sees (attempt.result.refusalReason itself) is untouched
+        // (sentinel review 2026-10-06, SHOULD-FIX 3): registryRecipientRefusal
+        // embeds an absolute registry path verbatim in this text.
+        ...attempt.result.refusalReason !== undefined
+          ? { refusalReason: redactAndCapForRecord(attempt.result.refusalReason) }
+          : {},
+        ...attempt.result.sentState !== undefined ? { sentState: attempt.result.sentState } : {},
+        ...attempt.result.deliveredAt !== undefined ? { deliveredAt: attempt.result.deliveredAt } : {},
+      })
+      return attempt.result
     },
   })
 }

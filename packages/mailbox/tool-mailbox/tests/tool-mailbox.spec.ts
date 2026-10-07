@@ -1268,6 +1268,20 @@ describe('mailbox_await durable mailbox/await event (SWD-99)', () => {
   }
 
   /**
+   * A session stub whose `append` always throws — proving recordMailboxAwait
+   * swallows the failure instead of letting it replace a real result or a
+   * real thrown error (MUST-FIX 1, reviewer + sentinel 2026-10-06). Carries
+   * its own empty `events` so {@link mailboxAwaitEvents} can assert nothing
+   * was durably recorded even though the append was attempted.
+   */
+  function throwingAppendSession(): { session: Session; append: ReturnType<typeof vi.fn> } {
+    const append = vi.fn(() => {
+      throw new Error('append boom')
+    })
+    return { session: { append, events: [] } as unknown as Session, append }
+  }
+
+  /**
    * Call mailbox_await directly against the given registry, bypassing the
    * tool registry entirely — mirrors this file's existing direct-execute
    * tests above (e.g. "rejects promptly with the abort reason", "never
@@ -1517,7 +1531,136 @@ describe('mailbox_await durable mailbox/await event (SWD-99)', () => {
     expect(events).toHaveLength(1)
     expect(events[0]!.data['outcome']).toBe('error')
     expect(events[0]!.data['errorName']).toBe('Error')
-    expect(typeof events[0]!.data['errorMessage']).toBe('string')
+    // The exact fallback literal safeAwaitStringify's second try/catch
+    // returns — not merely "some string" (sentinel review 2026-10-06,
+    // SHOULD-FIX 4): String(hostile) throws via the hostile toString, is
+    // caught, and the literal has no path to scrub and is well under the
+    // length cap, so redactAndCapForRecord passes it through unchanged.
+    expect(events[0]!.data['errorMessage']).toBe('<unstringifiable error>')
+  })
+
+  it('still returns the real reply result when the success-path append throws, and records nothing (MUST-FIX 1)', async () => {
+    const { ctx } = await setup('alfred')
+    await ctx.mailbox.publish({ to: 'alfred' as never, from: 'batman', subject: 'answer', payload: 'gate code is 4-1' })
+    const { session, append } = throwingAppendSession()
+    const result = await callAsWithSession(ctx, 'alfred', session, 'mailbox_await', { deadlineMs: AWAIT_MAX_DEADLINE_MS })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected mailbox_await success despite the append failure')
+    expect(result.value).toMatchObject({ outcome: 'reply', count: 1 })
+    // The append was attempted exactly once and it failed, so nothing was
+    // ever durably recorded — recordMailboxAwait swallowed the failure
+    // rather than fabricating a second "error" record over the real reply.
+    expect(append).toHaveBeenCalledTimes(1)
+    expect(mailboxAwaitEvents(session)).toHaveLength(0)
+    await ctx.fiber.dispose()
+  })
+
+  it('still rethrows the ORIGINAL store error when the error-path append also throws, and records nothing (MUST-FIX 1)', async () => {
+    const storeError = new Error('store exploded')
+    const { session, append } = throwingAppendSession()
+    const registry = {
+      lookupByTraceId: async () => [],
+      lookupInboundSince: async () => [],
+      claim: async () => { throw storeError },
+    } as unknown as MailboxRegistryShape
+    await expect(directAwait(registry, { sessionName: 'alfred' }, { deadlineMs: AWAIT_MAX_DEADLINE_MS }, session))
+      // The ORIGINAL error, not the append's own "append boom" — the catch
+      // records via recordMailboxAwait (which never throws) and rethrows
+      // the error it caught, unchanged.
+      .rejects.toBe(storeError)
+    expect(append).toHaveBeenCalledTimes(1)
+    expect(mailboxAwaitEvents(session)).toHaveLength(0)
+  })
+
+  it('redacts a double-quoted absolute path containing a space as one unit, not in pieces (SHOULD-FIX 2)', async () => {
+    const path = '/home/user/My Mailbox/db.sqlite'
+    const thrown = new Error(`mailbox database at "${path}" is not a mailbox store`)
+    const session = freshSession('space-double-quoted')
+    const registry = {
+      lookupByTraceId: async () => [],
+      lookupInboundSince: async () => [],
+      claim: async () => { throw thrown },
+    } as unknown as MailboxRegistryShape
+    await expect(directAwait(registry, { sessionName: 'alfred' }, { deadlineMs: AWAIT_MAX_DEADLINE_MS }, session))
+      .rejects.toBe(thrown)
+    const message = mailboxAwaitEvents(session)[0]!.data['errorMessage'] as string
+    // The whole quoted path replaced as one unit: a naive bare-segment-only
+    // pass would split on the space and leak "Mailbox" in the middle
+    // (`"<path> Mailbox<path>"`) — found in sentinel review 2026-10-06.
+    expect(message).toBe('mailbox database at "<path>" is not a mailbox store')
+    expect(message).not.toContain('Mailbox')
+    expect(message).not.toContain('/home')
+  })
+
+  it('redacts a single-quoted absolute path containing a space as one unit, not in pieces (SHOULD-FIX 2)', async () => {
+    const path = '/home/user/My Mailbox/db.sqlite'
+    const thrown = new Error(`mailbox database at '${path}' is not a mailbox store`)
+    const session = freshSession('space-single-quoted')
+    const registry = {
+      lookupByTraceId: async () => [],
+      lookupInboundSince: async () => [],
+      claim: async () => { throw thrown },
+    } as unknown as MailboxRegistryShape
+    await expect(directAwait(registry, { sessionName: 'alfred' }, { deadlineMs: AWAIT_MAX_DEADLINE_MS }, session))
+      .rejects.toBe(thrown)
+    const message = mailboxAwaitEvents(session)[0]!.data['errorMessage'] as string
+    expect(message).toBe('mailbox database at \'<path>\' is not a mailbox store')
+    expect(message).not.toContain('Mailbox')
+    expect(message).not.toContain('/home')
+  })
+
+  it('redacts each of the three real local-sqlite error message shapes without leaking the path (SHOULD-FIX 2)', async () => {
+    // Mirrors packages/mailbox/local/src/sqlite.ts's assertCompatibleSchema,
+    // lines ~132, ~138, ~141.
+    const path = '/tmp/dsh-tool-mailbox-test/mailbox.db'
+    const messages = [
+      `mailbox database at "${path}" is not a mailbox store: no mailbox_meta table`,
+      `mailbox database at "${path}" has no readable schema version stamp`,
+      `mailbox database at "${path}" has schema version 3, incompatible with this build (4)`,
+    ]
+    for (const [index, text] of messages.entries()) {
+      const thrown = new Error(text)
+      const session = freshSession(`sqlite-shape-${index}`)
+      const registry = {
+        lookupByTraceId: async () => [],
+        lookupInboundSince: async () => [],
+        claim: async () => { throw thrown },
+      } as unknown as MailboxRegistryShape
+      await expect(directAwait(registry, { sessionName: 'alfred' }, { deadlineMs: AWAIT_MAX_DEADLINE_MS }, session))
+        .rejects.toBe(thrown)
+      const message = mailboxAwaitEvents(session)[0]!.data['errorMessage'] as string
+      expect(message).not.toContain(path)
+      expect(message).toContain('<path>')
+    }
+  })
+
+  it('redacts the org-registry path from the recorded refusalReason without touching the rendered/returned text (SHOULD-FIX 3)', async () => {
+    const registryPath = writeSeatRegistry(['batman', 'alfred'])
+    const { ctx } = await setup('batman', { orgRegistryPath: registryPath })
+    const sent = await callAs(ctx, 'batman', 'mailbox_send', { to: 'anyone-at-all', subject: 's', body: 'b' })
+    if (sent.isError) throw new Error('expected a graceful refusal')
+    const sentValue = sent.value as { traceId: string; refusalReason: string }
+    // The model-facing text (mailbox_send's own result) is untouched — only
+    // the durable record below is redacted.
+    expect(sentValue.refusalReason).toContain(registryPath)
+
+    const session = freshSession('refusal-redaction')
+    vi.useFakeTimers()
+    try {
+      const pending = callAsWithSession(
+        ctx, 'batman', session, 'mailbox_await', { traceId: sentValue.traceId, deadlineMs: AWAIT_MAX_DEADLINE_MS },
+      )
+      await vi.advanceTimersByTimeAsync(0)
+      const result = await pending
+      expect(result.isError).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+    const recordedReason = mailboxAwaitEvents(session)[0]!.data['refusalReason'] as string
+    expect(recordedReason).toContain('<path>')
+    expect(recordedReason).not.toContain(registryPath)
+    expect(recordedReason).not.toContain('/home')
+    await ctx.fiber.dispose()
   })
 
   it('appends exactly one event even though the wait loop polls the store multiple times', async () => {
