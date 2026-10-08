@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { useState } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Button, ConnectionBanner, Input, Menu, Modal, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -405,6 +406,245 @@ describe('Modal', () => {
     const mask = document.querySelector('[aria-hidden="true"]') as HTMLElement
     fireEvent.click(mask)
     expect(onClose).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('Modal focus trap, background inert, and focus restore (SWD-155)', () => {
+  it('initial focus goes to the first tabbable element inside the dialog', () => {
+    render(
+      <Modal open onClose={() => {}} title="Pick" headless>
+        <button type="button">First</button>
+        <button type="button">Second</button>
+      </Modal>,
+    )
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'First' }))
+  })
+
+  it('focuses the dialog container itself when it has no tabbable content', () => {
+    render(
+      <Modal open onClose={() => {}} title="Notice" headless>
+        <p>Nothing to click.</p>
+      </Modal>,
+    )
+    expect(document.activeElement).toBe(screen.getByRole('dialog', { name: 'Notice' }))
+  })
+
+  it("leaves a child's own autoFocus alone instead of stealing it to the first tabbable", () => {
+    // Mirrors RiskConfirmation's own checkbox autoFocus and ModelsSection's
+    // Cancel-button autoFocus -- Modal must not fight a consumer's own
+    // deliberate initial-focus choice.
+    render(
+      <Modal open onClose={() => {}} title="Form" headless>
+        <button type="button">First</button>
+        <input aria-label="named" autoFocus />
+      </Modal>,
+    )
+    expect(document.activeElement).toBe(screen.getByLabelText('named'))
+  })
+
+  it('Tab from the last tabbable wraps to the first, and Shift+Tab from the first wraps to the last', () => {
+    render(
+      <Modal open onClose={() => {}} title="Pick" headless>
+        <button type="button">First</button>
+        <button type="button">Middle</button>
+        <button type="button">Last</button>
+      </Modal>,
+    )
+    const first = screen.getByRole('button', { name: 'First' })
+    const last = screen.getByRole('button', { name: 'Last' })
+
+    last.focus()
+    fireEvent.keyDown(document, { key: 'Tab' })
+    expect(document.activeElement).toBe(first)
+
+    first.focus()
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(last)
+  })
+
+  it('does not wrap Tab or Shift+Tab away from a tabbable that is not at either edge', () => {
+    render(
+      <Modal open onClose={() => {}} title="Pick" headless>
+        <button type="button">First</button>
+        <button type="button">Middle</button>
+        <button type="button">Last</button>
+      </Modal>,
+    )
+    const middle = screen.getByRole('button', { name: 'Middle' })
+    middle.focus()
+    fireEvent.keyDown(document, { key: 'Tab' })
+    expect(document.activeElement).toBe(middle)
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(middle)
+  })
+
+  it('swallows (preventDefault) Tab when the dialog has no tabbable content', () => {
+    render(
+      <Modal open onClose={() => {}} title="Notice" headless>
+        <p>Nothing to click.</p>
+      </Modal>,
+    )
+    const notCancelled = fireEvent.keyDown(document, { key: 'Tab' })
+    expect(notCancelled).toBe(false)
+  })
+
+  it('pulls focus back inside when something outside receives focus while open', () => {
+    render(
+      <>
+        <button type="button">Outside</button>
+        <Modal open onClose={() => {}} title="Pick" headless>
+          <button type="button">First</button>
+        </Modal>
+      </>,
+    )
+    const outside = screen.getByRole('button', { name: 'Outside' })
+    outside.focus()
+    expect(document.activeElement).not.toBe(outside)
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'First' }))
+  })
+
+  it('pulls focus back onto the dialog container when it has no tabbable content either', () => {
+    render(
+      <>
+        <button type="button">Outside</button>
+        <Modal open onClose={() => {}} title="Notice" headless>
+          <p>Nothing to click.</p>
+        </Modal>
+      </>,
+    )
+    screen.getByRole('button', { name: 'Outside' }).focus()
+    expect(document.activeElement).toBe(screen.getByRole('dialog', { name: 'Notice' }))
+  })
+
+  it('swallows pointerdown, mousedown, and click on an outside element while open (none reach their own handlers)', () => {
+    const onOutsideClick = vi.fn()
+    const onOutsideMouseDown = vi.fn()
+    const onOutsidePointerDown = vi.fn()
+    render(
+      <>
+        <button
+          type="button"
+          onClick={onOutsideClick}
+          onMouseDown={onOutsideMouseDown}
+          onPointerDown={onOutsidePointerDown}
+        >
+          Outside
+        </button>
+        <Modal open onClose={() => {}} title="Pick" headless>
+          <button type="button">First</button>
+        </Modal>
+      </>,
+    )
+    const outside = screen.getByRole('button', { name: 'Outside' })
+    fireEvent.pointerDown(outside)
+    fireEvent.mouseDown(outside)
+    fireEvent.click(outside)
+    expect(onOutsidePointerDown).not.toHaveBeenCalled()
+    expect(onOutsideMouseDown).not.toHaveBeenCalled()
+    expect(onOutsideClick).not.toHaveBeenCalled()
+  })
+
+  it('makes background siblings inert while open, restores them on close, and never clobbers a pre-existing inert sibling', () => {
+    const preExisting = document.createElement('div')
+    preExisting.inert = true
+    document.body.appendChild(preExisting)
+
+    const { rerender } = render(
+      <Modal open onClose={() => {}} title="Pick" headless>
+        <button type="button">First</button>
+      </Modal>,
+    )
+    const portalRoot = screen.getByRole('presentation')
+    const siblings = Array.from(document.body.children).filter(el => el !== portalRoot) as HTMLElement[]
+    expect(siblings.length).toBeGreaterThan(0)
+    for (const sibling of siblings) expect(sibling.inert).toBe(true)
+
+    rerender(
+      <Modal open={false} onClose={() => {}} title="Pick" headless>
+        <button type="button">First</button>
+      </Modal>,
+    )
+    for (const sibling of siblings) expect(sibling.inert).toBe(sibling === preExisting)
+
+    preExisting.remove()
+  })
+
+  it('restores focus to whatever had it before open, once closed', () => {
+    function Harness() {
+      const [open, setOpen] = useState(false)
+      return (
+        <>
+          <button type="button" onClick={() => { setOpen(true) }}>Open</button>
+          <Modal open={open} onClose={() => { setOpen(false) }} title="Pick" headless>
+            <button type="button">First</button>
+          </Modal>
+        </>
+      )
+    }
+    render(<Harness />)
+    const opener = screen.getByRole('button', { name: 'Open' })
+    opener.focus()
+    fireEvent.click(opener)
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'First' }))
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(document.activeElement).toBe(opener)
+  })
+
+  it('does not try to restore focus to an opener removed from the document while the dialog was open', () => {
+    const opener = document.createElement('button')
+    opener.textContent = 'Open'
+    document.body.appendChild(opener)
+    opener.focus()
+    const focusSpy = vi.spyOn(opener, 'focus')
+
+    const { rerender } = render(
+      <Modal open onClose={() => {}} title="Pick" headless>
+        <button type="button">First</button>
+      </Modal>,
+    )
+    opener.remove()
+    rerender(
+      <Modal open={false} onClose={() => {}} title="Pick" headless>
+        <button type="button">First</button>
+      </Modal>,
+    )
+    expect(focusSpy).not.toHaveBeenCalled()
+  })
+
+  it('traps only the topmost dialog when two Modals are open, and hands the trap back to the outer one when the inner closes', () => {
+    const onOuterButtonClick = vi.fn()
+    const onTrulyOutsideClick = vi.fn()
+    function Harness({ innerOpen }: { innerOpen: boolean }) {
+      return (
+        <>
+          <button type="button" onClick={onTrulyOutsideClick}>TrulyOutside</button>
+          <Modal open onClose={() => {}} title="Outer" headless>
+            <button type="button" onClick={onOuterButtonClick}>OuterButton</button>
+            <Modal open={innerOpen} onClose={() => {}} title="Inner" headless>
+              <button type="button">InnerButton</button>
+            </Modal>
+          </Modal>
+        </>
+      )
+    }
+    // Mounted in two separate commits (outer alone first, inner afterward) --
+    // matching OrgBoardControl's real sequence (the board's own Modal opens
+    // first; a RiskConfirmation inside it opens later, on its own click) --
+    // so the stack ends up [outer, inner] regardless of React's child-before-
+    // parent ref-attach order for a single simultaneous mount.
+    const { rerender } = render(<Harness innerOpen={false} />)
+    rerender(<Harness innerOpen />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'OuterButton' }))
+    expect(onOuterButtonClick).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'TrulyOutside' }))
+    expect(onTrulyOutsideClick).not.toHaveBeenCalled()
+
+    rerender(<Harness innerOpen={false} />)
+    fireEvent.click(screen.getByRole('button', { name: 'OuterButton' }))
+    expect(onOuterButtonClick).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'TrulyOutside' }))
+    expect(onTrulyOutsideClick).not.toHaveBeenCalled()
   })
 })
 

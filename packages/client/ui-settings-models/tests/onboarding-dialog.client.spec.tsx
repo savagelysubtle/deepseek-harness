@@ -180,6 +180,48 @@ describe('DeepSeekOnboardingDialog', () => {
     expect(appRoot.inert).toBe(true)
   })
 
+  it('restores #root to interactive once "configure later" dismisses the dialog (SWD-155)', async () => {
+    const h = harness()
+    const appRoot = document.getElementById('root')!
+    expect(appRoot.inert).toBeFalsy()
+    const view = render(<DeepSeekOnboardingDialog {...h.props} />)
+    await screen.findByRole('dialog')
+    expect(appRoot.inert).toBe(true)
+
+    fireEvent.click(screen.getByRole('button', { name: en.onboardingLater }))
+    expect(h.complete).toHaveBeenCalledOnce()
+
+    // The real onboarding coordinator stops rendering this step once `complete`
+    // fires; a bare `complete` mock has no such effect on its own, so simulate
+    // that reaction here rather than asserting on the mock's side effect.
+    // This is the exact pilot repro for SWD-155: OnboardingModal used to carry
+    // its own duplicate `#root`-inert effect that raced Modal's and stomped
+    // `#root` back to inert after this very unmount.
+    view.unmount()
+    expect(appRoot.inert).toBe(false)
+  })
+
+  it('a mask click does not dismiss the dialog, and #root still regains interactivity once it is actually closed (SWD-155)', async () => {
+    const h = harness()
+    const appRoot = document.getElementById('root')!
+    const view = render(<DeepSeekOnboardingDialog {...h.props} />)
+    await screen.findByRole('dialog')
+    expect(appRoot.inert).toBe(true)
+
+    // OnboardingModal hardcodes `onClose` to a no-op, so a mask click never
+    // actually dismisses it -- this exercises that path anyway (as named in
+    // the pilot's repro) to prove it leaves no stray state behind: the dialog
+    // stays open and interactive, and closing it for real afterward still
+    // restores #root correctly.
+    fireEvent.click(document.querySelector('[class*="mask"]')!)
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    expect(h.complete).not.toHaveBeenCalled()
+    expect(appRoot.inert).toBe(true)
+
+    view.unmount()
+    expect(appRoot.inert).toBe(false)
+  })
+
   it('requires a non-blank key before Save and continue is available', async () => {
     const h = harness()
     render(<DeepSeekOnboardingDialog {...h.props} />)

@@ -444,24 +444,36 @@ describe('OrgBoard remove seat (SWD-134 slice 4 step 4)', () => {
     expect(removeSeat).toHaveBeenCalledWith('batman')
   })
 
-  it('moving the selection to a different seat WHILE the remove-seat confirmation is open does not clobber it on confirm', () => {
-    // Modal.tsx has no focus trap or inert on the rest of the page, and
-    // onNodeClick is not gated on pending or on an open confirmation -- a
-    // keyboard user can still move the board's selection while this dialog
-    // is open. seatToRemove ('batman', captured when the dialog opened) and
-    // selectedSeat ('alfred', moved to afterward) then genuinely diverge, so
-    // onConfirm's `setSelectedSeat(current => current === name ? null : current)`
-    // must keep the NEW selection rather than nulling it out.
+  it('a click on a different seat in the list underneath is swallowed while the remove-seat confirmation is open (SWD-155)', () => {
+    // Modal now traps focus and makes the rest of the page inert while
+    // open (SWD-155), so a click on another seat in the board underneath
+    // no longer reaches onNodeClick at all -- this replaces the previous
+    // "moving the selection to a different seat WHILE the remove-seat
+    // confirmation is open does not clobber it on confirm" regression test,
+    // which exercised exactly the background-click leak this ticket closes
+    // (its own comment said so: "Modal.tsx has no focus trap or inert on
+    // the rest of the page ... a keyboard user can still move the board's
+    // selection while this dialog is open"). That premise no longer holds.
+    //
+    // OrgBoard's own defence -- seatToRemove captured once at open, never
+    // re-read off `selectedSeat` at confirm time -- still exists underneath
+    // and is still exercised here: it is what makes `removeSeat` receive
+    // the right name even though, now, selectedSeat provably never moved.
     const { removeSeat } = renderBoard(ready(BASE_VALUE))
     fireEvent.click(screen.getByText('batman'))
     fireEvent.click(screen.getByRole('button', { name: 'Remove seat' }))
+
     fireEvent.click(screen.getByText('alfred'))
+    // Swallowed: the detail panel still reads batman's own data (no
+    // session recorded), never alfred's -- proof onNodeClick was never
+    // reached, not just that the dialog happens to still say "batman".
+    expect(screen.getByText('No session recorded')).toBeTruthy()
+    expect(screen.queryByText('sess-alfred')).toBeNull()
+
     fireEvent.click(screen.getByRole('checkbox'))
     fireEvent.click(screen.getByRole('button', { name: 'Remove' }))
     expect(removeSeat).toHaveBeenCalledTimes(1)
     expect(removeSeat).toHaveBeenCalledWith('batman')
-    // The detail panel still shows alfred -- the later selection survived.
-    expect(screen.getByText('sess-alfred')).toBeTruthy()
   })
 
   it('names an empty cascade explicitly (none), never a silent 0-line message', () => {

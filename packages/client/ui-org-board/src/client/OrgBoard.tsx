@@ -744,7 +744,13 @@ export function OrgBoard({
               const name = seatToRemove
               setSeatToRemove(null)
               setRemoveAcknowledged(false)
-              setSelectedSeat(current => (current === name ? null : current))
+              // Always the removed seat, by construction since SWD-155: the
+              // Modal trap makes the rest of the board inert and swallows
+              // background clicks/focus while this confirmation is open, so
+              // selectedSeat cannot move away from `name` between open and
+              // confirm. (It used to be able to; see the ticket's own
+              // defence against that, now closed at the Modal layer.)
+              setSelectedSeat(null)
               setLastAttempt(() => () => removeSeat(name))
               void removeSeat(name)
             }}
