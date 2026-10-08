@@ -8,9 +8,11 @@ import css from './OnboardingModal.module.css'
 const ignoreImplicitDismiss = (): void => {}
 
 /**
- * Render a blocking onboarding dialog and keep the application root inert.
+ * Render a blocking onboarding dialog.
  * @param props.title - accessible and visible dialog title.
- * @param props.focusTitle - focus the title when the step has no form control.
+ * @param props.focusTitle - focus the title when the step has no form control
+ * worth focusing instead (e.g. WelcomeNotice's own Continue button would
+ * otherwise win Modal's default first-tabbable focus).
  * @param props.children - step-owned body and actions.
  * @returns the body-portaled modal.
  */
@@ -23,13 +25,14 @@ export function OnboardingModal({
 }): ReactNode {
   const titleRef = useRef<HTMLHeadingElement | null>(null)
 
-  useEffect(() => {
-    const appRoot = document.getElementById('root')
-    if (appRoot === null) return
-    const previous = appRoot.inert
-    appRoot.inert = true
-    return () => { appRoot.inert = previous }
-  }, [])
+  // SWD-155: Modal itself now traps focus and makes the rest of the page
+  // (including #root) inert while open -- this used to be this component's
+  // own job (a separate effect capturing and restoring #root.inert), which
+  // raced Modal's own trap: Modal's commit-phase callback ref already set
+  // #root.inert = true before this effect ran, so it captured `previous`
+  // as true, then stomped #root back to inert on unmount after Modal's own
+  // cleanup had just cleared it -- leaving the whole app permanently inert
+  // once an onboarding dialog had opened and closed. Removed; Modal owns it.
 
   useEffect(() => {
     if (focusTitle) titleRef.current?.focus()

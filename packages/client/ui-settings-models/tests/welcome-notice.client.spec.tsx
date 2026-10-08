@@ -92,10 +92,16 @@ describe('WelcomeNotice', () => {
   it('completes only after the acknowledgement write commits', async () => {
     const h = mount()
     await screen.findByRole('dialog')
+    expect(h.appRoot.inert).toBe(true)
     fireEvent.click(screen.getByRole('button', { name: WELCOME_NOTICE_COPY.zh.continueLabel }))
     await act(async () => { await Promise.resolve() })
     expect(h.mutate).toHaveBeenCalledOnce()
     expect(h.complete).toHaveBeenCalledOnce()
+    // WelcomeNotice itself returns null once acknowledged, unmounting
+    // OnboardingModal for real -- SWD-155's duplicate inert effect used to
+    // stomp this back to true right after Modal's own cleanup cleared it.
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(h.appRoot.inert).toBe(false)
   })
 
   it('skips itself when this exact version was already acknowledged', async () => {
