@@ -95,6 +95,13 @@ function isOutside(root: HTMLElement, target: EventTarget | null): boolean {
  * only ever invoked from the dialog's own callback ref, which React calls
  * with the real node on attach).
  * @returns the teardown to run on this dialog's unmount.
+ * @knownLimitation `isOutside` only ever exempts currently-stacked Modal
+ * roots. Anything else body-portaled outside this dialog's own root --
+ * `Menu` in a portal mode, `Toast` -- is treated as background and gets
+ * swallowed/inert-marked the same as real page content while a Modal is
+ * open. No consumer currently opens one of those alongside an open Modal;
+ * if one ever does, it would need its own root added to the stack (or a
+ * dedicated exemption) to stay interactive.
  */
 function setupModalTrap(dialog: HTMLDivElement): () => void {
   // Modal's own JSX (below) always renders `dialog` as the sole non-mask
