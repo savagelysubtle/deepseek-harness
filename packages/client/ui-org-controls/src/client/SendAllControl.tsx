@@ -17,13 +17,13 @@
 import { useState } from 'react'
 import { Button, IconSendOutline16, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { SendAllFace } from './slots.ts'
 import css from './OrgControls.module.css'
 
-/** Full component props: the footer-action runtime share, the live verb, and the bound locale seat. */
+/** Full component props: the session-header-action runtime share, the live verb, and the bound locale seat. */
 export type SendAllControlProps =
-  PropsRuntime<'sidebar.footer.action'> & InjectFace<SendAllFace> & PropsLocale<'orgControls'>
+  PropsRuntime<'conversation.session.header.actions'> & InjectFace<SendAllFace> & PropsLocale<'orgControls'>
 
 /**
  * Outcome banner shown after a Send All attempt. A dedicated `partial`
@@ -41,7 +41,7 @@ type ResultBanner =
  * (non-auto-fading) outcome banner.
  * @param props - runtime share, `onSendAll`, and the bound `t`.
  */
-export function SendAllControl({ wide, useSessions, onSendAll, t }: SendAllControlProps) {
+export function SendAllControl({ useSessions, onSendAll, t }: SendAllControlProps) {
   const [open, setOpen] = useState(false)
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
@@ -110,7 +110,7 @@ export function SendAllControl({ wide, useSessions, onSendAll, t }: SendAllContr
   const trimmed = text.trim()
 
   return (
-    <div className={wide ? css.root : `${css.root} ${css.rail}`}>
+    <div className={css.root}>
       {(result !== undefined || showFounderNotice) && (
         <div className={css.bannerStack}>
           {result !== undefined && (
@@ -153,8 +153,8 @@ export function SendAllControl({ wide, useSessions, onSendAll, t }: SendAllContr
         title={triggerLabel}
         onClick={() => { setOpen(true) }}
       >
-        <IconSendOutline16 size={wide ? 16 : 18} />
-        {wide && <span className={css.label}>{t('sendAll.trigger')}</span>}
+        <IconSendOutline16 size={16} />
+        <span className={css.label}>{t('sendAll.trigger')}</span>
       </button>
       {disabled && (
         // Visible on screen, not just a hover title/aria-label - a fence

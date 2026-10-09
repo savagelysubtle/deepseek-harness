@@ -42,6 +42,25 @@ const useWorkspaces = (() => {
   throw new Error('SendAllControl must not call useWorkspaces')
 }) as never
 
+/**
+ * SendAllControl never reads the session-scope standard kit either (it is a
+ * root-wide broadcast, not a per-session action) — throwing stubs prove that
+ * while satisfying the now-session-scoped `conversation.session.header.actions`
+ * slot's `PropsRuntime` (SWD-162 moved this control off the sidebar foot).
+ */
+const useSession = (() => {
+  throw new Error('SendAllControl must not call useSession')
+}) as never
+const useProjection = (() => {
+  throw new Error('SendAllControl must not call useProjection')
+}) as never
+const useInput = (() => {
+  throw new Error('SendAllControl must not call useInput')
+}) as never
+const inputActions = new Proxy({}, {
+  get(): never { throw new Error('SendAllControl must not call inputActions') },
+}) as never
+
 const TWO_ROOTS: SessionListState = {
   ids: [sid('a'), sid('b'), sid('sub')],
   byId: {
@@ -77,13 +96,16 @@ const TWO_LIVE_ONE_COLD: SessionListState = {
 
 /** Render helper: keeps every call site short — one place carries the runtime-share boilerplate. */
 function renderSendAll(overrides: {
-  wide?: boolean
   sessions?: SessionListState
   onSendAll?: SendAllControlProps['onSendAll']
 } = {}) {
-  const { wide = true, sessions = TWO_ROOTS, onSendAll = vi.fn() } = overrides
+  const { sessions = TWO_ROOTS, onSendAll = vi.fn() } = overrides
   return render(<SendAllControl
-    wide={wide}
+    sessionId={sid('current')}
+    useSession={useSession}
+    useProjection={useProjection}
+    useInput={useInput}
+    inputActions={inputActions}
     useSessions={useSessionsFixture(sessions)}
     useWorkspaces={useWorkspaces}
     onSendAll={onSendAll}
@@ -176,11 +198,6 @@ describe('SendAllControl', () => {
     const reopened = openCompose()
     const textarea = reopened.getByPlaceholderText('Type a message to send to every session…') as HTMLTextAreaElement
     expect(textarea.value).toBe('')
-  })
-
-  it('renders icon-only in rail mode (no wide label)', () => {
-    renderSendAll({ wide: false })
-    expect(screen.queryByText('Send All')).toBeNull()
   })
 
   it('a thrown Error (promise rejection, not a { ok: false } answer) surfaces its own message', async () => {

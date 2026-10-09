@@ -27,7 +27,7 @@
       "path": "../runtime"
     },
     {
-      "path": "../ui-sidebar"
+      "path": "../ui-conversation"
     },
     {
       "path": "../../runtime-diagnostics/invariants"

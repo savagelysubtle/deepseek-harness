@@ -1,6 +1,7 @@
-/* Shared footer-trigger and result-banner chrome for the Stop All and Send
-   All controls; each registers its own list entry into sidebar.footer.action
-   and gets one of these per the shell's .footerActions flex row.
+/* Shared trigger and result-banner chrome for the Stop All and Send All
+   controls; each registers its own list entry into
+   conversation.session.header.actions and gets one of these per the
+   session header's action row (SWD-162 moved both off the sidebar foot).
    Send All's composer used to live in its own SendAllControl.module.css,
    split out only because the confirm step's .preview surface scrolled on a
    base-l1 background while this file's .banner sits on the elevated l2 rung
@@ -39,13 +40,6 @@
 .trigger:disabled {
   color: var(--dsw-alias-label-tertiary);
   cursor: not-allowed;
-}
-
-.rail .trigger {
-  justify-content: center;
-  width: 36px;
-  padding: 0;
-  border-radius: 50%;
 }
 
 .label {

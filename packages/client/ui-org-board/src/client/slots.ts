@@ -1,4 +1,4 @@
-/** Injected face for the one footer-action entry this package registers. */
+/** Injected face for the one header-action entry this package registers. */
 
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import type { OrgBoardState } from './org-board-store.ts'
