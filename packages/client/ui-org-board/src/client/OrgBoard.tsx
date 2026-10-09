@@ -232,6 +232,13 @@ export function OrgBoard({
   setSeatServed,
 }: OrgBoardProps) {
   const [selectedSeat, setSelectedSeat] = useState<string | null>(null)
+  // The seat currently under the pointer (SWD-163 step 8) -- never persisted,
+  // cleared the instant the pointer leaves it. Edges are filtered against
+  // this OR selectedSeat (see `edges` below): a graph with every mail-
+  // permission line always drawn reads as noise once a seat has more than a
+  // couple of lines, so the default is zero lines and hovering/selecting a
+  // seat is what reveals its own.
+  const [hoveredSeat, setHoveredSeat] = useState<string | null>(null)
   const [addSeatOpen, setAddSeatOpen] = useState(false)
   const [addSeatName, setAddSeatName] = useState('')
   const [addSeatCwd, setAddSeatCwd] = useState('')
@@ -339,13 +346,19 @@ export function OrgBoard({
     })
     : []
 
+  // Zero edges by default (SWD-163 step 8): only a line touching the
+  // hovered seat OR the selected seat draws, in either direction -- an
+  // undirected edge [from, to] can have the highlighted seat on either
+  // side, so both ends of the pair are checked against both states.
   const edges: Edge[] = registry.ok
-    ? registry.registry.edges.map(([from, to]) => ({
-      id: `${from}--${to}`,
-      source: from,
-      target: to,
-      type: 'straight',
-    }))
+    ? registry.registry.edges
+      .filter(([from, to]) => from === hoveredSeat || to === hoveredSeat || from === selectedSeat || to === selectedSeat)
+      .map(([from, to]) => ({
+        id: `${from}--${to}`,
+        source: from,
+        target: to,
+        type: 'straight',
+      }))
     : []
 
   const selectedRecord = registry.ok && selectedSeat !== null ? registry.registry.seats[selectedSeat] : undefined
@@ -566,6 +579,13 @@ export function OrgBoard({
               {addSeatOpen ? t('action.cancel') : t('addSeat.trigger')}
             </Button>
           </div>
+          <div className={css.legendRow}>
+            <span className={`${css.badge} ${css.badgeLead}`}>{t('badge.lead')}</span>
+            <span className={`${css.badge} ${css.badgeTest}`}>{t('badge.test')}</span>
+            <span className={`${css.badge} ${css.badgeUnserved}`}>{t('badge.unserved')}</span>
+            <span className={`${css.badge} ${css.badgeCallUp}`}>{t('badge.callUp')}</span>
+            <span className={css.legendHint}>{t('legend.edges')}</span>
+          </div>
           {addSeatOpen && (
             <form className={css.addSeatForm} onSubmit={handleAddSeatSubmit}>
               <label className={css.addSeatField}>
@@ -613,6 +633,11 @@ export function OrgBoard({
                     nodeTypes={NODE_TYPES}
                     onNodeClick={(_event, node) => { setSelectedSeat(node.id) }}
                     onPaneClick={() => { setSelectedSeat(null) }}
+                    // Hover reveals a seat's own mail-permission lines without
+                    // disturbing the selection -- leaving only clears the
+                    // hover highlight, never selectedSeat (see `edges` above).
+                    onNodeMouseEnter={(_event, node) => { setHoveredSeat(node.id) }}
+                    onNodeMouseLeave={() => { setHoveredSeat(null) }}
                     onConnect={(connection: Connection) => {
                       if (pending) return
                       setLastAttempt(() => () => addEdge(connection.source, connection.target))

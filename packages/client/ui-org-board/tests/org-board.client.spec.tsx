@@ -68,6 +68,19 @@ beforeEach(() => {
   document.elementFromPoint = () => null
 })
 
+/**
+ * Fire a hover (mouseEnter) on one seat's React Flow node wrapper. SWD-163
+ * step 8 made the default edge set empty -- most of the pre-existing edge
+ * tests below only need SOME edge on screen to click or to wait on as a
+ * "nodes are measured" signal (see the ResizeObserverStub note above), and
+ * are not themselves testing the hover/select reveal; this is how they get
+ * one drawn without duplicating that logic at every call site.
+ */
+function hoverSeat(container: HTMLElement, name: string): void {
+  const node = container.querySelector(`.react-flow__node[data-id="${name}"]`)
+  fireEvent.mouseEnter(node as Element)
+}
+
 /** Minimal mustache-style interpolation over the real English dictionary (same pattern as ui-org-controls' tests). */
 function translate(key: LocaleKeysOf<'orgBoard'>, params?: Record<string, unknown>): string {
   const template = en[key as OrgBoardKey] ?? key
@@ -281,15 +294,21 @@ describe('OrgBoard', () => {
   })
 
   it('draws seat nodes with their badges and the detail hint before any selection', () => {
-    renderBoard(ready(BASE_VALUE))
+    const { container } = renderBoard(ready(BASE_VALUE))
     expect(screen.getByText('alfred')).toBeTruthy()
     expect(screen.getByText('batman')).toBeTruthy()
     expect(screen.getByText('robin')).toBeTruthy()
-    expect(screen.getByText('Lead')).toBeTruthy()
-    expect(screen.getByText('Test seat')).toBeTruthy()
-    expect(screen.getByText('May mail anyone')).toBeTruthy()
+    // Scoped to each seat's own node, not a bare screen.getByText: the
+    // legend row (SWD-163 step 9) now also shows every badge label once,
+    // so a bare query would find two matches for each of these.
+    const alfredNode = container.querySelector('.react-flow__node[data-id="alfred"]') as HTMLElement
+    const batmanNode = container.querySelector('.react-flow__node[data-id="batman"]') as HTMLElement
+    const robinNode = container.querySelector('.react-flow__node[data-id="robin"]') as HTMLElement
+    expect(within(alfredNode).getByText('Lead')).toBeTruthy()
+    expect(within(alfredNode).getByText('May mail anyone')).toBeTruthy()
+    expect(within(batmanNode).getByText('Test seat')).toBeTruthy()
     // robin has a drift row (missing from mailbox-bridge), so its node badges too.
-    expect(screen.getByText('Not fully served')).toBeTruthy()
+    expect(within(robinNode).getByText('Not fully served')).toBeTruthy()
     expect(screen.getByText('Select a seat to see its details.')).toBeTruthy()
   })
 
@@ -326,11 +345,70 @@ describe('OrgBoard', () => {
     expect(screen.getByText('Select a seat to see its details.')).toBeTruthy()
   })
 
-  it('draws the undirected edge between the two registry-declared seats', async () => {
+  it('renders zero edges by default, even though the registry declares one (SWD-163 step 8)', async () => {
     const { container } = renderBoard(ready(BASE_VALUE))
-    // Node measurement lands on the next tick (see the ResizeObserverStub
-    // note above); an edge only draws once both endpoint nodes are measured.
+    // Give node measurement (see the ResizeObserverStub note above) a tick
+    // to land -- an unmeasured graph would ALSO show no edges, which must
+    // never be mistaken for proof of the real, filtered-to-zero default.
+    await waitFor(() => { expect(container.querySelector('.react-flow__node[data-id="alfred"]')).toBeTruthy() })
+    expect(container.querySelectorAll('.react-flow__edge')).toHaveLength(0)
+  })
+
+  it('hovering either endpoint of an edge reveals it, and un-hovering clears it again', async () => {
+    const { container } = renderBoard(ready(BASE_VALUE))
+    const alfredNode = container.querySelector('.react-flow__node[data-id="alfred"]') as Element
+    fireEvent.mouseEnter(alfredNode)
     await waitFor(() => { expect(container.querySelector('.react-flow__edge')).toBeTruthy() })
+    fireEvent.mouseLeave(alfredNode)
+    expect(container.querySelectorAll('.react-flow__edge')).toHaveLength(0)
+
+    // Undirected: the same edge also reveals from its OTHER endpoint.
+    const batmanNode = container.querySelector('.react-flow__node[data-id="batman"]') as Element
+    fireEvent.mouseEnter(batmanNode)
+    await waitFor(() => { expect(container.querySelector('.react-flow__edge')).toBeTruthy() })
+    fireEvent.mouseLeave(batmanNode)
+    expect(container.querySelectorAll('.react-flow__edge')).toHaveLength(0)
+  })
+
+  it('hovering a seat with no edges of its own reveals nothing', async () => {
+    const { container } = renderBoard(ready(BASE_VALUE))
+    // Let measurement land first (see the zero-edges-by-default test above)
+    // so a genuinely empty result here cannot be mistaken for an unmeasured graph.
+    await waitFor(() => { expect(container.querySelector('.react-flow__node[data-id="robin"]')).toBeTruthy() })
+    const robinNode = container.querySelector('.react-flow__node[data-id="robin"]') as Element
+    fireEvent.mouseEnter(robinNode)
+    expect(container.querySelectorAll('.react-flow__edge')).toHaveLength(0)
+    fireEvent.mouseLeave(robinNode)
+    expect(container.querySelectorAll('.react-flow__edge')).toHaveLength(0)
+  })
+
+  it('selecting an endpoint seat reveals its edge without hovering, and the edge survives an unrelated hover/un-hover elsewhere', async () => {
+    const { container } = renderBoard(ready(BASE_VALUE))
+    fireEvent.click(screen.getByText('alfred'))
+    await waitFor(() => { expect(container.querySelector('.react-flow__edge')).toBeTruthy() })
+    const robinNode = container.querySelector('.react-flow__node[data-id="robin"]') as Element
+    fireEvent.mouseEnter(robinNode)
+    fireEvent.mouseLeave(robinNode)
+    // robin has no edge of its own; alfred's selection-revealed edge is
+    // unaffected either way -- re-awaited (not a synchronous check) because
+    // rebuilding the nodes/edges arrays for ANY hover change, even one that
+    // touches no shared edge, re-triggers React Flow's own node measurement
+    // (see the ResizeObserverStub note above), which transiently un-draws
+    // every edge for one microtask regardless of whether its own membership
+    // in the filtered set actually changed.
+    await waitFor(() => { expect(container.querySelector('.react-flow__edge')).toBeTruthy() })
+  })
+
+  it('shows a legend with one swatch per badge class and a note that edges show on hover/select', () => {
+    renderBoard(ready(BASE_VALUE))
+    // Each label already appears once as a real badge on a seat node in
+    // BASE_VALUE (alfred=lead+callUp, batman=test, robin=unserved); the
+    // legend adds one more occurrence of each, never replacing the node's own.
+    expect(screen.getAllByText('Lead').length).toBeGreaterThanOrEqual(2)
+    expect(screen.getAllByText('Test seat').length).toBeGreaterThanOrEqual(2)
+    expect(screen.getAllByText('Not fully served').length).toBeGreaterThanOrEqual(2)
+    expect(screen.getAllByText('May mail anyone').length).toBeGreaterThanOrEqual(2)
+    expect(screen.getByText(translate('legend.edges'))).toBeTruthy()
   })
 })
 
@@ -521,7 +599,11 @@ describe('OrgBoard mail-permission lines (SWD-134 slice 4 step 4)', () => {
     const { removeEdge, container } = renderBoard(ready(BASE_VALUE))
     // Node measurement lands on the next tick (see the ResizeObserverStub
     // note above); an edge only draws -- and becomes clickable -- once both
-    // endpoint nodes are measured.
+    // endpoint nodes are measured AND (SWD-163 step 8) one of them is
+    // hovered or selected -- this test is about onEdgeClick, not the reveal
+    // itself (covered separately above), so hover is just how it gets an
+    // edge on screen to click.
+    hoverSeat(container, 'alfred')
     await waitFor(() => { expect(container.querySelector('.react-flow__edge')).toBeTruthy() })
     // Verified here, on the REAL @xyflow/react component (not a mock): the
     // library attaches `onClick: onEdgeClick` directly to this element
@@ -543,6 +625,9 @@ describe('OrgBoard mail-permission lines (SWD-134 slice 4 step 4)', () => {
 
   it('clicking a source handle then a different seat\'s target handle (connect-on-click) calls addEdge', async () => {
     const { addEdge, container } = renderBoard(ready(BASE_VALUE))
+    // Sync point only (see hoverSeat's own doc comment): connect-on-click
+    // itself is independent of this board's own hover/select edge filter.
+    hoverSeat(container, 'alfred')
     await waitFor(() => { expect(container.querySelector('.react-flow__edge')).toBeTruthy() })
     const sourceHandle = container.querySelector('.react-flow__handle[data-nodeid="alfred"].source')
     const targetHandle = container.querySelector('.react-flow__handle[data-nodeid="robin"].target')
@@ -555,6 +640,7 @@ describe('OrgBoard mail-permission lines (SWD-134 slice 4 step 4)', () => {
 
   it('cancelling the mail-permission-line removal confirmation never calls removeEdge', async () => {
     const { removeEdge, container } = renderBoard(ready(BASE_VALUE))
+    hoverSeat(container, 'alfred')
     await waitFor(() => { expect(container.querySelector('.react-flow__edge')).toBeTruthy() })
     fireEvent.click(container.querySelector('.react-flow__edge') as Element)
     fireEvent.click(screen.getByRole('checkbox'))
@@ -565,6 +651,7 @@ describe('OrgBoard mail-permission lines (SWD-134 slice 4 step 4)', () => {
 
   it('Retry on a write-failed notice resubmits the exact same addEdge payload', async () => {
     const { addEdge, container, rerenderWithState } = renderBoard(ready(BASE_VALUE))
+    hoverSeat(container, 'alfred')
     await waitFor(() => { expect(container.querySelector('.react-flow__edge')).toBeTruthy() })
     const sourceHandle = container.querySelector('.react-flow__handle[data-nodeid="alfred"].source')
     const targetHandle = container.querySelector('.react-flow__handle[data-nodeid="robin"].target')
@@ -581,6 +668,7 @@ describe('OrgBoard mail-permission lines (SWD-134 slice 4 step 4)', () => {
 
   it('Retry on a write-failed notice resubmits the exact same removeEdge payload', async () => {
     const { removeEdge, container, rerenderWithState } = renderBoard(ready(BASE_VALUE))
+    hoverSeat(container, 'alfred')
     await waitFor(() => { expect(container.querySelector('.react-flow__edge')).toBeTruthy() })
     fireEvent.click(container.querySelector('.react-flow__edge') as Element)
     fireEvent.click(screen.getByRole('checkbox'))
@@ -854,6 +942,7 @@ describe('OrgBoard served status toggle (SWD-134 slice 5 step 3)', () => {
 describe('OrgBoard pending guards on the graph (SWD-134 slice 4 step 4)', () => {
   it('a write in flight blocks a connect-on-click addEdge attempt', async () => {
     const { addEdge, container } = renderBoard(withNotice(BASE_VALUE, { kind: 'invalid', message: 'x' }, true))
+    hoverSeat(container, 'alfred')
     await waitFor(() => { expect(container.querySelector('.react-flow__edge')).toBeTruthy() })
     const sourceHandle = container.querySelector('.react-flow__handle[data-nodeid="alfred"].source')
     const targetHandle = container.querySelector('.react-flow__handle[data-nodeid="robin"].target')
@@ -866,6 +955,7 @@ describe('OrgBoard pending guards on the graph (SWD-134 slice 4 step 4)', () => 
 
   it('a write in flight blocks onEdgeClick from opening the remove-edge confirmation', async () => {
     const { removeEdge, container } = renderBoard(withNotice(BASE_VALUE, { kind: 'invalid', message: 'x' }, true))
+    hoverSeat(container, 'alfred')
     await waitFor(() => { expect(container.querySelector('.react-flow__edge')).toBeTruthy() })
     fireEvent.click(container.querySelector('.react-flow__edge') as Element)
     expect(screen.queryByRole('dialog', { name: 'Remove mail-permission line' })).toBeNull()

@@ -48,11 +48,26 @@
   width: min(1180px, 100%);
 }
 
+/* This is the board's own root -- rendered inside Modal's `.body`
+   (OrgBoardControl.tsx mounts it as Modal's children, alongside the
+   sibling Refresh row). Modal itself stays a fixed-height, non-scrolling
+   shell (ui-primitives/Modal.module.css); this is the one element that
+   actually scrolls, so the modal's title row and the Refresh row above it
+   stay in place by construction while only the board's own body moves. */
 .content {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
   gap: 16px;
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* .node (the seat card) already paints the l2 elevation this sheet
+     scrolls on, so this surface's thumb takes the l2 tokens too -- the
+     same rebind .detailPanel below carries for its own scroll. */
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
 }
 
 .refreshRow {
@@ -115,6 +130,21 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+/* Legend row (SWD-163 step 9): one swatch per existing badge class, plus a
+   plain-text note on the edge-reveal interaction added alongside it --
+   edges are never a badge, so they get no swatch of their own. */
+.legendRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.legendHint {
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
 }
 
 .addSeatForm {
@@ -217,7 +247,12 @@
   position: relative;
   flex: 1 1 auto;
   min-width: 0;
-  height: 460px;
+  /* A fixed height used to force the modal's dialog taller than the
+     viewport could ever accommodate (the board's own `.content` above now
+     scrolls its body instead). A floor, not a fixed size: the canvas can
+     settle shorter than 460px inside a cramped layout row, but never
+     unusably small. */
+  min-height: 320px;
   border: 1px solid var(--dsw-alias-border-primary, #3a3a3a);
   border-radius: 12px;
   overflow: hidden;

@@ -59,6 +59,15 @@
 
 .titleCluster {
   display: flex;
+  /* .crumbs keeps white-space:nowrap with no min-width:0 override, so its
+     flex min-content equals its full rendered width -- it cannot actually
+     shrink to make room the way overflow:hidden alone would suggest. Now
+     that conversation.session.header.actions carries real labeled buttons
+     (Stop All/Send All/Org Board, SWD-162/163) rather than an empty slot,
+     a long breadcrumb chain plus those three buttons can exceed .titleRow's
+     width at a realistic column width -- wrap keeps that a second line
+     instead of a silent horizontal overflow. */
+  flex-wrap: wrap;
   flex: 1;
   align-items: center;
   gap: 10px;
