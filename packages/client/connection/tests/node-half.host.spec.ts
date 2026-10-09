@@ -205,6 +205,10 @@ describe('connection node half', () => {
       // reconnaissance, and copy/remove/openDocument manage the roster and
       // drive the host desktop.
       'agentPreset.read', 'agentPreset.copy', 'agentPreset.openDocument', 'agentPreset.remove',
+      // Typert endpoints are `<namespace>/<method>`, not dot-separated like
+      // the apiproxy RPC map above: starting an OAuth flow, forcing a
+      // reconnect, and editing the live mount roster all stay loopback-only.
+      'mcp/authorize-start', 'mcp/reconnect', 'mcp/set-enabled',
     ]) {
       const denied = fakeResponse()
       await routes[0]!.handler(

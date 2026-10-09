@@ -10,7 +10,10 @@
  * the next disconnect starts a fresh budget while a crash-looping server —
  * even one whose connects briefly succeed — still exhausts the cap instead of
  * restarting forever. Exhaustion unregisters the server's tools and stops;
- * disposal (including HMR) is the only way back from that state.
+ * disposal (including HMR) or a manual {@link ConnectionHandle.reconnectNow}
+ * call are the only ways back from that state (also the way back from
+ * `reconnect.enabled: false`'s own terminal `disabled` state — see
+ * `./status.ts`).
  *
  * @module
  */
@@ -26,6 +29,37 @@ import type { ToolBridgeOptions, ToolDisposers } from './tools.ts'
 import { CredentialsOAuthProvider } from './oauth.ts'
 import { DEFAULT_OAUTH_REDIRECT_PORT } from './index.ts'
 import type { Config } from './index.ts'
+import type { McpServerState, McpServerStatus } from './status.ts'
+
+/**
+ * Matches one quoted absolute POSIX path (`"/a/b"` or `'/a/b'`), redacted
+ * whole first so an embedded space or other character inside the quotes
+ * cannot split one path into a leaked fragment.
+ */
+const QUOTED_DOUBLE_PATH_RE = /"(\/[^"]*)"/g
+/** Same as {@link QUOTED_DOUBLE_PATH_RE}, for single-quoted paths. */
+const QUOTED_SINGLE_PATH_RE = /'(\/[^']*)'/g
+/**
+ * Fallback pass for an absolute POSIX path that was never quoted at all.
+ * Windows paths are out of scope — this package's connection errors
+ * (ENOENT/EADDRINUSE/stdio spawn failures) are POSIX-shaped in this
+ * deployment. Mirrors the reviewed pattern in
+ * `packages/mailbox/tool-mailbox/src/tools.ts` (SWD-99 sentinel finding).
+ */
+const BARE_ABSOLUTE_PATH_RE = /\/(?:[^\s"'<>]+\/)*[^\s"'<>]+/g
+
+/**
+ * Redact absolute filesystem paths from connection error text before it
+ * leaves the host (lastError crosses the `/api` wire to any trusted client).
+ * @param text - the raw error text.
+ * @returns the redacted text.
+ */
+function redactAbsolutePaths(text: string): string {
+  return text
+    .replace(QUOTED_DOUBLE_PATH_RE, '"<path>"')
+    .replace(QUOTED_SINGLE_PATH_RE, '\'<path>\'')
+    .replace(BARE_ABSOLUTE_PATH_RE, '<path>')
+}
 
 /**
  * Server names whose authorization-required guidance already logged this
@@ -41,9 +75,18 @@ const AUTH_GUIDANCE_SHOWN = new Set<string>()
  * @param ctx - plugin context carrying the credential store and logger.
  * @param config - resolved transport configuration (streamable-http when auth applies).
  * @param label - diagnostic prefix naming this plugin instance.
+ * @param onNeedsAuthorization - invoked on every authorization-URL event (not
+ *   just the first), so the status machinery can capture the current
+ *   `consentUrl` and flip to `needs-authorization` even on a later retry
+ *   whose guidance log is suppressed by {@link AUTH_GUIDANCE_SHOWN}.
  * @returns the provider, or `undefined` for unauthenticated servers.
  */
-function resolveAuthProvider(ctx: Context, config: Config, label: string): CredentialsOAuthProvider | undefined {
+function resolveAuthProvider(
+  ctx: Context,
+  config: Config,
+  label: string,
+  onNeedsAuthorization: (authorizationUrl: URL) => void,
+): CredentialsOAuthProvider | undefined {
   if (config.transport !== 'streamable-http' || config.auth === undefined) return undefined
   const credentials = ctx.get('credentials')
   if (credentials === undefined) {
@@ -62,6 +105,7 @@ function resolveAuthProvider(ctx: Context, config: Config, label: string): Crede
     // whichever process consents first.
     redirectUri: `http://127.0.0.1:${config.auth.redirectPort ?? DEFAULT_OAUTH_REDIRECT_PORT}/callback`,
     onAuthorizationUrl(authorizationUrl) {
+      onNeedsAuthorization(authorizationUrl)
       if (AUTH_GUIDANCE_SHOWN.has(config.serverName)) return
       AUTH_GUIDANCE_SHOWN.add(config.serverName)
       ctx.logger.error([
@@ -159,7 +203,49 @@ export interface ConnectionHandle {
    * still owns.
    */
   dispose(): Promise<void>
+  /** Current point-in-time status; see {@link McpServerStatus}. */
+  status(): McpServerStatus
+  /**
+   * Force one reconnect attempt now, bypassing backoff. A loud no-op unless
+   * the current state is `gave-up` or `disabled` (see the module doc on
+   * `status.ts` for why those are the only two states this ever recovers
+   * from), and rate-limited to one accepted call per server per
+   * {@link MANUAL_RECONNECT_MIN_INTERVAL_MS}.
+   */
+  reconnectNow(): void
+  /** Subscribe to every status transition. @returns an unsubscribe function. */
+  onStatusChange(callback: (status: McpServerStatus) => void): () => void
+  /** The OAuth provider for this server, reused by `authorize-start`; `undefined` for unauthenticated servers. */
+  readonly authProvider: CredentialsOAuthProvider | undefined
+  /**
+   * Internal-only peek at the most recently captured consent URL — NEVER part
+   * of {@link McpServerStatus} (SWD-164 sentinel finding: a leaked consent URL
+   * carries the CSRF `state` and lets whoever opens it complete the pending
+   * flow, so it must never cross the `/api` wire to any client, privileged or
+   * not). `authorize-start` ({@link ../status-registry.ts}) is the only
+   * caller: it triggers the capture via `sdkAuth`, then reads it back here in
+   * the same synchronous turn to hand the URL to the ONE caller who asked for
+   * it, over the privileged RPC response rather than the public status poll.
+   * `undefined` whenever no consent URL is currently pending.
+   */
+  peekConsentUrl(): string | undefined
+  /**
+   * Internal recovery hook for `authorize-start`'s own completion handler
+   * ({@link ../status-registry.ts}): force one immediate attempt after a
+   * fresh grant, regardless of current state (even `connecting` mid-backoff
+   * wait, or still `needs-authorization`) and without `reconnectNow`'s
+   * rate limit or state guard — this is the deterministic continuation of
+   * the SAME flow a human just completed, not a repeated manual action to
+   * throttle. A no-op while a generation is already live (`connected` or
+   * actively connecting) to avoid ever running two generations at once;
+   * that in-flight attempt will pick up the fresh grant on its own next
+   * retry if it is currently failing on the stale one.
+   */
+  forceReconnectAfterAuthorization(): void
 }
+
+/** Floor between accepted manual {@link ConnectionHandle.reconnectNow} calls, per server. */
+export const MANUAL_RECONNECT_MIN_INTERVAL_MS = 10_000
 
 /**
  * Start the supervised connection for one MCP server and keep it alive per
@@ -172,9 +258,6 @@ export interface ConnectionHandle {
  */
 export function startConnection(ctx: Context, config: Config, policy: ResolvedReconnectPolicy): ConnectionHandle {
   const label = `mcp-client(${config.serverName})`
-  // Built once per plugin instance: it closes over the credential store and
-  // the server identity, and every generation shares its persisted state.
-  const authProvider = resolveAuthProvider(ctx, config, label)
   const opts: ToolBridgeOptions = {
     registrationFailure: 'contain',
     serverName: config.serverName,
@@ -201,6 +284,60 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
   let connectedAt: number | undefined
   /** The real error from the first connection attempt, for startup-await diagnostics. */
   let firstAttemptError: unknown
+
+  // ---- Status machinery ----
+  /** Current lifecycle state exposed through {@link ConnectionHandle.status}. */
+  let state: McpServerState = 'connecting'
+  /** Redacted text of the most recent connection error; cleared on a successful connect. */
+  let lastErrorText: string | undefined
+  /** Pending OAuth consent URL; present only while `state` is `needs-authorization`. */
+  let consentUrl: string | undefined
+  /** Timestamp of the last manual {@link ConnectionHandle.reconnectNow} call this supervisor accepted. */
+  let lastManualReconnectAt = 0
+  const statusListeners = new Set<(status: McpServerStatus) => void>()
+
+  function currentStatus(): McpServerStatus {
+    const attempts = state === 'connected' || state === 'disabled' ? 0 : failedAttempts
+    return {
+      serverName: config.serverName,
+      state,
+      attempts,
+      maxAttempts: policy.maxAttempts,
+      ...(lastErrorText === undefined ? {} : { lastError: lastErrorText }),
+    }
+  }
+
+  function notifyStatusChange(): void {
+    const snapshot = currentStatus()
+    for (const listener of statusListeners) {
+      try { listener(snapshot) } catch (error) { ctx.logger.error(error) }
+    }
+  }
+
+  /** Pure state transition: clears `lastError` on reaching `connected`, clears `consentUrl` on leaving `needs-authorization`. */
+  function setState(next: McpServerState): void {
+    state = next
+    if (next === 'connected') lastErrorText = undefined
+    if (next !== 'needs-authorization') consentUrl = undefined
+    notifyStatusChange()
+  }
+
+  /** Record the latest connection error without changing `state` (a retry may still be scheduled). */
+  function recordError(message: string): void {
+    lastErrorText = redactAbsolutePaths(message)
+    notifyStatusChange()
+  }
+
+  /** Fires on every authorization-URL event (not just the first — {@link AUTH_GUIDANCE_SHOWN} gates the log, not this). */
+  function onNeedsAuthorization(authorizationUrl: URL): void {
+    if (disposed) return
+    consentUrl = authorizationUrl.toString()
+    setState('needs-authorization')
+  }
+
+  // Built once per plugin instance: it closes over the credential store and
+  // the server identity, and every generation shares its persisted state.
+  const authProvider = resolveAuthProvider(ctx, config, label, onNeedsAuthorization)
 
   /** A generation may act only while it is the current one on a live plugin. */
   const isCurrent = (generation: Client): boolean => !disposed && client === generation
@@ -249,6 +386,7 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
         ? 'connection lost and reconnect is disabled — registered tools will fail until an HMR reload or Host restart'
         : 'connection failed and reconnect is disabled — no tools were registered; reload the plugin or restart the Host to connect'
       ctx.logger.error(`${label}: ${message}`)
+      setState('disabled')
       return
     }
     // A connection that stayed up past the stability window (= maxDelayMs, the
@@ -264,11 +402,24 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
         disposers = new Map()
       })
       ctx.logger.error(`${label}: giving up after ${policy.maxAttempts} consecutive failed reconnect attempts — tools unregistered; reload the plugin or restart the Host to reconnect`)
+      setState('gave-up')
       return
     }
     const delayMs = Math.min(policy.maxDelayMs, policy.initialDelayMs * 2 ** (failedAttempts - 1))
     const action = lostEstablishedConnection ? 'connection lost; reconnecting' : 'connection failed; retrying'
     ctx.logger.warn(`${label}: ${action} in ${delayMs}ms (attempt ${failedAttempts}/${policy.maxAttempts})`)
+    // A server that was `connected` and just dropped stays reported as
+    // `connected` (attempts 0) through the whole backoff wait unless this
+    // transitions state explicitly — `generationDown` only calls
+    // `scheduleReconnect`, it never itself changes `state`. Guarded against
+    // `needs-authorization`: an `UnauthorizedError` attempt already ran
+    // `onNeedsAuthorization` → `setState('needs-authorization')` earlier in
+    // THIS SAME failed attempt before falling through to here, and that
+    // state (with its internally-captured consent URL) must survive the
+    // backoff wait, not get clobbered back to `connecting` one line later.
+    // `setState` notifies for us, so this replaces the bare
+    // `notifyStatusChange()` this branch used before.
+    if (state !== 'needs-authorization') setState('connecting')
     reconnectTimer = setTimeout(() => {
       reconnectTimer = undefined
       settling = connectGeneration(false)
@@ -337,6 +488,7 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
       // onAuthorizationUrl hook — repeating it per attempt would only spam.
       if (isCurrent(generation) && !(error instanceof UnauthorizedError)) {
         ctx.logger.warn(`${label}: connection attempt failed: ${String(error)}`)
+        recordError(String(error))
       }
       try { await generation.close() } catch { /* transport already gone */ }
       const quiesced = hasClosed() || await waitForClose(closed.promise)
@@ -346,6 +498,12 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
         client = undefined
         clientClosed = undefined
         ctx.logger.error(`${label}: failed generation did not close within ${GENERATION_CLOSE_TIMEOUT_MS}ms — reconnect stopped to avoid overlapping server processes; reload the plugin or restart the Host to retry`)
+        // No automatic retry follows this path (unlike the ordinary give-up
+        // budget exhaustion) — report it the same way so a human has a
+        // single, consistent "it's stuck, here's the button" state rather
+        // than a status frozen on "connecting" forever.
+        recordError('failed generation did not close in time — reconnect stopped to avoid overlapping server processes')
+        setState('gave-up')
         return
       }
       generationDown(generation)
@@ -358,6 +516,7 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
     }
     if (!isCurrent(generation)) return
     connectedAt = Date.now()
+    setState('connected')
     if (failedAttempts > 0) ctx.logger.info(`${label}: reconnected and re-synced tools (attempt ${failedAttempts}/${policy.maxAttempts})`)
   }
 
@@ -403,6 +562,55 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
       await syncChain
       for (const dispose of disposers.values()) dispose()
       disposers = new Map()
+    },
+    status: currentStatus,
+    peekConsentUrl(): string | undefined {
+      return consentUrl
+    },
+    reconnectNow(): void {
+      if (disposed) {
+        ctx.logger.warn(`${label}: reconnectNow ignored — plugin instance is disposed`)
+        return
+      }
+      if (state !== 'gave-up' && state !== 'disabled') {
+        ctx.logger.warn(`${label}: reconnectNow ignored — state is "${state}", not gave-up or disabled`)
+        return
+      }
+      const now = Date.now()
+      if (now - lastManualReconnectAt < MANUAL_RECONNECT_MIN_INTERVAL_MS) {
+        ctx.logger.warn(`${label}: reconnectNow ignored — a manual reconnect was already accepted within the last ${MANUAL_RECONNECT_MIN_INTERVAL_MS}ms`)
+        return
+      }
+      lastManualReconnectAt = now
+      // A manual nudge is at least as strong evidence of a fresh start as
+      // the stability-window reset below: start the next outage's budget
+      // at attempt 1, never carrying over the exhausted count that caused
+      // `gave-up`, and clear any armed automatic retry so this attempt is
+      // never doubled.
+      if (reconnectTimer !== undefined) {
+        clearTimeout(reconnectTimer)
+        reconnectTimer = undefined
+      }
+      failedAttempts = 0
+      connectedAt = undefined
+      setState('connecting')
+      settling = connectGeneration(false)
+    },
+    onStatusChange(callback: (status: McpServerStatus) => void): () => void {
+      statusListeners.add(callback)
+      return () => { statusListeners.delete(callback) }
+    },
+    authProvider,
+    forceReconnectAfterAuthorization(): void {
+      if (disposed || client !== undefined) return
+      if (reconnectTimer !== undefined) {
+        clearTimeout(reconnectTimer)
+        reconnectTimer = undefined
+      }
+      failedAttempts = 0
+      connectedAt = undefined
+      setState('connecting')
+      settling = connectGeneration(false)
     },
   }
 }

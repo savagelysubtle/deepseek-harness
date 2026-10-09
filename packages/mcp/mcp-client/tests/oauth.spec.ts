@@ -501,4 +501,36 @@ describe('resolveAuthProvider (connection.ts) direct wiring', () => {
       await fixture.close()
     }
   })
+
+  it('a fresh 401 against a streamable-http server leaves status() at needs-authorization, with the consent URL captured internally only (never on the public status)', async () => {
+    const fixture = await startOAuthFixture()
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
+    const credPath = join(dir, 'creds.yaml')
+    try {
+      const ctx = await mountRegistry(credPath)
+      const config: Config = {
+        ...httpConfig(fixture, 'needs-auth'),
+        // A large initialDelayMs keeps the armed reconnect timer from firing
+        // (and re-entering scheduleReconnect) during the assertion window —
+        // the connection stays parked in `needs-authorization`.
+        reconnect: { enabled: true, initialDelayMs: 60_000, maxDelayMs: 60_000, maxAttempts: 5 },
+      }
+      const handle = startConnection(ctx, config, resolveReconnectPolicy(config.reconnect, 'reconnect'))
+      await handle.ready
+      const status = handle.status()
+      expect(status.state).toBe('needs-authorization')
+      // consentUrl is deliberately absent from the public status object (it
+      // carries the CSRF `state`; SWD-164 sentinel finding) — only the
+      // internal peek `authorize-start` itself uses sees it.
+      expect('consentUrl' in status).toBe(false)
+      const consentUrl = handle.peekConsentUrl()
+      expect(consentUrl).toBeDefined()
+      expect(new URL(consentUrl!).pathname).toBe('/authorize')
+      await handle.dispose()
+      await ctx.fiber.dispose()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+      await fixture.close()
+    }
+  })
 })

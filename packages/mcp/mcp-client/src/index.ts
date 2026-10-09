@@ -18,6 +18,7 @@ import z from '@deepseek-ai/schemastery'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { RECONNECT_DEFAULTS, resolveReconnectPolicy, startConnection } from './connection.ts'
 import type { ReconnectConfig } from './connection.ts'
+import { ensureStatusRegistry } from './status-registry.ts'
 // Side-effect type import: declaration-merges `ctx.tools` onto Context.
 import type {} from '@deepseek-ai/dsh-tools'
 
@@ -25,6 +26,21 @@ export type { McpResult } from './tools.ts'
 export type { ReconnectConfig, ResolvedReconnectPolicy } from './connection.ts'
 export { CredentialsOAuthProvider, buildClientMetadata, oauthCredentialRef } from './oauth.ts'
 export type { OAuthCredentialStore } from './oauth.ts'
+export { McpStatusRegistryService, ensureStatusRegistry } from './status-registry.ts'
+export type { McpStatusRegistryOptions } from './status-registry.ts'
+export type {
+  McpAuthorizeStartResult,
+  McpServerState,
+  McpServerStatus,
+} from './status.ts'
+export {
+  MCP_AUTHORIZE_START_ENDPOINT,
+  MCP_RECONNECT_ENDPOINT,
+  MCP_SET_ENABLED_ENDPOINT,
+  MCP_STATUS_CHANGED_EVENT,
+  MCP_STATUS_ENDPOINT,
+  MCP_STATUS_NAMESPACE,
+} from './status.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'mcp-client'
@@ -49,8 +65,13 @@ const CREDENTIALS_WAIT_TIMEOUT_MS = 10_000
 /** Poll granularity while waiting on {@link CREDENTIALS_WAIT_TIMEOUT_MS}. */
 const CREDENTIALS_POLL_INTERVAL_MS = 50
 
-/** Valid `serverName`, kept below the public tool-name budget. */
-const SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]{1,32}$/
+/**
+ * Valid `serverName`, kept below the public tool-name budget. Exported so
+ * `status-registry.ts`'s `set-enabled` validates the exact same grammar
+ * before it ever touches `cordis.patch.yml` — one pattern, not two that
+ * could drift.
+ */
+export const SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]{1,32}$/
 
 /**
  * Live `serverName` reservations per app, keyed off `ctx.root` (multiple apps
@@ -254,6 +275,16 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   ctx.effect(() => {
     return () => connection.dispose()
   }, 'mcp-client.connection')
+
+  // The status registry is a single shared singleton per app (lazily
+  // mounted on ctx.root, not this instance's own ctx — see
+  // status-registry.ts), so every server's status is visible through one
+  // `mcp/status` call regardless of which instance activated first.
+  const statusRegistry = await ensureStatusRegistry(ctx)
+  ctx.effect(() => {
+    const unregister = statusRegistry.register(config, connection)
+    return unregister
+  }, 'mcp-client.statusRegistration')
 
   // Block plugin activation on the initial connection + tool discovery so
   // Cordis consumers observe the tools immediately after the fiber activates.

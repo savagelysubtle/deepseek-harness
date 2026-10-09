@@ -2624,6 +2624,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'restriction', description: 'the seat, the effective outcome, and the muted/degraded conditions.' }],
   },
   {
+    name: 'mcp/status-changed',
+    mode: 'emit',
+    signature: '\'mcp/status-changed\'(status: McpServerStatus): void',
+    summary: 'One server\'s status changed.',
+    description: 'One server\'s status changed. Forwarded to clients verbatim only once `packages/api/remotes/src/remote-events.ts`\'s allowlist names it.',
+    parameters: [{ name: 'status', description: 'the server\'s new point-in-time status.' }],
+  },
+  {
     name: 'session-telemetry/record',
     mode: 'waterfall',
     signature: '\'session-telemetry/record\'(record: SessionTelemetryRecord, next: () => SessionTelemetryRecord): SessionTelemetryRecord',
@@ -3694,6 +3702,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'ManualCompactAgentContext',
     declaration: 'export interface ManualCompactAgentContext extends CompactionAgentContext {\n    runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>;\n}',
+  },
+  {
+    name: 'McpServerState',
+    declaration: 'export type McpServerState = \'connected\' | \'connecting\' | \'needs-authorization\' | \'gave-up\' | \'disabled\';',
+  },
+  {
+    name: 'McpServerStatus',
+    declaration: 'export interface McpServerStatus {\n    serverName: string;\n    state: McpServerState;\n    attempts: number;\n    maxAttempts: number;\n    lastError?: string;\n}',
   },
   {
     name: 'MemoryEntry',

@@ -59,7 +59,7 @@ vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
 // vi.mock is hoisted above static imports, so the modules under test see the
 // mocked SDK even through a static import.
 import { apply } from '@deepseek-ai/dsh-mcp-client/src/index.ts'
-import { RECONNECT_DEFAULTS, resolveReconnectPolicy, startConnection } from '@deepseek-ai/dsh-mcp-client/src/connection.ts'
+import { MANUAL_RECONNECT_MIN_INTERVAL_MS, RECONNECT_DEFAULTS, resolveReconnectPolicy, startConnection } from '@deepseek-ai/dsh-mcp-client/src/connection.ts'
 
 // ---- Helpers ----
 
@@ -471,6 +471,222 @@ describe('reconnect supervisor', () => {
     const staleHandler = mockSetNotificationHandler.mock.calls[0]![1] as () => Promise<void>
     await staleHandler()
     expect(mockListTools).toHaveBeenCalledTimes(listCalls)
+  })
+})
+
+// ---- Status, manual reconnectNow, and forceReconnectAfterAuthorization ----
+
+describe('connection status and manual recovery', () => {
+  let ctx: Context
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    instances.length = 0
+    mockConnect.mockResolvedValue(undefined)
+    mockClose.mockImplementation(function (this: { onclose?: () => void }) {
+      this.onclose?.()
+      return Promise.resolve()
+    })
+    mockListTools.mockResolvedValue(listing('remote'))
+    ctx = await mountRegistry()
+  })
+
+  it('redacts an absolute path out of a connection error before it reaches status().lastError', async () => {
+    mockConnect.mockRejectedValue(new Error('spawn failed: ENOENT, open \'/home/steve/.dsh/secret/token.json\''))
+    const handle = startConnection(ctx, stdioConfig({ enabled: false }), resolveReconnectPolicy({ enabled: false }, 'reconnect'))
+    await handle.ready
+    const status = handle.status()
+    expect(status.state).toBe('disabled')
+    expect(status.lastError).toBeDefined()
+    expect(status.lastError).not.toContain('/home/steve/.dsh/secret/token.json')
+    expect(status.lastError).toContain('<path>')
+    await handle.dispose()
+  })
+
+  it('reports connecting (not a stale connected) with attempts reflecting the outage during the backoff wait, then gives up at the budget', async () => {
+    const { errors } = captureLogs(ctx)
+    const handle = startConnection(
+      ctx,
+      stdioConfig({ initialDelayMs: 30, maxDelayMs: 30, maxAttempts: 1 }),
+      resolveReconnectPolicy({ initialDelayMs: 30, maxDelayMs: 30, maxAttempts: 1 }, 'reconnect'),
+    )
+    await handle.ready
+    expect(handle.status().state).toBe('connected')
+
+    // The live generation drops; scheduleReconnect must stop reporting the
+    // stale 'connected' state through the whole backoff wait.
+    mockConnect.mockRejectedValue(new Error('server gone'))
+    instances[0]!.onclose?.()
+    await vi.waitFor(() => { expect(handle.status().state).toBe('connecting') })
+    expect(handle.status().attempts).toBe(1)
+
+    // The one scheduled retry (maxAttempts: 1) also fails, exhausting the budget.
+    await vi.waitFor(() => {
+      expect(errors.some(line => line.includes('giving up after 1 consecutive failed reconnect attempts'))).toBe(true)
+    })
+    expect(handle.status().state).toBe('gave-up')
+    await handle.dispose()
+  })
+
+  it('reconnectNow is a loud no-op while connected', async () => {
+    const { warns } = captureLogs(ctx)
+    const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 2 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 2 }, 'reconnect'))
+    await handle.ready
+    expect(handle.status().state).toBe('connected')
+
+    handle.reconnectNow()
+    expect(warns.some(line => line.includes('reconnectNow ignored — state is "connected"'))).toBe(true)
+    expect(mockConnect).toHaveBeenCalledTimes(1)
+    await handle.dispose()
+  })
+
+  it('reconnectNow recovers a given-up connection, re-registering tools, and is rate-limited against a second immediate call', async () => {
+    const { errors, warns } = captureLogs(ctx)
+    mockConnect.mockRejectedValue(new Error('server gone'))
+    const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }, 'reconnect'))
+    await handle.ready
+    await vi.waitFor(() => {
+      expect(errors.some(line => line.includes('giving up after 1 consecutive failed reconnect attempts'))).toBe(true)
+    })
+    expect(handle.status().state).toBe('gave-up')
+
+    mockConnect.mockResolvedValue(undefined)
+    handle.reconnectNow()
+    expect(handle.status().state).toBe('connecting')
+    await vi.waitFor(() => { expect(handle.status().state).toBe('connected') })
+
+    // A second manual call within the rate-limit window is ignored — but
+    // state is 'connected' now anyway, so reconnectNow's STATE guard already
+    // covers this; force it back to gave-up to isolate the rate-limit guard
+    // itself (not just the state guard) in the next test.
+    handle.reconnectNow()
+    expect(warns.some(line => line.includes('reconnectNow ignored — state is "connected"'))).toBe(true)
+    await handle.dispose()
+  })
+
+  it('a second reconnectNow within the manual rate-limit window is ignored even from gave-up again', async () => {
+    const { errors, warns } = captureLogs(ctx)
+    mockConnect.mockRejectedValue(new Error('server gone'))
+    const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }, 'reconnect'))
+    await handle.ready
+    await vi.waitFor(() => {
+      expect(errors.some(line => line.includes('giving up after 1 consecutive failed reconnect attempts'))).toBe(true)
+    })
+
+    // First manual call is accepted (still fails, back to gave-up).
+    handle.reconnectNow()
+    await vi.waitFor(() => { expect(handle.status().state).toBe('gave-up') })
+    const attemptsAfterFirst = mockConnect.mock.calls.length
+
+    // Immediately retrying is rejected by the 10s floor, not re-attempted.
+    handle.reconnectNow()
+    expect(warns.some(line => line.includes('a manual reconnect was already accepted within the last'))).toBe(true)
+    expect(mockConnect).toHaveBeenCalledTimes(attemptsAfterFirst)
+    await handle.dispose()
+  })
+
+  it('cycles give-up -> reconnectNow -> give-up across two independent manual attempts', async () => {
+    vi.useFakeTimers()
+    try {
+      const { errors } = captureLogs(ctx)
+      mockConnect.mockRejectedValue(new Error('server gone'))
+      const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }, 'reconnect'))
+      // maxAttempts: 1 takes TWO failed generations to exceed the budget (the
+      // initial attempt plus one scheduled retry) — advance well past both.
+      await vi.advanceTimersByTimeAsync(20)
+      expect(handle.status().state).toBe('gave-up')
+      expect(errors.filter(line => line.includes('giving up')).length).toBe(1)
+
+      // Clear the manual rate-limit floor between the two manual attempts.
+      vi.setSystemTime(Date.now() + MANUAL_RECONNECT_MIN_INTERVAL_MS + 1)
+      handle.reconnectNow()
+      await vi.advanceTimersByTimeAsync(20)
+      expect(handle.status().state).toBe('gave-up')
+      expect(errors.filter(line => line.includes('giving up')).length).toBe(2)
+
+      vi.setSystemTime(Date.now() + MANUAL_RECONNECT_MIN_INTERVAL_MS + 1)
+      handle.reconnectNow()
+      await vi.advanceTimersByTimeAsync(20)
+      expect(handle.status().state).toBe('gave-up')
+      expect(errors.filter(line => line.includes('giving up')).length).toBe(3)
+      await handle.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reconnectNow recovers from the disabled state (reconnect.enabled: false)', async () => {
+    const { errors } = captureLogs(ctx)
+    mockConnect.mockRejectedValueOnce(new Error('refused'))
+    const handle = startConnection(ctx, stdioConfig({ enabled: false }), resolveReconnectPolicy({ enabled: false }, 'reconnect'))
+    await handle.ready
+    expect(handle.status().state).toBe('disabled')
+    expect(errors.some(line => line.includes('connection failed and reconnect is disabled'))).toBe(true)
+
+    mockConnect.mockResolvedValue(undefined)
+    handle.reconnectNow()
+    await vi.waitFor(() => { expect(handle.status().state).toBe('connected') })
+    await handle.dispose()
+  })
+
+  it('reconnectNow ignores a disposed handle', async () => {
+    const { warns } = captureLogs(ctx)
+    mockConnect.mockRejectedValue(new Error('server gone'))
+    const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }, 'reconnect'))
+    await handle.ready
+    await handle.dispose()
+    handle.reconnectNow()
+    expect(warns.some(line => line.includes('reconnectNow ignored — plugin instance is disposed'))).toBe(true)
+  })
+
+  it('onStatusChange delivers every transition until unsubscribed', async () => {
+    mockConnect.mockRejectedValueOnce(new Error('first attempt fails'))
+    const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 3 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 3 }, 'reconnect'))
+    const seen: string[] = []
+    const unsubscribe = handle.onStatusChange((status) => { seen.push(status.state) })
+    await handle.ready
+    await vi.waitFor(() => { expect(handle.status().state).toBe('connected') })
+    expect(seen.length).toBeGreaterThan(0)
+
+    unsubscribe()
+    const seenAtUnsubscribe = seen.length
+    // The live generation, not the stale failed-attempt instance: a close
+    // signal from a replaced generation is ignored (see the dedicated test
+    // for that behavior above), so it would never prove unsubscribe works.
+    instances.at(-1)!.onclose?.()
+    await vi.waitFor(() => { expect(mockConnect).toHaveBeenCalledTimes(3) })
+    expect(seen.length).toBe(seenAtUnsubscribe)
+    await handle.dispose()
+  })
+
+  it('forceReconnectAfterAuthorization is a no-op while a generation is already live, but recovers a given-up connection', async () => {
+    const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 2 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 2 }, 'reconnect'))
+    await handle.ready
+    expect(handle.status().state).toBe('connected')
+
+    // A live generation: calling it must not start a second one.
+    handle.forceReconnectAfterAuthorization()
+    expect(mockConnect).toHaveBeenCalledTimes(1)
+    expect(instances).toHaveLength(1)
+
+    // Force it down, then recover — unlike reconnectNow, no rate limit and
+    // no state guard: this is the authorize-start completion's own hand-off.
+    mockConnect.mockRejectedValue(new Error('server gone'))
+    instances[0]!.onclose?.()
+    await vi.waitFor(() => { expect(handle.status().state).toBe('gave-up') })
+
+    mockConnect.mockResolvedValue(undefined)
+    handle.forceReconnectAfterAuthorization()
+    await vi.waitFor(() => { expect(handle.status().state).toBe('connected') })
+    await handle.dispose()
+  })
+
+  it('forceReconnectAfterAuthorization is a no-op once disposed', async () => {
+    const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }, 'reconnect'))
+    await handle.ready
+    await handle.dispose()
+    expect(() => { handle.forceReconnectAfterAuthorization() }).not.toThrow()
+    expect(mockConnect).toHaveBeenCalledTimes(1)
   })
 })
 
