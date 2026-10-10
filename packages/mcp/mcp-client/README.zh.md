@@ -76,7 +76,7 @@ MCP 客户端桥接插件：连接外部 [Model Context Protocol](https://modelc
 dsh-mcp-client-auth --url https://mcp.example.com/mcp --server-name example
 ```
 
-它会打印授权 URL，在 `127.0.0.1:<auth.redirectPort>`（默认 `14506`；如需修改，请在此命令和插件配置中同时传入 `--redirect-port`）上捕获重定向，交换 code 并写入 token。运行中的 Host 会在下一次连接尝试时取到这些 token，无需重启。缺少同意时，Host 会将同一 URL 记录一次日志并附上运行 CLI 的指引，同时在正常重连预算内继续重试；`--reset` 可重新开始整个授权。
+它会打印授权 URL，在 `127.0.0.1:<auth.redirectPort>`（默认 `14506`；如需修改，请在此命令和插件配置中同时传入 `--redirect-port`）上捕获重定向，交换 code 并写入 token。运行中的 Host 会在下一次连接尝试时取到这些 token，无需重启。缺少同意时，Host 从不记录该 URL——它只记录一次指引（前往「设置 > 工具」，或运行 CLI），同时在正常重连预算内继续重试；`--reset` 可重新开始整个授权。
 
 ## 行为
 

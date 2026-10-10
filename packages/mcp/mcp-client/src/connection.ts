@@ -108,11 +108,9 @@ function resolveAuthProvider(
       onNeedsAuthorization(authorizationUrl)
       if (AUTH_GUIDANCE_SHOWN.has(config.serverName)) return
       AUTH_GUIDANCE_SHOWN.add(config.serverName)
-      ctx.logger.error([
-        `${label}: human consent required to authorize MCP access.`,
-        `Open this URL, approve access, then complete the login with: dsh-mcp-client-auth --server-name ${config.serverName}`,
-        String(authorizationUrl),
-      ].join('\n  '))
+      ctx.logger.error(
+        `${label}: human consent required to authorize MCP access. Open Settings > Tools and click Authorize, or run: dsh-mcp-client-auth --server-name ${config.serverName}`,
+      )
     },
   })
   return provider
