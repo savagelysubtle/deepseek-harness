@@ -1,0 +1,160 @@
+/* Tools settings section, in the settings-panel design language shared with
+ * ModelsSection: 14/22 body, 12/18 caption, capsule controls (h28 r14 dense
+ * row actions), `border-l2` hairlines. Every color resolves through a
+ * `--dsw-alias-*` token — bare `--border`/`--text-*` names are undefined
+ * here and would render their light-mode literal fallbacks under dark. */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 720px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.title {
+  margin: 0;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+}
+
+.intro {
+  margin: 0;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.status {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.failure {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.failure p {
+  margin: 0;
+}
+
+.refreshButton,
+.secondaryButton {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 14px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.refreshButton:hover,
+.secondaryButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.row {
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rowHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.identity {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.serverName {
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stateTag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  border-radius: 5px;
+  padding: 1px 6px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.stateTag[data-state='connected'] {
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent);
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.stateTag[data-state='needs-authorization'] {
+  background: color-mix(in srgb, var(--dsw-alias-state-warn-label) 10%, transparent);
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.stateTag[data-state='gave-up'] {
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.lastError,
+.error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-state-error-primary);
+}

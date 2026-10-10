@@ -45,6 +45,7 @@
 | [permission-presets.md](permission-presets.md) | 权限预设层：`PresetSpec`/`PresetOption`、派生的 `custom` 状态、仅记日志的 `permission/preset` 事件 |
 | [plan.md](plan.md) | 计划模式：仅记日志的 `plan/mode` 状态、待定选择的冲刷、`PlanModeConfig`、`exit_plan_mode` 审阅流程 |
 | [mailbox.md](mailbox.md) | 持久代理邮箱 seam：地址文法、存储消息生命周期、认领与落定、提供方契约与 steering 投递 |
+| [mcp.md](mcp.md) | MCP 客户端桥接层的实时状态线上契约：`McpServerState`、`McpServerStatus`、`mcp/status-changed` 事件,以及 Settings 面板驱动的 authorize/reconnect/set-enabled 操作 |
 | [memory.md](memory.md) | 工作区作用域记忆服务：项目作用域、限额、read/write/list/search 契约与面向模型的工具 |
 | [invariants.md](invariants.md) | 运行时不变式注册表：选择配置 `Config`、`InvariantInstaller`/`InvariantFailure`、空配套插件约定 |
 | [web-server.md](web-server.md) | HTTP 载体：`WebRouteKind`/`WebRoute`、匹配顺序、可认领的回退席位、index 渲染挂接点 |

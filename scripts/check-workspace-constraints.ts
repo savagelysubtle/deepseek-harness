@@ -149,6 +149,15 @@ const packageFileExtras: Readonly<Record<string, readonly string[]>> = {
   // their own bundle beside the seam root; resolved through the package's
   // ./local, ./tool, and ./local-plugin exports respectively.
   '@deepseek-ai/dsh-memory': ['lib/local.js', 'lib/tool.js', 'lib/local-plugin.js'],
+  // The status contract subpath ships as its own bundle: the Typert
+  // generator requires every Remote-boundary type (McpServerStatus,
+  // McpAuthorizeStartResult) to be exported from a public non-root subpath,
+  // resolved through the package's ./status export.
+  '@deepseek-ai/dsh-mcp-client': ['lib/status.js'],
+  // Same rationale, moved with the Remote-boundary types it now carries
+  // (McpAuthorizeStartResult, the mcp/status-changed Events augmentation) —
+  // SWD-164 round 5, defect 2.
+  '@deepseek-ai/dsh-mcp-status': ['lib/status.js'],
 }
 
 function sameStringList(actual: readonly string[] | undefined, expected: readonly string[]): boolean {

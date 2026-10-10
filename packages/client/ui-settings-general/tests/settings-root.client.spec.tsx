@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useEffect, useState } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
-import type { SettingsRootComponentProps } from '../src/client/shell-contract.ts'
+import type { SettingsOpenSectionRequest, SettingsRootComponentProps } from '../src/client/shell-contract.ts'
 import { SettingsRoot } from '../src/client/SettingsRoot.tsx'
 
 afterEach(cleanup)
@@ -35,6 +35,10 @@ function mount({
   // plays a ledger change through the same observable contract.
   let current = rows
   const listeners = new Set<() => void>()
+  // Same observable shape for the settings/open-section request source;
+  // fireOpenRequest() stands in for apply()'s ctx.on handler notifying it.
+  let currentOpenRequest: SettingsOpenSectionRequest | undefined
+  const openListeners = new Set<() => void>()
   const renderSlot = vi.fn(
     ((key: string, _owner: unknown, opts?: { only?: string }) => {
       if (key === 'settings.section') return <div data-testid={`section-${opts?.only ?? 'all'}`} />
@@ -63,16 +67,40 @@ function mount({
       }, [])
       return select(current)
     },
+    useOpenRequests: (select) => {
+      const [, force] = useState(0)
+      useEffect(() => {
+        const listener = () => { force(n => n + 1) }
+        openListeners.add(listener)
+        return () => { openListeners.delete(listener) }
+      }, [])
+      return select(currentOpenRequest)
+    },
     renderSlot,
   }
-  const view = render(<SettingsRoot {...props} />)
+  let view = render(<SettingsRoot {...props} />)
   const bump = (next: Row[]) => {
     act(() => {
       current = next
       for (const fn of [...listeners]) fn()
     })
   }
-  return { view, renderSlot, bump, listeners }
+  const fireOpenRequest = (next: SettingsOpenSectionRequest | undefined) => {
+    act(() => {
+      currentOpenRequest = next
+      for (const fn of [...openListeners]) fn()
+    })
+  }
+  // Unmounts the React tree and renders a fresh instance reusing the SAME
+  // `props` closure — standing in for a real remount, where apply()'s
+  // plugin-lifetime `currentOpenRequest` (unlike the React tree) survives
+  // untouched.
+  const remount = () => {
+    view.unmount()
+    view = render(<SettingsRoot {...props} />)
+    return view
+  }
+  return { view, renderSlot, bump, listeners, fireOpenRequest, openListeners, remount }
 }
 
 function openPanel() {
@@ -265,5 +293,86 @@ describe('SettingsPanel navigation', () => {
     expect(listeners.size).toBe(1)
     view.unmount()
     expect(listeners.size).toBe(0)
+  })
+})
+
+describe('SettingsRoot settings/open-section requests', () => {
+  it('opens the panel and selects the requested section', () => {
+    const { fireOpenRequest } = mount({
+      rows: [
+        { id: 'general', order: 0, label: 'General' },
+        { id: 'tools', order: 25, label: 'Tools' },
+      ],
+    })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    fireOpenRequest({ section: 'tools' })
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Tools' }).getAttribute('aria-current')).toBe('true')
+    expect(screen.getByTestId('section-tools')).toBeTruthy()
+  })
+
+  it('a repeated request for the same section re-fires (no stale-reference guard)', () => {
+    const { fireOpenRequest } = mount({
+      rows: [
+        { id: 'general', order: 0, label: 'General' },
+        { id: 'tools', order: 25, label: 'Tools' },
+      ],
+    })
+    fireOpenRequest({ section: 'tools' })
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    fireOpenRequest({ section: 'tools' })
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    expect(screen.getByTestId('section-tools')).toBeTruthy()
+  })
+
+  it('a request source reverting to undefined after being consumed is a no-op', () => {
+    const { fireOpenRequest } = mount({
+      rows: [
+        { id: 'general', order: 0, label: 'General' },
+        { id: 'tools', order: 25, label: 'Tools' },
+      ],
+    })
+    fireOpenRequest({ section: 'tools' })
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    expect(screen.getByTestId('section-tools')).toBeTruthy()
+
+    // apply() never actually resets its plugin-lifetime variable back to
+    // undefined once a request has landed, but the hook's type still allows
+    // it — this proves the undefined guard does not crash or reopen/reset
+    // the panel when a differing-but-undefined snapshot arrives.
+    fireOpenRequest(undefined)
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    expect(screen.getByTestId('section-tools')).toBeTruthy()
+  })
+
+  it('an unknown id (already resolved to `section: undefined` by apply) opens the default section', () => {
+    const { fireOpenRequest } = mount()
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Models' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    fireOpenRequest({ section: undefined })
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    // Falls back to the first row, same as an unregistered active id.
+    expect(screen.getByTestId('section-general')).toBeTruthy()
+  })
+
+  it('does not replay a stale request on remount (the source outlives the React tree)', () => {
+    const { fireOpenRequest, remount } = mount({
+      rows: [
+        { id: 'general', order: 0, label: 'General' },
+        { id: 'tools', order: 25, label: 'Tools' },
+      ],
+    })
+    fireOpenRequest({ section: 'tools' })
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+
+    // Simulates apply()'s plugin-lifetime request source surviving a React
+    // remount untouched: no new event fires, so the panel must stay closed.
+    remount()
+    expect(screen.queryByRole('dialog')).toBeNull()
   })
 })

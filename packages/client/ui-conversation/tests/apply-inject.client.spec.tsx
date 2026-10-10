@@ -268,6 +268,15 @@ describe('conversation slot inject API', () => {
     await b.runtime.dispose()
   })
 
+  it('openSettingsSection emits settings/open-section with the section id, rather than calling ui-settings-general directly', async () => {
+    const b = await bench()
+    const resident = b.residentApi(ROOT)
+    const emitSpy = vi.spyOn(b.runtime.ctx, 'emit')
+    resident.openSettingsSection('tools')
+    expect(emitSpy).toHaveBeenCalledExactlyOnceWith('settings/open-section', { section: 'tools' })
+    await b.runtime.dispose()
+  })
+
   it('selectWorkspace edge arms: no-session resident, empty-draft move, connect failure retryable', async () => {
     const b = await bench()
     // No-session resident (hero before any session): connect resolves and

@@ -18,7 +18,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 // Type-only: pulls ctx.locale into this program.
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {
-  SettingsOnboardingStep, SettingsRootInjected, SettingsSectionRow,
+  SettingsOnboardingStep, SettingsOpenSectionRequest, SettingsRootInjected, SettingsSectionRow,
 } from './shell-contract.ts'
 import { SettingsRoot } from './SettingsRoot.tsx'
 import { CloseLabel, HeaderContent, TriggerContent } from './chrome.tsx'
@@ -43,6 +43,22 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
     /** Shell chrome + shell-owned General section copy. */
     settings: SettingsKey
+  }
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    /**
+     * Another client package asked the Settings shell to open on one
+     * section. A section id this shell's ledger does not currently carry
+     * opens the default section instead and logs a warning — never a
+     * silent no-op. A package that emits this imports this package's
+     * `/client` entry type-only, the same way a Remote-forwarded event's
+     * face is pulled in.
+     * @param payload - target section id.
+     * @mode emit
+     */
+    'settings/open-section'(payload: { section: string }): void
   }
 }
 
@@ -81,6 +97,18 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.on('connection/reset', () => {
     refreshDocumentIfLoaded(documentController)
   }), 'ui-settings-general: metadata invalidations')
+  // Cross-package "open Settings to this section" requests: a plain local
+  // Cordis event (every client plugin shares this root ctx), folded into a
+  // fresh request object per occurrence so the shell's subscriber always
+  // re-fires, even for a repeated id.
+  let openSectionRequest: SettingsOpenSectionRequest | undefined
+  const openSectionListeners = new Set<() => void>()
+  ctx.effect(() => ctx.on('settings/open-section', (payload) => {
+    const known = ctx.slots.entries('settings.section').some(e => e.options.id === payload.section)
+    if (!known) ctx.logger.warn('ui-settings-general: unknown settings/open-section id "%s"', payload.section)
+    openSectionRequest = { section: known ? payload.section : undefined }
+    for (const listener of [...openSectionListeners]) listener()
+  }), 'ui-settings-general: open-section requests')
   // The settings shell: this package occupies the sidebar-owned hole and
   // declares the settings slots. Ledger → nav-row projection as an observable
   // source (uSES contract: getSnapshot returns the cached rows until the
@@ -136,6 +164,13 @@ export function apply(ctx: ClientContext): void {
           return onboardingSteps
         },
         subscribe: listener => ctx.slots.subscribe('settings.onboarding', listener),
+      },
+      openRequests: {
+        getSnapshot: () => openSectionRequest,
+        subscribe: (listener) => {
+          openSectionListeners.add(listener)
+          return () => { openSectionListeners.delete(listener) }
+        },
       },
     },
   })

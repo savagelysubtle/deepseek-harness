@@ -32,6 +32,12 @@
       "path": "../../llm/llm"
     },
     {
+      "path": "../../mcp/mcp-client"
+    },
+    {
+      "path": "../../mcp/mcp-status"
+    },
+    {
       "path": "../../preset/agent-presets"
     },
     {

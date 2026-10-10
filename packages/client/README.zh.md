@@ -42,6 +42,7 @@ dsh web GUI 的浏览器侧：shell 启动、浏览器与宿主通信、共享 U
 | [`ui-settings-general/`](ui-settings-general/README.md) | 提供常规设置分区。 |
 | [`ui-settings-models/`](ui-settings-models/README.md) | 提供模型提供方配置与 DeepSeek 配置引导。 |
 | [`ui-settings-plugin-inventory/`](ui-settings-plugin-inventory/README.md) | 向“插件”设置贡献只读的 Host Loader 清单标签页。 |
+| [`ui-settings-tools/`](ui-settings-tools/README.md) | 设置中的“工具”分区：MCP 服务器连接状态与授权/重连/启用停用操作。 |
 
 每个子文档负责自身的约定和详细行为。[slot 系统标准](../../.agents/notes/implemented/architecture/2026-07-22-slot-type-chain-implementation.md)与 [Web 客户端架构 Agent Note](../../.agents/notes/implemented/architecture/2026-07-19-gui-web-client-architecture.md)负责跨包组合与加载决策。
 

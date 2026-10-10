@@ -258,6 +258,10 @@ function mount(
     useWorkspaces: bindSnapshotSelector(workspaces),
     useProjection: (() => undefined),
     useComposerBlock: select => select(options.composerBlock),
+    // Unrelated to this file's scenarios: no affected MCP servers, so the
+    // Tools banner never renders and openSettingsSection is never invoked.
+    useMcpAttention: select => select([]),
+    openSettingsSection: () => {},
     useInput,
     inputActions,
     renderSlot,

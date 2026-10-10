@@ -184,6 +184,10 @@ export const zh = {
   'json.truncated': '… 已截断，共 {total} 字符',
   'clock.md': '{m}月{d}日',
   'clock.ymd': '{y}年{m}月{d}日',
+  'tools.needsAuthorization': '工具需要处理：{names} 需要授权',
+  'tools.gaveUp': '{names} 已放弃重新连接',
+  'tools.openSettings': '打开工具设置',
+  'tools.dismiss': '关闭提示',
   'founderStamp.notice': '未加盖创始人印记：该消息未经本机回环连接到达，已作为普通输入被接受。由此产生的目标变更与确认不被视为创始人本人的操作。要以创始人身份操作，请从本机直接驱动 dsh，或通过你自己的隧道连接。',
   'founderStamp.dismiss': '关闭提示',
 } satisfies Record<string, string>
@@ -367,6 +371,10 @@ export const en = {
   'json.truncated': '… truncated, {total} characters total',
   'clock.md': '{m}/{d}',
   'clock.ymd': '{y}-{m}-{d}',
+  'tools.needsAuthorization': 'Tools need attention: {names} need authorization',
+  'tools.gaveUp': '{names} gave up reconnecting',
+  'tools.openSettings': 'Open Tools settings',
+  'tools.dismiss': 'Dismiss notice',
   'founderStamp.notice': "Not founder-stamped: this message was accepted as ordinary input because it did not arrive over loopback. Goal changes and confirmations from it are not treated as the founder's own. To act as founder, drive dsh from this machine or through your own tunnel.",
   'founderStamp.dismiss': 'Dismiss notice',
 } satisfies Record<ConversationKey, string>

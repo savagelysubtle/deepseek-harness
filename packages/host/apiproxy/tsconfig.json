@@ -36,6 +36,9 @@
       "path": "../../llm/llm"
     },
     {
+      "path": "../../mcp/mcp-status"
+    },
+    {
       "path": "../../core/agent"
     },
     {

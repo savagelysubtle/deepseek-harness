@@ -13,7 +13,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import clsx from 'clsx'
 import {
-  IconAgentPresetOutline16, IconCloseOutline16, IconDataOutline16,
+  IconAgentPresetOutline16, IconApiOutline14, IconCloseOutline16, IconDataOutline16,
   IconPersonalizationOutline16, IconSettingsOutline16,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SettingsRootComponentProps, SettingsSectionRow } from './shell-contract.ts'
@@ -24,6 +24,7 @@ function navIcon(id: string) {
   if (id === 'models') return <IconDataOutline16 className={css.navIcon} size={16} />
   if (id === 'agent-presets') return <IconAgentPresetOutline16 className={css.navIcon} size={16} />
   if (id === 'plugins') return <IconPersonalizationOutline16 className={css.navIcon} size={16} />
+  if (id === 'tools') return <IconApiOutline14 className={css.navIcon} size={16} />
   return <IconSettingsOutline16 className={css.navIcon} size={16} />
 }
 
@@ -102,7 +103,9 @@ function SettingsPanel({ rows, renderSlot, activeId, onSelect, onClose }: PanelP
  * @returns the settings shell element tree.
  */
 export function SettingsRoot(props: SettingsRootComponentProps) {
-  const { wide, useSections, useOnboardingSteps, useSessions, renderSlot } = props
+  const {
+    wide, useSections, useOnboardingSteps, useOpenRequests, useSessions, renderSlot,
+  } = props
   const [open, setOpen] = useState(false)
   const [activeId, setActiveId] = useState<string | undefined>(undefined)
   const [completedOnboarding, setCompletedOnboarding] = useState<ReadonlySet<string>>(() => new Set())
@@ -114,6 +117,34 @@ export function SettingsRoot(props: SettingsRootComponentProps) {
     setActiveId(id)
     setOpen(true)
   }, [])
+
+  // Cross-package "open Settings to this section" requests (settings/open-section):
+  // a fresh request object per occurrence, so a repeated id still re-opens.
+  // apply() has already resolved an unknown id to `section: undefined` (and
+  // logged the warning) — that case opens on the default section instead of
+  // a specific one, by leaving activeId alone so the panel's own
+  // fallback-to-first-row logic (SettingsPanel's `active` derivation) picks it.
+  // The request source lives in apply()'s plugin-lifetime closure, not this
+  // component's — a remount (HMR, or any parent re-mounting this tree) sees
+  // whatever the LAST real event already left there. `consumedRequest`
+  // captures the value present at THIS mount's first render (useRef's
+  // initializer only runs once), so that already-seen value compares equal
+  // to itself on the first effect run and is treated as handled; only a
+  // genuinely new object (a request that arrives while mounted) differs from
+  // it and gets acted on.
+  const openRequest = useOpenRequests(s => s)
+  const consumedRequest = useRef(openRequest)
+  useEffect(() => {
+    if (openRequest === consumedRequest.current) return
+    consumedRequest.current = openRequest
+    if (openRequest === undefined) return
+    if (openRequest.section !== undefined) {
+      openSection(openRequest.section)
+    } else {
+      setActiveId(undefined)
+      setOpen(true)
+    }
+  }, [openRequest, openSection])
 
   // The ledger tick keeps the nav rows fresh: registrants re-register with
   // freshly localized text on locale change, and the trigger/header/close

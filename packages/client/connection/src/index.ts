@@ -117,6 +117,22 @@ const PRIVILEGED_METHODS = new Set([
   'credentials.set',
   'credentials.unset',
   'llm.discoverModels',
+  // `mcp/authorize-start` opens a loopback OAuth-callback listener and starts
+  // an authorization-code exchange for whichever server a caller names — it
+  // returns a fresh consent URL carrying a CSRF `state` token, which a
+  // remote caller could use to hijack the pending flow, so it stays
+  // privileged on that basis alone. `mcp/reconnect` forces an immediate
+  // connection attempt, bypassing the manual-retry rate limit; grouping it
+  // here keeps every mcp/* write behind one consistent gate alongside
+  // `mcp/set-enabled`, which edits the live `cordis.patch.yml` mount roster.
+  // `mcp/status` is deliberately NOT pinned: it is a read of connection
+  // state (names, attempts, redacted errors) with the same shape as the
+  // model catalog note above — no endpoints, keys, key state, or consent
+  // URLs a LAN client's Tools panel needs to withhold (the consent URL
+  // itself never appears there; see `docs/subsystems/mcp.md`).
+  'mcp/authorize-start',
+  'mcp/reconnect',
+  'mcp/set-enabled',
 ])
 
 /**

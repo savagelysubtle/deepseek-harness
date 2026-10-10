@@ -18,13 +18,52 @@ import z from '@deepseek-ai/schemastery'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { RECONNECT_DEFAULTS, resolveReconnectPolicy, startConnection } from './connection.ts'
 import type { ReconnectConfig } from './connection.ts'
+// `./handle-store.ts` imports `SERVER_NAME_PATTERN`/`Config` back from THIS
+// file — the same circular pair `status-registry.ts` used to form with
+// `./connection.ts` (see that file's former module doc, preserved in spirit
+// here): this file is the entry point that begins — and, transitively,
+// finishes — loading `./connection.ts` (imported just above) before
+// `./handle-store.ts` gets a turn, so by the time `apply()` below actually
+// calls into it, every top-level binding it needs is settled.
+import { registerMcpHandle } from './handle-store.ts'
 // Side-effect type import: declaration-merges `ctx.tools` onto Context.
 import type {} from '@deepseek-ai/dsh-tools'
 
 export type { McpResult } from './tools.ts'
-export type { ReconnectConfig, ResolvedReconnectPolicy } from './connection.ts'
+export type { ConnectionHandle, ReconnectConfig, ResolvedReconnectPolicy } from './connection.ts'
+// `RECONNECT_DEFAULTS.maxAttempts` is the attempt budget a patch-disabled
+// mount's synthesized status row reports (no live handle to read a real
+// budget from) — `@deepseek-ai/dsh-mcp-status`'s `list()` needs the same
+// default this package's own Config schema uses, not a second guess at it.
+export { RECONNECT_DEFAULTS } from './connection.ts'
 export { CredentialsOAuthProvider, buildClientMetadata, oauthCredentialRef } from './oauth.ts'
 export type { OAuthCredentialStore } from './oauth.ts'
+// The shared loopback OAuth-callback listener stays owned by this package —
+// `auth-cli.ts`'s standalone `dsh-mcp-client-auth` CLI uses it directly, and
+// `@deepseek-ai/dsh-mcp-status`'s `authorize-start` imports this same public
+// export rather than a second implementation (SWD-164 round 5, defect 2).
+export { ConsentTimeoutError, startAuthorizationCallbackListener } from './oauth-callback.ts'
+export type { AuthorizationCallbackListener, CaptureAuthorizationCodeOptions } from './oauth-callback.ts'
+export {
+  backupPatchBytes,
+  buildNextMcpPatches,
+  defaultPatchPath,
+  hashMcpPatchBytes,
+  listMcpHandles,
+  locateMcpMount,
+  readMcpPatchEntries,
+  redactAbsolutePaths,
+  registerMcpHandle,
+  subscribeMcpHandles,
+} from './handle-store.ts'
+export type {
+  McpHandleEntry,
+  McpMountLocation,
+  McpMountLookup,
+  McpPatchEntry,
+  RegisterMcpHandleOptions,
+} from './handle-store.ts'
+export type { McpServerState, McpServerStatus } from './status.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'mcp-client'
@@ -49,8 +88,13 @@ const CREDENTIALS_WAIT_TIMEOUT_MS = 10_000
 /** Poll granularity while waiting on {@link CREDENTIALS_WAIT_TIMEOUT_MS}. */
 const CREDENTIALS_POLL_INTERVAL_MS = 50
 
-/** Valid `serverName`, kept below the public tool-name budget. */
-const SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]{1,32}$/
+/**
+ * Valid `serverName`, kept below the public tool-name budget. Exported so
+ * `@deepseek-ai/dsh-mcp-status`'s `set-enabled` validates the exact same
+ * grammar before it ever touches `cordis.patch.yml` — one pattern, not two
+ * that could drift.
+ */
+export const SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]{1,32}$/
 
 /**
  * Live `serverName` reservations per app, keyed off `ctx.root` (multiple apps
@@ -254,6 +298,14 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   ctx.effect(() => {
     return () => connection.dispose()
   }, 'mcp-client.connection')
+
+  // Registration into the root-scoped handle store is unconditional — this
+  // instance must behave identically whether or not
+  // `@deepseek-ai/dsh-mcp-status` is mounted anywhere on this context tree
+  // (a headless or embedded host may have no Remote status surface at all).
+  // See `./handle-store.ts`'s module doc for why that service no longer
+  // lives in this package (SWD-164 round 5, defect 2).
+  ctx.effect(() => registerMcpHandle(ctx, config, connection), 'mcp-client.statusRegistration')
 
   // Block plugin activation on the initial connection + tool discovery so
   // Cordis consumers observe the tools immediately after the fiber activates.

@@ -45,6 +45,7 @@ One page per subsystem of the DeepSeek Harness: what it is, the data structures 
 | [permission-presets.md](permission-presets.md) | the permission-preset layer: `PresetSpec`/`PresetOption`, the derived `custom` state, the log-only `permission/preset` event |
 | [plan.md](plan.md) | plan mode: the log-only `plan/mode` state, pending-selection flush, `PlanModeConfig`, the `exit_plan_mode` review arc |
 | [mailbox.md](mailbox.md) | the durable agent-mailbox seam: address grammar, stored-message lifecycle, claims and settlement, the provider contract, and steering delivery |
+| [mcp.md](mcp.md) | the MCP client bridge's live-status wire contract: `McpServerState`, `McpServerStatus`, the `mcp/status-changed` event, and the authorize/reconnect/set-enabled actions a Settings panel drives |
 | [memory.md](memory.md) | the workspace-scoped memory service: project scoping, limits, read/write/list/search contracts, and the model-facing tool |
 | [invariants.md](invariants.md) | the runtime-invariant registry: selection `Config`, `InvariantInstaller`/`InvariantFailure`, the empty-companion contract |
 | [web-server.md](web-server.md) | the HTTP carrier: `WebRouteKind`/`WebRoute`, match order, the claimable fallback seat, index taps |

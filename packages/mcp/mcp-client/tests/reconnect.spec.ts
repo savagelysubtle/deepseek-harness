@@ -59,7 +59,8 @@ vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
 // vi.mock is hoisted above static imports, so the modules under test see the
 // mocked SDK even through a static import.
 import { apply } from '@deepseek-ai/dsh-mcp-client/src/index.ts'
-import { RECONNECT_DEFAULTS, resolveReconnectPolicy, startConnection } from '@deepseek-ai/dsh-mcp-client/src/connection.ts'
+import { MANUAL_RECONNECT_MIN_INTERVAL_MS, RECONNECT_DEFAULTS, resolveReconnectPolicy, startConnection } from '@deepseek-ai/dsh-mcp-client/src/connection.ts'
+import type { McpServerStatus } from '@deepseek-ai/dsh-mcp-client/src/status.ts'
 
 // ---- Helpers ----
 
@@ -67,6 +68,11 @@ const testToolSignal = new AbortController().signal
 
 async function mountRegistry(): Promise<Context> {
   const ctx = new Context()
+  // No profile loader is mounted in these tests, so the status registry's
+  // default cordis.patch.yml resolution (ctx.baseUrl) needs a stand-in — see
+  // defaultPatchPath in status-registry.ts. The path is never read or
+  // written by these tests; it only has to resolve to something.
+  ctx.baseUrl = 'file:///test-profile/'
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
   return ctx
@@ -471,6 +477,462 @@ describe('reconnect supervisor', () => {
     const staleHandler = mockSetNotificationHandler.mock.calls[0]![1] as () => Promise<void>
     await staleHandler()
     expect(mockListTools).toHaveBeenCalledTimes(listCalls)
+  })
+})
+
+// ---- Status, manual reconnectNow, and forceReconnectAfterAuthorization ----
+
+describe('connection status and manual recovery', () => {
+  let ctx: Context
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    instances.length = 0
+    mockConnect.mockResolvedValue(undefined)
+    mockClose.mockImplementation(function (this: { onclose?: () => void }) {
+      this.onclose?.()
+      return Promise.resolve()
+    })
+    mockListTools.mockResolvedValue(listing('remote'))
+    ctx = await mountRegistry()
+  })
+
+  it('redacts an absolute path out of a connection error before it reaches status().lastError', async () => {
+    mockConnect.mockRejectedValue(new Error('spawn failed: ENOENT, open \'/home/steve/.dsh/secret/token.json\''))
+    const handle = startConnection(ctx, stdioConfig({ enabled: false }), resolveReconnectPolicy({ enabled: false }, 'reconnect'))
+    await handle.ready
+    const status = handle.status()
+    expect(status.state).toBe('disabled')
+    expect(status.lastError).toBeDefined()
+    expect(status.lastError).not.toContain('/home/steve/.dsh/secret/token.json')
+    expect(status.lastError).toContain('<path>')
+    await handle.dispose()
+  })
+
+  it('reports connecting (not a stale connected) with attempts reflecting the outage during the backoff wait, then gives up at the budget', async () => {
+    const { errors } = captureLogs(ctx)
+    const handle = startConnection(
+      ctx,
+      stdioConfig({ initialDelayMs: 30, maxDelayMs: 30, maxAttempts: 1 }),
+      resolveReconnectPolicy({ initialDelayMs: 30, maxDelayMs: 30, maxAttempts: 1 }, 'reconnect'),
+    )
+    await handle.ready
+    expect(handle.status().state).toBe('connected')
+
+    // The live generation drops; scheduleReconnect must stop reporting the
+    // stale 'connected' state through the whole backoff wait.
+    mockConnect.mockRejectedValue(new Error('server gone'))
+    instances[0]!.onclose?.()
+    await vi.waitFor(() => { expect(handle.status().state).toBe('connecting') })
+    expect(handle.status().attempts).toBe(1)
+
+    // The one scheduled retry (maxAttempts: 1) also fails, exhausting the budget.
+    await vi.waitFor(() => {
+      expect(errors.some(line => line.includes('giving up after 1 consecutive failed reconnect attempts'))).toBe(true)
+    })
+    expect(handle.status().state).toBe('gave-up')
+    // The give-up decision counts 1 consecutive failed reconnect attempt
+    // (maxAttempts: 1) — the reported figure must match the log exactly,
+    // never the internal counter's one-higher value (SWD-164 pilot finding).
+    expect(handle.status().attempts).toBe(1)
+    await handle.dispose()
+  })
+
+  it('reconnectNow is a loud no-op while connected', async () => {
+    const { warns } = captureLogs(ctx)
+    const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 2 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 2 }, 'reconnect'))
+    await handle.ready
+    expect(handle.status().state).toBe('connected')
+
+    handle.reconnectNow()
+    expect(warns.some(line => line.includes('reconnectNow ignored — state is "connected"'))).toBe(true)
+    expect(mockConnect).toHaveBeenCalledTimes(1)
+    await handle.dispose()
+  })
+
+  it('reconnectNow recovers a given-up connection, re-registering tools, and is rate-limited against a second immediate call', async () => {
+    const { errors, warns } = captureLogs(ctx)
+    mockConnect.mockRejectedValue(new Error('server gone'))
+    const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }, 'reconnect'))
+    await handle.ready
+    await vi.waitFor(() => {
+      expect(errors.some(line => line.includes('giving up after 1 consecutive failed reconnect attempts'))).toBe(true)
+    })
+    expect(handle.status().state).toBe('gave-up')
+
+    mockConnect.mockResolvedValue(undefined)
+    handle.reconnectNow()
+    expect(handle.status().state).toBe('connecting')
+    await vi.waitFor(() => { expect(handle.status().state).toBe('connected') })
+
+    // A second manual call within the rate-limit window is ignored — but
+    // state is 'connected' now anyway, so reconnectNow's STATE guard already
+    // covers this; force it back to gave-up to isolate the rate-limit guard
+    // itself (not just the state guard) in the next test.
+    handle.reconnectNow()
+    expect(warns.some(line => line.includes('reconnectNow ignored — state is "connected"'))).toBe(true)
+    await handle.dispose()
+  })
+
+  it('a second reconnectNow within the manual rate-limit window is ignored even from gave-up again', async () => {
+    const { errors, warns } = captureLogs(ctx)
+    mockConnect.mockRejectedValue(new Error('server gone'))
+    const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }, 'reconnect'))
+    await handle.ready
+    await vi.waitFor(() => {
+      expect(errors.some(line => line.includes('giving up after 1 consecutive failed reconnect attempts'))).toBe(true)
+    })
+
+    // First manual call is accepted (still fails, back to gave-up).
+    handle.reconnectNow()
+    await vi.waitFor(() => { expect(handle.status().state).toBe('gave-up') })
+    const attemptsAfterFirst = mockConnect.mock.calls.length
+
+    // Immediately retrying is rejected by the 10s floor, not re-attempted.
+    handle.reconnectNow()
+    expect(warns.some(line => line.includes('a manual reconnect was already accepted within the last'))).toBe(true)
+    expect(mockConnect).toHaveBeenCalledTimes(attemptsAfterFirst)
+    await handle.dispose()
+  })
+
+  it('cycles give-up -> reconnectNow -> give-up across two independent manual attempts', async () => {
+    vi.useFakeTimers()
+    try {
+      const { errors } = captureLogs(ctx)
+      mockConnect.mockRejectedValue(new Error('server gone'))
+      const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }, 'reconnect'))
+      // maxAttempts: 1 takes TWO failed generations to exceed the budget (the
+      // initial attempt plus one scheduled retry) — advance well past both.
+      await vi.advanceTimersByTimeAsync(20)
+      expect(handle.status().state).toBe('gave-up')
+      expect(errors.filter(line => line.includes('giving up')).length).toBe(1)
+
+      // Clear the manual rate-limit floor between the two manual attempts.
+      vi.setSystemTime(Date.now() + MANUAL_RECONNECT_MIN_INTERVAL_MS + 1)
+      handle.reconnectNow()
+      await vi.advanceTimersByTimeAsync(20)
+      expect(handle.status().state).toBe('gave-up')
+      expect(errors.filter(line => line.includes('giving up')).length).toBe(2)
+
+      vi.setSystemTime(Date.now() + MANUAL_RECONNECT_MIN_INTERVAL_MS + 1)
+      handle.reconnectNow()
+      await vi.advanceTimersByTimeAsync(20)
+      expect(handle.status().state).toBe('gave-up')
+      expect(errors.filter(line => line.includes('giving up')).length).toBe(3)
+      await handle.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reconnectNow recovers from the disabled state (reconnect.enabled: false)', async () => {
+    const { errors } = captureLogs(ctx)
+    mockConnect.mockRejectedValueOnce(new Error('refused'))
+    const handle = startConnection(ctx, stdioConfig({ enabled: false }), resolveReconnectPolicy({ enabled: false }, 'reconnect'))
+    await handle.ready
+    expect(handle.status().state).toBe('disabled')
+    expect(errors.some(line => line.includes('connection failed and reconnect is disabled'))).toBe(true)
+
+    mockConnect.mockResolvedValue(undefined)
+    handle.reconnectNow()
+    await vi.waitFor(() => { expect(handle.status().state).toBe('connected') })
+    await handle.dispose()
+  })
+
+  it('reconnectNow ignores a disposed handle', async () => {
+    const { warns } = captureLogs(ctx)
+    mockConnect.mockRejectedValue(new Error('server gone'))
+    const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }, 'reconnect'))
+    await handle.ready
+    await handle.dispose()
+    handle.reconnectNow()
+    expect(warns.some(line => line.includes('reconnectNow ignored — plugin instance is disposed'))).toBe(true)
+  })
+
+  it('onStatusChange delivers every transition until unsubscribed', async () => {
+    mockConnect.mockRejectedValueOnce(new Error('first attempt fails'))
+    const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 3 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 3 }, 'reconnect'))
+    const seen: string[] = []
+    const unsubscribe = handle.onStatusChange((status) => { seen.push(status.state) })
+    await handle.ready
+    await vi.waitFor(() => { expect(handle.status().state).toBe('connected') })
+    expect(seen.length).toBeGreaterThan(0)
+
+    unsubscribe()
+    const seenAtUnsubscribe = seen.length
+    // The live generation, not the stale failed-attempt instance: a close
+    // signal from a replaced generation is ignored (see the dedicated test
+    // for that behavior above), so it would never prove unsubscribe works.
+    instances.at(-1)!.onclose?.()
+    await vi.waitFor(() => { expect(mockConnect).toHaveBeenCalledTimes(3) })
+    expect(seen.length).toBe(seenAtUnsubscribe)
+    await handle.dispose()
+  })
+
+  it('a throwing onStatusChange listener is logged and does not stop delivery to other listeners', async () => {
+    const { errors } = captureLogs(ctx)
+    const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 2 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 2 }, 'reconnect'))
+    const seenByWellBehaved: string[] = []
+    handle.onStatusChange(() => { throw new Error('listener boom') })
+    handle.onStatusChange((status) => { seenByWellBehaved.push(status.state) })
+    await handle.ready
+
+    expect(seenByWellBehaved).toContain('connected')
+    expect(errors.some(line => line.includes('listener boom'))).toBe(true)
+    await handle.dispose()
+  })
+
+  it('forceReconnectAfterAuthorization is a no-op while a generation is already live, but recovers a given-up connection', async () => {
+    const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 2 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 2 }, 'reconnect'))
+    await handle.ready
+    expect(handle.status().state).toBe('connected')
+
+    // A live generation: calling it must not start a second one.
+    handle.forceReconnectAfterAuthorization()
+    expect(mockConnect).toHaveBeenCalledTimes(1)
+    expect(instances).toHaveLength(1)
+
+    // Force it down, then recover — unlike reconnectNow, no rate limit and
+    // no state guard: this is the authorize-start completion's own hand-off.
+    mockConnect.mockRejectedValue(new Error('server gone'))
+    instances[0]!.onclose?.()
+    await vi.waitFor(() => { expect(handle.status().state).toBe('gave-up') })
+
+    mockConnect.mockResolvedValue(undefined)
+    handle.forceReconnectAfterAuthorization()
+    await vi.waitFor(() => { expect(handle.status().state).toBe('connected') })
+    await handle.dispose()
+  })
+
+  it('forceReconnectAfterAuthorization clears a pending backoff timer instead of leaving a duplicate reconnect armed', async () => {
+    const { warns } = captureLogs(ctx)
+    mockConnect.mockRejectedValueOnce(new Error('server gone'))
+    const handle = startConnection(
+      ctx,
+      stdioConfig({ initialDelayMs: 30, maxDelayMs: 30, maxAttempts: 3 }),
+      resolveReconnectPolicy({ initialDelayMs: 30, maxDelayMs: 30, maxAttempts: 3 }, 'reconnect'),
+    )
+    await handle.ready
+    // The first attempt just failed: a 30ms backoff timer is now armed and
+    // `client` is undefined (state 'connecting') — exactly the window
+    // forceReconnectAfterAuthorization's own timer-clear exists for, since
+    // its guard (`client !== undefined`) would otherwise let a THEN-pending
+    // automatic retry fire a second, duplicate reconnect later.
+    expect(handle.status().state).toBe('connecting')
+    expect(mockConnect).toHaveBeenCalledTimes(1)
+
+    mockConnect.mockResolvedValue(undefined)
+    handle.forceReconnectAfterAuthorization()
+    await vi.waitFor(() => { expect(handle.status().state).toBe('connected') })
+    expect(mockConnect).toHaveBeenCalledTimes(2)
+
+    // If the old backoff timer were still armed, waiting past its original
+    // 30ms delay would fire a third, duplicate connect attempt.
+    await sleep(40)
+    expect(mockConnect).toHaveBeenCalledTimes(2)
+    expect(warns.some(line => line.includes('connection failed; retrying in 30ms'))).toBe(true)
+    await handle.dispose()
+  })
+
+  it('forceReconnectAfterAuthorization is a no-op once disposed', async () => {
+    const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }, 'reconnect'))
+    await handle.ready
+    await handle.dispose()
+    expect(() => { handle.forceReconnectAfterAuthorization() }).not.toThrow()
+    expect(mockConnect).toHaveBeenCalledTimes(1)
+  })
+
+  it('reportAuthorizationFailure records the message as lastError without touching state, and notifies listeners', async () => {
+    const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }, 'reconnect'))
+    await handle.ready
+    const seen: McpServerStatus[] = []
+    const unsubscribe = handle.onStatusChange((status) => { seen.push(status) })
+
+    handle.reportAuthorizationFailure('Authorization timed out after 5 minutes — try again')
+
+    expect(handle.status().lastError).toBe('Authorization timed out after 5 minutes — try again')
+    // The row stays whatever it already was (here 'connected') — this never
+    // forces 'needs-authorization' or any other transition of its own.
+    expect(handle.status().state).toBe('connected')
+    expect(seen.at(-1)?.lastError).toBe('Authorization timed out after 5 minutes — try again')
+
+    unsubscribe()
+    await handle.dispose()
+  })
+
+  it('reportAuthorizationFailure is a no-op once disposed', async () => {
+    const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }, 'reconnect'))
+    await handle.ready
+    await handle.dispose()
+    expect(() => { handle.reportAuthorizationFailure('too late') }).not.toThrow()
+    expect(handle.status().lastError).not.toBe('too late')
+  })
+
+  // ---- beginAuthorization / endAuthorization / isReconnectAttemptInFlight (SWD-164 round 5) ----
+  //
+  // These model `authorize-start`'s own bracketing of `sdkAuth` (see
+  // mcp-status/src/index.ts) directly against the supervisor, without the
+  // real OAuth machinery: the fix lives entirely in whether
+  // `scheduleReconnect` runs at all, so proving no retry fires while
+  // suppressed is equivalent to proving the SDK's own 401-triggered `auth()`
+  // step cannot fire either (it can only run from inside a reconnect
+  // attempt). The pilot's exact interleaving, reproduced against the real
+  // SDK and real `sdkAuth`, is covered separately in oauth.spec.ts.
+
+  it('beginAuthorization clears an armed backoff timer and suppresses scheduling; endAuthorization lets a later failure schedule normally again', async () => {
+    const { warns } = captureLogs(ctx)
+    mockConnect.mockRejectedValueOnce(new Error('server gone'))
+    const handle = startConnection(
+      ctx,
+      stdioConfig({ initialDelayMs: 30, maxDelayMs: 30, maxAttempts: 3 }),
+      resolveReconnectPolicy({ initialDelayMs: 30, maxDelayMs: 30, maxAttempts: 3 }, 'reconnect'),
+    )
+    await handle.ready
+    // The first attempt just failed: a 30ms backoff timer is now armed —
+    // exactly the SWD-164 pilot's timing window (Authorize clicked while a
+    // retry is still ticking).
+    expect(handle.status().state).toBe('connecting')
+    expect(mockConnect).toHaveBeenCalledTimes(1)
+
+    handle.beginAuthorization()
+    // Past the original 30ms delay: the cleared timer never fires, and no
+    // new one gets armed while authorizationPending stays true.
+    await sleep(40)
+    expect(mockConnect).toHaveBeenCalledTimes(1)
+
+    handle.endAuthorization()
+    // `endAuthorization` does not itself replay the dropped timer (drop, not
+    // defer) — the next REAL failure is what proves scheduling resumed.
+    // `forceReconnectAfterAuthorization` is the deterministic trigger
+    // `authorize-start`'s own completion handler uses; reused here only to
+    // produce one fresh attempt, then let THAT attempt's failure prove
+    // `scheduleReconnect` is reachable again.
+    mockConnect.mockRejectedValue(new Error('still gone'))
+    handle.forceReconnectAfterAuthorization()
+    await vi.waitFor(() => { expect(mockConnect).toHaveBeenCalledTimes(2) })
+    await vi.waitFor(() => { expect(mockConnect).toHaveBeenCalledTimes(3) })
+    expect(warns.some(line => line.includes('connection failed; retrying in 30ms (attempt'))).toBe(true)
+    await handle.dispose()
+  })
+
+  it('scheduleReconnect drops a disconnect that happens WHILE a consent flow is pending, then endAuthorization replays it on the failure path — no stale "connected" with no client and no armed timer', async () => {
+    const { warns } = captureLogs(ctx)
+    const handle = startConnection(
+      ctx,
+      stdioConfig({ initialDelayMs: 30, maxDelayMs: 30, maxAttempts: 3 }),
+      resolveReconnectPolicy({ initialDelayMs: 30, maxDelayMs: 30, maxAttempts: 3 }, 'reconnect'),
+    )
+    await handle.ready
+    expect(handle.status().state).toBe('connected')
+    expect(mockConnect).toHaveBeenCalledTimes(1)
+
+    handle.beginAuthorization()
+    // A disconnect happens WHILE the consent flow is pending — independent of
+    // whatever timer `beginAuthorization` itself may have cleared at call
+    // time, this is a FRESH `generationDown` -> `scheduleReconnect` call that
+    // only the `authorizationPending` guard inside `scheduleReconnect` (not
+    // `beginAuthorization`'s own one-shot clear) can catch. Without that
+    // guard this arms a 30ms retry that would run the SDK's own `auth()`
+    // step through the same provider mid-flow.
+    instances[0]!.onclose?.()
+    await sleep(50) // past the 30ms policy delay: nothing should fire while suppressed
+    expect(mockConnect).toHaveBeenCalledTimes(1)
+    expect(warns.some(line => line.includes('retrying') || line.includes('reconnecting'))).toBe(false)
+    // Still reporting the stale pre-drop status while suppressed — this is
+    // exactly the window a reviewer flagged as a trap: without the replay
+    // below, this would never move again (no client, no timer, and
+    // reconnectNow's own state guard only accepts gave-up/disabled).
+    expect(handle.status().state).toBe('connected')
+
+    // The consent flow then fails/times out (no forceReconnectAfterAuthorization
+    // call on this path) — endAuthorization must replay the dropped
+    // disconnect itself, exactly as if it were happening now.
+    handle.endAuthorization()
+    expect(handle.status().state).toBe('connecting')
+    expect(warns.some(line => line.includes('connection lost; reconnecting in 30ms (attempt 1/3)'))).toBe(true)
+
+    await vi.waitFor(() => { expect(mockConnect).toHaveBeenCalledTimes(2) })
+    await vi.waitFor(() => { expect(handle.status().state).toBe('connected') })
+    await handle.dispose()
+  })
+
+  it('dispose while a consent flow is pending (and a disconnect was dropped during it) leaves no armed timer and schedules nothing afterward', async () => {
+    const handle = startConnection(
+      ctx,
+      stdioConfig({ initialDelayMs: 30, maxDelayMs: 30, maxAttempts: 3 }),
+      resolveReconnectPolicy({ initialDelayMs: 30, maxDelayMs: 30, maxAttempts: 3 }, 'reconnect'),
+    )
+    await handle.ready
+    expect(mockConnect).toHaveBeenCalledTimes(1)
+
+    handle.beginAuthorization()
+    instances[0]!.onclose?.()
+    await sleep(10)
+    expect(mockConnect).toHaveBeenCalledTimes(1)
+
+    // Dispose while still pending — beginAuthorization/endAuthorization and
+    // the replay they'd otherwise run must all become flat no-ops, and
+    // dispose's own unconditional timer-clear must leave nothing armed.
+    await handle.dispose()
+    expect(() => { handle.endAuthorization() }).not.toThrow()
+    await sleep(40) // past the policy's own 30ms delay: nothing should fire post-dispose
+    expect(mockConnect).toHaveBeenCalledTimes(1)
+  })
+
+  it('models the authorize-start success sequence: beginAuthorization during an armed backoff, then endAuthorization + forceReconnectAfterAuthorization recovers with no intervening automatic retry', async () => {
+    const { warns } = captureLogs(ctx)
+    mockConnect.mockRejectedValueOnce(new Error('server gone'))
+    const handle = startConnection(
+      ctx,
+      stdioConfig({ initialDelayMs: 30, maxDelayMs: 30, maxAttempts: 3 }),
+      resolveReconnectPolicy({ initialDelayMs: 30, maxDelayMs: 30, maxAttempts: 3 }, 'reconnect'),
+    )
+    await handle.ready
+    expect(mockConnect).toHaveBeenCalledTimes(1)
+
+    // authorize-start begins its consent flow while a backoff retry is
+    // armed — exactly the SWD-164 pilot's interleaving.
+    handle.beginAuthorization()
+    await sleep(40) // past the original 30ms delay: nothing fires while suppressed
+    expect(mockConnect).toHaveBeenCalledTimes(1)
+
+    // The consent exchange succeeds: runConsentCapture's `finally` ends the
+    // window, then its success branch forces one immediate reconnect —
+    // exactly the sequence that function runs today.
+    mockConnect.mockResolvedValue(undefined)
+    handle.endAuthorization()
+    handle.forceReconnectAfterAuthorization()
+    await vi.waitFor(() => { expect(handle.status().state).toBe('connected') })
+    expect(mockConnect).toHaveBeenCalledTimes(2)
+    // No automatic retry sneaked in from the cleared timer re-arming itself.
+    expect(warns.some(line => line.includes('connection failed; retrying in 30ms (attempt 2/3)'))).toBe(false)
+    await handle.dispose()
+  })
+
+  it('isReconnectAttemptInFlight is true only between generation.connect() and the end of its initial sync', async () => {
+    const gate: PromiseWithResolvers<void> = Promise.withResolvers()
+    mockConnect.mockImplementation(() => gate.promise)
+    const handle = startConnection(
+      ctx,
+      stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 2 }),
+      resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 2 }, 'reconnect'),
+    )
+    await vi.waitFor(() => { expect(instances).toHaveLength(1) })
+    expect(handle.isReconnectAttemptInFlight()).toBe(true)
+
+    gate.resolve()
+    await handle.ready
+    expect(handle.isReconnectAttemptInFlight()).toBe(false)
+    await handle.dispose()
+  })
+
+  it('beginAuthorization and endAuthorization are no-ops once disposed', async () => {
+    const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }, 'reconnect'))
+    await handle.ready
+    await handle.dispose()
+    expect(() => { handle.beginAuthorization() }).not.toThrow()
+    expect(() => { handle.endAuthorization() }).not.toThrow()
+    expect(mockConnect).toHaveBeenCalledTimes(1)
   })
 })
 

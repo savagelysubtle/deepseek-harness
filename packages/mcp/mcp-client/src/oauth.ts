@@ -10,6 +10,7 @@
  * @module @deepseek-ai/dsh-mcp-client/oauth
  */
 
+import { randomBytes } from 'node:crypto'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type { OAuthDiscoveryState } from '@modelcontextprotocol/sdk/client/auth.js'
@@ -221,6 +222,18 @@ export class CredentialsOAuthProvider {
   /** This provider's client metadata, rebuilt from the configured redirect URI and scope on every read. */
   get clientMetadata(): OAuthClientMetadata {
     return buildClientMetadata(this.options.redirectUri, this.options.scope)
+  }
+
+  /**
+   * Fresh anti-CSRF `state` parameter for one authorization attempt. The MCP
+   * SDK's `auth()` calls this once per invocation and embeds the result in
+   * the authorization URL; never persisted here — the loopback callback
+   * (host or CLI) reads the value back out of the URL it already has, so
+   * there is nothing to store between the two.
+   * @returns a fresh random state token.
+   */
+  state(): string {
+    return randomBytes(16).toString('hex')
   }
 
   /**

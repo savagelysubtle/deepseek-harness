@@ -7,14 +7,15 @@ import clsx from 'clsx'
 import type { WorkspaceId } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ConversationSlotProps, InputZone } from '../contract/slots.ts'
 import { HeroGlow, HeroShell, WorkspaceChip, workspaceLabel } from './EmptyHero.tsx'
+import { ToolsStatusBanner } from './ToolsStatusBanner.tsx'
 import css from './ConversationRoot.module.css'
 
 /** Full props composed from the slot contract. */
 export type ConversationRootProps = ConversationSlotProps
 
 export function ConversationRoot({
-  sessionId, useSession, useSessions, useWorkspaces, useInput, useComposerBlock,
-  renderSlot, renderSlotChain, selectWorkspace, t,
+  sessionId, useSession, useSessions, useWorkspaces, useInput, useComposerBlock, useMcpAttention,
+  renderSlot, renderSlotChain, selectWorkspace, openSettingsSection, t,
 }: ConversationRootProps) {
   const openState = useSession(s => s.openState)
   const composerPhase = useSession(s => s.composerPhase)
@@ -27,6 +28,10 @@ export function ConversationRoot({
   // A plugin this package cannot import (ui-model-selection) says this session cannot
   // send; its reason is already localized by whoever raised it.
   const composerBlock = useComposerBlock(block => block)
+  // Project-wide, not session-scoped: every session's banner reads the same
+  // underlying store, so this renders identically whether or not a session
+  // is current.
+  const mcpAttention = useMcpAttention(servers => servers)
 
   const [pickerOpen, setPickerOpen] = useState(false)
   const [pendingWorkspaceId, setPendingWorkspaceId] = useState<WorkspaceId | undefined>()
@@ -179,6 +184,7 @@ export function ConversationRoot({
   // end off-screen when the user is not pinned to the floor.
   const composerSeat = (
     <div ref={seatResizeRef} className={css.composerSeat} data-composer-seat="">
+      <ToolsStatusBanner servers={mcpAttention} openSettingsSection={openSettingsSection} t={t} />
       {composer}
     </div>
   )

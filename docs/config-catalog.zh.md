@@ -1563,7 +1563,26 @@ export interface OAuthAuthConfig {
 }
 ```
 
-Source: [`packages/mcp/mcp-client/src/index.ts:141`](../packages/mcp/mcp-client/src/index.ts)
+Source: [`packages/mcp/mcp-client/src/index.ts:185`](../packages/mcp/mcp-client/src/index.ts)
+
+<a id="deepseek-aidsh-mcp-status"></a>
+
+## `@deepseek-ai/dsh-mcp-status`
+
+```ts config-catalog
+/** Options for {@link McpStatusRegistryService}; the `patchPath` override exists for tests only. */
+export interface McpStatusRegistryOptions {
+  /**
+   * Absolute path to the `cordis.patch.yml` `set-enabled` patches. Defaults
+   * to `@deepseek-ai/dsh-mcp-client`'s `defaultPatchPath` — the running
+   * profile's own patch file, resolved from `ctx.baseUrl`, never a
+   * hardcoded profile name.
+   */
+  patchPath?: string
+}
+```
+
+Source: [`packages/mcp/mcp-status/src/index.ts:154`](../packages/mcp/mcp-status/src/index.ts)
 
 <a id="deepseek-aidsh-message-feedback"></a>
 
@@ -3400,6 +3419,7 @@ export interface Config {
 - `@deepseek-ai/dsh-client-ui-settings-models`（[`packages/client/ui-settings-models/src/index.ts`](../packages/client/ui-settings-models/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-settings-plugin-inventory`（[`packages/client/ui-settings-plugin-inventory/src/index.ts`](../packages/client/ui-settings-plugin-inventory/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-settings-plugins`（[`packages/client/ui-settings-plugins/src/index.ts`](../packages/client/ui-settings-plugins/src/index.ts)）
+- `@deepseek-ai/dsh-client-ui-settings-tools`（[`packages/client/ui-settings-tools/src/index.ts`](../packages/client/ui-settings-tools/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-sidebar`（[`packages/client/ui-sidebar/src/index.ts`](../packages/client/ui-sidebar/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-skill`（[`packages/client/ui-skill/src/index.ts`](../packages/client/ui-skill/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-subagent`（[`packages/client/ui-subagent/src/index.ts`](../packages/client/ui-subagent/src/index.ts)）

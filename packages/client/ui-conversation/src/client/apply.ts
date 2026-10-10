@@ -10,6 +10,20 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
+// Type-only: pulls the generated Remote API and ctx.remote merge through the Client assembly boundary.
+import type {} from '@deepseek-ai/dsh-api-remotes/client'
+// Type-only: ctx.remote.mcp's generated namespace. The shared aggregator
+// (packages/api/remotes/src/client/index.ts) does not mount this namespace
+// yet — see the McpAttentionStore wiring below — so this package pulls the
+// generated descriptor's types directly rather than depending on that mount
+// landing first. The generated Remote client artifact is published by
+// `@deepseek-ai/dsh-mcp-status` now, not mcp-client (SWD-164 round 5,
+// defect 2).
+import type {} from '@deepseek-ai/dsh-mcp-status/remote'
+// Type-only: pulls ui-settings-general's `settings/open-section` Events
+// merge — a type-only edge (devDependency + tsconfig reference only), not a
+// value import, so the one-way dependency rule above still holds.
+import type {} from '@deepseek-ai/dsh-client-ui-settings-general/client'
 import type { ViewTab } from './contract/views.ts'
 import type {
   ApprovalWait, ChatNodeTurnDataInjected, ChatScrollPosition, ChatViewInjected, ComposerBarInjected,
@@ -22,6 +36,8 @@ import { ConversationController, UnsupportedImageMediaTypeError } from './servic
 import type { IConversation } from './service.ts'
 import { ComposerBlockRegistry } from './input/blocks.ts'
 import type { ComposerBlock } from './input/blocks.ts'
+import { McpAttentionStore } from './mcp-status-store.ts'
+import type { McpStatusRemote } from './mcp-status-store.ts'
 import { InputHub } from './input/hub.ts'
 import { ComposerSubmissionPolicy } from './input/submission-policy.ts'
 import { InputBar } from './skeleton/InputBar.tsx'
@@ -175,6 +191,36 @@ export function apply(ctx: Context): void {
   // way: this package must not import the plugins that would know.
   const composerBlocks = new ComposerBlockRegistry()
 
+  // Project-wide MCP attention (Tools banner): loaded once, kept current by
+  // the forwarded `mcp/status-changed` event. Deliberately NOT a captured
+  // snapshot and NOT a `'remote.mcp'` entry in this package's own `inject`
+  // array — cordis suspends a fiber's whole activation until every injected
+  // name resolves (vendor/cordis/src/fiber.ts `_refresh`), and this package
+  // must not block on a peripheral banner's Remote namespace mounting.
+  // `ctx.get('remote.mcp')` (not the `ctx.remote.mcp` property chain) is the
+  // deliberate choice too: once mcp's namespace mounts elsewhere, reading it
+  // by property access throws `cannot get property "remote.mcp" without
+  // inject` for any fiber that never injected the name — `ctx.get` is
+  // cordis's own documented "read a service without the inject requirement"
+  // escape hatch, returning `undefined` instead. `getRemote` re-resolves it
+  // lazily on every load either way.
+  const mcpAttention = new McpAttentionStore(() => ctx.get('remote.mcp') as McpStatusRemote | undefined)
+  ctx.effect(() => {
+    void mcpAttention.load()
+    return ctx.remote.$on('mcp/status-changed', (status) => { mcpAttention.apply(status) })
+  }, 'ui-conversation: mcp status')
+
+  /**
+   * Open Settings directly on one registered section. Fires the
+   * `settings/open-section` event (declared in ui-settings-general's client
+   * contract, declaration-merged onto Cordis's `Events`) rather than calling
+   * ui-settings-general directly — that package renders the listener, so
+   * this stays a one-way emit, not an import of its implementation.
+   */
+  const openSettingsSection = (sectionId: string): void => {
+    ctx.emit('settings/open-section', { section: sectionId })
+  }
+
   // The input machine feeds every session-scope slot
   // component through the standard provide channel — the 'input' hook plus
   // the two public actions. Materialization is the shell creation trigger
@@ -210,7 +256,13 @@ export function apply(ctx: Context): void {
       'conversation.hero.agentPreset': { kind: 'single', scope: 'root' },
     },
     inject: (sessionId: SessionId | undefined): ConversationInjected => ({
-      hooks: { composerBlock: sessionId === undefined ? ABSENT_BLOCK : composerBlocks.storeFor(sessionId) },
+      hooks: {
+        composerBlock: sessionId === undefined ? ABSENT_BLOCK : composerBlocks.storeFor(sessionId),
+        // Same store for every session: the fact it carries (MCP auth state)
+        // is Host-wide, not session-scoped.
+        mcpAttention: mcpAttention.store,
+      },
+      openSettingsSection,
       selectWorkspace: async (workspaceId) => {
         const nextId = await workspaces.connectWorkspace(workspaceId)
         if (sessionId !== undefined && nextId !== sessionId) {

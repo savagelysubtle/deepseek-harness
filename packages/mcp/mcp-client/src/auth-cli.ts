@@ -14,7 +14,6 @@
  * @module @deepseek-ai/dsh-mcp-client/auth-cli
  */
 
-import { createServer } from 'node:http'
 import { pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { LocalCredentialProvider, resolveSpec } from '@deepseek-ai/dsh-credentials-local'
@@ -22,6 +21,7 @@ import { auth as sdkAuth } from '@modelcontextprotocol/sdk/client/auth.js'
 import type { OAuthCredentialStore } from './oauth.ts'
 import { CredentialsOAuthProvider } from './oauth.ts'
 import { DEFAULT_OAUTH_REDIRECT_PORT } from './index.ts'
+import { captureAuthorizationCode } from './oauth-callback.ts'
 
 /** Parsed command line. */
 interface CliArgs {
@@ -115,62 +115,6 @@ export function parseArgs(argv: readonly string[]): CliArgs {
     timeoutMs: timeoutFlag('--timeout-ms', 300_000),
     reset: argv.includes('--reset'),
   }
-}
-
-/**
- * Wait for the authorization-server redirect on a loopback listener.
- * @param port - the port advertised as the redirect URI's port.
- * @param timeoutMs - how long to wait for the browser round trip.
- * @returns the authorization code from the callback.
- */
-function captureAuthorizationCode(port: number, timeoutMs: number): Promise<string> {
-  const captured: PromiseWithResolvers<string> = Promise.withResolvers()
-  const server = createServer((request, response) => {
-    /* v8 ignore next -- request.url is always defined on a server 'request' event; optional only on the shared client type */
-    const incoming = new URL(request.url ?? '/', 'http://127.0.0.1')
-    if (incoming.pathname !== '/callback') {
-      response.writeHead(404).end()
-      return
-    }
-    const error = incoming.searchParams.get('error')
-    const code = incoming.searchParams.get('code')
-    response.writeHead(200, { 'content-type': 'text/plain' })
-    if (code !== null) {
-      response.end('Authorization complete. You may close this window.\n')
-    } else {
-      response.end(`Authorization failed: ${error ?? 'missing code'}${incoming.searchParams.get('error_description') ? ` (${incoming.searchParams.get('error_description')})` : ''}\n`)
-    }
-    response.end()
-    if (code !== null) {
-      captured.resolve(code)
-    } else {
-      captured.reject(new Error(`authorization server redirected with error: ${error ?? 'missing code'}`))
-    }
-  })
-  const timer = setTimeout(() => {
-    captured.reject(new Error(`no consent callback within ${timeoutMs}ms — rerun the command to get a fresh login URL`))
-  }, timeoutMs)
-  timer.unref()
-  server.on('error', (error) => {
-    captured.reject(new Error([
-      `cannot listen on 127.0.0.1:${port} for the consent redirect (${String(error)})`,
-      '— free the port or pass --redirect-port on BOTH this command and the plugin config',
-    ].join(' ')))
-  })
-  // `.finally()`'s own returned promise adopts `captured.promise`'s rejection
-  // and nobody holds a handler for it, so discarding it with `void` (as
-  // before) left an independent unhandled rejection on every failure path.
-  // `.then(cleanup, cleanup)` runs the same cleanup on both outcomes but
-  // never itself rejects — neither handler throws — so discarding IT is
-  // safe. `captured.promise` itself is returned below unchanged, so callers
-  // still see the real resolution or rejection.
-  const cleanup = (): void => {
-    clearTimeout(timer)
-    server.close()
-  }
-  void captured.promise.then(cleanup, cleanup)
-  server.listen(port, '127.0.0.1')
-  return captured.promise
 }
 
 /**

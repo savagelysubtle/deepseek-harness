@@ -35,6 +35,12 @@
     },
     {
       "path": "../../util/timeout"
+    },
+    {
+      "path": "../../util/home-paths"
+    },
+    {
+      "path": "../../typert/protocol"
     }
   ]
 }

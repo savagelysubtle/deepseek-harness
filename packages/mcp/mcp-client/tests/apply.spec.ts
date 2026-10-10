@@ -60,6 +60,11 @@ import { apply, name, inject, Config as ConfigSchema } from '@deepseek-ai/dsh-mc
 
 async function mountRegistry(): Promise<Context> {
   const ctx = new Context()
+  // No profile loader is mounted in these tests, so the status registry's
+  // default cordis.patch.yml resolution (ctx.baseUrl) needs a stand-in — see
+  // defaultPatchPath in status-registry.ts. The path is never read or
+  // written by these tests; it only has to resolve to something.
+  ctx.baseUrl = 'file:///test-profile/'
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
   return ctx
@@ -210,6 +215,7 @@ describe('apply (plugin lifecycle)', () => {
 
   it('releases the serverName reservation on dispose', async () => {
     const first = new Context()
+    first.baseUrl = 'file:///test-profile/'
     await first.plugin(SystemPrompt)
     await first.plugin(ToolRuntime)
     await apply(first, stdioConfig)
@@ -220,6 +226,7 @@ describe('apply (plugin lifecycle)', () => {
     // Same root would conflict; a fresh app root reuses the name freely,
     // and the disposed instance no longer holds the reservation on its root.
     const second = new Context()
+    second.baseUrl = 'file:///test-profile/'
     await second.plugin(SystemPrompt)
     await second.plugin(ToolRuntime)
     await expect(apply(second, stdioConfig)).resolves.toBeUndefined()
