@@ -35,6 +35,7 @@ import type { IConversation } from './service.ts'
 import { ComposerBlockRegistry } from './input/blocks.ts'
 import type { ComposerBlock } from './input/blocks.ts'
 import { McpAttentionStore } from './mcp-status-store.ts'
+import type { McpStatusRemote } from './mcp-status-store.ts'
 import { InputHub } from './input/hub.ts'
 import { ComposerSubmissionPolicy } from './input/submission-policy.ts'
 import { InputBar } from './skeleton/InputBar.tsx'
@@ -190,11 +191,18 @@ export function apply(ctx: Context): void {
 
   // Project-wide MCP attention (Tools banner): loaded once, kept current by
   // the forwarded `mcp/status-changed` event. Deliberately NOT a captured
-  // `ctx.remote.mcp` snapshot and NOT a `'remote.mcp'` entry in this
-  // package's own `inject` array — this package must not block its whole
-  // activation on a peripheral banner's Remote namespace mounting (see
-  // mcp-status-store.ts); `getRemote` re-resolves it lazily on every load.
-  const mcpAttention = new McpAttentionStore(() => ctx.remote.mcp)
+  // snapshot and NOT a `'remote.mcp'` entry in this package's own `inject`
+  // array — cordis suspends a fiber's whole activation until every injected
+  // name resolves (vendor/cordis/src/fiber.ts `_refresh`), and this package
+  // must not block on a peripheral banner's Remote namespace mounting.
+  // `ctx.get('remote.mcp')` (not the `ctx.remote.mcp` property chain) is the
+  // deliberate choice too: once mcp's namespace mounts elsewhere, reading it
+  // by property access throws `cannot get property "remote.mcp" without
+  // inject` for any fiber that never injected the name — `ctx.get` is
+  // cordis's own documented "read a service without the inject requirement"
+  // escape hatch, returning `undefined` instead. `getRemote` re-resolves it
+  // lazily on every load either way.
+  const mcpAttention = new McpAttentionStore(() => ctx.get('remote.mcp') as McpStatusRemote | undefined)
   ctx.effect(() => {
     void mcpAttention.load()
     return ctx.remote.$on('mcp/status-changed', (status) => { mcpAttention.apply(status) })

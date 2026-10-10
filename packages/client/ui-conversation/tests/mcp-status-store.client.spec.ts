@@ -1,7 +1,18 @@
 import { describe, expect, it, vi } from 'vitest'
+import { Context, Service } from '@deepseek-ai/cordis'
 import type { McpServerStatus } from '@deepseek-ai/dsh-mcp-client/status'
 import { McpAttentionStore } from '../src/client/mcp-status-store.ts'
 import type { McpStatusRemote } from '../src/client/mcp-status-store.ts'
+
+/**
+ * Stands in for api-gateway's `ClientRemoteService` (registered as `'remote'`
+ * through the real `Service` base class, which is what gives `ctx.remote`
+ * its property-forwarding tracker) — a plain `ctx.provide('remote', {})`
+ * object has no tracker and can never reproduce the regression below.
+ */
+class FakeRemoteService extends Service {
+  constructor(ctx: Context) { super(ctx, 'remote') }
+}
 
 function status(partial: Partial<McpServerStatus> & { serverName: string; state: McpServerStatus['state'] }): McpServerStatus {
   return { attempts: 0, maxAttempts: 3, ...partial }
@@ -83,5 +94,62 @@ describe('McpAttentionStore', () => {
     box.remote = remoteOk([status({ serverName: 'stripe', state: 'needs-authorization' })])
     await store.load()
     expect(store.store.getSnapshot()).toEqual([{ serverName: 'stripe', state: 'needs-authorization' }])
+  })
+})
+
+/**
+ * Production `getRemote` wiring (apply.ts): `ctx.get('remote.mcp')`, not the
+ * `ctx.remote.mcp` property chain. In the real app, `packages/api/remotes`'s
+ * aggregator mounts the `mcp` Remote namespace from its OWN fiber — a
+ * sibling of ui-conversation's fiber, never an ancestor, and never a name
+ * this package injects. Property access forwards through a tracker that
+ * walks only the calling fiber's ANCESTOR chain looking for a fiber whose
+ * own store resolved the name (via that fiber's own `inject`); a sibling's
+ * provide is invisible to that walk, so it throws `cannot get property
+ * "remote.mcp" without inject` on every access once the namespace mounts —
+ * the console error pilot found on every page load. `ctx.get` instead reads
+ * the shared reflect store directly, which does see it.
+ */
+describe('getRemote wiring: ctx.remote.mcp (regression) vs ctx.get (fix)', () => {
+  /** Mounts `fakeRemote` under `'remote.mcp'` from a fiber sibling to the consumer's. */
+  async function withSiblingMountedMcp(fakeRemote: McpStatusRemote, consumer: (ctx: Context) => void) {
+    const ctx = new Context()
+    new FakeRemoteService(ctx)
+    await ctx.plugin({ apply: (sibling: Context) => { sibling.provide('remote.mcp', fakeRemote) } }).await()
+    await ctx.plugin({ inject: ['remote'], apply: consumer }).await()
+  }
+
+  it('ctx.remote.mcp throws across the sibling boundary — proves the bug this fix addresses', async () => {
+    let caught: unknown
+    await withSiblingMountedMcp({ status: vi.fn() }, (ctx) => {
+      try {
+        void (ctx as unknown as { remote: { mcp: unknown } }).remote.mcp
+      } catch (error) {
+        caught = error
+      }
+    })
+    expect((caught as Error | undefined)?.message).toBe('cannot get property "remote.mcp" without inject')
+  })
+
+  it("ctx.get('remote.mcp') resolves the same sibling-mounted face without throwing", async () => {
+    const fakeRemote: McpStatusRemote = { status: vi.fn() }
+    let resolved: McpStatusRemote | undefined
+    await withSiblingMountedMcp(fakeRemote, (ctx) => {
+      resolved = ctx.get('remote.mcp') as McpStatusRemote | undefined
+    })
+    expect(resolved).toBe(fakeRemote)
+  })
+
+  it('McpAttentionStore.load(), wired the production way, loads from the sibling-mounted face without throwing or logging', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const fakeRemote = remoteOk([status({ serverName: 'stripe', state: 'needs-authorization' })])
+    let loaded: readonly { serverName: string }[] = []
+    await withSiblingMountedMcp(fakeRemote, (ctx) => {
+      const store = new McpAttentionStore(() => ctx.get('remote.mcp') as McpStatusRemote | undefined)
+      void store.load().then(() => { loaded = store.store.getSnapshot() })
+    })
+    await vi.waitFor(() => { expect(loaded).toHaveLength(1) })
+    expect(errorSpy).not.toHaveBeenCalled()
+    errorSpy.mockRestore()
   })
 })

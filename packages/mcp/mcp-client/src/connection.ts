@@ -242,6 +242,21 @@ export interface ConnectionHandle {
    * retry if it is currently failing on the stale one.
    */
   forceReconnectAfterAuthorization(): void
+  /**
+   * Report that this server's pending authorization flow failed or timed
+   * out, without touching `state` — the row stays `needs-authorization` so
+   * the user can click Authorize again — exactly like any other connection
+   * failure recorded through {@link McpServerStatus.lastError}.
+   * `authorize-start`'s background consent capture
+   * ({@link ../status-registry.ts}) is the only caller: `authorize-start`
+   * itself already rejects on an up-front failure, but a failure or the
+   * 5-minute consent timeout AFTER it has already returned the URL to the
+   * client would otherwise only ever reach a server log — this is what
+   * turns it into a visible `mcp/status-changed` on the row (via the same
+   * `onStatusChange` subscription `register()` already wires up). A no-op
+   * once disposed, like every other post-dispose status write.
+   */
+  reportAuthorizationFailure(message: string): void
 }
 
 /** Floor between accepted manual {@link ConnectionHandle.reconnectNow} calls, per server. */
@@ -297,7 +312,15 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
   const statusListeners = new Set<(status: McpServerStatus) => void>()
 
   function currentStatus(): McpServerStatus {
-    const attempts = state === 'connected' || state === 'disabled' ? 0 : failedAttempts
+    // `failedAttempts` counts the outage-starting disconnect itself as one
+    // slot before any retry runs, so it reads one higher than the give-up
+    // decision's own "N consecutive failed reconnect attempts" the instant
+    // give-up fires (failedAttempts === policy.maxAttempts + 1 at that
+    // point, never more). Cap the reported figure so the UI and the log
+    // agree on the same number (maxAttempts) instead of being off by one.
+    const attempts = state === 'connected' || state === 'disabled'
+      ? 0
+      : Math.min(failedAttempts, policy.maxAttempts)
     return {
       serverName: config.serverName,
       state,
@@ -625,6 +648,10 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
       connectedAt = undefined
       setState('connecting')
       settling = connectGeneration(false)
+    },
+    reportAuthorizationFailure(message: string): void {
+      if (disposed) return
+      recordError(message)
     },
   }
 }

@@ -28,14 +28,14 @@ import { createHash, randomBytes } from 'node:crypto'
 import { open, readFile, rename, rm } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import type { Context } from '@deepseek-ai/cordis'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
-import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { auth as sdkAuth } from '@modelcontextprotocol/sdk/client/auth.js'
 // Typert-generated ./typert and ./remote artifacts import Zod at runtime.
 import type {} from 'zod'
-import { startAuthorizationCallbackListener } from './oauth-callback.ts'
+import { ConsentTimeoutError, startAuthorizationCallbackListener } from './oauth-callback.ts'
 // `./index.ts` must be imported (and therefore begin — and, transitively,
 // finish — loading `./connection.ts`, which it imports first) BEFORE this
 // file's own `./connection.ts` import below: index.ts reads
@@ -71,18 +71,11 @@ export type { McpAuthorizeStartResult } from './status.ts'
 export const HOST_CONSENT_TIMEOUT_MS = 300_000
 
 /**
- * Default profile whose `cordis.patch.yml` `set-enabled` patches. Mirrors
- * `DEFAULT_ORG_PROFILE_NAME` in `@deepseek-ai/dsh-host-apiproxy`'s
- * `api-proxy.ts` — the SAME disclosed limitation ("the active profile is not
- * recoverable at runtime anywhere in this host today"), restated here rather
- * than imported (depending on the whole Host apiproxy package for one string
- * would invert this package's place in the dependency graph). A deployment
- * running any OTHER profile needs the `patchPath` constructor option below,
- * or `set-enabled` will patch the wrong profile's file. **Flagged for
- * reviewer/sentinel attention** — this is the same gap the plan's own
- * write-up called out for the Enable/Disable surface generally.
+ * Bound on {@link McpStatusRegistryService.authorizeStart}'s own reachability
+ * probe (see its doc) — generous enough for a slow but live server, short
+ * enough that a dead one fails the RPC fast rather than stalling the click.
  */
-const DEFAULT_PROFILE_NAME = 'web-stable'
+const AUTHORIZE_REACHABILITY_PROBE_TIMEOUT_MS = 5_000
 
 /** Patch-file entry name set-enabled's cordis.patch.yml mutation uses for one plugin mount's YAML-level disable flag. */
 const PATCH_PATCH_FILENAME = 'cordis.patch.yml'
@@ -93,8 +86,43 @@ const MCP_CLIENT_PACKAGE_NAME = '@deepseek-ai/dsh-mcp-client'
 /** Bound on disambiguating backup-filename suffixes, mirroring `org-served-roster.ts`. */
 const MAX_BACKUP_FILENAME_ATTEMPTS = 100
 
-function defaultPatchPath(): string {
-  return join(dshHomePath('profiles', DEFAULT_PROFILE_NAME), PATCH_PATCH_FILENAME)
+/**
+ * Resolve the running profile's own `cordis.patch.yml` — never a hardcoded
+ * profile name (SWD-164 pilot finding: `set-enabled`/`list()` previously
+ * assumed `web-stable` and ENOENT'd under any other profile).
+ *
+ * `ctx.baseUrl` is the one place the active profile's directory is actually
+ * known at runtime: `@deepseek-ai/dsh-app-boot`'s `boot()` sets it once, on
+ * the root context, to `file://<profile dir>/` (see
+ * `packages/boot/app-boot/src/profile.ts`'s module doc — "The Loader's
+ * `baseUrl` is the profile directory"), and every plugin context inherits
+ * the root's own property through the Cordis context prototype chain. That
+ * is the SAME directory `loadProfile`'s `Profile.patchPath` and
+ * `apps/cli/src/profile-boot.ts`'s `watchUserPatches` already read and write
+ * for the live user patch layer — this reuses that resolution rather than
+ * re-deriving it.
+ * @param ctx - any context in the live plugin tree; `ctx.root.baseUrl` is read.
+ * @returns the absolute patch-file path, or `undefined` when `ctx.root.baseUrl`
+ *   is unset — a bare `Context` with no `@deepseek-ai/dsh-app-boot` profile
+ *   loader mounted (an e2e harness, an embedded host, a unit test). Every
+ *   mcp-client instance must still be able to mount in that case ({@link
+ *   McpStatusRegistryService} degrades: `list()` reports live rows only,
+ *   `set-enabled` rejects loudly, the deregister notifier emits nothing) — it
+ *   never silently guesses a profile, but it also never blocks activation
+ *   over a feature a context without a profile loader cannot use anyway. A
+ *   `warn` fires here once (the constructor calls this exactly once).
+ */
+function defaultPatchPath(ctx: Context): string | undefined {
+  const baseUrl = ctx.root.baseUrl
+  if (baseUrl === undefined) {
+    ctx.logger.warn(
+      'mcp status: cannot resolve the default cordis.patch.yml path — ctx.baseUrl is unset '
+      + '(no profile loader mounted on this context tree) — set-enabled and the disabled-row '
+      + 'listing are unavailable on this host; pass patchPath explicitly to enable them',
+    )
+    return undefined
+  }
+  return join(fileURLToPath(baseUrl), PATCH_PATCH_FILENAME)
 }
 
 /** One registered mcp-client instance's live state. */
@@ -106,7 +134,11 @@ interface RegisteredServer {
 
 /** Options for {@link McpStatusRegistryService}; the `patchPath` override exists for tests only. */
 export interface McpStatusRegistryOptions {
-  /** Absolute path to the `cordis.patch.yml` `set-enabled` patches. Defaults to {@link defaultPatchPath}. */
+  /**
+   * Absolute path to the `cordis.patch.yml` `set-enabled` patches. Defaults
+   * to {@link defaultPatchPath} — the running profile's own patch file,
+   * resolved from `ctx.baseUrl`, never a hardcoded profile name.
+   */
   patchPath?: string
 }
 
@@ -273,14 +305,20 @@ function collectMcpPatchEntries(patches: readonly unknown[]): Map<string, McpPat
  * wrong, and guessing `removed: true` from a failed read would be a false
  * report, not a graceful degradation).
  * @param ctx - plugin context, for the one-shot `warn` on a non-ENOENT failure.
- * @param patchPath - absolute path to the `cordis.patch.yml` to read.
+ * @param patchPath - absolute path to the `cordis.patch.yml` to read; `undefined`
+ *   when this host has no profile file to resolve one from ({@link defaultPatchPath}
+ *   already warned once at construction) — treated exactly like an unreadable file
+ *   (returns `undefined`), never like a missing-but-nameable file (which would
+ *   return the empty map): callers must degrade the same way for both.
  * @returns every valid mcp-client mount's id and `disabled` flag; an empty map for a
- *   missing file or a genuinely empty list; `undefined` if the read or parse failed.
+ *   missing file or a genuinely empty list; `undefined` if there is no path to read,
+ *   or the read or parse failed.
  */
 async function readMcpPatchEntries(
   ctx: Context,
-  patchPath: string,
+  patchPath: string | undefined,
 ): Promise<Map<string, McpPatchEntry> | undefined> {
+  if (patchPath === undefined) return undefined
   let bytes: Buffer
   try {
     bytes = await readFile(patchPath)
@@ -368,7 +406,8 @@ export function ensureStatusRegistry(ctx: Context, options: McpStatusRegistryOpt
  */
 export class McpStatusRegistryService extends TypertRemoteService {
   private readonly handles = new Map<string, RegisteredServer>()
-  private readonly patchPath: string
+  /** `undefined` when this host has no profile loader to resolve a default from — see {@link defaultPatchPath}. */
+  private readonly patchPath: string | undefined
   /**
    * serverName of the one in-flight `authorize-start` consent flow, if any —
    * the shared loopback listener is single-flight, not per-server.
@@ -377,7 +416,7 @@ export class McpStatusRegistryService extends TypertRemoteService {
 
   constructor(ctx: Context, options: McpStatusRegistryOptions = {}) {
     super(ctx, 'mcpStatus', { namespace: 'mcp' })
-    this.patchPath = options.patchPath ?? defaultPatchPath()
+    this.patchPath = options.patchPath ?? defaultPatchPath(ctx)
   }
 
   /**
@@ -482,10 +521,11 @@ export class McpStatusRegistryService extends TypertRemoteService {
    * @returns the consent URL to open.
    * @throws when the server is unknown, has no OAuth configured, is already
    *   authorized, a consent flow is already pending for ANY server (the
-   *   shared listener is single-flight, not per-server), or the loopback
-   *   port could not be bound (e.g. a concurrent `dsh-mcp-client-auth` run
-   *   already holds it) — reported immediately rather than only surfacing
-   *   once the unreachable listener's timeout eventually elapses.
+   *   shared listener is single-flight, not per-server), the server is not
+   *   reachable right now, or the loopback port could not be bound (e.g. a
+   *   concurrent `dsh-mcp-client-auth` run already holds it) — reported
+   *   immediately rather than only surfacing once the unreachable listener's
+   *   timeout eventually elapses.
    */
   @Remote('authorize-start')
   async authorizeStart(serverName: string): Promise<McpAuthorizeStartResult> {
@@ -505,6 +545,30 @@ export class McpStatusRegistryService extends TypertRemoteService {
     // two concurrent calls can never both pass the check above.
     this.pendingFlow = serverName
     try {
+      // Probe the server itself before trusting the SDK's own consent-URL
+      // synthesis: `auth()` builds the authorization URL from (possibly
+      // cached) OAuth discovery metadata, and its own discovery fetches
+      // treat a connection failure the same as a browser CORS failure (both
+      // surface as `TypeError` — Node's fetch gives a down server the exact
+      // same error shape a cross-origin block gets in a browser) and fall
+      // back to building a URL anyway rather than throwing. So a fully dead
+      // server still reaches `peekConsentUrl()` with something to return
+      // (SWD-164 pilot finding) unless THIS call checks reachability itself
+      // — a plain request to the server's own URL; ANY response at all —
+      // including a redirect, a 401/404/405, whatever — proves the
+      // connection succeeded, so `redirect: 'manual'` stops `fetch` itself
+      // from chasing a 3xx (and potentially throwing on ITS target) and
+      // treats the redirect response as reachability too. Only a
+      // network-level failure or the probe's own timeout rejects.
+      try {
+        await fetch(config.url, {
+          method: 'HEAD',
+          redirect: 'manual',
+          signal: AbortSignal.timeout(AUTHORIZE_REACHABILITY_PROBE_TIMEOUT_MS),
+        })
+      } catch (error) {
+        throw new Error(`mcp authorize-start: server "${serverName}" is not reachable: ${redactAbsolutePaths(String(error))}`)
+      }
       const result = await sdkAuth(handle.authProvider, { serverUrl: config.url })
       if (result === 'AUTHORIZED') {
         throw new Error(`mcp authorize-start: server "${serverName}" is already authorized — try Reconnect instead of Authorize`)
@@ -588,6 +652,17 @@ export class McpStatusRegistryService extends TypertRemoteService {
       handle.forceReconnectAfterAuthorization()
     } catch (error) {
       this.ctx.logger.error(`mcp authorize-start(${serverName}): consent flow failed: ${redactAbsolutePaths(String(error))}`)
+      // `authorize-start` already returned the consent URL by the time any
+      // of this runs, so the only way the user ever learns the flow did not
+      // finish is through the row itself (SWD-164 pilot finding: previously
+      // this was logged here and nowhere else — the 5-minute consent
+      // timeout was silent on the client). A timeout gets its own plain-
+      // English message; any other exchange failure reports the (redacted)
+      // real error, same as every other connection failure's `lastError`.
+      const message = error instanceof ConsentTimeoutError
+        ? 'Authorization timed out after 5 minutes — try again'
+        : redactAbsolutePaths(String(error))
+      handle.reportAuthorizationFailure(message)
     } finally {
       this.pendingFlow = undefined
     }
@@ -620,15 +695,19 @@ export class McpStatusRegistryService extends TypertRemoteService {
    * @param serverName - the mount id to toggle; validated against
    *   {@link SERVER_NAME_PATTERN} and must already exist in the patch file.
    * @param enabled - the proposed enablement.
-   * @throws when `serverName` fails the pattern, no mount with that id
-   *   exists in the patch file (set-enabled never inserts one), the file
-   *   changed between the initial read and the write (retry), or any I/O,
-   *   parse, or structural step fails.
+   * @throws when `serverName` fails the pattern, this host has no profile
+   *   file to resolve a patch path from ({@link defaultPatchPath}), no mount
+   *   with that id exists in the patch file (set-enabled never inserts one),
+   *   the file changed between the initial read and the write (retry), or
+   *   any I/O, parse, or structural step fails.
    */
   @Remote('set-enabled')
   async setEnabled(serverName: string, enabled: boolean): Promise<void> {
     if (!SERVER_NAME_PATTERN.test(serverName)) {
       throw new Error(`mcp set-enabled: "${serverName}" is not a valid server name`)
+    }
+    if (this.patchPath === undefined) {
+      throw new Error('mcp set-enabled: this host has no profile file to edit')
     }
     let currentBytes: Buffer
     try {

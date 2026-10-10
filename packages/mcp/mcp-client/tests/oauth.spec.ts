@@ -25,6 +25,11 @@ import { startConnection, resolveReconnectPolicy } from '@deepseek-ai/dsh-mcp-cl
 
 async function mountRegistry(credentialsPath?: string): Promise<Context> {
   const ctx = new Context()
+  // No profile loader is mounted in these tests, so the status registry's
+  // default cordis.patch.yml resolution (ctx.baseUrl) needs a stand-in — see
+  // defaultPatchPath in status-registry.ts. The path is never read or
+  // written by these tests; it only has to resolve to something.
+  ctx.baseUrl = 'file:///test-profile/'
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
   if (credentialsPath !== undefined) {

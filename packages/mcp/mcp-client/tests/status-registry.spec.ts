@@ -8,6 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { createServer as createHttpServer } from 'node:http'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -95,7 +96,7 @@ import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
-import type { Config } from '@deepseek-ai/dsh-mcp-client'
+import type { StreamableHttpConfig } from '@deepseek-ai/dsh-mcp-client'
 
 import { startOAuthFixture, type OAuthFixture } from './oauth-fixture.ts'
 import { CredentialsOAuthProvider } from '@deepseek-ai/dsh-mcp-client/src/oauth.ts'
@@ -112,7 +113,7 @@ async function mountRegistry(credentialsPath: string): Promise<Context> {
   return ctx
 }
 
-function httpConfig(fixture: OAuthFixture, serverName: string): Config {
+function httpConfig(fixture: OAuthFixture, serverName: string): StreamableHttpConfig {
   return {
     transport: 'streamable-http',
     serverName,
@@ -134,8 +135,10 @@ function buildOAuthHandle(fixture: OAuthFixture, ctx: Context, serverName: strin
   handle: ConnectionHandle
   forceReconnectAfterAuthorization: ReturnType<typeof vi.fn>
   reconnectNow: ReturnType<typeof vi.fn>
+  box: { consentUrl: string | undefined; state: McpServerState; lastError: string | undefined }
 } {
-  const box: { consentUrl: string | undefined; state: McpServerState } = { consentUrl: undefined, state: 'connecting' }
+  const box: { consentUrl: string | undefined; state: McpServerState; lastError: string | undefined } =
+    { consentUrl: undefined, state: 'connecting', lastError: undefined }
   const provider = CredentialsOAuthProvider.create({
     serverName,
     serverUrl: new URL(fixture.url),
@@ -161,6 +164,7 @@ function buildOAuthHandle(fixture: OAuthFixture, ctx: Context, serverName: strin
         state: box.state,
         attempts: 0,
         maxAttempts: 10,
+        ...(box.lastError === undefined ? {} : { lastError: box.lastError }),
       }
     },
     peekConsentUrl() { return box.consentUrl },
@@ -168,8 +172,26 @@ function buildOAuthHandle(fixture: OAuthFixture, ctx: Context, serverName: strin
     onStatusChange() { return () => {} },
     authProvider: provider,
     forceReconnectAfterAuthorization,
+    reportAuthorizationFailure(message: string) { box.lastError = message },
   }
-  return { handle, forceReconnectAfterAuthorization, reconnectNow }
+  return { handle, forceReconnectAfterAuthorization, reconnectNow, box }
+}
+
+/**
+ * `authorizeStart` against a server that actually needs the shared loopback
+ * listener (port 18700, hardcoded in {@link buildOAuthHandle}). Retried as
+ * cheap insurance against the brief, legitimate window between a PRECEDING
+ * test's `server.close()` call and the OS actually releasing the port —
+ * every test below is careful to complete or otherwise settle its own flow
+ * before finishing, so this should normally succeed on the first try. A
+ * server that is deliberately unreachable (this file's own "not reachable"
+ * test) never gets here at all — the reachability probe rejects first.
+ */
+async function authorizeStartOnSharedListener(
+  registry: McpStatusRegistryService,
+  serverName: string,
+): ReturnType<McpStatusRegistryService['authorizeStart']> {
+  return vi.waitFor(() => registry.authorizeStart(serverName), { timeout: 2_000, interval: 20 })
 }
 
 describe('McpStatusRegistryService — list/register', () => {
@@ -704,7 +726,7 @@ describe('McpStatusRegistryService — authorize-start', () => {
     await vi.waitFor(() => { expect(otherForceReconnect).toHaveBeenCalledTimes(1) })
   })
 
-  it('a timed-out consent capture logs and releases the slot for the next caller', async () => {
+  it('a timed-out consent capture logs, reports lastError on the row, and releases the slot for the next caller', async () => {
     vi.useFakeTimers()
     try {
       const { handle, forceReconnectAfterAuthorization } = buildOAuthHandle(fixture, ctx, 'timeout-srv')
@@ -722,14 +744,106 @@ describe('McpStatusRegistryService — authorize-start', () => {
         expect(errors.some(line => line.includes('consent flow failed'))).toBe(true)
       }, { timeout: 2_000, interval: 10 })
       expect(forceReconnectAfterAuthorization).not.toHaveBeenCalled()
+      // SWD-164 pilot finding: this used to be logged here and nowhere
+      // else — a client watching the row never learned the 5-minute
+      // consent timeout happened at all.
+      expect(handle.status().lastError).toBe('Authorization timed out after 5 minutes — try again')
 
       // The slot is released: a new flow may start immediately.
-      const { handle: nextHandle } = buildOAuthHandle(fixture, ctx, 'next-srv')
+      const { handle: nextHandle, forceReconnectAfterAuthorization: nextForceReconnect } = buildOAuthHandle(fixture, ctx, 'next-srv')
       registry.register(httpConfig(fixture, 'next-srv'), nextHandle)
       const released = await registry.authorizeStart('next-srv')
       expect(typeof released.consentUrl).toBe('string')
+
+      // Complete this flow too so its real listener does not stay bound to
+      // the shared port into a later test (same reason the "second
+      // authorize-start" test above completes its own trailing flow).
+      vi.useRealTimers()
+      const nextState = new URL(released.consentUrl).searchParams.get('state')!
+      const nextPort = new URL(nextHandle.authProvider!.redirectUrl).port
+      const nextResponse = await fetch(`http://127.0.0.1:${nextPort}/callback?code=auth-code-next-srv&state=${nextState}`)
+      expect(nextResponse.ok).toBe(true)
+      await vi.waitFor(() => { expect(nextForceReconnect).toHaveBeenCalledTimes(1) })
     } finally {
       vi.useRealTimers()
+    }
+  })
+
+  it('a consent denial (non-timeout exchange failure) reports the redacted real error as lastError', async () => {
+    const { handle } = buildOAuthHandle(fixture, ctx, 'denied-srv')
+    registry.register(httpConfig(fixture, 'denied-srv'), handle)
+    const { consentUrl } = await authorizeStartOnSharedListener(registry, 'denied-srv')
+    const state = new URL(consentUrl).searchParams.get('state')!
+    const port = new URL(handle.authProvider!.redirectUrl).port
+
+    // The user denies consent: the authorization server redirects back with
+    // `error`, not `code` — a real failure distinct from the listener's own
+    // timeout, so it must take the "redacted real error" branch, not the
+    // fixed timeout message.
+    const response = await fetch(`http://127.0.0.1:${port}/callback?error=access_denied&state=${state}`)
+    expect(response.ok).toBe(true)
+
+    await vi.waitFor(() => {
+      expect(handle.status().lastError).toMatch(/authorization server redirected with error: access_denied/)
+    })
+    expect(handle.status().lastError).not.toContain('timed out')
+  })
+
+  it('rejects authorize-start immediately when the server is unreachable, instead of handing back a dead-page URL', async () => {
+    // A port nothing is listening on: bind then release it immediately so
+    // the OS frees it, but no server is live when the probe fires.
+    const probe = createServer()
+    await new Promise<void>((resolve) => { probe.listen(0, '127.0.0.1', resolve) })
+    const address = probe.address()
+    if (address === null || typeof address === 'string') throw new Error('no probe port')
+    const deadPort = address.port
+    await new Promise<void>((resolve) => { probe.close(() => { resolve() }) })
+
+    const { handle } = buildOAuthHandle(fixture, ctx, 'down')
+    registry.register({ ...httpConfig(fixture, 'down'), url: `http://127.0.0.1:${deadPort}/mcp` }, handle)
+
+    await expect(registry.authorizeStart('down')).rejects.toThrow(/is not reachable/)
+    // The single-flight slot must be released on this up-front rejection too.
+    const { handle: nextHandle } = buildOAuthHandle(fixture, ctx, 'next-after-down')
+    registry.register(httpConfig(fixture, 'next-after-down'), nextHandle)
+    const released = await authorizeStartOnSharedListener(registry, 'next-after-down')
+    expect(typeof released.consentUrl).toBe('string')
+  })
+
+  it('treats a redirect response from the reachability probe as reachable, not a dead server', async () => {
+    // `redirect: 'manual'` means `fetch` itself never chases this 3xx — the
+    // probe must accept the 302 response itself as proof the server is up.
+    // Every other request gets a fixed 500 so the SDK's own OAuth discovery
+    // fails cleanly and deterministically right after (never reaching the
+    // shared port listener — nothing to clean up) without ever following
+    // the redirect target anywhere: this test only cares that the eventual
+    // rejection is THAT discovery failure, never the probe's own "is not
+    // reachable".
+    const redirecting = createHttpServer((request, response) => {
+      if (request.method === 'HEAD') {
+        response.writeHead(302, { Location: '/elsewhere' })
+        response.end()
+        return
+      }
+      response.writeHead(500)
+      response.end()
+    })
+    await new Promise<void>((resolve) => { redirecting.listen(0, '127.0.0.1', resolve) })
+    const address = redirecting.address()
+    if (address === null || typeof address === 'string') throw new Error('no redirect-server port')
+    const redirectingPort = address.port
+
+    try {
+      const { handle } = buildOAuthHandle(fixture, ctx, 'redirecting')
+      registry.register({ ...httpConfig(fixture, 'redirecting'), url: `http://127.0.0.1:${redirectingPort}/mcp` }, handle)
+
+      const error = await registry.authorizeStart('redirecting').then(
+        () => { throw new Error('UNEXPECTED_SUCCESS: expected sdkAuth discovery to fail against a fixed-500 fake server') },
+        (rejected: unknown) => rejected,
+      )
+      expect(String(error)).not.toMatch(/is not reachable/)
+    } finally {
+      await new Promise<void>((resolve) => { redirecting.close(() => { resolve() }) })
     }
   })
 })
@@ -946,10 +1060,17 @@ describe('McpStatusRegistryService — set-enabled', () => {
 })
 
 describe('ensureStatusRegistry — lazy mount-once-per-root dedup', () => {
+  // Neither test below exercises the default patchPath resolution (that is
+  // `defaultPatchPath`'s own describe block, below) — these bare Contexts
+  // have no `baseUrl`, so an explicit patchPath is required regardless of
+  // what defaultPatchPath would otherwise resolve.
   it('two calls on the same root resolve to the same instance', async () => {
     const ctx = new Context()
     try {
-      const [a, b] = await Promise.all([ensureStatusRegistry(ctx), ensureStatusRegistry(ctx)])
+      const [a, b] = await Promise.all([
+        ensureStatusRegistry(ctx, { patchPath: '/nonexistent/cordis.patch.yml' }),
+        ensureStatusRegistry(ctx, { patchPath: '/nonexistent/cordis.patch.yml' }),
+      ])
       expect(a).toBe(b)
     } finally {
       await ctx.fiber.dispose()
@@ -960,10 +1081,49 @@ describe('ensureStatusRegistry — lazy mount-once-per-root dedup', () => {
     const root = new Context()
     try {
       const child = root.extend()
-      const [fromRoot, fromChild] = await Promise.all([ensureStatusRegistry(root), ensureStatusRegistry(child)])
+      const [fromRoot, fromChild] = await Promise.all([
+        ensureStatusRegistry(root, { patchPath: '/nonexistent/cordis.patch.yml' }),
+        ensureStatusRegistry(child, { patchPath: '/nonexistent/cordis.patch.yml' }),
+      ])
       expect(fromRoot).toBe(fromChild)
     } finally {
       await root.fiber.dispose()
     }
+  })
+})
+
+describe('defaultPatchPath — derives the patch-file path from the running profile, never a hardcoded name', () => {
+  it('resolves under profiles/web when ctx.baseUrl is the web profile directory', async () => {
+    const ctx = new Context()
+    ctx.baseUrl = 'file:///home/dsh/profiles/web/'
+    try {
+      const registry = await ensureStatusRegistry(ctx)
+      expect((registry as unknown as { patchPath: string }).patchPath)
+        .toBe('/home/dsh/profiles/web/cordis.patch.yml')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('never throws (mcp-client must still mount with no profile loader) when ctx.baseUrl is unset and no patchPath is given — warns once, degrades gracefully', async () => {
+    // e2e harnesses and embedded hosts have no `@deepseek-ai/dsh-app-boot`
+    // profile loader mounted at all, so `ctx.baseUrl` is never set — that
+    // must never block mcp-client activation (SWD-164 pilot finding:
+    // mcp-client.e2e.ts failed to mount entirely before this fix).
+    const ctx = new Context()
+    const warns: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warns.push(String(message)) }) as never)
+
+    const registry = await ensureStatusRegistry(ctx)
+    expect(warns.some(line => line.includes('ctx.baseUrl is unset'))).toBe(true)
+
+    // list() degrades to live rows only — no synthesized disabled rows, but
+    // no throw either.
+    await expect(registry.list()).resolves.toEqual([])
+    // set-enabled has no file to edit on this host and must say so loudly,
+    // never silently no-op or guess a path.
+    await expect(registry.setEnabled('srv', true)).rejects.toThrow(/this host has no profile file to edit/)
+
+    await ctx.fiber.dispose()
   })
 })

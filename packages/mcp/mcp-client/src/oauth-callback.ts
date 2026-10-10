@@ -15,6 +15,16 @@
 
 import { createServer } from 'node:http'
 
+/**
+ * Thrown by {@link startAuthorizationCallbackListener}'s `code` promise when
+ * no consent callback arrived within `timeoutMs`. A distinct class (rather
+ * than matching the generic `Error`'s message text) so a caller — the Host's
+ * `authorize-start` flow ({@link ./status-registry.ts}) — can tell "the user
+ * never finished" apart from any other capture failure and report the two
+ * differently.
+ */
+export class ConsentTimeoutError extends Error {}
+
 /** Options for {@link captureAuthorizationCode}. */
 export interface CaptureAuthorizationCodeOptions {
   /**
@@ -94,7 +104,7 @@ export function startAuthorizationCallbackListener(
     }
   })
   const timer = setTimeout(() => {
-    captured.reject(new Error(`no consent callback within ${timeoutMs}ms — rerun the command to get a fresh login URL`))
+    captured.reject(new ConsentTimeoutError(`no consent callback within ${timeoutMs}ms — rerun the command to get a fresh login URL`))
   }, timeoutMs)
   timer.unref()
   server.on('error', (error) => {
@@ -119,6 +129,15 @@ export function startAuthorizationCallbackListener(
   // still see the real resolution or rejection.
   const cleanup = (): void => {
     clearTimeout(timer)
+    // `close()` alone only stops accepting NEW connections; it waits for
+    // any already-open one to end on its own before the port is actually
+    // freed — and an HTTP/1.1 keep-alive connection from the single
+    // `/callback` request (or one that never arrived at all) can sit idle
+    // for Node's default `keepAliveTimeout` before that happens, leaving
+    // this one-shot listener's port looking busy well after this flow is
+    // over. Force every connection closed immediately — nothing has a
+    // reason to stay open once this listener is done either way.
+    server.closeAllConnections()
     server.close()
   }
   void captured.promise.then(cleanup, cleanup)

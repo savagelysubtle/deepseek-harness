@@ -60,6 +60,7 @@ vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
 // mocked SDK even through a static import.
 import { apply } from '@deepseek-ai/dsh-mcp-client/src/index.ts'
 import { MANUAL_RECONNECT_MIN_INTERVAL_MS, RECONNECT_DEFAULTS, resolveReconnectPolicy, startConnection } from '@deepseek-ai/dsh-mcp-client/src/connection.ts'
+import type { McpServerStatus } from '@deepseek-ai/dsh-mcp-client/src/status.ts'
 
 // ---- Helpers ----
 
@@ -67,6 +68,11 @@ const testToolSignal = new AbortController().signal
 
 async function mountRegistry(): Promise<Context> {
   const ctx = new Context()
+  // No profile loader is mounted in these tests, so the status registry's
+  // default cordis.patch.yml resolution (ctx.baseUrl) needs a stand-in — see
+  // defaultPatchPath in status-registry.ts. The path is never read or
+  // written by these tests; it only has to resolve to something.
+  ctx.baseUrl = 'file:///test-profile/'
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
   return ctx
@@ -525,6 +531,10 @@ describe('connection status and manual recovery', () => {
       expect(errors.some(line => line.includes('giving up after 1 consecutive failed reconnect attempts'))).toBe(true)
     })
     expect(handle.status().state).toBe('gave-up')
+    // The give-up decision counts 1 consecutive failed reconnect attempt
+    // (maxAttempts: 1) — the reported figure must match the log exactly,
+    // never the internal counter's one-higher value (SWD-164 pilot finding).
+    expect(handle.status().attempts).toBe(1)
     await handle.dispose()
   })
 
@@ -730,6 +740,32 @@ describe('connection status and manual recovery', () => {
     await handle.dispose()
     expect(() => { handle.forceReconnectAfterAuthorization() }).not.toThrow()
     expect(mockConnect).toHaveBeenCalledTimes(1)
+  })
+
+  it('reportAuthorizationFailure records the message as lastError without touching state, and notifies listeners', async () => {
+    const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }, 'reconnect'))
+    await handle.ready
+    const seen: McpServerStatus[] = []
+    const unsubscribe = handle.onStatusChange((status) => { seen.push(status) })
+
+    handle.reportAuthorizationFailure('Authorization timed out after 5 minutes — try again')
+
+    expect(handle.status().lastError).toBe('Authorization timed out after 5 minutes — try again')
+    // The row stays whatever it already was (here 'connected') — this never
+    // forces 'needs-authorization' or any other transition of its own.
+    expect(handle.status().state).toBe('connected')
+    expect(seen.at(-1)?.lastError).toBe('Authorization timed out after 5 minutes — try again')
+
+    unsubscribe()
+    await handle.dispose()
+  })
+
+  it('reportAuthorizationFailure is a no-op once disposed', async () => {
+    const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 1 }, 'reconnect'))
+    await handle.ready
+    await handle.dispose()
+    expect(() => { handle.reportAuthorizationFailure('too late') }).not.toThrow()
+    expect(handle.status().lastError).not.toBe('too late')
   })
 })
 

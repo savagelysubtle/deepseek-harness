@@ -63,13 +63,14 @@ export class McpAttentionStore {
 
   /**
    * @param getRemote - resolves the `mcp/status` Remote face on every call
-   *   (`() => ctx.remote.mcp` in production), NOT a captured snapshot: this
-   *   package does not declare `'remote.mcp'` in its own `inject` array (see
-   *   apply.ts's wiring note — blocking the whole conversation plugin on a
-   *   peripheral banner's Remote namespace would be the wrong trade), so the
-   *   namespace may still be `undefined` at construction time and only
-   *   become defined later once the host coder's aggregator mount lands.
-   *   Re-resolving on every `load()` call picks that up without a restart.
+   *   (`() => ctx.get('remote.mcp')` in production, not the `ctx.remote.mcp`
+   *   property chain — see apply.ts's wiring note), NOT a captured snapshot:
+   *   this package does not declare `'remote.mcp'` in its own `inject` array
+   *   (blocking the whole conversation plugin on a peripheral banner's
+   *   Remote namespace would be the wrong trade), so the namespace may still
+   *   be `undefined` at construction time and only become defined later once
+   *   the host coder's aggregator mount lands. Re-resolving on every `load()`
+   *   call picks that up without a restart.
    */
   constructor(private readonly getRemote: () => McpStatusRemote | undefined) {}
 
