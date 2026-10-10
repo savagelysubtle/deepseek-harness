@@ -14,7 +14,7 @@
  * @module @deepseek-ai/dsh-memory/local
  */
 
-import { link, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { link, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import type { Stats } from 'node:fs'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -132,6 +132,34 @@ function retentionTimestamp(): string {
 const LOCK_DIR = '.locks'
 
 /**
+ * Name prefix for one lock-acquisition attempt's private, uncontended temp
+ * file: {@link acquireEntryLock} writes the complete lock payload there
+ * first, then promotes it to the real lock path with a single `link()`
+ * call. `link()` is atomic at the filesystem level — a competitor's `open`
+ * or `readFile` of the lock path either sees it absent or sees it already
+ * carrying its full payload, never empty or partial. This is deliberately
+ * NOT `open(lockPath, 'wx')` followed by a separate write (one call or
+ * two, including the single-call `writeFile(path, data, {flag:'wx'})`
+ * form): `writeFile` still performs `open()` and the data `write()` as two
+ * separate internal async steps, each its own turn through the event loop,
+ * so it creates `lockPath` itself via a syscall that produces an empty file
+ * before any payload byte lands, and another writer's own attempt can get
+ * a turn in exactly that gap regardless of which of these forms is used.
+ * A scratchpad repro confirmed this gap is real and observable under
+ * concurrent load — rare under light load, more frequent the heavier the
+ * load, never fully closed by either `open`-based form — and, separately,
+ * that `link()`-based creation closed it entirely in the same repro
+ * (SWD-161: a competitor's read landing in the gap failed to parse and was
+ * wrongly read as "no live holder", so it stole the lock and ran its
+ * critical section concurrently with the actual holder). This assumes at
+ * most one in-flight acquire per process per entry, so the process's pid
+ * plus a random suffix is enough to make the temp name unique; a caller
+ * that starts two unawaited writes to the same entry from the same process
+ * is a caller bug this does not detect or handle.
+ */
+const LOCK_TEMP_PREFIX = '.lock-tmp-'
+
+/**
  * Longest {@link acquireEntryLock} will wait for a live holder to release
  * before failing the write loudly. Generous next to how long one write's
  * critical section actually takes (a handful of filesystem calls), so a
@@ -160,11 +188,32 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
+ * Best-effort removal of one lock-acquisition attempt's private temp file
+ * (see {@link LOCK_TEMP_PREFIX}), whether its `link()` into the real lock
+ * path landed or failed. A failure here is always disk hygiene, never a
+ * correctness problem — the lock's own state lives at `lockPath`, not at
+ * this name — so it is swallowed rather than surfaced or retried.
+ * @param tmpPath - the temp file to remove.
+ */
+async function cleanupLockTemp(tmpPath: string): Promise<void> {
+  await unlink(tmpPath).catch(() => {})
+}
+
+/**
  * Whether the lock file at `lockPath` names a holder that must still be
- * honored: read failure, unparseable content, or a pid field that is not a
- * plausible pid all read as "no provable live holder" — same fail-soft shape
- * `dsh-named-sessions` itself uses for an abandoned lock file — so a torn or
- * foreign artifact cannot wedge a write forever.
+ * honored — i.e. must NOT be treated as abandoned. Only two shapes are
+ * provable abandonment: the file is confirmed absent (ENOENT), or it parses
+ * and names a pid that is not a live process. Every other outcome —
+ * `readFile` failing for any other reason, or content that exists but does
+ * not parse — is honored the same as a confirmed-live holder (SWD-161): a
+ * lock file that genuinely exists but cannot (yet) be read as valid JSON is
+ * indistinguishable from a live holder whose write of it has not landed
+ * yet, so treating it as abandoned on first sight risked two writers
+ * running the critical section concurrently. Honoring it instead falls
+ * through to {@link acquireEntryLock}'s existing deadline-and-poll wait,
+ * so a lock file that genuinely never resolves — foreign, corrupt, or torn
+ * — still fails loud once that budget is exhausted, never a silent steal
+ * and never a silent hang.
  * @param lockPath - the contended lock file.
  * @returns whether the recorded holder must be honored as live.
  */
@@ -172,14 +221,14 @@ async function entryLockHolderLive(lockPath: string): Promise<boolean> {
   let raw: string
   try {
     raw = await readFile(lockPath, 'utf8')
-  } catch {
-    return false
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ENOENT'
   }
   let payload: { pid?: unknown }
   try {
     payload = JSON.parse(raw) as { pid?: unknown }
   } catch {
-    return false
+    return true
   }
   if (typeof payload.pid !== 'number' || !Number.isInteger(payload.pid) || payload.pid < 1) return false
   return isLockHolderLive({ pid: payload.pid })
@@ -202,14 +251,23 @@ async function entryLockHolderLive(lockPath: string): Promise<boolean> {
  * the last unlink error's code).
  */
 async function acquireEntryLock(lockPath: string, jailed: string, slug: string): Promise<EntryLock> {
-  await mkdir(join(lockPath, '..'), { recursive: true })
+  const lockDir = join(lockPath, '..')
+  await mkdir(lockDir, { recursive: true })
   const payload = JSON.stringify({ pid: process.pid } satisfies EntryLockPayload)
   const deadline = Date.now() + LOCK_ACQUIRE_TIMEOUT_MS
   for (;;) {
-    let handle
+    // Write the full payload to a private, uncontended temp name first, then
+    // promote it with link() — see LOCK_TEMP_PREFIX's doc for why this, and
+    // not open('wx') plus a later write, is what actually closes SWD-161's
+    // window. link() fails EEXIST exactly when open('wx') on lockPath itself
+    // would have, so the contention/abandoned-lock/timeout logic below is
+    // unchanged in shape.
+    const tmpPath = join(lockDir, `${LOCK_TEMP_PREFIX}${process.pid.toString(36)}-${Math.random().toString(36).slice(2, 8)}`)
     try {
-      handle = await open(lockPath, 'wx')
+      await writeFile(tmpPath, payload, 'utf8')
+      await link(tmpPath, lockPath)
     } catch (error) {
+      await cleanupLockTemp(tmpPath)
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
         throw new Error(`memory(${slug}): could not create the write lock for "${jailed}" (${String(error instanceof Error ? error.message : error)})`)
       }
@@ -220,7 +278,7 @@ async function acquireEntryLock(lockPath: string, jailed: string, slug: string):
         // unlink of our own, that resolves with a single quick retry on the
         // next loop iteration's create. Any other removal failure (a
         // directory occupies the lock path; a permission that blocks
-        // unlink but not open/readFile) falls through to the same deadline
+        // unlink but not link/readFile) falls through to the same deadline
         // and poll delay the live-holder branch below uses, so it still
         // fails loud instead of spinning this loop forever.
         try {
@@ -244,11 +302,10 @@ async function acquireEntryLock(lockPath: string, jailed: string, slug: string):
       await delay(LOCK_POLL_INTERVAL_MS)
       continue
     }
-    try {
-      await handle.writeFile(payload, 'utf8')
-    } finally {
-      await handle.close()
-    }
+    // The lock is live under lockPath — a second name for the same inode as
+    // tmpPath — so this extra name is redundant. Losing it is disk hygiene,
+    // never a correctness problem, hence the same best-effort cleanup.
+    await cleanupLockTemp(tmpPath)
     return {
       async release(): Promise<void> {
         let current: string
