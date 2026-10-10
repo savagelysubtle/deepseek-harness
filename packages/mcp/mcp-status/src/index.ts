@@ -268,6 +268,17 @@ export class McpStatusRegistryService extends TypertRemoteService {
     if (handle.authProvider === undefined || config.transport !== 'streamable-http') {
       throw new Error(`mcp authorize-start: server "${serverName}" has no OAuth configured`)
     }
+    // The opposite direction of the SWD-164 pilot race: a reconnect attempt
+    // already mid-`generation.connect()` may itself be running the MCP SDK's
+    // own 401-triggered `auth()` step through this same `authProvider` right
+    // now. Starting our own consent flow on top of that would race the same
+    // PKCE verifier/state this method is about to protect once it owns the
+    // flow — reject loudly rather than silently losing that race too; the
+    // caller can simply retry once the in-flight attempt settles (it is
+    // always short-lived: one `connect()` + initial sync).
+    if (handle.isReconnectAttemptInFlight()) {
+      throw new Error(`mcp authorize-start: server "${serverName}" is mid-reconnect, retry in a moment`)
+    }
     if (this.pendingFlow !== undefined) {
       throw new Error(
         `mcp authorize-start: a consent flow is already pending for "${this.pendingFlow}" — `
@@ -277,6 +288,19 @@ export class McpStatusRegistryService extends TypertRemoteService {
     // Reserve the shared listener slot synchronously, before any await, so
     // two concurrent calls can never both pass the check above.
     this.pendingFlow = serverName
+    // From here through `runConsentCapture`'s `finally` below, this flow owns
+    // `authProvider`: suppress the automatic reconnect loop entirely so it
+    // cannot run its own `auth()` step through the same provider and
+    // regenerate the PKCE verifier/state out from under this flow (SWD-164
+    // pilot finding). Called BEFORE the reachability probe below, not just
+    // before `sdkAuth` — the probe is itself an `await` (up to
+    // `AUTHORIZE_REACHABILITY_PROBE_TIMEOUT_MS`), and the
+    // `isReconnectAttemptInFlight` check above only catches an attempt
+    // already running at the moment this method was called, not one whose
+    // timer was merely armed and fires DURING this probe; the pilot's own
+    // 17ms figure fits a short backoff delay elapsing mid-probe far better
+    // than it fits the (much longer) user-interaction window afterward.
+    handle.beginAuthorization()
     try {
       // Probe the server itself before trusting the SDK's own consent-URL
       // synthesis: `auth()` builds the authorization URL from (possibly
@@ -356,6 +380,12 @@ export class McpStatusRegistryService extends TypertRemoteService {
       void this.runConsentCapture(serverName, handle, listener.code)
       return { consentUrl }
     } catch (error) {
+      // Mirrors the `pendingFlow` release right next to it: any failure from
+      // here up (reachability, `sdkAuth`, already-authorized, the consent
+      // listener) must let automatic reconnection resume — only the
+      // background `runConsentCapture` path (which took over on success)
+      // releases it later, in its own `finally`.
+      handle.endAuthorization()
       this.pendingFlow = undefined
       throw error
     }
@@ -397,6 +427,11 @@ export class McpStatusRegistryService extends TypertRemoteService {
         : redactAbsolutePaths(String(error))
       handle.reportAuthorizationFailure(message)
     } finally {
+      // Release the provider back to the automatic reconnect loop: on
+      // success this is immediately followed by `forceReconnectAfterAuthorization`
+      // above, bypassing backoff entirely; on failure or timeout, the normal
+      // backoff loop simply resumes scheduling on the next real disconnect.
+      handle.endAuthorization()
       this.pendingFlow = undefined
     }
   }

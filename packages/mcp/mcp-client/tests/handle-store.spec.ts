@@ -104,6 +104,9 @@ function fakeHandle(serverName: string): { handle: ConnectionHandle; fireStatusC
     peekConsentUrl() { return undefined },
     forceReconnectAfterAuthorization() {},
     reportAuthorizationFailure() {},
+    beginAuthorization() {},
+    endAuthorization() {},
+    isReconnectAttemptInFlight() { return false },
   }
   return { handle, fireStatusChange: (status) => { for (const listener of listeners) listener(status) } }
 }

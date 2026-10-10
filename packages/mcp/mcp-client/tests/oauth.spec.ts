@@ -22,6 +22,7 @@ import { apply as mcpApply, inject as mcpInject, name as mcpName, Config as Conf
   from '@deepseek-ai/dsh-mcp-client/src/index.ts'
 import { runAuthCli } from '@deepseek-ai/dsh-mcp-client/src/auth-cli.ts'
 import { startConnection, resolveReconnectPolicy } from '@deepseek-ai/dsh-mcp-client/src/connection.ts'
+import { auth as sdkAuth } from '@modelcontextprotocol/sdk/client/auth.js'
 
 async function mountRegistry(credentialsPath?: string): Promise<Context> {
   const ctx = new Context()
@@ -570,4 +571,79 @@ describe('resolveAuthProvider (connection.ts) direct wiring', () => {
       await fixture.close()
     }
   })
+
+  it(
+    'reproduces the SWD-164 pilot race directly against the real SDK: a reconnect retry ticking '
+    + 'moments after authorize-start begins must not regenerate the PKCE verifier/state out from '
+    + 'under the pending consent code',
+    async () => {
+      const fixture = await startOAuthFixture()
+      const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
+      const credPath = join(dir, 'creds.yaml')
+      try {
+        const ctx = await mountRegistry(credPath)
+        const config: Config = {
+          ...httpConfig(fixture, 'authorize-race'),
+          // The pilot's own timing: a reconnect retry armed to tick shortly
+          // after the Authorize click. Short enough that, without the fix,
+          // the armed timer reliably fires inside this test's own wait below.
+          reconnect: { enabled: true, initialDelayMs: 17, maxDelayMs: 17, maxAttempts: 10 },
+        }
+        const handle = startConnection(ctx, config, resolveReconnectPolicy(config.reconnect, 'reconnect'))
+        await handle.ready
+        expect(handle.status().state).toBe('needs-authorization')
+
+        // authorize-start's own sequence (mcp-status/src/index.ts
+        // authorizeStart): begin the window — clearing the backoff timer the
+        // first failed attempt just armed — then run the exact same sdkAuth
+        // call authorizeStart runs, capturing the real consent URL/verifier.
+        handle.beginAuthorization()
+        const result = await sdkAuth(handle.authProvider!, { serverUrl: fixture.url })
+        expect(result).toBe('REDIRECT')
+        const consentUrl = handle.peekConsentUrl()
+        expect(consentUrl).toBeDefined()
+        const stateAtStart = new URL(consentUrl!).searchParams.get('state')
+        const verifierAtStart = await handle.authProvider!.codeVerifier()
+
+        // The exact pilot interleaving: wait past the armed timer's original
+        // 17ms delay — this is the tick that, in the real browser pilot,
+        // fired 17ms after the Authorize click and re-ran the SDK's own
+        // auth() step through the same provider.
+        await new Promise<void>((resolve) => { setTimeout(resolve, 60) })
+
+        // Unchanged: no automatic reconnect attempt ran while the flow was
+        // pending, so neither the consent URL's state nor the persisted PKCE
+        // verifier was clobbered out from under this flow.
+        expect(handle.peekConsentUrl()).toBe(consentUrl)
+        expect(new URL(handle.peekConsentUrl()!).searchParams.get('state')).toBe(stateAtStart)
+        expect(await handle.authProvider!.codeVerifier()).toBe(verifierAtStart)
+
+        // The user completes consent: the real token exchange must submit
+        // the SAME verifier captured above — the fixture's own PKCE check is
+        // a no-op, so asserting the submitted value directly is what proves
+        // nothing clobbered it, independent of the fixture's leniency.
+        const exchangeResult = await sdkAuth(handle.authProvider!, {
+          serverUrl: fixture.url,
+          authorizationCode: 'auth-code-1',
+        })
+        expect(exchangeResult).toBe('AUTHORIZED')
+        const lastTokenRequest = fixture.tokenRequests.at(-1)!
+        expect(lastTokenRequest.grant_type).toBe('authorization_code')
+        expect(lastTokenRequest.code_verifier).toBe(verifierAtStart)
+
+        // runConsentCapture's own finally + success branch: release the
+        // window, then force the deterministic reconnect that completes it.
+        fixture.setValidToken('at-cli')
+        handle.endAuthorization()
+        handle.forceReconnectAfterAuthorization()
+        await vi.waitFor(() => { expect(handle.status().state).toBe('connected') })
+
+        await handle.dispose()
+        await ctx.fiber.dispose()
+      } finally {
+        await rm(dir, { recursive: true, force: true })
+        await fixture.close()
+      }
+    },
+  )
 })

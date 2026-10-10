@@ -168,10 +168,33 @@ function buildOAuthHandle(fixture: OAuthFixture, ctx: Context, serverName: strin
   handle: ConnectionHandle
   forceReconnectAfterAuthorization: ReturnType<typeof vi.fn>
   reconnectNow: ReturnType<typeof vi.fn>
-  box: { consentUrl: string | undefined; state: McpServerState; lastError: string | undefined }
+  beginAuthorization: ReturnType<typeof vi.fn>
+  endAuthorization: ReturnType<typeof vi.fn>
+  box: {
+    consentUrl: string | undefined
+    state: McpServerState
+    lastError: string | undefined
+    authorizationPending: boolean
+    reconnectAttemptInFlight: boolean
+  }
 } {
-  const box: { consentUrl: string | undefined; state: McpServerState; lastError: string | undefined } =
-    { consentUrl: undefined, state: 'connecting', lastError: undefined }
+  const box: {
+    consentUrl: string | undefined
+    state: McpServerState
+    lastError: string | undefined
+    authorizationPending: boolean
+    reconnectAttemptInFlight: boolean
+  } = {
+    consentUrl: undefined,
+    state: 'connecting',
+    lastError: undefined,
+    authorizationPending: false,
+    // Settable directly by a test that wants to simulate a reconnect attempt
+    // already mid-auth when `authorize-start` is called (the SWD-164 round 5
+    // opposite-direction guard) — this fake handle has no real supervisor
+    // loop to flip it on its own.
+    reconnectAttemptInFlight: false,
+  }
   const provider = CredentialsOAuthProvider.create({
     serverName,
     serverUrl: new URL(fixture.url),
@@ -184,6 +207,8 @@ function buildOAuthHandle(fixture: OAuthFixture, ctx: Context, serverName: strin
   })
   const forceReconnectAfterAuthorization = vi.fn()
   const reconnectNow = vi.fn()
+  const beginAuthorization = vi.fn(() => { box.authorizationPending = true })
+  const endAuthorization = vi.fn(() => { box.authorizationPending = false })
   const handle: ConnectionHandle = {
     ready: Promise.resolve({}),
     async dispose() {},
@@ -206,8 +231,11 @@ function buildOAuthHandle(fixture: OAuthFixture, ctx: Context, serverName: strin
     authProvider: provider,
     forceReconnectAfterAuthorization,
     reportAuthorizationFailure(message: string) { box.lastError = message },
+    beginAuthorization,
+    endAuthorization,
+    isReconnectAttemptInFlight() { return box.reconnectAttemptInFlight },
   }
-  return { handle, forceReconnectAfterAuthorization, reconnectNow, box }
+  return { handle, forceReconnectAfterAuthorization, reconnectNow, beginAuthorization, endAuthorization, box }
 }
 
 /**
@@ -699,7 +727,7 @@ describe('McpStatusRegistryService — authorize-start', () => {
   })
 
   it('rejects when the server is already authorized, directing the caller to Reconnect instead', async () => {
-    const { handle } = buildOAuthHandle(fixture, ctx, 'already')
+    const { handle, beginAuthorization, endAuthorization } = buildOAuthHandle(fixture, ctx, 'already')
     registry.register(httpConfig(fixture, 'already'), handle)
     await ctx.credentials.set(handle.authProvider!.ref, JSON.stringify({
       version: 1,
@@ -707,6 +735,51 @@ describe('McpStatusRegistryService — authorize-start', () => {
       clientInformation: { client_id: 'dyn-client-1' },
     }))
     await expect(registry.authorizeStart('already')).rejects.toThrow(/already authorized — try Reconnect/)
+    // sdkAuth already ran (that is how this learned the token is still
+    // valid) — begin/end must still bracket it symmetrically even on this
+    // up-front failure, same as every other early throw in the outer catch.
+    expect(beginAuthorization).toHaveBeenCalledTimes(1)
+    expect(endAuthorization).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects loudly when a reconnect attempt is already mid-auth, without reserving the pending-flow slot (SWD-164 round 5: the opposite-direction race)', async () => {
+    const { handle, box, forceReconnectAfterAuthorization } = buildOAuthHandle(fixture, ctx, 'mid-reconnect')
+    registry.register(httpConfig(fixture, 'mid-reconnect'), handle)
+    box.reconnectAttemptInFlight = true
+
+    await expect(registry.authorizeStart('mid-reconnect')).rejects.toThrow(/is mid-reconnect, retry in a moment/)
+    expect((registry as unknown as { pendingFlow: string | undefined }).pendingFlow).toBeUndefined()
+
+    // Once the in-flight attempt settles, authorize-start proceeds normally.
+    box.reconnectAttemptInFlight = false
+    const { consentUrl } = await registry.authorizeStart('mid-reconnect')
+    const port = Number(new URL(handle.authProvider!.redirectUrl).port)
+    const state = new URL(consentUrl).searchParams.get('state')!
+    const response = await fetch(`http://127.0.0.1:${port}/callback?code=auth-code-mid-reconnect&state=${state}`)
+    expect(response.ok).toBe(true)
+    await vi.waitFor(() => { expect(forceReconnectAfterAuthorization).toHaveBeenCalledTimes(1) })
+  })
+
+  it('brackets sdkAuth with beginAuthorization/endAuthorization across the whole consent flow, releasing only once the background capture concludes (SWD-164 round 5)', async () => {
+    const { handle, box, beginAuthorization, endAuthorization, forceReconnectAfterAuthorization } =
+      buildOAuthHandle(fixture, ctx, 'bracket')
+    registry.register(httpConfig(fixture, 'bracket'), handle)
+
+    const { consentUrl } = await registry.authorizeStart('bracket')
+    expect(beginAuthorization).toHaveBeenCalledTimes(1)
+    // Still pending: the background capture has not concluded yet, so the
+    // automatic reconnect loop must stay suppressed.
+    expect(endAuthorization).not.toHaveBeenCalled()
+    expect(box.authorizationPending).toBe(true)
+
+    const port = Number(new URL(handle.authProvider!.redirectUrl).port)
+    const state = new URL(consentUrl).searchParams.get('state')!
+    const response = await fetch(`http://127.0.0.1:${port}/callback?code=auth-code-bracket&state=${state}`)
+    expect(response.ok).toBe(true)
+
+    await vi.waitFor(() => { expect(endAuthorization).toHaveBeenCalledTimes(1) })
+    expect(box.authorizationPending).toBe(false)
+    await vi.waitFor(() => { expect(forceReconnectAfterAuthorization).toHaveBeenCalledTimes(1) })
   })
 
   it('a second authorize-start rejects while the first is pending (single shared listener)', async () => {

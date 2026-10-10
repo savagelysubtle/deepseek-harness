@@ -257,6 +257,40 @@ export interface ConnectionHandle {
    * once disposed, like every other post-dispose status write.
    */
   reportAuthorizationFailure(message: string): void
+  /**
+   * Mark a consent flow as pending for this server: clears any armed
+   * reconnect timer and suppresses every future {@link scheduleReconnect}
+   * call (so no automatic retry can run `generation.connect()`, and
+   * therefore cannot run the MCP SDK's own 401-triggered `auth()` step
+   * through this handle's `authProvider`) until {@link endAuthorization} is
+   * called. `authorize-start`
+   * (`@deepseek-ai/dsh-mcp-status`'s status-registry service) calls this
+   * right before its own `sdkAuth` call — the fix for the SWD-164 pilot
+   * race, where a reconnect attempt firing moments after the Authorize
+   * click regenerated the PKCE verifier/state out from under the user's
+   * in-flight consent code. A no-op once disposed.
+   */
+  beginAuthorization(): void
+  /**
+   * End the pending-authorization window opened by {@link beginAuthorization}
+   * and let automatic reconnection resume normally. Does not itself schedule
+   * anything: on a successful consent exchange the caller's own
+   * `finally` follows this with {@link forceReconnectAfterAuthorization}; on
+   * failure or timeout, the next real disconnect (there is none pending,
+   * since none could fire while suppressed) simply schedules through
+   * `scheduleReconnect` again next time one happens. A no-op once disposed.
+   */
+  endAuthorization(): void
+  /**
+   * True while a reconnect attempt is between `generation.connect()` and
+   * the end of its initial tool sync — including any time the MCP SDK
+   * spends running its own `auth()` step through `authProvider` on a 401.
+   * `authorize-start` checks this BEFORE starting its own consent flow: the
+   * opposite direction of the race {@link beginAuthorization} guards
+   * against, where a reconnect attempt is already using the provider when
+   * the user clicks Authorize.
+   */
+  isReconnectAttemptInFlight(): boolean
 }
 
 /** Floor between accepted manual {@link ConnectionHandle.reconnectNow} calls, per server. */
@@ -299,6 +333,44 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
   let connectedAt: number | undefined
   /** The real error from the first connection attempt, for startup-await diagnostics. */
   let firstAttemptError: unknown
+  /**
+   * True for the duration of one pending `authorize-start` consent flow
+   * (`beginAuthorization`..`endAuthorization`): suppresses
+   * {@link scheduleReconnect} entirely, so no automatic retry can run
+   * `generation.connect()` — and therefore the MCP SDK's own 401-triggered
+   * `auth()` step through this same persisted `authProvider` — while a
+   * fresh PKCE verifier/state is saved and the user's browser tab is
+   * mid-flight completing it (SWD-164 pilot finding: an armed backoff
+   * timer that fired 17ms after the Authorize click re-ran that SDK auth
+   * step, regenerating the verifier/state out from under the pending
+   * consent code and failing it with "PKCE verification failed").
+   */
+  let authorizationPending = false
+  /**
+   * Set by {@link scheduleReconnect}'s `authorizationPending` guard when it
+   * drops a disconnect that happened WHILE a consent flow was pending —
+   * e.g. a live, `connected` generation closing mid-flow — rather than
+   * silently losing that disconnect forever (reviewer finding, SWD-164
+   * round 5: without this, `endAuthorization` on a FAILED/timed-out flow
+   * left the row stuck reporting a stale `connected` status with no client,
+   * no armed timer, and no way back short of a plugin reload, since
+   * `reconnectNow`'s own state guard only accepts `gave-up`/`disabled`).
+   * `endAuthorization` consumes this flag on the failure path by calling
+   * `scheduleReconnect` itself once suppression lifts, exactly as if the
+   * dropped disconnect were happening now; the success path clears it too,
+   * since `forceReconnectAfterAuthorization` already reconnects without it.
+   */
+  let disconnectDroppedDuringAuthorization = false
+  /**
+   * True for the duration of one `connectGeneration` call (`generation.connect()`
+   * through its initial sync), including the window the MCP SDK may spend
+   * running its own 401-triggered `auth()` step through `authProvider`.
+   * `authorize-start` checks this BEFORE starting its own consent flow — the
+   * opposite direction of the race {@link authorizationPending} guards
+   * against, where a reconnect attempt is already using the provider when
+   * the user clicks Authorize.
+   */
+  let attemptInFlight = false
 
   // ---- Status machinery ----
   /** Current lifecycle state exposed through {@link ConnectionHandle.status}. */
@@ -403,6 +475,20 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
   }
 
   function scheduleReconnect(): void {
+    // A pending authorize-start consent flow owns the provider right now —
+    // never arm (or leave armed) a timer that would run a competing
+    // `generation.connect()` attempt. `beginAuthorization` already cleared
+    // whatever was armed at the moment it was called; this keeps every
+    // LATER disconnect during the same window from re-arming one. Not
+    // silently lost, though (reviewer finding, SWD-164 round 5): a disconnect
+    // THIS call is dropping is recorded via `disconnectDroppedDuringAuthorization`
+    // so `endAuthorization`'s failure path can replay it once suppression lifts
+    // — otherwise a `connected` row that drops mid-flow would stay reporting
+    // stale `connected` status forever, with no client and no armed timer.
+    if (authorizationPending) {
+      disconnectDroppedDuringAuthorization = true
+      return
+    }
     const lostEstablishedConnection = connectedAt !== undefined
     if (!policy.enabled) {
       const message = lostEstablishedConnection
@@ -462,6 +548,20 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
    * @param startup - Whether this is the plugin's activation attempt.
    */
   async function connectGeneration(startup: boolean): Promise<void> {
+    attemptInFlight = true
+    try {
+      await runConnectAttempt(startup)
+    } finally {
+      attemptInFlight = false
+    }
+  }
+
+  /**
+   * The actual attempt body, split out so {@link connectGeneration} can
+   * bracket it with {@link attemptInFlight} regardless of which of its
+   * several return points fires.
+   */
+  async function runConnectAttempt(startup: boolean): Promise<void> {
     const generation = new Client(
       { name: 'dsh-mcp-client', version: '0.0.1' },
       { capabilities: {} },
@@ -646,12 +746,48 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
       }
       failedAttempts = 0
       connectedAt = undefined
+      // This success path owns the recovery itself — a disconnect
+      // scheduleReconnect dropped while suppressed would otherwise still be
+      // replayed by endAuthorization() right after this returns (see its
+      // own doc); clearing it here too keeps that replay from ever being
+      // live simultaneously with this call's own fresh generation.
+      disconnectDroppedDuringAuthorization = false
       setState('connecting')
       settling = connectGeneration(false)
     },
     reportAuthorizationFailure(message: string): void {
       if (disposed) return
       recordError(message)
+    },
+    beginAuthorization(): void {
+      if (disposed) return
+      authorizationPending = true
+      if (reconnectTimer !== undefined) {
+        clearTimeout(reconnectTimer)
+        reconnectTimer = undefined
+      }
+    },
+    endAuthorization(): void {
+      if (disposed) return
+      authorizationPending = false
+      if (!disconnectDroppedDuringAuthorization) return
+      disconnectDroppedDuringAuthorization = false
+      // This guard's TRUE branch (a generation already live) is unreachable:
+      // the only path that can set `client` while this flag could still be
+      // true is forceReconnectAfterAuthorization, and it clears the flag
+      // itself before returning — so by the time any caller reaches this
+      // line with the flag still true, no generation has started yet and
+      // `client` is still undefined. Kept as a defensive second guard
+      // (rather than an assertion) for any future caller sequence, not as a
+      // branch meant to be exercised.
+      /* v8 ignore next -- see proof above */
+      if (client !== undefined) return
+      // Replay the disconnect scheduleReconnect dropped while suppressed,
+      // exactly as if it were happening now (reviewer finding, SWD-164 round 5).
+      scheduleReconnect()
+    },
+    isReconnectAttemptInFlight(): boolean {
+      return attemptInFlight
     },
   }
 }
