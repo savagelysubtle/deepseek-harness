@@ -215,15 +215,34 @@ describe('consent CLI and host pickup', () => {
     const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
     const credPath = join(dir, 'creds.yaml')
     const errors: string[] = []
+    const warns: string[] = []
+    const infos: string[] = []
+    const debugs: string[] = []
     try {
       const ctx = await mountRegistry(credPath)
       vi.spyOn(ctx.logger, 'error').mockImplementation(((message: unknown) => {
         errors.push(String(message))
       }) as never)
+      vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => {
+        warns.push(String(message))
+      }) as never)
+      vi.spyOn(ctx.logger, 'info').mockImplementation(((message: unknown) => {
+        infos.push(String(message))
+      }) as never)
+      vi.spyOn(ctx.logger, 'debug').mockImplementation(((message: unknown) => {
+        debugs.push(String(message))
+      }) as never)
       await expect(mcpApply(ctx, httpConfig(fixture, 'noconsent'))).resolves.toBeUndefined()
       expect(ctx.tools.get('mcp__noconsent__ping')).toBeUndefined()
       await ctx.fiber.dispose()
       expect(errors.join('\n')).toMatch(/human consent required/)
+      expect(errors.join('\n')).toContain('Settings > Tools')
+      // The consent URL (and anything derived from it — the authorize
+      // endpoint, its PKCE challenge) must never reach any log line.
+      const allLogged = [...errors, ...warns, ...infos, ...debugs].join('\n')
+      expect(allLogged).not.toContain('code_challenge=')
+      expect(allLogged).not.toContain(`${fixture.base}/authorize`)
+      expect(allLogged).not.toMatch(/[?&]state=/)
     } finally {
       await rm(dir, { recursive: true, force: true })
       await fixture.close()

@@ -75,7 +75,7 @@ First consent (headless-safe): run the consent CLI from this package on any mach
 dsh-mcp-client-auth --url https://mcp.example.com/mcp --server-name example
 ```
 
-It prints the authorization URL, captures the redirect on `127.0.0.1:<auth.redirectPort>` (default `14506`; pass `--redirect-port` here AND in the plugin config when you change it), exchanges the code, and writes the tokens. A running host picks them up on its next connection attempt without a restart. When consent is missing, the host logs the same URL once with run-the-CLI guidance and keeps retrying under its normal reconnect budget; `--reset` starts the grant over.
+It prints the authorization URL, captures the redirect on `127.0.0.1:<auth.redirectPort>` (default `14506`; pass `--redirect-port` here AND in the plugin config when you change it), exchanges the code, and writes the tokens. A running host picks them up on its next connection attempt without a restart. When consent is missing, the host never logs the URL — it logs a pointer once (Settings > Tools, or run the CLI) and keeps retrying under its normal reconnect budget; `--reset` starts the grant over.
 
 ## Behavior
 
