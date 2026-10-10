@@ -31,6 +31,7 @@ export type OrgBoardKey =
   | 'badge.test'
   | 'badge.unserved'
   | 'badge.callUp'
+  | 'legend.edges'
   | 'detail.hint'
   | 'detail.cwd'
   | 'detail.session'
@@ -113,6 +114,7 @@ export const zh: Record<OrgBoardKey, string> = {
   'badge.test': '测试席位',
   'badge.unserved': '未完全提供服务',
   'badge.callUp': '可致信任何席位',
+  'legend.edges': '邮件权限连线仅在悬停或选中某个席位时显示。',
   'detail.hint': '选择一个席位以查看详情。',
   'detail.cwd': '工作目录',
   'detail.session': '会话 ID',
@@ -189,6 +191,7 @@ export const en: Record<OrgBoardKey, string> = {
   'badge.test': 'Test seat',
   'badge.unserved': 'Not fully served',
   'badge.callUp': 'May mail anyone',
+  'legend.edges': 'Mail-permission lines only show while a seat is hovered or selected.',
   'detail.hint': 'Select a seat to see its details.',
   'detail.cwd': 'Working directory',
   'detail.session': 'Session ID',

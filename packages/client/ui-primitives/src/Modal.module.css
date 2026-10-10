@@ -18,7 +18,13 @@
   backdrop-filter: var(--dsw-mask-blur);
 }
 
-/* Dialog card: r24, shadow-lv3, layer-2 fill, inverted border, pb 24. */
+/* Dialog card: r24, shadow-lv3, layer-2 fill, inverted border, pb 24.
+ * Capped at (viewport - 48px) so a tall body (e.g. ui-org-board's graph)
+ * never grows the card past the viewport's own top/bottom edges. Non-visual
+ * otherwise: `overflow: hidden` stays, so a consumer that does nothing
+ * further still clips at the card's own bounds exactly as before -- the
+ * one that wants its own content to scroll inside that cap opts in itself
+ * (see ui-org-board/OrgBoard.module.css's own `.content`). */
 .dialog {
   position: relative;
   z-index: 1;
@@ -26,6 +32,7 @@
   flex-direction: column;
   gap: 20px;
   width: min(380px, 100%);
+  max-height: calc(100vh - 48px);
   padding: 0 0 24px;
   overflow: hidden;
   border: 1px solid var(--dsw-alias-border-inverted);
@@ -34,10 +41,19 @@
   box-shadow: var(--dsw-shadow-lv3);
 }
 
+@supports (height: 100dvh) {
+  .dialog {
+    max-height: calc(100dvh - 48px);
+  }
+}
+
 .content {
   display: flex;
   flex-direction: column;
   width: 100%;
+  /* Lets this shrink below its own content height once `.dialog`'s cap
+     bites, instead of a flex item's default min-height: auto floor. */
+  min-height: 0;
 }
 
 /* Header row (figma Title row): pad l24/t22/r14/b12, SPACE_BETWEEN —
@@ -90,6 +106,9 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
+  /* Same reason as .content above: lets a consumer's own scrolling child
+     (e.g. ui-org-board's) actually shrink inside the capped dialog. */
+  min-height: 0;
   margin-top: 20px;
   padding: 0 24px;
 }
