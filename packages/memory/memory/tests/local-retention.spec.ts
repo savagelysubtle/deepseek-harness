@@ -6,10 +6,12 @@
  * itself cannot happen, genuinely concurrent writers on one path (the actual
  * shape of the 2026-08-26 incident, not just sequential overwrites), and the
  * per-entry lock's stale-holder takeover so a dead process's lock cannot
- * wedge a write forever.
+ * wedge a write forever. Also covers SWD-161: a lock file that exists but
+ * cannot yet be read as valid JSON — empty, mid-creation, or otherwise —
+ * must never be treated as abandoned on first sight.
  */
 import { describe, expect, it } from 'vitest'
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -246,16 +248,66 @@ describe('write() retention (SWD-148)', () => {
     }
   })
 
-  it('treats a lock file with unparseable content as abandoned rather than honoring it', async () => {
+  it('does not treat an empty, still-being-created lock file as abandoned, but completes once it resolves (SWD-161)', async () => {
     const booted = await boot()
     try {
       const scope = scopeDirForProject(booted.root)
-      const lockPath = join(scope, '.locks', 'malformed-lock.md.lock')
+      const lockPath = join(scope, '.locks', 'empty-lock.md.lock')
       await mkdir(join(lockPath, '..'), { recursive: true })
-      await writeFile(lockPath, 'not json at all', 'utf8')
-      const result = await booted.provider.write(PROJECT, 'malformed-lock.md', 'content')
+      // A 0-byte lock file is exactly the on-disk state acquireEntryLock's
+      // own former open('wx')-then-write window could leave another writer
+      // to observe mid-creation (SWD-161) — placed here directly, before
+      // write() ever starts, rather than relying on timing to land a real
+      // reader inside that window.
+      await writeFile(lockPath, '', 'utf8')
+      let settled = false
+      const writing = booted.provider.write(PROJECT, 'empty-lock.md', 'content')
+      void writing.finally(() => { settled = true })
+      // A handful of LOCK_POLL_INTERVAL_MS (20ms) worth of real waiting: if
+      // the empty file were (wrongly) read as abandoned, the write would
+      // already have taken the lock and completed well within this window.
+      await new Promise(resolve => setTimeout(resolve, 100))
+      expect(settled).toBe(false)
+      // Resolve it the way a real holder's own completed write eventually
+      // would — by releasing the lock.
+      await unlink(lockPath)
+      const result = await writing
       expect(result.replaced).toBeUndefined()
-      expect(await booted.provider.read(PROJECT, 'malformed-lock.md')).toBe('content')
+      expect(await booted.provider.read(PROJECT, 'empty-lock.md')).toBe('content')
+    } finally {
+      await booted.done()
+    }
+  })
+
+  it('never leaves the per-entry lock file observable as empty or partially written while writers race it (SWD-161)', async () => {
+    const booted = await boot()
+    try {
+      const scope = scopeDirForProject(booted.root)
+      const lockPath = join(scope, '.locks', 'observed.md.lock')
+      let observing = true
+      const badObservations: string[] = []
+      // Hammers the raw lock-file bytes in a tight loop for the whole
+      // duration of the race below — the same method that proved the fix
+      // empirically before this change landed (see the lock-repro script
+      // referenced in the ticket): a live lock's payload is always a
+      // complete `{"pid":<number>}` object, so anything else observable at
+      // this path — empty or a truncated prefix — is the exact defect
+      // SWD-161 fixed.
+      const prober = (async () => {
+        while (observing) {
+          try {
+            const raw = await readFile(lockPath, 'utf8')
+            if (!/^\{"pid":\d+\}$/.test(raw)) badObservations.push(raw)
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+          }
+        }
+      })()
+      const bodies = Array.from({ length: 12 }, (_, i) => `writer-${String(i)}`)
+      await Promise.all(bodies.map(body => booted.provider.write(PROJECT, 'observed.md', body)))
+      observing = false
+      await prober
+      expect(badObservations).toEqual([])
     } finally {
       await booted.done()
     }

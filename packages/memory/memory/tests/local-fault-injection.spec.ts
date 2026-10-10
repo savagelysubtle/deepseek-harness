@@ -74,21 +74,20 @@ const state = vi.hoisted(() => ({
   failStatErrorCode: undefined as string | undefined,
   /** link: always reject with a non-Error value when the new-path argument contains this substring. */
   failLinkNonErrorContains: undefined as string | undefined,
-  /** open: always reject with a non-Error value for a path ending in this suffix. */
-  failOpenNonErrorSuffix: undefined as string | undefined,
-  /** open: always throw with this code for a path ending in this suffix. */
-  failOpenErrorCodeSuffix: undefined as string | undefined,
-  failOpenErrorCode: undefined as string | undefined,
-  /** open: always (persistently, not one-shot) throw EEXIST for a path ending in this suffix — simulates a
-   *  contended lock file without ever touching real disk. */
-  alwaysFailOpenEexistSuffix: undefined as string | undefined,
-  /** open: throw EEXIST once for a path ending in this suffix, then delegate — simulates a lock file that
-   *  appears contended on the first attempt (so the abandoned-lock branch runs) but was never actually
-   *  created on real disk, so the real readFile/unlink calls against it genuinely reject ENOENT. */
-  failOpenEexistOnceSuffix: undefined as string | undefined,
-  /** mkdir: resolve immediately without touching real disk for a path starting with this prefix (write()
-   *  mkdir's both the entry's own directory and the lock directory — both land under one scope dir). */
-  alwaysResolveMkdirPrefix: undefined as string | undefined,
+  /** link: always throw with this code when the new-path argument ends in this suffix. */
+  failLinkErrorCodeSuffix: undefined as string | undefined,
+  failLinkErrorCode: undefined as string | undefined,
+  /** link: always (persistently, not one-shot) throw EEXIST when the new-path argument ends in this suffix —
+   *  simulates a contended lock file without ever touching real disk. */
+  alwaysFailLinkEexistSuffix: undefined as string | undefined,
+  /** link: throw EEXIST once when the new-path argument ends in this suffix, then delegate — simulates a lock
+   *  file that appears contended on the first attempt (so the abandoned-lock branch runs) but was never
+   *  actually created on real disk, so the real readFile/unlink calls against it genuinely reject ENOENT. */
+  failLinkEexistOnceSuffix: undefined as string | undefined,
+  /** mkdir and writeFile (for a lock-acquisition temp file only — see LOCK_TEMP_PREFIX in local.ts): resolve
+   *  immediately without touching real disk for a path starting with this prefix (write() mkdir's both the
+   *  entry's own directory and the lock directory — both land under one scope dir). */
+  alwaysResolveIOPrefix: undefined as string | undefined,
 }))
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -141,6 +140,13 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       if (state.failUnlinkContains !== undefined && p.includes(state.failUnlinkContains)) {
         throw Object.assign(new Error('ENOSPC: injected prune-unlink failure'), { code: 'ENOSPC' })
       }
+      if (
+        state.alwaysResolveIOPrefix !== undefined
+        && p.startsWith(state.alwaysResolveIOPrefix)
+        && p.includes('.lock-tmp-')
+      ) {
+        return undefined
+      }
       return actual.unlink(...args)
     }),
     rename: (async (...args: Parameters<typeof actual.rename>) => {
@@ -156,6 +162,13 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       // writeFile's type signature also admits a FileHandle.
       const [path] = args
       const p = path as string
+      if (
+        state.alwaysResolveIOPrefix !== undefined
+        && p.startsWith(state.alwaysResolveIOPrefix)
+        && p.includes('.lock-tmp-')
+      ) {
+        return undefined
+      }
       if (
         state.failWriteFileTargetSuffix !== undefined
         && p.endsWith(state.failWriteFileTargetSuffix)
@@ -182,36 +195,28 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     link: (async (...args: Parameters<typeof actual.link>) => {
       const [, newPath] = args
       const p = String(newPath)
+      if (state.alwaysFailLinkEexistSuffix !== undefined && p.endsWith(state.alwaysFailLinkEexistSuffix)) {
+        throw Object.assign(new Error('EEXIST: injected persistent link failure'), { code: 'EEXIST' })
+      }
+      if (state.failLinkEexistOnceSuffix !== undefined && p.endsWith(state.failLinkEexistOnceSuffix)) {
+        state.failLinkEexistOnceSuffix = undefined
+        throw Object.assign(new Error('EEXIST: injected one-shot link failure'), { code: 'EEXIST' })
+      }
       if (state.failLinkNonErrorContains !== undefined && p.includes(state.failLinkNonErrorContains)) {
         throw 'injected non-Error link failure'
       }
-      return actual.link(...args)
-    }),
-    open: (async (...args: Parameters<typeof actual.open>) => {
-      const [path] = args
-      const p = String(path)
-      if (state.alwaysFailOpenEexistSuffix !== undefined && p.endsWith(state.alwaysFailOpenEexistSuffix)) {
-        throw Object.assign(new Error('EEXIST: injected persistent open failure'), { code: 'EEXIST' })
-      }
-      if (state.failOpenEexistOnceSuffix !== undefined && p.endsWith(state.failOpenEexistOnceSuffix)) {
-        state.failOpenEexistOnceSuffix = undefined
-        throw Object.assign(new Error('EEXIST: injected one-shot open failure'), { code: 'EEXIST' })
-      }
-      if (state.failOpenNonErrorSuffix !== undefined && p.endsWith(state.failOpenNonErrorSuffix)) {
-        throw 'injected non-Error open failure'
-      }
-      if (state.failOpenErrorCodeSuffix !== undefined && p.endsWith(state.failOpenErrorCodeSuffix)) {
+      if (state.failLinkErrorCodeSuffix !== undefined && p.endsWith(state.failLinkErrorCodeSuffix)) {
         throw Object.assign(
-          new Error(`injected open failure (${String(state.failOpenErrorCode)})`),
-          { code: state.failOpenErrorCode },
+          new Error(`injected link failure (${String(state.failLinkErrorCode)})`),
+          { code: state.failLinkErrorCode },
         )
       }
-      return actual.open(...args)
+      return actual.link(...args)
     }),
     mkdir: (async (...args: Parameters<typeof actual.mkdir>) => {
       const [path] = args
       const p = String(path)
-      if (state.alwaysResolveMkdirPrefix !== undefined && p.startsWith(state.alwaysResolveMkdirPrefix)) {
+      if (state.alwaysResolveIOPrefix !== undefined && p.startsWith(state.alwaysResolveIOPrefix)) {
         return undefined
       }
       return actual.mkdir(...args)
@@ -240,12 +245,11 @@ afterEach(() => {
   state.failStatErrorCodeSuffix = undefined
   state.failStatErrorCode = undefined
   state.failLinkNonErrorContains = undefined
-  state.failOpenNonErrorSuffix = undefined
-  state.failOpenErrorCodeSuffix = undefined
-  state.failOpenErrorCode = undefined
-  state.alwaysFailOpenEexistSuffix = undefined
-  state.failOpenEexistOnceSuffix = undefined
-  state.alwaysResolveMkdirPrefix = undefined
+  state.failLinkErrorCodeSuffix = undefined
+  state.failLinkErrorCode = undefined
+  state.alwaysFailLinkEexistSuffix = undefined
+  state.failLinkEexistOnceSuffix = undefined
+  state.alwaysResolveIOPrefix = undefined
 })
 
 /** One fresh provider over a fresh temp root; `done()` removes the root. */
@@ -289,9 +293,9 @@ describe('acquireEntryLock fault injection', () => {
   it('wraps a non-Error rejection creating the lock file in the usual "could not create" message', async () => {
     const booted = await boot()
     try {
-      state.failOpenNonErrorSuffix = 'nonerror-open.md.lock'
+      state.failLinkNonErrorContains = 'nonerror-open.md.lock'
       await expect(booted.provider.write(PROJECT, 'nonerror-open.md', 'content'))
-        .rejects.toThrow(/could not create the write lock for "nonerror-open\.md" \(injected non-Error open failure\)/)
+        .rejects.toThrow(/could not create the write lock for "nonerror-open\.md" \(injected non-Error link failure\)/)
     } finally {
       await booted.done()
     }
@@ -305,24 +309,30 @@ describe('acquireEntryLock fault injection', () => {
       // root silently turned this into a no-op instead of exercising the
       // EACCES path. Injecting the error code directly is deterministic
       // regardless of who runs the suite.
-      state.failOpenErrorCodeSuffix = 'unlockable.md.lock'
-      state.failOpenErrorCode = 'EACCES'
+      state.failLinkErrorCodeSuffix = 'unlockable.md.lock'
+      state.failLinkErrorCode = 'EACCES'
       await expect(booted.provider.write(PROJECT, 'unlockable.md', 'y'))
-        .rejects.toThrow(/could not create the write lock for "unlockable\.md" \(injected open failure \(EACCES\)\)/)
+        .rejects.toThrow(/could not create the write lock for "unlockable\.md" \(injected link failure \(EACCES\)\)/)
     } finally {
       await booted.done()
     }
   })
 
-  it('treats a lock file it cannot even read as abandoned rather than wedging the write', async () => {
+  it('honors (does not abandon) a lock file it cannot even read, retrying rather than wedging or stealing it (SWD-161)', async () => {
     const booted = await boot()
     try {
       const scope = scopeDirForProject(booted.root)
       const lockPath = join(scope, '.locks', 'readfail-acquire.md.lock')
       await mkdir(join(lockPath, '..'), { recursive: true })
-      // Real, present lock file — contention is real; only the read of it
-      // (inside entryLockHolderLive) is injected to fail once.
-      await writeFile(lockPath, JSON.stringify({ pid: 1 }), 'utf8')
+      // Real, present lock file naming a genuinely dead pid — contention is
+      // real; only the FIRST read of it (inside entryLockHolderLive) is
+      // injected to fail once. A read failure that is not a confirmed
+      // ENOENT must not itself be read as proof of abandonment (SWD-161):
+      // the one-shot failure is honored like a live holder and falls
+      // through to the poll-and-retry path, waiting out one real
+      // LOCK_POLL_INTERVAL_MS — only the SECOND (real, unmocked) read,
+      // which actually names a dead holder, triggers the takeover.
+      await writeFile(lockPath, JSON.stringify({ pid: 2_147_483_647 }), 'utf8')
       state.failReadOnceSuffix = 'readfail-acquire.md.lock'
       const result = await booted.provider.write(PROJECT, 'readfail-acquire.md', 'content')
       expect(result.replaced).toBeUndefined()
@@ -358,11 +368,12 @@ describe('acquireEntryLock fault injection', () => {
     const booted = await boot()
     try {
       // Moved here from the real-fs version in local-retention.spec.ts: that
-      // version left open() and readFile() real, so every poll iteration did
-      // genuine (if small) libuv work alongside the faked 20ms delay(). Under
-      // CPU load the real I/O fell behind the virtual clock's stepped
-      // advances and the loop never observed the deadline within the step
-      // budget — settled stayed undefined and the test timed out.
+      // version left the lock-creation calls and readFile() real, so every
+      // poll iteration did genuine (if small) libuv work alongside the faked
+      // 20ms delay(). Under CPU load the real I/O fell behind the virtual
+      // clock's stepped advances and the loop never observed the deadline
+      // within the step budget — settled stayed undefined and the test
+      // timed out.
       //
       // write() and acquireEntryLock each start with a real await too —
       // write() mkdir's the entry's own directory before even computing the
@@ -371,15 +382,15 @@ describe('acquireEntryLock fault injection', () => {
       // advanceTimersByTimeAsync call made before one of those real mkdir
       // continuations gets a turn finds no fake timer registered yet and
       // advances nothing, which is what made earlier stepped attempts need
-      // an ever-larger step budget instead of a fixed one. With mkdir, open
-      // and readFile all mocked, nothing on the awaited path is real I/O, so
-      // the whole loop is pure microtask + fake-timer resolution and a
-      // single bounded advance is deterministic.
+      // an ever-larger step budget instead of a fixed one. With mkdir, the
+      // lock-temp writeFile/unlink, link and readFile all mocked, nothing on
+      // the awaited path is real I/O, so the whole loop is pure microtask +
+      // fake-timer resolution and a single bounded advance is deterministic.
       // This test process's own pid is genuinely alive for the whole test,
       // so the holder-liveness check (a synchronous process.kill(pid, 0)
       // probe, not filesystem-based) stays real rather than mocked.
-      state.alwaysResolveMkdirPrefix = scopeDirForProject(booted.root)
-      state.alwaysFailOpenEexistSuffix = 'contended.md.lock'
+      state.alwaysResolveIOPrefix = scopeDirForProject(booted.root)
+      state.alwaysFailLinkEexistSuffix = 'contended.md.lock'
       state.fixedReadSuffix = 'contended.md.lock'
       state.fixedReadValue = JSON.stringify({ pid: process.pid })
       vi.useFakeTimers()
@@ -415,11 +426,12 @@ describe('acquireEntryLock fault injection', () => {
     const booted = await boot()
     try {
       // Same deterministic-loop setup as the live-holder timeout test above:
-      // mkdir, open and readFile are all mocked so nothing on the awaited
-      // path is real I/O, letting a single bounded fake-timer advance carry
-      // the whole poll loop through to its deadline.
-      state.alwaysResolveMkdirPrefix = scopeDirForProject(booted.root)
-      state.alwaysFailOpenEexistSuffix = 'unremovable.md.lock'
+      // mkdir, the lock-temp writeFile/unlink, link and readFile are all
+      // mocked so nothing on the awaited path is real I/O, letting a single
+      // bounded fake-timer advance carry the whole poll loop through to its
+      // deadline.
+      state.alwaysResolveIOPrefix = scopeDirForProject(booted.root)
+      state.alwaysFailLinkEexistSuffix = 'unremovable.md.lock'
       // A pid this large can never be a live process (same value the
       // real-fs "retries past a failed cleanup unlink" test above uses), so
       // this lock reads as abandoned on every iteration — the branch under
@@ -428,7 +440,7 @@ describe('acquireEntryLock fault injection', () => {
       state.fixedReadValue = JSON.stringify({ pid: 2_147_483_647 })
       // The cleanup unlink never succeeds — stands in for a directory
       // occupying the lock path, or a permission that blocks unlink but not
-      // open/readFile.
+      // link/readFile.
       state.failUnlinkErrorCodeSuffix = 'unremovable.md.lock'
       state.failUnlinkErrorCode = 'EPERM'
       vi.useFakeTimers()
@@ -471,17 +483,20 @@ describe('acquireEntryLock fault injection', () => {
     const booted = await boot()
     try {
       // The lock file is only ever pretended to exist: the one-shot EEXIST
-      // injection makes the first open() attempt believe it is contended,
-      // but nothing was ever actually written to disk at lockPath. So the
+      // injection makes the first link() attempt believe it is contended,
+      // but nothing was ever actually written to disk at lockPath (its own
+      // private temp file is written for real, then removed by the catch
+      // block's cleanup — only the link() promoting it is faked). So the
       // real (unmocked) readFile inside entryLockHolderLive genuinely
       // rejects ENOENT — read as "not live" (abandoned), same as any other
-      // read failure — and the real (unmocked) unlink that follows also
-      // genuinely rejects ENOENT. That is exactly the branch under test:
-      // treated as a race already won by another taker, not a removal
-      // failure, so it must continue immediately rather than fall through
-      // to the deadline/poll-delay path. The second, delegated open() call
-      // then genuinely succeeds, since nothing was ever there to begin with.
-      state.failOpenEexistOnceSuffix = 'enoent-race.md.lock'
+      // confirmed-absent read — and the real (unmocked) unlink that follows
+      // also genuinely rejects ENOENT. That is exactly the branch under
+      // test: treated as a race already won by another taker, not a
+      // removal failure, so it must continue immediately rather than fall
+      // through to the deadline/poll-delay path. The second, delegated
+      // link() call then genuinely succeeds, since nothing was ever there
+      // to begin with.
+      state.failLinkEexistOnceSuffix = 'enoent-race.md.lock'
       vi.useFakeTimers()
       try {
         // Fake timers make delay()'s setTimeout never fire on its own: if
@@ -502,8 +517,8 @@ describe('acquireEntryLock fault injection', () => {
   it('falls back to the unlink error itself in the acquire-timeout diagnostic when it carries no error code', async () => {
     const booted = await boot()
     try {
-      state.alwaysResolveMkdirPrefix = scopeDirForProject(booted.root)
-      state.alwaysFailOpenEexistSuffix = 'codeless.md.lock'
+      state.alwaysResolveIOPrefix = scopeDirForProject(booted.root)
+      state.alwaysFailLinkEexistSuffix = 'codeless.md.lock'
       state.fixedReadSuffix = 'codeless.md.lock'
       state.fixedReadValue = JSON.stringify({ pid: 2_147_483_647 })
       // A plain Error with no `code` property at all — the diagnostic must
@@ -529,6 +544,61 @@ describe('acquireEntryLock fault injection', () => {
       } finally {
         vi.useRealTimers()
       }
+    } finally {
+      await booted.done()
+    }
+  })
+
+  it('fails loud after the acquire timeout rather than ever stealing a lock file that never becomes parseable (SWD-161)', async () => {
+    const booted = await boot()
+    try {
+      // Same deterministic-loop setup as the sibling timeout tests above.
+      // The recorded content never parses as JSON and never changes, so
+      // this exercises entryLockHolderLive's "honor it, do not abandon on a
+      // read/parse failure" branch on every single iteration — the lock
+      // must still fail loud once the acquire budget is exhausted, never
+      // silently take over a lock file it could never actually confirm was
+      // abandoned.
+      state.alwaysResolveIOPrefix = scopeDirForProject(booted.root)
+      state.alwaysFailLinkEexistSuffix = 'malformed.md.lock'
+      state.fixedReadSuffix = 'malformed.md.lock'
+      state.fixedReadValue = 'not json at all'
+      vi.useFakeTimers()
+      try {
+        const writing = booted.provider.write(PROJECT, 'malformed.md', 'new content')
+        let settled: unknown
+        writing.then(
+          (value) => { settled = { ok: true, value } },
+          (error: unknown) => { settled = { ok: false, error } },
+        )
+        await vi.advanceTimersByTimeAsync(5_000 + 20)
+        await flushMicrotasks()
+        expect(settled).toMatchObject({ ok: false })
+        const { error } = settled as { ok: false; error: unknown }
+        expect(error).toBeInstanceOf(Error)
+        expect((error as Error).message).toMatch(
+          /could not acquire the write lock for "malformed\.md" — another process is still writing it after waiting 5000ms/,
+        )
+      } finally {
+        vi.useRealTimers()
+      }
+    } finally {
+      await booted.done()
+    }
+  })
+
+  it('a failed cleanup unlink of the lock-acquisition temp file never fails the write', async () => {
+    const booted = await boot()
+    try {
+      // The temp file's own cleanup (see LOCK_TEMP_PREFIX/cleanupLockTemp in
+      // local.ts) is disk hygiene, never a correctness requirement: the
+      // lock itself is already live under its real path by the time this
+      // runs, so losing the redundant temp name must never surface as a
+      // write failure.
+      state.failUnlinkContains = '.lock-tmp-'
+      const result = await booted.provider.write(PROJECT, 'tmp-cleanup-fail.md', 'content')
+      expect(result.replaced).toBeUndefined()
+      expect(await booted.provider.read(PROJECT, 'tmp-cleanup-fail.md')).toBe('content')
     } finally {
       await booted.done()
     }
@@ -678,7 +748,12 @@ describe('retainExisting() fault injection', () => {
     const booted = await boot()
     try {
       await booted.provider.write(PROJECT, 'nonerror-link.md', 'version one')
-      state.failLinkNonErrorContains = 'nonerror-link.md.'
+      // Anchored to the retained-copy directory specifically: the bare
+      // basename-prefix substring also matches the per-entry lock's own
+      // link() destination (.locks/nonerror-link.md.lock), which would
+      // inject the failure one step too early, into lock acquisition
+      // rather than retention.
+      state.failLinkNonErrorContains = '.replaced/nonerror-link.md.'
       await expect(booted.provider.write(PROJECT, 'nonerror-link.md', 'version two'))
         .rejects.toThrow(/could not retain the previous "nonerror-link\.md"/)
       expect(await booted.provider.read(PROJECT, 'nonerror-link.md')).toBe('version one')
