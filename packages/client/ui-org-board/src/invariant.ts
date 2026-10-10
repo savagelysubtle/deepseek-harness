@@ -15,7 +15,7 @@ export const name = 'client-ui-org-board-invariant'
 export const inject = ['invariants']
 
 /**
- * No runtime invariant: this package registers one footer-action button that
+ * No runtime invariant: this package registers one header-action button that
  * opens a modal rendering whatever `org.get` reports; it owns no mutable
  * cross-plugin state and emits no cordis events of its own for a companion
  * to police.

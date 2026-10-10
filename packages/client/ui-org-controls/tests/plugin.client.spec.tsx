@@ -54,6 +54,13 @@ describe('plugin registration', () => {
     expect(idsOf(b.slots)).toEqual(['subagent-catalog', 'stop-all', 'send-all'])
   })
 
+  it('registers stop-all at order 20 and send-all at order 30 (right after the Chat | Trajectory tabs, SWD-162 placement)', async () => {
+    const b = await bench({})
+    const entries = b.slots.entries('conversation.session.header.actions')
+    expect(entries.find(e => e.options.id === 'stop-all')?.options.order).toBe(20)
+    expect(entries.find(e => e.options.id === 'send-all')?.options.order).toBe(30)
+  })
+
   it('fiber disposal removes both entries and leaves subagent-catalog standing', async () => {
     const b = await bench({})
     await b.fiber.dispose()

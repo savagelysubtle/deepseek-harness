@@ -207,6 +207,12 @@ describe('plugin registration', () => {
     expect(idsOf(b.slots)).toEqual(['subagent-catalog', 'send-all', 'org-board'])
   })
 
+  it('registers org-board at order 40 (right after the Chat | Trajectory tabs, SWD-162 placement)', async () => {
+    const b = await bench(vi.fn())
+    const entry = b.slots.entries('conversation.session.header.actions').find(e => e.options.id === 'org-board')
+    expect(entry?.options.order).toBe(40)
+  })
+
   it('fiber disposal removes org-board and leaves the other entries standing', async () => {
     const b = await bench(vi.fn())
     await b.fiber.dispose()

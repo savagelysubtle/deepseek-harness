@@ -1,5 +1,5 @@
 /**
- * Sidebar-foot Send All control (SWD-131): compose one message and broadcast
+ * Session-header-action Send All control (SWD-131): compose one message and broadcast
  * it to every live top-level session immediately (mid-turn, never queued)
  * via `Agent.steer`. Nothing like this existed before this package — both
  * the host mechanism (`sessions.sendAll`) and this control are new.

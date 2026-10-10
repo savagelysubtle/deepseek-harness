@@ -23,7 +23,7 @@ export type { OrgBoardControlProps } from './OrgBoardControl.tsx'
 export type { OrgBoardKey } from './locales.ts'
 export type { OrgBoardState, OrgBoardValue } from './org-board-store.ts'
 
-/** Required services: the sidebar footer-action ring, the locale service, and the connection api client. */
+/** Required services: the session-header actions ring, the locale service, and the connection api client. */
 export const inject = ['slots', 'locale', 'connection']
 
 /**

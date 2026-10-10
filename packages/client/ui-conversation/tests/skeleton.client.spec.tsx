@@ -359,6 +359,27 @@ describe('ConversationRoot resident composer', () => {
     // render only the labeled variant now). The header passes {} exactly as
     // the three real registrants (ui-org-controls, ui-org-board) expect.
     expect(b.headerActionsOwner()).toEqual({})
+    // Founder ruling (SWD-162 follow-up): the three entries sit right after
+    // the Chat | Trajectory tabs, on the SAME row — assert they land inside
+    // the tabs row container, not merely somewhere under the header.
+    const tablist = header?.querySelector('[role="tablist"]')
+    const tabsRow = tablist?.parentElement
+    expect(tabsRow).not.toBeNull()
+    expect(tabsRow?.querySelector('[data-testid="header-action-stop-all"]')).not.toBeNull()
+    expect(tabsRow?.querySelector('[data-testid="header-action-send-all"]')).not.toBeNull()
+    expect(tabsRow?.querySelector('[data-testid="header-action-org-board"]')).not.toBeNull()
+  })
+
+  it('active phase, single view tab: the session-header actions still render even with no tablist', () => {
+    // Reviewer catch: the actions' row was conditioned on `tabs.length > 1`
+    // along with the tablist, so a Session with exactly one registered view
+    // would silently lose Stop All/Send All/Org Board entirely -- masked
+    // today only because ui-trajectory always ships a second tab.
+    const b = mount(conversationSnapshot(), undefined, undefined, {
+      viewTabs: [{ id: 'chat', label: 'Chat' }],
+    })
+    const header = b.view.container.querySelector('header')
+    expect(header?.querySelector('[role="tablist"]')).toBeNull()
     expect(header?.querySelector('[data-testid="header-action-stop-all"]')).not.toBeNull()
     expect(header?.querySelector('[data-testid="header-action-send-all"]')).not.toBeNull()
     expect(header?.querySelector('[data-testid="header-action-org-board"]')).not.toBeNull()

@@ -115,7 +115,7 @@
  * Visible disabled-reason caption: a hover title/aria-label alone does not
  * satisfy "say so on screen" - nothing is on screen until the pointer finds
  * it. Floats below the trigger (the banner already claims the space above)
- * so it never disturbs the footer row's own layout.
+ * so it never disturbs the header actions row's own layout.
  */
 .disabledReason {
   position: absolute;

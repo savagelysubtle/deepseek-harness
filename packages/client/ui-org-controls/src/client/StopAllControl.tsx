@@ -1,5 +1,5 @@
 /**
- * Sidebar-foot Stop All control (SWD-130): a confirm-first button that stops
+ * Session-header-action Stop All control (SWD-130): a confirm-first button that stops
  * every live top-level session and its whole descendant forest in one host
  * call. There was no client surface for `sessions.stopAll` before this
  * package; the RPC already cascaded correctly, the gap was purely the
