@@ -206,6 +206,12 @@
     - id: ui-settings-plugin-inventory
       name: '@deepseek-ai/dsh-client-ui-settings-plugin-inventory'
 
+    # Tools settings section: live MCP server connection status with
+    # Authorize/Reconnect/Enable-Disable actions over the Host's mcp Remote
+    # namespace.
+    - id: ui-settings-tools
+      name: '@deepseek-ai/dsh-client-ui-settings-tools'
+
     - id: ui-conversation
       name: '@deepseek-ai/dsh-client-ui-conversation'
 

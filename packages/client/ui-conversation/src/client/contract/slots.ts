@@ -17,6 +17,7 @@ import type { ComposerBlock } from '../input/blocks.ts'
 import type {
   ComposerKeyboard, DraftAttachmentId, EditSelection, InputActions, InputNotice, InputState,
 } from '../input/contract.ts'
+import type { McpAttentionStatus } from '../mcp-status-store.ts'
 import type { createChatStore } from '../stores.ts'
 import type { ComposerSubmitGesture, InputSubmitMode } from './composer-submission.ts'
 import type { ChatNode, ChatNodeKind } from './chat-nodes.ts'
@@ -417,11 +418,23 @@ export interface ConversationInjected {
    */
   selectWorkspace: (workspaceId: WorkspaceId) => Promise<void>
   /**
+   * Open Settings directly on one registered section (the Tools banner's
+   * only caller today, always with `'tools'`). See apply.ts for the one real
+   * mechanism available to this package without importing ui-settings-
+   * general, and the cross-package gap flagged there.
+   */
+  openSettingsSection: (sectionId: string) => void
+  /**
    * Framework-bound sources. `composerBlock` is this session's block when a
    * plugin raised one; the reason is the blocker's own localized copy, which
-   * the root renders as the inert composer's placeholder.
+   * the root renders as the inert composer's placeholder. `mcpAttention` is
+   * project-wide (not session-scoped): every configured MCP server currently
+   * stuck in `needs-authorization` or `gave-up`, for the Tools banner.
    */
-  hooks: { composerBlock: ObservableSnapshot<ComposerBlock | undefined> }
+  hooks: {
+    composerBlock: ObservableSnapshot<ComposerBlock | undefined>
+    mcpAttention: ObservableSnapshot<readonly McpAttentionStatus[]>
+  }
 }
 
 /** Business callbacks injected into the strict Session body seat. */

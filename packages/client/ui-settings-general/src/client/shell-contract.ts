@@ -27,6 +27,17 @@ export interface SettingsOnboardingStep {
 }
 
 /**
+ * One `settings/open-section` request folded into shell-local state: a fresh
+ * object every occurrence (so a repeated id still re-triggers the shell's
+ * subscriber), with `section` already resolved by apply() — `undefined`
+ * means the requested id was unknown and the shell should open its default
+ * section instead (apply() has already logged the warning).
+ */
+export interface SettingsOpenSectionRequest {
+  readonly section: string | undefined
+}
+
+/**
  * Registrant-private injected share of the settings shell (assembled in
  * apply): the ledger's nav-row projection as a hooks-compartment source —
  * the shell reads no locale state and subscribes through the bound hook.
@@ -37,6 +48,8 @@ export type SettingsRootInjected = {
     sections: HostObservable<readonly SettingsSectionRow[]>
     /** settings.onboarding ledger projected into coordinator order. */
     onboardingSteps: HostObservable<readonly SettingsOnboardingStep[]>
+    /** Latest `settings/open-section` request, or `undefined` before the first one. */
+    openRequests: HostObservable<SettingsOpenSectionRequest | undefined>
   }
 }
 

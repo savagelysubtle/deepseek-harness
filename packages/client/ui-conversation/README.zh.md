@@ -46,6 +46,8 @@ Host 带 placement 的 `session/queue` 快照也会携带待处理 steering。Qu
 
 完成的一轮会物化一个有序的 `turn-tail` Conversation Node。它由引擎维护的 `TurnLocation` 提供收尾 Assistant 和 Turn data；renderer 在该 Node 的 IconActions 之前渲染 `conversation.chat.turnTail` chain，并派发包含 Turn、收尾 seq 和 `openFile` 的 `TurnTailOwnerProps`。本包只拥有空位；`@deepseek-ai/dsh-client-ui-deliverables` 把改写工具的 `locations` 累积到 Turn data，并拥有产物行、chip 上限和文案，因此把该插件从 cordis.yml 中组合掉即可关闭该交互面，空位以零成本渲染为空。收尾正文经由同一个开关参与其中：chat 视图向可选的 `chatFileMentions` service（ctx.get；由同一插件提供）索取收尾消息的行内代码词表，并把结果接进 MarkdownText 的 `fileMentions` seam——service 缺席时正文保持死文本。
 
+`ToolsStatusBanner` 在任意 MCP 服务器处于 `needs-authorization` 或 `gave-up` 状态时渲染在 composer 上方：一条可关闭的提示，列出受影响的服务器并附带跳转 Settings 的链接。`McpAttentionStore` 一次性加载 `mcp/status`，并靠转发的 `mcp/status-changed` 事件保持该集合最新——当某个状态携带 `removed: true` 时将其从集合中剔除而不是并入；常驻的 `mcpAttention` hook 把该实时集合暴露给 banner。`openSettingsSection` 并不直接调用 ui-settings-general，而是发出跨包的 `settings/open-section` 事件（`{ section: string }`），由该包的 shell 监听，从而保持本文件别处所述的单向依赖方向。
+
 ## 模型体验
 
 无。会话 UI 在浏览器中渲染会话历史与流；这里没有任何内容进入模型请求。

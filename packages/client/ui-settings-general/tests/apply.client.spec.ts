@@ -207,3 +207,65 @@ describe('ui-settings-general apply', () => {
     expect(b.slots.spec('settings.general.item')).toBeUndefined()
   })
 })
+
+describe('settings/open-section requests', () => {
+  // The shared declare() above declares the shell's six children directly
+  // under 'root', standing in for what the real 'sidebar.settings' occupant
+  // (this package's own SettingsRoot registration) would otherwise declare
+  // — it never needs 'sidebar.settings' itself to exist. Reaching the
+  // shellInjected hooks compartment needs that registration to actually
+  // fire, so this describe declares 'sidebar.settings' instead and lets
+  // apply()'s own registration declare the six children itself (declaring
+  // both here would double-declare them).
+  function declareWithShell(slots: SlotRegistry): () => void {
+    return slots.register(
+      { name: 'root', children: { 'sidebar.settings': { kind: 'single', scope: 'root' } } } as never,
+      () => null,
+    )
+  }
+
+  function shellInjected(b: Awaited<ReturnType<typeof bench>>) {
+    const entry = b.slots.entries('sidebar.settings')[0]!
+    return (entry.inject as unknown as () => import('../src/client/shell-contract.ts').SettingsRootInjected)()
+  }
+
+  it('folds a known section id into hooks.openRequests without warning', async () => {
+    const b = await bench()
+    declareWithShell(b.slots)
+    await b.ctx.plugin({ inject: [...inject], apply }).await()
+    const warn = vi.spyOn(b.ctx.logger, 'warn').mockImplementation(() => undefined)
+    const injected = shellInjected(b)
+    expect(injected.hooks.openRequests.getSnapshot()).toBeUndefined()
+    // 'general' is this package's own GeneralSection registration.
+    b.ctx.emit('settings/open-section', { section: 'general' })
+    expect(injected.hooks.openRequests.getSnapshot()).toEqual({ section: 'general' })
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('resolves an unknown section id to `section: undefined` and warns with the id', async () => {
+    const b = await bench()
+    declareWithShell(b.slots)
+    await b.ctx.plugin({ inject: [...inject], apply }).await()
+    const warn = vi.spyOn(b.ctx.logger, 'warn').mockImplementation(() => undefined)
+    const injected = shellInjected(b)
+    b.ctx.emit('settings/open-section', { section: 'does-not-exist' })
+    expect(injected.hooks.openRequests.getSnapshot()).toEqual({ section: undefined })
+    expect(warn).toHaveBeenCalledWith('ui-settings-general: unknown settings/open-section id "%s"', 'does-not-exist')
+  })
+
+  it('notifies subscribers on every occurrence, including a repeat of the same id', async () => {
+    const b = await bench()
+    declareWithShell(b.slots)
+    await b.ctx.plugin({ inject: [...inject], apply }).await()
+    vi.spyOn(b.ctx.logger, 'warn').mockImplementation(() => undefined)
+    const injected = shellInjected(b)
+    const listener = vi.fn()
+    const off = injected.hooks.openRequests.subscribe(listener)
+    b.ctx.emit('settings/open-section', { section: 'general' })
+    b.ctx.emit('settings/open-section', { section: 'general' })
+    expect(listener).toHaveBeenCalledTimes(2)
+    off()
+    b.ctx.emit('settings/open-section', { section: 'general' })
+    expect(listener).toHaveBeenCalledTimes(2)
+  })
+})

@@ -1,0 +1,65 @@
+/* Same strip shape as InputBar's founderNotice (figma precedent): a
+   dismissable row riding the composer's own width axis. Lives in
+   ConversationRoot (above the composer chain, not inside the bar) because
+   the fact it names — MCP server auth state — is Host-wide, not
+   per-session. */
+
+.banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  max-width: var(--dsh-composer-card-max-width);
+  margin: 0 auto 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.icon {
+  flex: none;
+  margin-top: 1px;
+}
+
+.text {
+  flex: 1 1 auto;
+}
+
+.action {
+  flex: none;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-label-accent);
+  font-size: 12px;
+  line-height: 18px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.action:hover {
+  color: var(--dsw-alias-label-primary);
+}
+
+.dismiss {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-left: 2px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.dismiss:hover {
+  background: var(--dsw-alias-interactive-bg-hover-danger);
+}

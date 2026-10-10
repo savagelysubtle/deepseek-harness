@@ -24,6 +24,19 @@ const fsRaceState = vi.hoisted(() => ({
   raceAtCall: 0,
   raceContents: '',
   callsSeen: 0,
+  // Coverage-only I/O failure injections for the handful of real-but-rare
+  // failure paths below (a non-ENOENT read error, a non-Error throw, a
+  // backup/rename/cleanup failure) that cannot be timed or shaped through
+  // the real filesystem alone. Each is a ONE-SHOT: it consumes itself
+  // (resets to undefined) the moment it fires, so it can never leak into a
+  // later call in the same test or into another test's `afterEach` cleanup.
+  readFileFailPath: undefined as string | undefined,
+  readFileFailAtCall: 0,
+  readFileFailCallsSeen: 0,
+  readFileFailError: undefined as unknown,
+  openWxFailError: undefined as unknown,
+  renameFailError: undefined as unknown,
+  rmFailError: undefined as unknown,
 }))
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -39,8 +52,42 @@ vi.mock('node:fs/promises', async (importOriginal) => {
           fsRaceState.racePath = undefined // one-shot: never re-arms for a later call or test
         }
       }
+      if (fsRaceState.readFileFailPath !== undefined && typeof path === 'string' && path === fsRaceState.readFileFailPath) {
+        fsRaceState.readFileFailCallsSeen += 1
+        if (fsRaceState.readFileFailCallsSeen === fsRaceState.readFileFailAtCall) {
+          const error = fsRaceState.readFileFailError
+          fsRaceState.readFileFailPath = undefined // one-shot
+          fsRaceState.readFileFailError = undefined
+          throw error
+        }
+      }
       return actual.readFile(...args)
     }) as typeof actual.readFile,
+    open: async (...args: Parameters<typeof actual.open>) => {
+      const [, flags] = args
+      if (flags === 'wx' && fsRaceState.openWxFailError !== undefined) {
+        const error = fsRaceState.openWxFailError
+        fsRaceState.openWxFailError = undefined // one-shot
+        throw error
+      }
+      return actual.open(...args)
+    },
+    rename: async (...args: Parameters<typeof actual.rename>) => {
+      if (fsRaceState.renameFailError !== undefined) {
+        const error = fsRaceState.renameFailError
+        fsRaceState.renameFailError = undefined // one-shot
+        throw error
+      }
+      return actual.rename(...args)
+    },
+    rm: async (...args: Parameters<typeof actual.rm>) => {
+      if (fsRaceState.rmFailError !== undefined) {
+        const error = fsRaceState.rmFailError
+        fsRaceState.rmFailError = undefined // one-shot
+        throw error
+      }
+      return actual.rm(...args)
+    },
   }
 })
 
@@ -142,6 +189,16 @@ describe('McpStatusRegistryService — list/register', () => {
     await ctx.fiber.dispose()
     await fixture.close()
     await rm(dir, { recursive: true, force: true })
+    // Defensively clear any one-shot injection an earlier test in this
+    // block armed but never consumed (e.g. it threw before reaching the
+    // matching fs call) -- never leak into a later test's fs calls.
+    fsRaceState.readFileFailPath = undefined
+    fsRaceState.readFileFailAtCall = 0
+    fsRaceState.readFileFailCallsSeen = 0
+    fsRaceState.readFileFailError = undefined
+    fsRaceState.openWxFailError = undefined
+    fsRaceState.renameFailError = undefined
+    fsRaceState.rmFailError = undefined
   })
 
   it('register exposes the handle through list, and unregister removes it', async () => {
@@ -150,10 +207,10 @@ describe('McpStatusRegistryService — list/register', () => {
     const config = httpConfig(fixture, 'listed')
     const unregister = registry.register(config, handle)
 
-    expect(registry.list()).toEqual([handle.status()])
+    expect(await registry.list()).toEqual([handle.status()])
 
-    unregister()
-    expect(registry.list()).toEqual([])
+    await unregister()
+    expect(await registry.list()).toEqual([])
   })
 
   it('an HMR replacement registration is not torn down by the OLD instance\'s unregister', async () => {
@@ -166,8 +223,329 @@ describe('McpStatusRegistryService — list/register', () => {
     registry.register(config, newHandle)
     // The old registration's unregister must not drop the NEW handle that
     // already replaced it in the map.
-    unregisterOld()
-    expect(registry.list()).toEqual([newHandle.status()])
+    await unregisterOld()
+    expect(await registry.list()).toEqual([newHandle.status()])
+  })
+
+  it('list() synthesizes a disabled row (attempts 0, no live handle) for an OTHER mcp-client mount the patch file disables', async () => {
+    const patchPath = join(dir, 'cordis.patch.yml')
+    await writeFile(
+      patchPath,
+      [
+        '- id: live',
+        '  name: \'@deepseek-ai/dsh-mcp-client\'',
+        '- id: dormant',
+        '  name: \'@deepseek-ai/dsh-mcp-client\'',
+        '  disabled: true',
+        '- id: other-plugin',
+        '  name: \'@deepseek-ai/dsh-some-other-plugin\'',
+        '  disabled: true',
+        '',
+      ].join('\n'),
+      'utf8',
+    )
+    const registry = new McpStatusRegistryService(ctx, { patchPath })
+    const { handle } = buildOAuthHandle(fixture, ctx, 'live')
+    registry.register(httpConfig(fixture, 'live'), handle)
+
+    const rows = await registry.list()
+    expect(rows).toEqual(expect.arrayContaining([handle.status()]))
+    expect(rows).toEqual(expect.arrayContaining([
+      { serverName: 'dormant', state: 'disabled', attempts: 0, maxAttempts: 10 },
+    ]))
+    // The disabled mount belonging to a DIFFERENT plugin package must never
+    // be reported as an mcp server.
+    expect(rows.some(row => row.serverName === 'other-plugin')).toBe(false)
+    expect(rows).toHaveLength(2)
+  })
+
+  it('a live handle wins over a stale patch-file disabled entry for the same serverName', async () => {
+    const patchPath = join(dir, 'cordis.patch.yml')
+    // HMR / a reload race could momentarily leave the on-disk file still
+    // saying `disabled: true` for a server that already has a live handle;
+    // the live status must not be shadowed by the synthesized row.
+    await writeFile(patchPath, '- id: both\n  name: \'@deepseek-ai/dsh-mcp-client\'\n  disabled: true\n', 'utf8')
+    const registry = new McpStatusRegistryService(ctx, { patchPath })
+    const { handle } = buildOAuthHandle(fixture, ctx, 'both')
+    registry.register(httpConfig(fixture, 'both'), handle)
+
+    expect(await registry.list()).toEqual([handle.status()])
+  })
+
+  it('a malformed patch file logs one warn and list() still returns live rows (ENOENT stays silent, malformed YAML does not)', async () => {
+    const patchPath = join(dir, 'cordis.patch.yml')
+    await writeFile(patchPath, ': : not yaml ][', 'utf8')
+    const registry = new McpStatusRegistryService(ctx, { patchPath })
+    const { handle } = buildOAuthHandle(fixture, ctx, 'live-despite-malformed')
+    registry.register(httpConfig(fixture, 'live-despite-malformed'), handle)
+
+    const warns: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warns.push(String(message)) }) as never)
+
+    expect(await registry.list()).toEqual([handle.status()])
+    expect(warns).toHaveLength(1)
+    expect(warns[0]).toContain('not valid YAML')
+
+    // A missing file, by contrast, is the ordinary no-patch-file deployment
+    // shape and must stay silent. A fresh bare Context — `mcpStatus` is a
+    // named service and `ctx` already has one registered above.
+    const registryNoFile = new McpStatusRegistryService(new Context(), { patchPath: join(dir, 'does-not-exist.yml') })
+    expect(await registryNoFile.list()).toEqual([])
+    expect(warns).toHaveLength(1)
+  })
+
+  it('a non-ENOENT readFile failure (Error instance) logs one warn and list() still returns live rows', async () => {
+    const patchPath = join(dir, 'cordis.patch.yml')
+    await writeFile(patchPath, '- id: live\n  name: \'@deepseek-ai/dsh-mcp-client\'\n', 'utf8')
+    const registry = new McpStatusRegistryService(ctx, { patchPath })
+    const { handle } = buildOAuthHandle(fixture, ctx, 'live-despite-read-error')
+    registry.register(httpConfig(fixture, 'live-despite-read-error'), handle)
+
+    const warns: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warns.push(String(message)) }) as never)
+
+    const error = new Error('EACCES: permission denied') as NodeJS.ErrnoException
+    error.code = 'EACCES'
+    fsRaceState.readFileFailPath = patchPath
+    fsRaceState.readFileFailAtCall = 1
+    fsRaceState.readFileFailError = error
+
+    expect(await registry.list()).toEqual([handle.status()])
+    expect(warns).toHaveLength(1)
+    expect(warns[0]).toContain('cordis patch file could not be read')
+    expect(warns[0]).toContain('EACCES')
+  })
+
+  it('a non-ENOENT readFile failure (non-Error thrown value) logs one warn and list() still returns live rows', async () => {
+    const patchPath = join(dir, 'cordis.patch.yml')
+    await writeFile(patchPath, '- id: live\n  name: \'@deepseek-ai/dsh-mcp-client\'\n', 'utf8')
+    const registry = new McpStatusRegistryService(ctx, { patchPath })
+    const { handle } = buildOAuthHandle(fixture, ctx, 'live-despite-nonerror-throw')
+    registry.register(httpConfig(fixture, 'live-despite-nonerror-throw'), handle)
+
+    const warns: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warns.push(String(message)) }) as never)
+
+    // A deliberately non-Error thrown value: exercises the `String(error)`
+    // ternary arm (the real fs module only ever throws Error instances, so
+    // this is otherwise untestable without injecting the throw directly).
+    fsRaceState.readFileFailPath = patchPath
+    fsRaceState.readFileFailAtCall = 1
+    fsRaceState.readFileFailError = 'a plain thrown string, not an Error'
+
+    expect(await registry.list()).toEqual([handle.status()])
+    expect(warns).toHaveLength(1)
+    expect(warns[0]).toContain('a plain thrown string, not an Error')
+  })
+
+  it('a patch file that parses to a non-list value logs one warn and list() still returns live rows', async () => {
+    const patchPath = join(dir, 'cordis.patch.yml')
+    await writeFile(patchPath, 'serverName: not-a-list\n', 'utf8')
+    const registry = new McpStatusRegistryService(ctx, { patchPath })
+    const { handle } = buildOAuthHandle(fixture, ctx, 'live-despite-non-list')
+    registry.register(httpConfig(fixture, 'live-despite-non-list'), handle)
+
+    const warns: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warns.push(String(message)) }) as never)
+
+    expect(await registry.list()).toEqual([handle.status()])
+    expect(warns).toHaveLength(1)
+    expect(warns[0]).toContain('does not contain a top-level list')
+  })
+
+  it('locateMcpMount and collectMcpPatchEntries ignore non-object top-level and nested entries while still finding the real mounts', async () => {
+    const patchPath = join(dir, 'cordis.patch.yml')
+    await writeFile(
+      patchPath,
+      [
+        '- null',
+        '- a plain string top-level entry',
+        '- id: group',
+        '  insert:',
+        '    - a plain string nested entry',
+        '    - id: sibling',
+        '      name: \'@deepseek-ai/dsh-mcp-client\'',
+        '      disabled: true',
+        '    - id: target',
+        '      name: \'@deepseek-ai/dsh-mcp-client\'',
+        '      disabled: true',
+        '',
+      ].join('\n'),
+      'utf8',
+    )
+    const registry = new McpStatusRegistryService(ctx, { patchPath })
+
+    // Exercises collectMcpPatchEntries (via list()): garbage entries at both
+    // nesting levels are skipped, and the loop keeps going past the
+    // non-matching `sibling` nested entry to find `target` too.
+    const rows = await registry.list()
+    expect(rows).toEqual(expect.arrayContaining([
+      { serverName: 'sibling', state: 'disabled', attempts: 0, maxAttempts: 10 },
+      { serverName: 'target', state: 'disabled', attempts: 0, maxAttempts: 10 },
+    ]))
+    expect(rows).toHaveLength(2)
+
+    // Exercises the sibling function locateMcpMount (via setEnabled), over
+    // the same garbage-entry shapes, continuing past `sibling` to reach
+    // `target`.
+    await registry.setEnabled('target', true)
+    const written = await readFile(patchPath, 'utf8')
+    expect(written).toMatch(/id: target\s*\n\s*name: '@deepseek-ai\/dsh-mcp-client'\s*\n\s*disabled: false/)
+    expect(written).toMatch(/id: sibling\s*\n\s*name: '@deepseek-ai\/dsh-mcp-client'\s*\n\s*disabled: true/)
+  })
+
+  it('unregister emits a final mcp/status-changed with state disabled when the mount is still named (disabled) in the patch file', async () => {
+    const patchPath = join(dir, 'cordis.patch.yml')
+    await writeFile(patchPath, '- id: toggled\n  name: \'@deepseek-ai/dsh-mcp-client\'\n  disabled: true\n', 'utf8')
+    const registry = new McpStatusRegistryService(ctx, { patchPath })
+    const { handle } = buildOAuthHandle(fixture, ctx, 'toggled')
+    const unregister = registry.register(httpConfig(fixture, 'toggled'), handle)
+
+    const events: unknown[] = []
+    ctx.on('mcp/status-changed', (status) => { events.push(status) })
+
+    await unregister()
+
+    expect(events).toEqual([
+      { serverName: 'toggled', state: 'disabled', attempts: 0, maxAttempts: 10 },
+    ])
+  })
+
+  it('unregister emits a final mcp/status-changed with removed: true when the mount is no longer in the patch file at all', async () => {
+    const patchPath = join(dir, 'cordis.patch.yml')
+    await writeFile(patchPath, '- id: someone-else\n  name: \'@deepseek-ai/dsh-mcp-client\'\n', 'utf8')
+    const registry = new McpStatusRegistryService(ctx, { patchPath })
+    const { handle } = buildOAuthHandle(fixture, ctx, 'gone')
+    const unregister = registry.register(httpConfig(fixture, 'gone'), handle)
+
+    const events: unknown[] = []
+    ctx.on('mcp/status-changed', (status) => { events.push(status) })
+
+    await unregister()
+
+    // `toEqual` pins the object exactly — including that it carries no
+    // `consentUrl` key, since `handle.status()` never has one (SWD-164).
+    expect(events).toEqual([{ ...handle.status(), removed: true }])
+  })
+
+  // Reviewer block: the identity check (`handles.get(name)?.handle !== handle`)
+  // only proves "superseded" when the loader happens to register the
+  // replacement BEFORE disposing the old fork. It must never be the SOLE
+  // decision mechanism for "disabled" vs "removed" vs "ordinary reload" —
+  // only a fast path for the one order where it's provably equivalent to
+  // reading the file (a replacement is already live, so the mount is
+  // provably enabled). Every other order falls through to reading the patch
+  // file fresh. This matrix exercises both orderings crossed with all three
+  // profile states.
+  describe('unregister emit decision is order-independent, driven by the patch file', () => {
+    it.each([
+      { label: 'enabled', patch: (name: string) => `- id: ${name}\n  name: '@deepseek-ai/dsh-mcp-client'\n` },
+      { label: 'disabled', patch: (name: string) => `- id: ${name}\n  name: '@deepseek-ai/dsh-mcp-client'\n  disabled: true\n` },
+      { label: 'absent', patch: (_name: string) => '- id: someone-else\n  name: \'@deepseek-ai/dsh-mcp-client\'\n' },
+    ])(
+      'register-new-then-dispose-old, profile $label: the fast path short-circuits — no event, regardless of what the file says',
+      async ({ label, patch }) => {
+        const serverName = `order-a-${label}`
+        const patchPath = join(dir, 'cordis.patch.yml')
+        await writeFile(patchPath, patch(serverName), 'utf8')
+        const registry = new McpStatusRegistryService(ctx, { patchPath })
+        const config = httpConfig(fixture, serverName)
+        const { handle: oldHandle } = buildOAuthHandle(fixture, ctx, serverName)
+        const { handle: newHandle } = buildOAuthHandle(fixture, ctx, serverName)
+
+        const unregisterOld = registry.register(config, oldHandle)
+        registry.register(config, newHandle)
+
+        const events: unknown[] = []
+        ctx.on('mcp/status-changed', (status) => { events.push(status) })
+
+        await unregisterOld()
+
+        expect(events).toEqual([])
+        expect(await registry.list()).toEqual([newHandle.status()])
+      },
+    )
+
+    it('dispose-old-then-register-new, profile enabled: no event — the replacement reports its own status once it registers', async () => {
+      const serverName = 'order-b-enabled'
+      const patchPath = join(dir, 'cordis.patch.yml')
+      await writeFile(patchPath, `- id: ${serverName}\n  name: '@deepseek-ai/dsh-mcp-client'\n`, 'utf8')
+      const registry = new McpStatusRegistryService(ctx, { patchPath })
+      const config = httpConfig(fixture, serverName)
+      const { handle: oldHandle } = buildOAuthHandle(fixture, ctx, serverName)
+      const { handle: newHandle } = buildOAuthHandle(fixture, ctx, serverName)
+
+      const unregisterOld = registry.register(config, oldHandle)
+      const events: unknown[] = []
+      ctx.on('mcp/status-changed', (status) => { events.push(status) })
+
+      // Dispose runs BEFORE the replacement registers: at this instant the
+      // identity check sees `handle === oldHandle` (still the current
+      // registration) and cannot short-circuit — it must read the file.
+      await unregisterOld()
+      expect(events).toEqual([])
+
+      registry.register(config, newHandle)
+      expect(await registry.list()).toEqual([newHandle.status()])
+    })
+
+    it('dispose-old-then-register-new, profile disabled: one disabled event, emitted before the replacement ever registers', async () => {
+      const serverName = 'order-b-disabled'
+      const patchPath = join(dir, 'cordis.patch.yml')
+      await writeFile(patchPath, `- id: ${serverName}\n  name: '@deepseek-ai/dsh-mcp-client'\n  disabled: true\n`, 'utf8')
+      const registry = new McpStatusRegistryService(ctx, { patchPath })
+      const config = httpConfig(fixture, serverName)
+      const { handle: oldHandle } = buildOAuthHandle(fixture, ctx, serverName)
+
+      const unregisterOld = registry.register(config, oldHandle)
+      const events: unknown[] = []
+      ctx.on('mcp/status-changed', (status) => { events.push(status) })
+
+      await unregisterOld()
+
+      expect(events).toEqual([
+        { serverName, state: 'disabled', attempts: 0, maxAttempts: 10 },
+      ])
+    })
+
+    it('dispose-old-then-register-new, profile absent: one removed event, emitted before the replacement ever registers', async () => {
+      const serverName = 'order-b-removed'
+      const patchPath = join(dir, 'cordis.patch.yml')
+      await writeFile(patchPath, '- id: someone-else\n  name: \'@deepseek-ai/dsh-mcp-client\'\n', 'utf8')
+      const registry = new McpStatusRegistryService(ctx, { patchPath })
+      const config = httpConfig(fixture, serverName)
+      const { handle: oldHandle } = buildOAuthHandle(fixture, ctx, serverName)
+
+      const unregisterOld = registry.register(config, oldHandle)
+      const events: unknown[] = []
+      ctx.on('mcp/status-changed', (status) => { events.push(status) })
+
+      await unregisterOld()
+
+      expect(events).toEqual([{ ...oldHandle.status(), removed: true }])
+    })
+
+    it('dispose-old-then-register-new, malformed patch file: no event — a failed read is not "absent", so it never reports removed', async () => {
+      const serverName = 'order-b-malformed'
+      const patchPath = join(dir, 'cordis.patch.yml')
+      await writeFile(patchPath, ': : not yaml ][', 'utf8')
+      const registry = new McpStatusRegistryService(ctx, { patchPath })
+      const config = httpConfig(fixture, serverName)
+      const { handle: oldHandle } = buildOAuthHandle(fixture, ctx, serverName)
+
+      const warns: string[] = []
+      vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warns.push(String(message)) }) as never)
+
+      const unregisterOld = registry.register(config, oldHandle)
+      const events: unknown[] = []
+      ctx.on('mcp/status-changed', (status) => { events.push(status) })
+
+      await unregisterOld()
+
+      expect(events).toEqual([])
+      expect(warns).toHaveLength(1)
+      expect(warns[0]).toContain('not valid YAML')
+    })
   })
 })
 
@@ -232,6 +610,33 @@ describe('McpStatusRegistryService — authorize-start', () => {
     const response = await fetch(`http://127.0.0.1:${port}/callback?code=auth-code-1&state=${state}`)
     expect(response.ok).toBe(true)
     await vi.waitFor(() => { expect(forceReconnectAfterAuthorization).toHaveBeenCalledTimes(1) })
+  })
+
+  it('runConsentCapture drops a completed callback silently (no error, pending-flow slot released) when its server deregistered first', async () => {
+    const errors: string[] = []
+    vi.spyOn(ctx.logger, 'error').mockImplementation(((message: unknown) => { errors.push(String(message)) }) as never)
+
+    const { handle } = buildOAuthHandle(fixture, ctx, 'deregistered-mid-flow')
+    const unregister = registry.register(httpConfig(fixture, 'deregistered-mid-flow'), handle)
+    const { consentUrl } = await registry.authorizeStart('deregistered-mid-flow')
+    const port = Number(new URL(handle.authProvider!.redirectUrl).port)
+    const state = new URL(consentUrl).searchParams.get('state')!
+
+    // The mount is deregistered (e.g. disabled or removed through the Tools
+    // panel) while a stale consent tab is still open.
+    await unregister()
+
+    const response = await fetch(`http://127.0.0.1:${port}/callback?code=stale-code&state=${state}`)
+    expect(response.ok).toBe(true)
+
+    // runConsentCapture resumes in the background, finds no entry for the
+    // now-deregistered server, and returns without attempting a token
+    // exchange or logging an error — but it still releases the pending-flow
+    // slot via its `finally`.
+    await vi.waitFor(() => {
+      expect((registry as unknown as { pendingFlow: string | undefined }).pendingFlow).toBeUndefined()
+    })
+    expect(errors).toHaveLength(0)
   })
 
   it('rejects immediately when the loopback port is already held, releasing the slot for a retry (SWD-164 sentinel: bind before promising a URL)', async () => {
@@ -369,6 +774,16 @@ describe('McpStatusRegistryService — set-enabled', () => {
 
   afterEach(async () => {
     await rm(dir, { recursive: true, force: true })
+    // Defensively clear any one-shot injection an earlier test in this
+    // block armed but never consumed (e.g. it threw before reaching the
+    // matching fs call) -- never leak into a later test's fs calls.
+    fsRaceState.readFileFailPath = undefined
+    fsRaceState.readFileFailAtCall = 0
+    fsRaceState.readFileFailCallsSeen = 0
+    fsRaceState.readFileFailError = undefined
+    fsRaceState.openWxFailError = undefined
+    fsRaceState.renameFailError = undefined
+    fsRaceState.rmFailError = undefined
   })
 
   it('rejects a server name that fails SERVER_NAME_PATTERN', async () => {
@@ -459,6 +874,74 @@ describe('McpStatusRegistryService — set-enabled', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('fails loud (Error instance) when the backup file cannot be created for a reason other than it already existing', async () => {
+    await writeFile(patchPath, '- id: srv\n  disabled: true\n', 'utf8')
+    const error = new Error('EACCES: permission denied') as NodeJS.ErrnoException
+    error.code = 'EACCES'
+    fsRaceState.openWxFailError = error
+    await expect(registry.setEnabled('srv', false)).rejects.toThrow(/could not be backed up before set-enabled.*EACCES/s)
+  })
+
+  it('fails loud (non-Error thrown value) when the backup file cannot be created for a reason other than it already existing', async () => {
+    await writeFile(patchPath, '- id: srv\n  disabled: true\n', 'utf8')
+    fsRaceState.openWxFailError = 'a plain thrown string, not an Error'
+    await expect(registry.setEnabled('srv', false)).rejects.toThrow(/could not be backed up before set-enabled.*a plain thrown string, not an Error/s)
+  })
+
+  it('rejects the initial read (non-Error thrown value) with the error folded into the message', async () => {
+    await writeFile(patchPath, '- id: srv\n  disabled: true\n', 'utf8')
+    fsRaceState.readFileFailPath = patchPath
+    fsRaceState.readFileFailAtCall = 1
+    fsRaceState.readFileFailError = 'a plain thrown string, not an Error'
+    await expect(registry.setEnabled('srv', false))
+      .rejects.toThrow(/cordis patch file could not be read.*a plain thrown string, not an Error/s)
+  })
+
+  it('rejects the pre-rename re-check (Error instance) when the file disappears between the two reads', async () => {
+    await writeFile(patchPath, '- id: srv\n  disabled: true\n', 'utf8')
+    const error = new Error('EIO: i/o error') as NodeJS.ErrnoException
+    error.code = 'EIO'
+    fsRaceState.readFileFailPath = patchPath
+    fsRaceState.readFileFailAtCall = 2
+    fsRaceState.readFileFailError = error
+    await expect(registry.setEnabled('srv', false))
+      .rejects.toThrow(/could not be re-read for the concurrency check.*EIO/s)
+  })
+
+  it('rejects the pre-rename re-check (non-Error thrown value) when the file disappears between the two reads', async () => {
+    await writeFile(patchPath, '- id: srv\n  disabled: true\n', 'utf8')
+    fsRaceState.readFileFailPath = patchPath
+    fsRaceState.readFileFailAtCall = 2
+    fsRaceState.readFileFailError = 'a plain thrown string, not an Error'
+    await expect(registry.setEnabled('srv', false))
+      .rejects.toThrow(/could not be re-read for the concurrency check.*a plain thrown string, not an Error/s)
+  })
+
+  it('fails loud (Error instance) when the atomic rename fails, and the temp-file cleanup failure itself is swallowed', async () => {
+    await writeFile(patchPath, '- id: srv\n  disabled: true\n', 'utf8')
+    const renameError = new Error('EXDEV: cross-device link not permitted') as NodeJS.ErrnoException
+    renameError.code = 'EXDEV'
+    const rmError = new Error('EACCES: permission denied') as NodeJS.ErrnoException
+    rmError.code = 'EACCES'
+    fsRaceState.renameFailError = renameError
+    // The temp-file cleanup itself also fails (not ENOENT, so `force: true`
+    // does not swallow it) — the outer failure must still win and the
+    // cleanup's own rejection must be caught, not left unhandled.
+    fsRaceState.rmFailError = rmError
+    await expect(registry.setEnabled('srv', false))
+      .rejects.toThrow(/could not be written atomically.*EXDEV/s)
+    // The original content is untouched — the failed write never replaced it.
+    const written = await readFile(patchPath, 'utf8')
+    expect(written).toMatch(/id: srv\s*\n\s*disabled: true/)
+  })
+
+  it('fails loud (non-Error thrown value) when the atomic rename fails', async () => {
+    await writeFile(patchPath, '- id: srv\n  disabled: true\n', 'utf8')
+    fsRaceState.renameFailError = 'a plain thrown string, not an Error'
+    await expect(registry.setEnabled('srv', false))
+      .rejects.toThrow(/could not be written atomically.*a plain thrown string, not an Error/s)
   })
 })
 

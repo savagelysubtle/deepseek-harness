@@ -8,10 +8,16 @@
  *
  * `disabled` names the connection supervisor's own `reconnect.enabled: false`
  * policy, NOT whether the plugin mount itself is loaded (the Loader's
- * `entry.disabled`, toggled by `mcp/set-enabled`). A mount the Loader never
- * activated has no live `ConnectionHandle` and so never appears in
- * `mcp/status` at all — the two "disabled" concepts are deliberately
- * independent; see the status-registry module doc for the full reasoning.
+ * `entry.disabled`, toggled by `mcp/set-enabled`) — the two "disabled"
+ * concepts are deliberately independent; see the status-registry module doc
+ * for the full reasoning. A mount the Loader never activated has no live
+ * `ConnectionHandle`, but it still appears in `mcp/status` with state
+ * `disabled` and `attempts: 0` as long as it is still named (disabled) in
+ * the profile's `cordis.patch.yml` — otherwise the Tools panel could disable
+ * a server and never have a way to re-enable it. Only a mount no longer
+ * named in that file at all (removed from configuration entirely) is
+ * missing from `mcp/status`'s listing; see `removed` below for how a client
+ * is told to drop that row.
  *
  * @module @deepseek-ai/dsh-mcp-client/status
  */
@@ -36,6 +42,16 @@ export interface McpServerStatus {
   maxAttempts: number
   /** Last connection error, with absolute paths redacted; absent while healthy or awaiting consent. */
   lastError?: string
+  /**
+   * Set only on the final `mcp/status-changed` emitted when this server's
+   * plugin mount deregisters AND is no longer named in the profile's
+   * `cordis.patch.yml` at all — as opposed to merely disabled, which keeps
+   * reporting `state: 'disabled'` so a re-enable action stays available. A
+   * client should drop this server's row entirely rather than render it.
+   * Always absent from `mcp/status`'s own listing, including its
+   * synthesized rows for a currently-disabled-but-still-configured mount.
+   */
+  removed?: boolean
 }
 
 /** Typert namespace every Remote method and event below is published under. */

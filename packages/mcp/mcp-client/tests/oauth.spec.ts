@@ -533,4 +533,36 @@ describe('resolveAuthProvider (connection.ts) direct wiring', () => {
       await fixture.close()
     }
   })
+
+  it('a redirect reported after disposal is ignored (onNeedsAuthorization no-ops once disposed)', async () => {
+    const fixture = await startOAuthFixture()
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
+    const credPath = join(dir, 'creds.yaml')
+    try {
+      const ctx = await mountRegistry(credPath)
+      const config: Config = {
+        ...httpConfig(fixture, 'needs-auth-disposed'),
+        reconnect: { enabled: true, initialDelayMs: 60_000, maxDelayMs: 60_000, maxAttempts: 5 },
+      }
+      const handle = startConnection(ctx, config, resolveReconnectPolicy(config.reconnect, 'reconnect'))
+      await handle.ready
+      expect(handle.status().state).toBe('needs-authorization')
+      const consentUrlBeforeDispose = handle.peekConsentUrl()
+      expect(consentUrlBeforeDispose).toBeDefined()
+
+      await handle.dispose()
+
+      // A straggling attempt's redirect, reported by the SDK after disposal
+      // already ran, must be a flat no-op: no new consent URL captured, no
+      // state mutation.
+      handle.authProvider!.redirectToAuthorization(new URL('https://attacker.example/authorize?fresh=1'))
+      expect(handle.peekConsentUrl()).toBe(consentUrlBeforeDispose)
+      expect(handle.status().state).toBe('needs-authorization')
+
+      await ctx.fiber.dispose()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+      await fixture.close()
+    }
+  })
 })

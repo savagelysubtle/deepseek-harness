@@ -659,6 +659,19 @@ describe('connection status and manual recovery', () => {
     await handle.dispose()
   })
 
+  it('a throwing onStatusChange listener is logged and does not stop delivery to other listeners', async () => {
+    const { errors } = captureLogs(ctx)
+    const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 2 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 2 }, 'reconnect'))
+    const seenByWellBehaved: string[] = []
+    handle.onStatusChange(() => { throw new Error('listener boom') })
+    handle.onStatusChange((status) => { seenByWellBehaved.push(status.state) })
+    await handle.ready
+
+    expect(seenByWellBehaved).toContain('connected')
+    expect(errors.some(line => line.includes('listener boom'))).toBe(true)
+    await handle.dispose()
+  })
+
   it('forceReconnectAfterAuthorization is a no-op while a generation is already live, but recovers a given-up connection', async () => {
     const handle = startConnection(ctx, stdioConfig({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 2 }), resolveReconnectPolicy({ initialDelayMs: 2, maxDelayMs: 8, maxAttempts: 2 }, 'reconnect'))
     await handle.ready
@@ -678,6 +691,36 @@ describe('connection status and manual recovery', () => {
     mockConnect.mockResolvedValue(undefined)
     handle.forceReconnectAfterAuthorization()
     await vi.waitFor(() => { expect(handle.status().state).toBe('connected') })
+    await handle.dispose()
+  })
+
+  it('forceReconnectAfterAuthorization clears a pending backoff timer instead of leaving a duplicate reconnect armed', async () => {
+    const { warns } = captureLogs(ctx)
+    mockConnect.mockRejectedValueOnce(new Error('server gone'))
+    const handle = startConnection(
+      ctx,
+      stdioConfig({ initialDelayMs: 30, maxDelayMs: 30, maxAttempts: 3 }),
+      resolveReconnectPolicy({ initialDelayMs: 30, maxDelayMs: 30, maxAttempts: 3 }, 'reconnect'),
+    )
+    await handle.ready
+    // The first attempt just failed: a 30ms backoff timer is now armed and
+    // `client` is undefined (state 'connecting') — exactly the window
+    // forceReconnectAfterAuthorization's own timer-clear exists for, since
+    // its guard (`client !== undefined`) would otherwise let a THEN-pending
+    // automatic retry fire a second, duplicate reconnect later.
+    expect(handle.status().state).toBe('connecting')
+    expect(mockConnect).toHaveBeenCalledTimes(1)
+
+    mockConnect.mockResolvedValue(undefined)
+    handle.forceReconnectAfterAuthorization()
+    await vi.waitFor(() => { expect(handle.status().state).toBe('connected') })
+    expect(mockConnect).toHaveBeenCalledTimes(2)
+
+    // If the old backoff timer were still armed, waiting past its original
+    // 30ms delay would fire a third, duplicate connect attempt.
+    await sleep(40)
+    expect(mockConnect).toHaveBeenCalledTimes(2)
+    expect(warns.some(line => line.includes('connection failed; retrying in 30ms'))).toBe(true)
     await handle.dispose()
   })
 

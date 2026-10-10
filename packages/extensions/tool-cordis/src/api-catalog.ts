@@ -3709,7 +3709,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'McpServerStatus',
-    declaration: 'export interface McpServerStatus {\n    serverName: string;\n    state: McpServerState;\n    attempts: number;\n    maxAttempts: number;\n    lastError?: string;\n}',
+    declaration: 'export interface McpServerStatus {\n    serverName: string;\n    state: McpServerState;\n    attempts: number;\n    maxAttempts: number;\n    lastError?: string;\n    removed?: boolean;\n}',
   },
   {
     name: 'MemoryEntry',

@@ -587,6 +587,20 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
       // at attempt 1, never carrying over the exhausted count that caused
       // `gave-up`, and clear any armed automatic retry so this attempt is
       // never doubled.
+      //
+      // This guard is provably unreachable: scheduleReconnect's only two
+      // branches that set `state` to 'gave-up' or 'disabled' (the gate just
+      // above) never arm `reconnectTimer` on their way there, and the ONE
+      // place that does arm it (scheduleReconnect's retry branch) always
+      // sets `state` to 'connecting' (or leaves it 'needs-authorization'),
+      // never 'gave-up'/'disabled' — and the timer's own setTimeout callback
+      // clears `reconnectTimer` to undefined before ever calling
+      // connectGeneration again. So by the time the gate above lets
+      // execution reach here, `reconnectTimer` is always undefined.
+      // Unreachable; kept only because dispose() and
+      // forceReconnectAfterAuthorization() share this exact clear-and-null
+      // idiom and this one stays symmetric with them.
+      /* v8 ignore next 4 -- see proof above */
       if (reconnectTimer !== undefined) {
         clearTimeout(reconnectTimer)
         reconnectTimer = undefined

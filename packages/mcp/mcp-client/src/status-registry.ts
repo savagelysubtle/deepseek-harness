@@ -11,11 +11,15 @@
  * `./status.ts`) and "this plugin mount is disabled" (the Loader's
  * `entry.disabled`, toggled here by `set-enabled`) are deliberately
  * independent concepts sharing an unfortunate word: a mount the Loader never
- * activates has no live `ConnectionHandle` at all, so it never appears in
- * `list()`. `set-enabled` therefore only ever *disables a currently-listed
- * server going forward* (after the next Loader reload) or *re-enables one
- * that is not currently listed because it was previously disabled* — it
- * never needs to read this registry to do its job, only the patch file.
+ * activates has no live `ConnectionHandle` at all, so `list()` synthesizes
+ * its row instead — straight off the same `cordis.patch.yml` `set-enabled`
+ * edits, as `state: 'disabled'`, `attempts: 0`, no live handle — so a
+ * disabled server never vanishes from the panel with no way back.
+ * `set-enabled` therefore only ever *disables a currently-listed server
+ * going forward* (after the next Loader reload) or *re-enables one that is
+ * reporting `disabled` from the patch file because it was previously
+ * disabled* — it never needs to read this registry's `handles` map to do
+ * its job, only the patch file.
  *
  * @module @deepseek-ai/dsh-mcp-client/status-registry
  */
@@ -32,9 +36,21 @@ import { auth as sdkAuth } from '@modelcontextprotocol/sdk/client/auth.js'
 // Typert-generated ./typert and ./remote artifacts import Zod at runtime.
 import type {} from 'zod'
 import { startAuthorizationCallbackListener } from './oauth-callback.ts'
-import type { ConnectionHandle } from './connection.ts'
+// `./index.ts` must be imported (and therefore begin — and, transitively,
+// finish — loading `./connection.ts`, which it imports first) BEFORE this
+// file's own `./connection.ts` import below: index.ts reads
+// `RECONNECT_DEFAULTS` at its own module top level (building its `Reconnect`
+// Schemastery schema), not lazily inside a function, so if THIS file became
+// the circular pair's entry point instead, connection.ts would still be
+// mid-load (stuck re-importing index.ts, which is this same partially-loaded
+// module) the moment index.ts's top-level code tries to read it — undefined,
+// not a value. Letting index.ts stay the entry point is what every other
+// circularly-imported binding in this file already relies on (each used only
+// inside a method body, never at this file's own top level either).
 import { SERVER_NAME_PATTERN } from './index.ts'
 import type { Config } from './index.ts'
+import { RECONNECT_DEFAULTS } from './connection.ts'
+import type { ConnectionHandle } from './connection.ts'
 import type { McpAuthorizeStartResult, McpServerStatus } from './status.ts'
 
 export type { McpAuthorizeStartResult } from './status.ts'
@@ -70,6 +86,9 @@ const DEFAULT_PROFILE_NAME = 'web-stable'
 
 /** Patch-file entry name set-enabled's cordis.patch.yml mutation uses for one plugin mount's YAML-level disable flag. */
 const PATCH_PATCH_FILENAME = 'cordis.patch.yml'
+
+/** The `name` field a `cordis.patch.yml` entry carries for an mcp-client mount, e.g. `examples/mcp-memory/engram.cordis.yml`. */
+const MCP_CLIENT_PACKAGE_NAME = '@deepseek-ai/dsh-mcp-client'
 
 /** Bound on disambiguating backup-filename suffixes, mirroring `org-served-roster.ts`. */
 const MAX_BACKUP_FILENAME_ATTEMPTS = 100
@@ -188,6 +207,107 @@ function locateMcpMount(patches: readonly unknown[], serverName: string): McpMou
 }
 
 /**
+ * One `@deepseek-ai/dsh-mcp-client` mount found in a parsed
+ * `cordis.patch.yml`, keyed by `id` — this deployment's convention keeps
+ * `id === config.serverName` (same assumption {@link locateMcpMount} already
+ * makes).
+ */
+interface McpPatchEntry {
+  readonly disabled: boolean
+}
+
+/**
+ * Collect every `@deepseek-ai/dsh-mcp-client` mount in a parsed
+ * `cordis.patch.yml` document, flat or nested one level under a group's
+ * `insert` (the same two shapes {@link locateMcpMount} accepts). An entry
+ * failing {@link SERVER_NAME_PATTERN} is skipped rather than surfaced — the
+ * same validation `setEnabled` applies to its `serverName` parameter before
+ * ever touching this file.
+ * @param patches - the parsed top-level patch list.
+ * @returns every valid mcp-client mount's id and `disabled` flag.
+ */
+function collectMcpPatchEntries(patches: readonly unknown[]): Map<string, McpPatchEntry> {
+  const entries = new Map<string, McpPatchEntry>()
+  const visit = (record: Record<string, unknown>): void => {
+    if (
+      record.name === MCP_CLIENT_PACKAGE_NAME
+      && typeof record.id === 'string'
+      && SERVER_NAME_PATTERN.test(record.id)
+    ) {
+      entries.set(record.id, { disabled: record.disabled === true })
+    }
+  }
+  for (const patch of patches) {
+    if (typeof patch !== 'object' || patch === null) continue
+    const record = patch as Record<string, unknown>
+    visit(record)
+    const insert = record.insert
+    if (!Array.isArray(insert)) continue
+    for (const nested of insert) {
+      if (typeof nested !== 'object' || nested === null) continue
+      visit(nested as Record<string, unknown>)
+    }
+  }
+  return entries
+}
+
+/**
+ * Read and parse the patch file into its mcp-client mount entries, tolerating
+ * a missing or malformed file by returning an empty map. Used by `list()`
+ * (an absent file means no extra disabled rows to synthesize) and the
+ * deregister notifier below (an absent or unreadable file means "assume
+ * removed" rather than throwing out of a disposal path) — `setEnabled` keeps
+ * its own strict read, since it is the one path that must fail loud on this
+ * file.
+ *
+ * A missing file (`ENOENT`) is the ordinary case for a deployment with no
+ * `cordis.patch.yml` at all and stays silent, returning the (genuinely)
+ * empty map. A file that exists but fails to read, fails to parse, or
+ * parses to something other than a top-level list, is NOT ordinary — it
+ * means `set-enabled`'s own reads would also be failing — so that case logs
+ * one `warn` (redacted path, reason) and returns `undefined` rather than an
+ * empty map: an empty map would read as "no disabled mounts, nothing named
+ * here", which callers must NOT treat the same as "the read failed and we
+ * have no idea." `list()` degrades to live rows only; the deregister
+ * notifier emits nothing (the warn already told the operator something is
+ * wrong, and guessing `removed: true` from a failed read would be a false
+ * report, not a graceful degradation).
+ * @param ctx - plugin context, for the one-shot `warn` on a non-ENOENT failure.
+ * @param patchPath - absolute path to the `cordis.patch.yml` to read.
+ * @returns every valid mcp-client mount's id and `disabled` flag; an empty map for a
+ *   missing file or a genuinely empty list; `undefined` if the read or parse failed.
+ */
+async function readMcpPatchEntries(
+  ctx: Context,
+  patchPath: string,
+): Promise<Map<string, McpPatchEntry> | undefined> {
+  let bytes: Buffer
+  try {
+    bytes = await readFile(patchPath)
+  } catch (error: unknown) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return new Map()
+    ctx.logger.warn(`mcp status: cordis patch file could not be read: ${redactAbsolutePaths(error instanceof Error ? error.message : String(error))}`)
+    return undefined
+  }
+  let patches: unknown
+  try {
+    patches = parseYaml(bytes.toString('utf8'))
+  } catch (error: unknown) {
+    // `: String(error)` is unreachable: the `yaml` package's `parse()` only
+    // ever throws `YAMLParseError` (and its siblings in that module), all of
+    // which extend `Error` — a non-Error throw from `parse()` cannot occur.
+    /* v8 ignore next -- see proof above */
+    ctx.logger.warn(`mcp status: cordis patch file is not valid YAML: ${error instanceof Error ? error.message : String(error)}`)
+    return undefined
+  }
+  if (!Array.isArray(patches)) {
+    ctx.logger.warn('mcp status: cordis patch file does not contain a top-level list')
+    return undefined
+  }
+  return collectMcpPatchEntries(patches)
+}
+
+/**
  * Build the next patch document with minimal new objects, writing an
  * explicit `disabled: true|false` onto exactly the matched entry — always
  * explicit (never omitted on enable) so the written file is unambiguous on
@@ -267,31 +387,88 @@ export class McpStatusRegistryService extends TypertRemoteService {
    * allowlist.
    * @param config - the resolved plugin config this handle belongs to.
    * @param handle - the live supervisor handle.
-   * @returns an unregister function; call it from the instance's own disposal.
+   * @returns an unregister function; call it from the instance's own disposal — it
+   *   may run async work, which Cordis's effect disposal awaits.
    */
-  register(config: Config, handle: ConnectionHandle): () => void {
+  register(config: Config, handle: ConnectionHandle): () => Promise<void> {
     const unsubscribe = handle.onStatusChange((status) => {
       this.ctx.emit('mcp/status-changed', status)
     })
     this.handles.set(config.serverName, { config, handle, unsubscribe })
-    return () => {
+    return async () => {
       unsubscribe()
-      // Only drop the map entry if it is still THIS registration — an HMR
-      // reload can register the replacement before the old instance's
-      // disposer runs.
-      if (this.handles.get(config.serverName)?.handle === handle) {
-        this.handles.delete(config.serverName)
+      // Fast path only: if a replacement has ALREADY registered under this
+      // serverName (the loader registered-then-disposed, in that order),
+      // the map entry is already superseded and owned by that replacement —
+      // nothing to decide or emit here. This is an optimization, never the
+      // sole decision mechanism: when the loader disposes-then-registers
+      // instead, this check sees `handle === this one` even though the
+      // dispose is real, and must NOT short-circuit on that basis alone —
+      // see below.
+      if (this.handles.get(config.serverName)?.handle !== handle) return
+      // The identity check above cannot tell "ordinary reload, replacement
+      // not registered yet" apart from "real removal/disable" — both leave
+      // this handle as the current map entry at this instant. The profile
+      // patch file is the source of truth at THIS moment, so re-read it
+      // fresh rather than trusting registration order:
+      //   - mount absent from the patch file -> really gone -> `removed: true`
+      //   - mount present and disabled -> the Loader disabled it -> 'disabled'
+      //   - mount present and enabled -> an ordinary reload; the replacement
+      //     handle is on its way and will report its own status once it
+      //     registers (startConnection's initial connect is async, so that
+      //     report lands after this closure returns) — emit nothing now.
+      // A failed read (`undefined`, not an empty map) means the file's
+      // actual state is unknown, not that the mount is absent — the warn
+      // already fired inside readMcpPatchEntries, so emit nothing rather
+      // than guess `removed: true` from a read that never completed.
+      this.handles.delete(config.serverName)
+      const patchEntries = await readMcpPatchEntries(this.ctx, this.patchPath)
+      if (patchEntries === undefined) return
+      const patchEntry = patchEntries.get(config.serverName)
+      if (patchEntry === undefined) {
+        this.ctx.emit('mcp/status-changed', { ...handle.status(), removed: true })
+      } else if (patchEntry.disabled) {
+        this.ctx.emit('mcp/status-changed', {
+          serverName: config.serverName,
+          state: 'disabled',
+          attempts: 0,
+          maxAttempts: RECONNECT_DEFAULTS.maxAttempts,
+        })
       }
     }
   }
 
   /**
-   * List every registered server's current status.
-   * @returns every registered server's current status, in registration order.
+   * List every registered server's current status, plus a synthesized
+   * `disabled` row (attempts 0, no live handle) for every OTHER
+   * `@deepseek-ai/dsh-mcp-client` mount the profile's `cordis.patch.yml`
+   * marks `disabled: true` — without this, a server the Tools panel just
+   * disabled would vanish from the list entirely (the Loader never
+   * activates a disabled mount, so it has no live `ConnectionHandle`) and
+   * the panel would have no way to show a re-enable action for it.
+   *
+   * On a failed patch-file read (`undefined`, already `warn`ed inside
+   * {@link readMcpPatchEntries}), this degrades to live rows only — no
+   * synthesized `disabled` row is fabricated from a read that never
+   * completed.
+   * @returns every registered or patch-disabled server's current status.
    */
   @Remote('status')
-  list(): McpServerStatus[] {
-    return [...this.handles.values()].map(entry => entry.handle.status())
+  async list(): Promise<McpServerStatus[]> {
+    const live = [...this.handles.values()].map(entry => entry.handle.status())
+    const liveNames = new Set(live.map(status => status.serverName))
+    const patchEntries = await readMcpPatchEntries(this.ctx, this.patchPath)
+    const disabledFromPatch: McpServerStatus[] = []
+    for (const [serverName, entry] of patchEntries ?? []) {
+      if (!entry.disabled || liveNames.has(serverName)) continue
+      disabledFromPatch.push({
+        serverName,
+        state: 'disabled',
+        attempts: 0,
+        maxAttempts: RECONNECT_DEFAULTS.maxAttempts,
+      })
+    }
+    return [...live, ...disabledFromPatch]
   }
 
   /**
@@ -336,18 +513,30 @@ export class McpStatusRegistryService extends TypertRemoteService {
       // the CSRF `state`, so leaking it over the public status poll would let
       // anyone who opens it complete THIS flow (SWD-164 sentinel finding).
       const consentUrl = handle.peekConsentUrl()
+      // This whole branch is unreachable: a REDIRECT result always ran
+      // through `onAuthorizationUrl` first, which sets `consentUrl` before
+      // `sdkAuth` returns — kept only as a named diagnostic in case that SDK
+      // invariant ever changes, rather than an `as string`/`!` cast below.
+      /* v8 ignore next 3 -- see proof above */
       if (consentUrl === undefined) {
-        /* v8 ignore next -- defensive: a REDIRECT result always ran through
-         * onAuthorizationUrl first, which sets consentUrl before sdkAuth returns */
         throw new Error(`mcp authorize-start: server "${serverName}" did not produce a consent URL`)
       }
+      // `?? undefined` right-hand side is unreachable: `CredentialsOAuthProvider.state()`
+      // (oauth.ts) always returns a fresh non-empty random token, and the MCP SDK's
+      // `auth()` always embeds that exact value as the `state` query parameter on the
+      // authorization URL it builds — so `searchParams.get('state')` is never null for
+      // any consent URL this method ever reads.
+      /* v8 ignore next -- see proof above */
       const expectedState = new URL(consentUrl).searchParams.get('state') ?? undefined
       const port = Number(new URL(handle.authProvider.redirectUrl).port)
       // `exactOptionalPropertyTypes` rejects `{ expectedState: undefined }` —
-      // omit the key entirely rather than set it to `undefined`.
+      // omit the key entirely rather than set it to `undefined`. The `{}`
+      // arm is unreachable (`expectedState` is never undefined; see the
+      // proof just above), kept only to satisfy that strictness rule.
       const listener = startAuthorizationCallbackListener(
         port,
         HOST_CONSENT_TIMEOUT_MS,
+        /* v8 ignore next -- see proof above */
         expectedState === undefined ? {} : { expectedState },
       )
       // `code` rejects with the same error as `bound` on a bind failure (both
@@ -390,6 +579,9 @@ export class McpStatusRegistryService extends TypertRemoteService {
       const serverUrl = entry?.config.transport === 'streamable-http' ? entry.config.url : undefined
       if (serverUrl === undefined) return
       const result = await sdkAuth(handle.authProvider, { serverUrl, authorizationCode })
+      /* v8 ignore next 3 -- SDK 1.29.0 authInternal always returns AUTHORIZED or throws given an
+       * authorizationCode (auth.js ~262-271) — same proof already relied on in auth-cli.ts's
+       * identical guard right after its own sdkAuth(..., { authorizationCode }) call */
       if (result !== 'AUTHORIZED') {
         throw new Error('token exchange did not complete')
       }
@@ -449,6 +641,10 @@ export class McpStatusRegistryService extends TypertRemoteService {
     try {
       patches = parseYaml(currentBytes.toString('utf8'))
     } catch (error: unknown) {
+      // `: String(error)` is unreachable: see the identical proof on
+      // `readMcpPatchEntries`'s own YAML-parse catch above — the `yaml`
+      // package's `parse()` only ever throws `Error` subclasses.
+      /* v8 ignore next -- see proof above */
       throw new Error(`mcp set-enabled: cordis patch file is not valid YAML: ${error instanceof Error ? error.message : String(error)}`)
     }
     if (!Array.isArray(patches)) {
@@ -463,8 +659,20 @@ export class McpStatusRegistryService extends TypertRemoteService {
 
     // Self-validate through the same reader before anything touches disk.
     const reparsed: unknown = parseYaml(nextText)
+    // `: undefined` arm is unreachable: `nextPatches` is always a plain
+    // array (buildNextMcpPatches's return type), and stringifying an array
+    // with the `yaml` package then re-parsing the result always yields an
+    // array back — `reparsed` is never anything else here.
+    /* v8 ignore next -- see proof above */
     const rereadLocation = Array.isArray(reparsed) ? locateMcpMount(reparsed, serverName) : undefined
     const rereadEnabled = rereadLocation !== undefined && rereadLocation.entry.disabled === !enabled
+    // Unreachable: `buildNextMcpPatches` always writes an explicit
+    // `disabled: !enabled` onto exactly the entry `locateMcpMount` matched,
+    // and re-locating that same, unreordered document always finds the same
+    // entry with that same boolean faithfully round-tripped through the
+    // `yaml` package — `rereadEnabled` is always true here. Kept as a named
+    // diagnostic in case a future refactor of either helper breaks that.
+    /* v8 ignore next 3 -- see proof above */
     if (!rereadEnabled) {
       throw new Error(`mcp set-enabled: produced document failed self-validation for mount "${serverName}"`)
     }

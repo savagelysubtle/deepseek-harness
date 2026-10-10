@@ -82,6 +82,15 @@
     },
     {
       "path": "../ui-settings"
+    },
+    {
+      "path": "../../api/remotes/tsconfig.client.json"
+    },
+    {
+      "path": "../../mcp/mcp-client"
+    },
+    {
+      "path": "../ui-settings-general"
     }
   ],
   "exclude": [
