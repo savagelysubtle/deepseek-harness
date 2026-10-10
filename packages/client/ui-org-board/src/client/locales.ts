@@ -1,4 +1,4 @@
-/** `orgBoard` namespace dictionaries: the org board footer control and its modal. */
+/** `orgBoard` namespace dictionaries: the org board header-action control and its modal. */
 
 /** Dictionary namespace owned by this plugin. */
 export const NS = 'orgBoard'
@@ -81,7 +81,7 @@ export type OrgBoardKey =
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
-    /** The org board footer control and modal copy. */
+    /** The org board header-action control and modal copy. */
     'orgBoard': OrgBoardKey
   }
 }

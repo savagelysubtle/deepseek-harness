@@ -1,5 +1,5 @@
-/* Footer-trigger chrome mirrors OrgControls.module.css (ui-org-controls is
-   the model this package follows); the rest is the modal body: status
+/* Trigger chrome mirrors OrgControls.module.css (ui-org-controls is the
+   model this package follows); the rest is the modal body: status
    banners, the drift summary, the React Flow canvas, and the seat detail
    panel. React Flow's own structural classes live in xyflow-base.module.css
    (imported once from OrgBoard.tsx) — this file only styles content INSIDE
@@ -29,13 +29,6 @@
 
 .trigger:hover {
   background: var(--dsw-alias-interactive-bg-hover);
-}
-
-.rail .trigger {
-  justify-content: center;
-  width: 36px;
-  padding: 0;
-  border-radius: 50%;
 }
 
 .label {

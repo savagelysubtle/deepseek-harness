@@ -40,6 +40,25 @@ const useWorkspaces = (() => {
   throw new Error('StopAllControl must not call useWorkspaces')
 }) as never
 
+/**
+ * StopAllControl never reads the session-scope standard kit either (it is a
+ * root-wide broadcast, not a per-session action) — throwing stubs prove that
+ * while satisfying the now-session-scoped `conversation.session.header.actions`
+ * slot's `PropsRuntime` (SWD-162 moved this control off the sidebar foot).
+ */
+const useSession = (() => {
+  throw new Error('StopAllControl must not call useSession')
+}) as never
+const useProjection = (() => {
+  throw new Error('StopAllControl must not call useProjection')
+}) as never
+const useInput = (() => {
+  throw new Error('StopAllControl must not call useInput')
+}) as never
+const inputActions = new Proxy({}, {
+  get(): never { throw new Error('StopAllControl must not call inputActions') },
+}) as never
+
 const RUNNING_TWO: SessionListState = {
   ids: [sid('a'), sid('b'), sid('sub')],
   byId: {
@@ -58,13 +77,16 @@ const NONE_RUNNING: SessionListState = {
 
 /** Render helper: keeps every call site short — one place carries the runtime-share boilerplate. */
 function renderStopAll(overrides: {
-  wide?: boolean
   sessions?: SessionListState
   onStopAll?: StopAllControlProps['onStopAll']
 } = {}) {
-  const { wide = true, sessions = RUNNING_TWO, onStopAll = vi.fn() } = overrides
+  const { sessions = RUNNING_TWO, onStopAll = vi.fn() } = overrides
   return render(<StopAllControl
-    wide={wide}
+    sessionId={sid('current')}
+    useSession={useSession}
+    useProjection={useProjection}
+    useInput={useInput}
+    inputActions={inputActions}
     useSessions={useSessionsFixture(sessions)}
     useWorkspaces={useWorkspaces}
     onStopAll={onStopAll}
@@ -136,11 +158,6 @@ describe('StopAllControl', () => {
     await screen.findByRole('alert')
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
     expect(screen.queryByRole('alert')).toBeNull()
-  })
-
-  it('renders icon-only in rail mode (no wide label)', () => {
-    renderStopAll({ wide: false })
-    expect(screen.queryByText('Stop All')).toBeNull()
   })
 
   it('a thrown Error (promise rejection, not a { ok: false } answer) surfaces its own message', async () => {

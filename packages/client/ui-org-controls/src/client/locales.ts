@@ -1,4 +1,4 @@
-/** `orgControls` namespace dictionaries: the Stop All and Send All footer controls. */
+/** `orgControls` namespace dictionaries: the Stop All and Send All header-action controls. */
 
 /** Dictionary namespace owned by this plugin. */
 export const NS = 'orgControls'
@@ -33,7 +33,7 @@ export type OrgControlsKey =
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
-    /** The Stop All / Send All sidebar footer controls' copy. */
+    /** The Stop All / Send All header-action controls' copy. */
     'orgControls': OrgControlsKey
   }
 }

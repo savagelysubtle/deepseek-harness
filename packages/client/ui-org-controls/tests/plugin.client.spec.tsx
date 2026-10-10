@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 /**
  * Registration acceptance on the real framework stack: both Stop All and
- * Send All land in the sidebar's real `sidebar.footer.action` list slot
- * without disturbing an existing occupant, their labels/dictionaries follow
- * the active locale, each injected face routes straight through to
- * `ctx.sessions.stopAll`/`sendAll`, and fiber disposal removes both.
+ * Send All land in the conversation session header's real
+ * `conversation.session.header.actions` list slot without disturbing an
+ * existing occupant, their labels/dictionaries follow the active locale,
+ * each injected face routes straight through to `ctx.sessions.stopAll`/
+ * `sendAll`, and fiber disposal removes both.
  */
 import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -22,14 +23,15 @@ afterEach(cleanup)
 async function bench(fakeSessions: Partial<ISessions>) {
   const ctx = new Context()
   const slots = new SlotRegistry(ctx)
-  // The sidebar shell's role: declare the ring and seed one existing
-  // occupant (mirroring the shipped ui-cordis panel) ahead of ours.
+  // The session header's role: declare the ring and seed one existing
+  // occupant (mirroring the shipped ui-subagent catalog entry, order 10)
+  // ahead of ours.
   slots.register({
     name: 'root',
-    children: { 'sidebar.footer.action': { kind: 'list', scope: 'root' } },
+    children: { 'conversation.session.header.actions': { kind: 'list', scope: 'session' } },
   }, (_p: { renderSlot?: unknown }) => null)
   slots.register(
-    { name: 'sidebar.footer.action', id: 'cordis-panel' } as never,
+    { name: 'conversation.session.header.actions', id: 'subagent-catalog' } as never,
     (() => null) as never,
   )
   ctx.provide('connection', { api: { settings: {} }, isLoopback: false } as never)
@@ -43,25 +45,32 @@ async function bench(fakeSessions: Partial<ISessions>) {
 }
 
 function idsOf(slots: SlotRegistry): string[] {
-  return slots.entries('sidebar.footer.action').map(e => e.options.id as string)
+  return slots.entries('conversation.session.header.actions').map(e => e.options.id as string)
 }
 
 describe('plugin registration', () => {
-  it('adds stop-all and send-all beside the existing cordis-panel entry', async () => {
+  it('adds stop-all and send-all beside the existing subagent-catalog entry', async () => {
     const b = await bench({})
-    expect(idsOf(b.slots)).toEqual(['cordis-panel', 'stop-all', 'send-all'])
+    expect(idsOf(b.slots)).toEqual(['subagent-catalog', 'stop-all', 'send-all'])
   })
 
-  it('fiber disposal removes both entries and leaves cordis-panel standing', async () => {
+  it('registers stop-all at order 20 and send-all at order 30 (right after the Chat | Trajectory tabs, SWD-162 placement)', async () => {
+    const b = await bench({})
+    const entries = b.slots.entries('conversation.session.header.actions')
+    expect(entries.find(e => e.options.id === 'stop-all')?.options.order).toBe(20)
+    expect(entries.find(e => e.options.id === 'send-all')?.options.order).toBe(30)
+  })
+
+  it('fiber disposal removes both entries and leaves subagent-catalog standing', async () => {
     const b = await bench({})
     await b.fiber.dispose()
-    expect(idsOf(b.slots)).toEqual(['cordis-panel'])
+    expect(idsOf(b.slots)).toEqual(['subagent-catalog'])
   })
 
   it('routes the Stop All injected face straight through to ctx.sessions.stopAll', async () => {
     const stopAll = vi.fn().mockResolvedValue({ ok: true, value: { stoppedCount: 0, descendants: 'ok' } })
     const b = await bench({ stopAll })
-    const entry = b.slots.entries('sidebar.footer.action').find(e => e.options.id === 'stop-all')
+    const entry = b.slots.entries('conversation.session.header.actions').find(e => e.options.id === 'stop-all')
     const face = (entry?.inject as (() => { onStopAll: () => unknown }) | undefined)?.()
     await face?.onStopAll()
     expect(stopAll).toHaveBeenCalledTimes(1)
@@ -70,7 +79,7 @@ describe('plugin registration', () => {
   it('routes the Send All injected face straight through to ctx.sessions.sendAll with the given content', async () => {
     const sendAll = vi.fn().mockResolvedValue({ ok: true, value: { sentCount: 0, result: 'ok', founderStamped: true } })
     const b = await bench({ sendAll })
-    const entry = b.slots.entries('sidebar.footer.action').find(e => e.options.id === 'send-all')
+    const entry = b.slots.entries('conversation.session.header.actions').find(e => e.options.id === 'send-all')
     const face = (entry?.inject as (() => { onSendAll: (c: unknown) => unknown }) | undefined)?.()
     const content = [{ type: 'text' as const, text: 'stand down' }]
     await face?.onSendAll(content)

@@ -99,30 +99,40 @@ export function ConversationSessionHeader({
                 })}
                 {ancestry.length === 0 && <span className={css.crumbCurrent}>{sessionId}</span>}
               </nav>
-              <div className={css.headerActions}>
-                {renderSlot('conversation.session.header.actions', {})}
-              </div>
             </div>
             <div className={css.headerUtilities}>
               {renderSlot('conversation.session.header.utilities', {})}
             </div>
           </div>
-          {tabs.length > 1 && (
-            <div className={css.tabs} role="tablist">
-              {tabs.map(viewTab => (
-                <button
-                  key={viewTab.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={viewTab.id === active?.id}
-                  className={clsx(css.tab, viewTab.id === active?.id && css.tabActive)}
-                  onClick={() => { actions.setView(viewTab.id) }}
-                >
-                  {viewTab.label}
-                </button>
-              ))}
+          {/* Founder ruling (SWD-162 follow-up): Stop All, Send All, and Org
+              Board sit right after Chat | Trajectory, on this same row — but
+              the row (and the actions) must render regardless of tab count:
+              only the tablist itself is conditional on there being more than
+              one view, or a single-tab Session would lose these actions
+              entirely (reviewer catch — masked by ui-trajectory always
+              shipping today). Not role="tab" themselves, so outside the
+              tablist either way. */}
+          <div className={css.tabsRow}>
+            {tabs.length > 1 && (
+              <div className={css.tabs} role="tablist">
+                {tabs.map(viewTab => (
+                  <button
+                    key={viewTab.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={viewTab.id === active?.id}
+                    className={clsx(css.tab, viewTab.id === active?.id && css.tabActive)}
+                    onClick={() => { actions.setView(viewTab.id) }}
+                  >
+                    {viewTab.label}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className={css.headerActions}>
+              {renderSlot('conversation.session.header.actions', {})}
             </div>
-          )}
+          </div>
         </>
       )}
     </header>

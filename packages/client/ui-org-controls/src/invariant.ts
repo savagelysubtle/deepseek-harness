@@ -15,7 +15,7 @@ export const name = 'client-ui-org-controls-invariant'
 export const inject = ['invariants']
 
 /**
- * No runtime invariant: this package registers two footer-action buttons
+ * No runtime invariant: this package registers two header-action buttons
  * that call through `ctx.sessions.stopAll`/`sendAll` and render whatever
  * those calls report; it owns no mutable cross-plugin state and emits no
  * cordis events of its own for a companion to police.

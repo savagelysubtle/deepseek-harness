@@ -1,22 +1,23 @@
 /**
- * Sidebar-foot Org Board control (SWD-134 slice 2): opens a large modal
- * showing the org registry as a node graph. Read-only — the one verb this
- * control exposes is `load` (issue `org.get` again), never a mutation.
- * `org.get` is (re-)issued whenever the modal opens, so it never reads stale
- * data from before the modal was last shown.
+ * Session-header Org Board control (SWD-134 slice 2; moved off the sidebar
+ * foot by SWD-162): opens a large modal showing the org registry as a node
+ * graph. Read-only — the one verb this control exposes is `load` (issue
+ * `org.get` again), never a mutation. `org.get` is (re-)issued whenever the
+ * modal opens, so it never reads stale data from before the modal was last
+ * shown.
  */
 import { useEffect, useState } from 'react'
 import clsx from 'clsx'
 import { Button, IconBranchOutline16, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { OrgBoardFace } from './slots.ts'
 import { OrgBoard } from './OrgBoard.tsx'
 import css from './OrgBoard.module.css'
 
-/** Full component props: the footer-action runtime share, the live verb + snapshot, and the bound locale seat. */
+/** Full component props: the session-header-action runtime share, the live verb + snapshot, and the bound locale seat. */
 export type OrgBoardControlProps =
-  PropsRuntime<'sidebar.footer.action'> & InjectFace<OrgBoardFace> & PropsLocale<'orgBoard'>
+  PropsRuntime<'conversation.session.header.actions'> & InjectFace<OrgBoardFace> & PropsLocale<'orgBoard'>
 
 /**
  * Render the Org Board trigger and its modal.
@@ -24,7 +25,7 @@ export type OrgBoardControlProps =
  * forwarded to the board, and the bound `t`.
  */
 export function OrgBoardControl({
-  wide, useOrgBoard, load, addSeat, removeSeat, addEdge, removeEdge, setSeatTools, setSeatServed, t,
+  useOrgBoard, load, addSeat, removeSeat, addEdge, removeEdge, setSeatTools, setSeatServed, t,
 }: OrgBoardControlProps) {
   const [open, setOpen] = useState(false)
   const state = useOrgBoard(snapshot => snapshot)
@@ -40,7 +41,7 @@ export function OrgBoardControl({
   const triggerLabel = t('trigger')
 
   return (
-    <div className={wide ? css.root : `${css.root} ${css.rail}`}>
+    <div className={css.root}>
       <button
         type="button"
         className={css.trigger}
@@ -48,8 +49,8 @@ export function OrgBoardControl({
         title={triggerLabel}
         onClick={() => { setOpen(true) }}
       >
-        <IconBranchOutline16 size={wide ? 16 : 18} />
-        {wide && <span className={css.label}>{triggerLabel}</span>}
+        <IconBranchOutline16 size={16} />
+        <span className={css.label}>{triggerLabel}</span>
       </button>
       <Modal
         open={open}

@@ -138,12 +138,28 @@ function mount(
   /** Owner share handed to the two composer tool-row seats, per render. */
   const seatOwners: { key: string; owner: unknown }[] = []
   let pickerOwner: unknown
+  let headerActionsOwner: unknown
   const renderSlot = ((key: string, owner: object, opts?: { only?: string }) => {
     slotCalls.push(key)
     if (key === 'conversation.input.model' || key === 'conversation.input.plan') {
       seatOwners.push({ key, owner })
     }
     if (key === 'conversation.hero.workspace') { pickerOwner = owner; return null }
+    if (key === 'conversation.session.header.actions') {
+      // Stand-ins for the three SWD-162 registrants (ui-org-controls'
+      // Stop All/Send All, ui-org-board's Org Board) — ui-conversation
+      // cannot import those packages (they depend on it, not the reverse),
+      // so this proves the list slot is reachable here with the empty
+      // owner share those entries now rely on, rather than importing them.
+      headerActionsOwner = owner
+      return (
+        <>
+          <div data-testid="header-action-stop-all" />
+          <div data-testid="header-action-send-all" />
+          <div data-testid="header-action-org-board" />
+        </>
+      )
+    }
     if (key === 'conversation.session.header') {
       return (
         <ConversationSessionHeader
@@ -253,6 +269,7 @@ function mount(
   return {
     view, chat, sink, retargetWorkspace, session, slotCalls, seatOwners, open,
     pickerOwner: () => pickerOwner,
+    headerActionsOwner: () => headerActionsOwner,
     rerender: () => { view.rerender(<ConversationRoot {...props} />) },
   }
 }
@@ -337,6 +354,35 @@ describe('ConversationRoot resident composer', () => {
     expect(seat?.contains(textarea)).toBe(true)
     expect(b.slotCalls).toContain('conversation.session.header.actions')
     expect(b.slotCalls).toContain('conversation.session.header.utilities')
+    // SWD-162: Stop All, Send All, and Org Board moved off the sidebar foot
+    // into this list slot, with an empty owner share (no `wide` — they
+    // render only the labeled variant now). The header passes {} exactly as
+    // the three real registrants (ui-org-controls, ui-org-board) expect.
+    expect(b.headerActionsOwner()).toEqual({})
+    // Founder ruling (SWD-162 follow-up): the three entries sit right after
+    // the Chat | Trajectory tabs, on the SAME row — assert they land inside
+    // the tabs row container, not merely somewhere under the header.
+    const tablist = header?.querySelector('[role="tablist"]')
+    const tabsRow = tablist?.parentElement
+    expect(tabsRow).not.toBeNull()
+    expect(tabsRow?.querySelector('[data-testid="header-action-stop-all"]')).not.toBeNull()
+    expect(tabsRow?.querySelector('[data-testid="header-action-send-all"]')).not.toBeNull()
+    expect(tabsRow?.querySelector('[data-testid="header-action-org-board"]')).not.toBeNull()
+  })
+
+  it('active phase, single view tab: the session-header actions still render even with no tablist', () => {
+    // Reviewer catch: the actions' row was conditioned on `tabs.length > 1`
+    // along with the tablist, so a Session with exactly one registered view
+    // would silently lose Stop All/Send All/Org Board entirely -- masked
+    // today only because ui-trajectory always ships a second tab.
+    const b = mount(conversationSnapshot(), undefined, undefined, {
+      viewTabs: [{ id: 'chat', label: 'Chat' }],
+    })
+    const header = b.view.container.querySelector('header')
+    expect(header?.querySelector('[role="tablist"]')).toBeNull()
+    expect(header?.querySelector('[data-testid="header-action-stop-all"]')).not.toBeNull()
+    expect(header?.querySelector('[data-testid="header-action-send-all"]')).not.toBeNull()
+    expect(header?.querySelector('[data-testid="header-action-org-board"]')).not.toBeNull()
   })
 
   it('sticky composer seat wraps the whole overlay chain, not only the fallback stack', () => {

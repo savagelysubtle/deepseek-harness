@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
- * Footer trigger + modal wiring: the trigger opens the modal, opening (re-)
- * issues `load`, the modal renders whatever the bound `useOrgBoard` snapshot
- * says, rail mode drops the label, and the Refresh button re-issues `load`
+ * Session-header trigger + modal wiring: the trigger opens the modal,
+ * opening (re-)issues `load`, the modal renders whatever the bound
+ * `useOrgBoard` snapshot says, and the Refresh button re-issues `load`
  * without a confirm step (a re-read is not a mutation and needs none of Stop
  * All's confirm-first ceremony).
  *
@@ -71,9 +71,27 @@ const useSessions = (() => {
 const useWorkspaces = (() => {
   throw new Error('OrgBoardControl must not call useWorkspaces')
 }) as unknown as OrgBoardControlProps['useWorkspaces']
+/**
+ * Session-scope standard kit stubs, required structurally since SWD-162
+ * moved this slot to `conversation.session.header.actions` (session scope)
+ * — OrgBoardControl never reads these either (a root-wide broadcast
+ * trigger, not a per-session action).
+ */
+const useSession = (() => {
+  throw new Error('OrgBoardControl must not call useSession')
+}) as unknown as OrgBoardControlProps['useSession']
+const useProjection = (() => {
+  throw new Error('OrgBoardControl must not call useProjection')
+}) as unknown as OrgBoardControlProps['useProjection']
+const useInput = (() => {
+  throw new Error('OrgBoardControl must not call useInput')
+}) as unknown as OrgBoardControlProps['useInput']
+const inputActions = new Proxy({}, {
+  get(): never { throw new Error('OrgBoardControl must not call inputActions') },
+}) as unknown as OrgBoardControlProps['inputActions']
 
-function renderControl(overrides: { wide?: boolean; state?: OrgBoardState } = {}) {
-  const { wide = true, state = IDLE_STATE } = overrides
+function renderControl(overrides: { state?: OrgBoardState } = {}) {
+  const { state = IDLE_STATE } = overrides
   const load = vi.fn<OrgBoardControlProps['load']>().mockResolvedValue(undefined)
   // Every verb is both supplied AND forwarded to the board; the
   // reachability test below is what proves the forwarding still happens.
@@ -93,7 +111,11 @@ function renderControl(overrides: { wide?: boolean; state?: OrgBoardState } = {}
     setSeatTools,
     setSeatServed,
     ...render(<OrgBoardControl
-      wide={wide}
+      sessionId={'current' as never}
+      useSession={useSession}
+      useProjection={useProjection}
+      useInput={useInput}
+      inputActions={inputActions}
       useSessions={useSessions}
       useWorkspaces={useWorkspaces}
       useOrgBoard={useOrgBoard}
@@ -110,16 +132,10 @@ function renderControl(overrides: { wide?: boolean; state?: OrgBoardState } = {}
 }
 
 describe('OrgBoardControl', () => {
-  it('renders wide with a visible label', () => {
-    renderControl({ wide: true })
+  it('renders a visible label', () => {
+    renderControl()
     expect(screen.getByRole('button', { name: 'Org Board' })).toBeTruthy()
     expect(screen.getByText('Org Board')).toBeTruthy()
-  })
-
-  it('renders icon-only in rail mode (no wide label)', () => {
-    renderControl({ wide: false })
-    expect(screen.queryByText('Org Board')).toBeNull()
-    expect(screen.getByRole('button', { name: 'Org Board' })).toBeTruthy()
   })
 
   it('the modal is closed until the trigger is clicked', () => {

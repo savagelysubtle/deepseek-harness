@@ -1,4 +1,4 @@
-/** Injected faces for the two footer-action entries this package registers. */
+/** Injected faces for the two header-action entries this package registers. */
 
 import type { PromptContentPart, SendAllResult, StopDescendantsResult } from '@deepseek-ai/dsh-client-runtime/client'
 import type { RpcResult } from '@deepseek-ai/dsh-api-remotes/client'

@@ -1,5 +1,5 @@
 /**
- * Sidebar-foot Stop All control (SWD-130): a confirm-first button that stops
+ * Session-header-action Stop All control (SWD-130): a confirm-first button that stops
  * every live top-level session and its whole descendant forest in one host
  * call. There was no client surface for `sessions.stopAll` before this
  * package; the RPC already cascaded correctly, the gap was purely the
@@ -8,13 +8,13 @@
 import { useState } from 'react'
 import { Button, IconStopFill16, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { StopAllFace } from './slots.ts'
 import css from './OrgControls.module.css'
 
-/** Full component props: the footer-action runtime share, the live verb, and the bound locale seat. */
+/** Full component props: the session-header-action runtime share, the live verb, and the bound locale seat. */
 export type StopAllControlProps =
-  PropsRuntime<'sidebar.footer.action'> & InjectFace<StopAllFace> & PropsLocale<'orgControls'>
+  PropsRuntime<'conversation.session.header.actions'> & InjectFace<StopAllFace> & PropsLocale<'orgControls'>
 
 /**
  * Outcome banner shown after a Stop All attempt. A dedicated `partial` member
@@ -32,7 +32,7 @@ type ResultBanner =
  * (non-auto-fading) outcome banner.
  * @param props - runtime share, `onStopAll`, and the bound `t`.
  */
-export function StopAllControl({ wide, useSessions, onStopAll, t }: StopAllControlProps) {
+export function StopAllControl({ useSessions, onStopAll, t }: StopAllControlProps) {
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<ResultBanner | undefined>(undefined)
@@ -66,7 +66,7 @@ export function StopAllControl({ wide, useSessions, onStopAll, t }: StopAllContr
   const triggerLabel = disabled ? t('stopAll.trigger.disabledAria') : t('stopAll.trigger')
 
   return (
-    <div className={wide ? css.root : `${css.root} ${css.rail}`}>
+    <div className={css.root}>
       {result !== undefined && (
         <div className={css.banner} data-variant={result.kind} role="alert">
           <span>
@@ -92,8 +92,8 @@ export function StopAllControl({ wide, useSessions, onStopAll, t }: StopAllContr
         title={triggerLabel}
         onClick={() => { setConfirmOpen(true) }}
       >
-        <IconStopFill16 size={wide ? 16 : 18} />
-        {wide && <span className={css.label}>{t('stopAll.trigger')}</span>}
+        <IconStopFill16 size={16} />
+        <span className={css.label}>{t('stopAll.trigger')}</span>
       </button>
       {disabled && (
         // Visible on screen, not just a hover title/aria-label - a fence

@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 /**
  * Registration acceptance on the real framework stack: the org-board entry
- * lands in the sidebar's real `sidebar.footer.action` list slot alongside
- * existing occupants, its labels follow the active locale, its injected
- * `load` routes straight through to `ctx.connection.api.org.get`, and fiber
- * disposal removes it.
+ * lands in the conversation session header's real
+ * `conversation.session.header.actions` list slot alongside existing
+ * occupants, its labels follow the active locale, its injected `load` routes
+ * straight through to `ctx.connection.api.org.get`, and fiber disposal
+ * removes it.
  */
 import { useSyncExternalStore } from 'react'
 import { Context } from '@deepseek-ai/cordis'
@@ -119,18 +120,19 @@ async function bench(
 ) {
   const ctx = new Context()
   const slots = new SlotRegistry(ctx)
-  // The sidebar shell's role: declare the ring and seed two existing
-  // occupants (mirroring the shipped cordis-panel + org-controls entries).
+  // The conversation session header's role: declare the ring and seed two
+  // existing occupants (mirroring the shipped subagent-catalog + send-all
+  // entries, orders 10/30 — org-board registers at order 40).
   slots.register({
     name: 'root',
-    children: { 'sidebar.footer.action': { kind: 'list', scope: 'root' } },
+    children: { 'conversation.session.header.actions': { kind: 'list', scope: 'session' } },
   }, (_p: { renderSlot?: unknown }) => null)
   slots.register(
-    { name: 'sidebar.footer.action', id: 'cordis-panel' } as never,
+    { name: 'conversation.session.header.actions', id: 'subagent-catalog' } as never,
     (() => null) as never,
   )
   slots.register(
-    { name: 'sidebar.footer.action', id: 'send-all' } as never,
+    { name: 'conversation.session.header.actions', id: 'send-all' } as never,
     (() => null) as never,
   )
   ctx.provide('connection', { api: { org: { get: orgGet, writeServed: orgWriteServed, write: orgWrite }, settings: {} }, isLoopback: false } as never)
@@ -159,6 +161,24 @@ const useSessions = (() => {
 const useWorkspaces = (() => {
   throw new Error('OrgBoardControl must not call useWorkspaces')
 }) as unknown as OrgBoardControlProps['useWorkspaces']
+/**
+ * Stubs for the session-scope standard kit OrgBoardControl never reads
+ * either (it is a root-wide broadcast trigger, not a per-session action) —
+ * now required structurally since SWD-162 moved this slot to
+ * `conversation.session.header.actions` (session scope).
+ */
+const useSession = (() => {
+  throw new Error('OrgBoardControl must not call useSession')
+}) as unknown as OrgBoardControlProps['useSession']
+const useProjection = (() => {
+  throw new Error('OrgBoardControl must not call useProjection')
+}) as unknown as OrgBoardControlProps['useProjection']
+const useInput = (() => {
+  throw new Error('OrgBoardControl must not call useInput')
+}) as unknown as OrgBoardControlProps['useInput']
+const inputActions = new Proxy({}, {
+  get(): never { throw new Error('OrgBoardControl must not call inputActions') },
+}) as unknown as OrgBoardControlProps['inputActions']
 
 /**
  * A REAL `useOrgBoard` selector hook bound to one plugin instance's own
@@ -178,25 +198,31 @@ function useOrgBoardFromFace(face: OrgBoardFace): OrgBoardControlProps['useOrgBo
 }
 
 function idsOf(slots: SlotRegistry): string[] {
-  return slots.entries('sidebar.footer.action').map(e => e.options.id as string)
+  return slots.entries('conversation.session.header.actions').map(e => e.options.id as string)
 }
 
 describe('plugin registration', () => {
-  it('adds org-board after the existing cordis-panel and send-all entries', async () => {
+  it('adds org-board after the existing subagent-catalog and send-all entries', async () => {
     const b = await bench(vi.fn())
-    expect(idsOf(b.slots)).toEqual(['cordis-panel', 'send-all', 'org-board'])
+    expect(idsOf(b.slots)).toEqual(['subagent-catalog', 'send-all', 'org-board'])
+  })
+
+  it('registers org-board at order 40 (right after the Chat | Trajectory tabs, SWD-162 placement)', async () => {
+    const b = await bench(vi.fn())
+    const entry = b.slots.entries('conversation.session.header.actions').find(e => e.options.id === 'org-board')
+    expect(entry?.options.order).toBe(40)
   })
 
   it('fiber disposal removes org-board and leaves the other entries standing', async () => {
     const b = await bench(vi.fn())
     await b.fiber.dispose()
-    expect(idsOf(b.slots)).toEqual(['cordis-panel', 'send-all'])
+    expect(idsOf(b.slots)).toEqual(['subagent-catalog', 'send-all'])
   })
 
   it('routes the injected load face straight through to ctx.connection.api.org.get', async () => {
     const orgGet = vi.fn().mockResolvedValue({ result: { ok: true, value: ORG_GET_VALUE } })
     const b = await bench(orgGet)
-    const entry = b.slots.entries('sidebar.footer.action').find(e => e.options.id === 'org-board')
+    const entry = b.slots.entries('conversation.session.header.actions').find(e => e.options.id === 'org-board')
     const face = (entry?.inject as (() => OrgBoardFace) | undefined)?.()
     await face?.load()
     expect(orgGet).toHaveBeenCalledWith({})
@@ -228,7 +254,7 @@ describe('plugin registration', () => {
       },
     })
     const b = await bench(orgGet, vi.fn(), write)
-    const entry = b.slots.entries('sidebar.footer.action').find(e => e.options.id === 'org-board')
+    const entry = b.slots.entries('conversation.session.header.actions').find(e => e.options.id === 'org-board')
     const face = (entry?.inject as (() => OrgBoardFace) | undefined)?.()
     if (face === undefined) throw new Error('org-board entry did not inject a face')
     await face.load()
@@ -273,7 +299,7 @@ describe('plugin registration', () => {
   it('a reconnect re-reads a loaded board, so pre-reconnect wiring is never left on screen', async () => {
     const orgGet = vi.fn().mockResolvedValue({ result: { ok: true, value: ORG_GET_VALUE } })
     const b = await bench(orgGet)
-    const entry = b.slots.entries('sidebar.footer.action').find(e => e.options.id === 'org-board')
+    const entry = b.slots.entries('conversation.session.header.actions').find(e => e.options.id === 'org-board')
     const face = (entry?.inject as (() => OrgBoardFace) | undefined)?.()
     await face?.load()
     expect(orgGet).toHaveBeenCalledTimes(1)
@@ -307,13 +333,17 @@ describe('served toggle reachability (SWD-134 slice 5 step 3)', () => {
       result: { ok: true, value: { addresses: [], token: 'served-roster-token-2' } },
     })
     const b = await bench(orgGet, writeServed)
-    const entry = b.slots.entries('sidebar.footer.action').find(e => e.options.id === 'org-board')
+    const entry = b.slots.entries('conversation.session.header.actions').find(e => e.options.id === 'org-board')
     const face = (entry?.inject as (() => OrgBoardFace) | undefined)?.()
     if (face === undefined) throw new Error('org-board entry did not inject a face')
 
     render(
       <OrgBoardControl
-        wide
+        sessionId={'current' as never}
+        useSession={useSession}
+        useProjection={useProjection}
+        useInput={useInput}
+        inputActions={inputActions}
         useSessions={useSessions}
         useWorkspaces={useWorkspaces}
         useOrgBoard={useOrgBoardFromFace(face)}

@@ -122,11 +122,25 @@
   cursor: default;
 }
 
+/* Session-header actions (Stop All, Send All, Org Board, plus whatever else
+   registers into the list) now sit at the end of the tabs row rather than
+   the title row — founder ruling, SWD-162 follow-up: "right after Chat |
+   Trajectory, on the same row". Always rendered (a single-tab Session has
+   no tablist, but must not lose these actions); the hairline divider below
+   is scoped to the `.tabs` + `.headerActions` adjacency so it only appears
+   when a tablist actually precedes it — otherwise it would float as an
+   empty-looking rule with nothing to its left. */
 .headerActions {
   display: flex;
   flex: none;
   align-items: center;
   gap: 8px;
+}
+
+.tabs + .headerActions {
+  margin-left: 16px;
+  padding-left: 16px;
+  border-left: 1px solid var(--dsw-alias-border-l2);
 }
 
 .headerUtilities {
@@ -141,14 +155,24 @@
   display: none;
 }
 
-/* figma Tab_Group 34:11441: 35px strip, gap 36, pad-left 8, tabs bottom-aligned. */
-.tabs {
+/* figma Tab_Group 34:11441: 35px strip, gap 36, pad-left 8, tabs bottom-aligned.
+   .tabsRow holds the tablist (when there is more than one view) plus the
+   session-header actions beside it (see .headerActions) — always rendered,
+   so pad-left lives here rather than on `.tabs` (which may be absent). The
+   row, not the tablist alone, needs the raised z-index since the actions
+   now share its bottom edge against .header's divider. */
+.tabsRow {
   position: relative;
   z-index: 1;
   display: flex;
-  gap: 36px;
+  align-items: center;
   margin-top: 4px;
   padding-left: 8px;
+}
+
+.tabs {
+  display: flex;
+  gap: 36px;
 }
 
 /* figma .Tab 34:11442: 13/16 text (figma wt510, rendered 500), gap 8 to the 2px bar. */

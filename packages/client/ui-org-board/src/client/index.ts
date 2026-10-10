@@ -1,15 +1,16 @@
 /**
- * Browser org-board plugin: one entry in the sidebar's existing
- * `sidebar.footer.action` list slot, beside Stop All / Send All. Slice 2 was
- * read-only (`load` was the only verb); SWD-134 slice 4 step 3 wires in the
- * five write verbs `OrgBoardController` now exposes — this step still owns
- * no UI, so nothing here renders a control for them yet.
+ * Browser org-board plugin: one entry in the conversation session header's
+ * `conversation.session.header.actions` list slot, beside Stop All / Send
+ * All (SWD-162 moved all three off the sidebar foot). Slice 2 was read-only
+ * (`load` was the only verb); SWD-134 slice 4 step 3 wires in the five write
+ * verbs `OrgBoardController` now exposes — this step still owns no UI, so
+ * nothing here renders a control for them yet.
  */
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-// Type-only: the 'sidebar.footer.action' SlotMap row (declared by the slot's
-// owning package) must be in the program for the register call to type.
-import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+// Type-only: the 'conversation.session.header.actions' SlotMap row (declared
+// by the slot's owning package) must be in the program for the register call to type.
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import { en, NS, zh } from './locales.ts'
@@ -22,11 +23,11 @@ export type { OrgBoardControlProps } from './OrgBoardControl.tsx'
 export type { OrgBoardKey } from './locales.ts'
 export type { OrgBoardState, OrgBoardValue } from './org-board-store.ts'
 
-/** Required services: the sidebar footer-action ring, the locale service, and the connection api client. */
+/** Required services: the session-header actions ring, the locale service, and the connection api client. */
 export const inject = ['slots', 'locale', 'connection']
 
 /**
- * Client plugin body: register the dictionary and the footer-action entry.
+ * Client plugin body: register the dictionary and the header-action entry.
  * The registration rides the slot service's effect wrapper, so plugin unload
  * removes the button; the controller's own disposer stops any in-flight
  * `org.get` response from publishing after that, and a `connection/reset`
@@ -71,10 +72,10 @@ export function apply(ctx: ClientContext): void {
     refreshOrgBoardIfLoaded(controller)
   }), 'ui-org-board: reconnect refresh')
 
-  ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
-    name: 'sidebar.footer.action',
+  ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
+    name: 'conversation.session.header.actions',
     id: 'org-board',
-    order: 120,
+    order: 40,
     locale: NS,
     inject: injected,
   }, OrgBoardControl))
