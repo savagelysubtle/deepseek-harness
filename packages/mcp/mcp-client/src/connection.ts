@@ -222,8 +222,8 @@ export interface ConnectionHandle {
    * of {@link McpServerStatus} (SWD-164 sentinel finding: a leaked consent URL
    * carries the CSRF `state` and lets whoever opens it complete the pending
    * flow, so it must never cross the `/api` wire to any client, privileged or
-   * not). `authorize-start` ({@link ../status-registry.ts}) is the only
-   * caller: it triggers the capture via `sdkAuth`, then reads it back here in
+   * not). `authorize-start` (`@deepseek-ai/dsh-mcp-status`'s status-registry
+   * service) is the only caller: it triggers the capture via `sdkAuth`, then reads it back here in
    * the same synchronous turn to hand the URL to the ONE caller who asked for
    * it, over the privileged RPC response rather than the public status poll.
    * `undefined` whenever no consent URL is currently pending.
@@ -231,7 +231,7 @@ export interface ConnectionHandle {
   peekConsentUrl(): string | undefined
   /**
    * Internal recovery hook for `authorize-start`'s own completion handler
-   * ({@link ../status-registry.ts}): force one immediate attempt after a
+   * (`@deepseek-ai/dsh-mcp-status`'s status-registry service): force one immediate attempt after a
    * fresh grant, regardless of current state (even `connecting` mid-backoff
    * wait, or still `needs-authorization`) and without `reconnectNow`'s
    * rate limit or state guard — this is the deterministic continuation of
@@ -248,7 +248,7 @@ export interface ConnectionHandle {
    * the user can click Authorize again — exactly like any other connection
    * failure recorded through {@link McpServerStatus.lastError}.
    * `authorize-start`'s background consent capture
-   * ({@link ../status-registry.ts}) is the only caller: `authorize-start`
+   * (`@deepseek-ai/dsh-mcp-status`'s status-registry service) is the only caller: `authorize-start`
    * itself already rejects on an up-front failure, but a failure or the
    * 5-minute consent timeout AFTER it has already returned the URL to the
    * client would otherwise only ever reach a server log — this is what

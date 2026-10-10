@@ -2,8 +2,9 @@
  * Shared OAuth loopback-redirect capture: one `http.Server` bound to
  * `127.0.0.1:<port>` that answers exactly `/callback` and resolves with the
  * authorization code. Extracted from `auth-cli.ts` so the manual consent CLI
- * and the Host's `authorize-start` flow ({@link ./status-registry.ts}) share
- * one listener implementation instead of two independently-drifting copies.
+ * and the Host's `authorize-start` flow (`@deepseek-ai/dsh-mcp-status`'s
+ * status-registry service, which imports this package's own public export)
+ * share one listener implementation instead of two independently-drifting copies.
  *
  * The CLI calls this with no `expectedState` (its original behavior,
  * unchanged); the Host path passes the per-flow state it generated so a
@@ -19,7 +20,8 @@ import { createServer } from 'node:http'
  * Thrown by {@link startAuthorizationCallbackListener}'s `code` promise when
  * no consent callback arrived within `timeoutMs`. A distinct class (rather
  * than matching the generic `Error`'s message text) so a caller — the Host's
- * `authorize-start` flow ({@link ./status-registry.ts}) — can tell "the user
+ * `authorize-start` flow (`@deepseek-ai/dsh-mcp-status`'s status-registry
+ * service) — can tell "the user
  * never finished" apart from any other capture failure and report the two
  * differently.
  */
@@ -150,8 +152,8 @@ export function startAuthorizationCallbackListener(
  * {@link startAuthorizationCallbackListener} without separating the bind
  * outcome from the capture. The CLI's single, human-driven flow has nothing
  * else running concurrently to race the bind against, so it has no use for
- * `bound` on its own; `authorize-start` ({@link ./status-registry.ts}) is
- * the caller that does.
+ * `bound` on its own; `authorize-start` (`@deepseek-ai/dsh-mcp-status`'s
+ * status-registry service) is the caller that does.
  * @param port - the port advertised as the redirect URI's port.
  * @param timeoutMs - how long to wait for the browser round trip.
  * @param options - optional state verification; see {@link CaptureAuthorizationCodeOptions}.

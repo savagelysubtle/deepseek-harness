@@ -90,6 +90,9 @@
       "path": "../../mcp/mcp-client"
     },
     {
+      "path": "../../mcp/mcp-status"
+    },
+    {
       "path": "../ui-settings-general"
     }
   ],

@@ -1,10 +1,19 @@
 /**
- * Tests for `McpStatusRegistryService` ({@link ../src/status-registry.ts}):
- * `list`/`register`, `authorize-start`'s single-flight consent flow against a
- * real OAuth fixture (no SDK mocks — the state anti-CSRF check and the
- * eventual `forceReconnectAfterAuthorization` call are real SDK behavior),
- * `reconnect`, `set-enabled`'s atomic patch-file rewrite, and
- * `ensureStatusRegistry`'s lazy-mount-once dedup.
+ * Tests for `McpStatusRegistryService` ({@link ../src/index.ts}): `list`
+ * (through its `register` test delegate, which forwards to
+ * `@deepseek-ai/dsh-mcp-client`'s `registerMcpHandle` — production code never
+ * calls `register` directly, only tests do), `authorize-start`'s
+ * single-flight consent flow against a real OAuth fixture (no SDK mocks —
+ * the state anti-CSRF check and the eventual
+ * `forceReconnectAfterAuthorization` call are real SDK behavior),
+ * `reconnect`, `set-enabled`'s atomic patch-file rewrite, and (replacing the
+ * old `ensureStatusRegistry` lazy-mount-once dedup tests, retired with that
+ * function — SWD-164 round 5, defect 2) this service's survival of disposing
+ * the last live mcp-client instance.
+ *
+ * `defaultPatchPath`'s own resolution tests moved to
+ * `@deepseek-ai/dsh-mcp-client/tests/handle-store.spec.ts` — that function
+ * lives in the handle store now, not this service.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
@@ -100,10 +109,10 @@ import type { StreamableHttpConfig } from '@deepseek-ai/dsh-mcp-client'
 
 import { startOAuthFixture, type OAuthFixture } from './oauth-fixture.ts'
 import { CredentialsOAuthProvider } from '@deepseek-ai/dsh-mcp-client/src/oauth.ts'
-import { HOST_CONSENT_TIMEOUT_MS, McpStatusRegistryService, ensureStatusRegistry }
-  from '@deepseek-ai/dsh-mcp-client/src/status-registry.ts'
+import { registerMcpHandle } from '@deepseek-ai/dsh-mcp-client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-mcp-client/src/connection.ts'
 import type { McpServerState } from '@deepseek-ai/dsh-mcp-client/src/status.ts'
+import { HOST_CONSENT_TIMEOUT_MS, McpStatusRegistryService } from '../src/index.ts'
 
 async function mountRegistry(credentialsPath: string): Promise<Context> {
   const ctx = new Context()
@@ -111,6 +120,30 @@ async function mountRegistry(credentialsPath: string): Promise<Context> {
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(LocalCredentialProvider, { path: credentialsPath, watch: false })
   return ctx
+}
+
+/**
+ * Build one `cordis.patch.yml` mount entry's YAML lines for an
+ * `@deepseek-ai/dsh-mcp-client` mount, `id` and `config.serverName`
+ * deliberately independent (SWD-164 pilot finding: the live profile's own
+ * mounts follow `id === 'mcp-' + config.serverName`, but that is this
+ * deployment's convention, not a contract the matching logic — or these
+ * fixtures — may assume; ids are opaque).
+ * @param id - the opaque mount id.
+ * @param serverName - the mount's `config.serverName`.
+ * @param disabled - the entry's `disabled` flag; omitted when `undefined`.
+ * @param indent - leading spaces, for an entry nested under a group's `insert`.
+ * @returns the entry's YAML lines, newline-joined, no trailing newline.
+ */
+function mcpMountYaml(id: string, serverName: string, disabled?: boolean, indent = ''): string {
+  const lines = [
+    `${indent}- id: ${id}`,
+    `${indent}  name: '@deepseek-ai/dsh-mcp-client'`,
+    `${indent}  config:`,
+    `${indent}    serverName: ${serverName}`,
+  ]
+  if (disabled !== undefined) lines.push(`${indent}  disabled: ${String(disabled)}`)
+  return lines.join('\n')
 }
 
 function httpConfig(fixture: OAuthFixture, serverName: string): StreamableHttpConfig {
@@ -254,13 +287,12 @@ describe('McpStatusRegistryService — list/register', () => {
     await writeFile(
       patchPath,
       [
-        '- id: live',
-        '  name: \'@deepseek-ai/dsh-mcp-client\'',
-        '- id: dormant',
-        '  name: \'@deepseek-ai/dsh-mcp-client\'',
-        '  disabled: true',
-        '- id: other-plugin',
+        mcpMountYaml('mcp-live', 'live'),
+        mcpMountYaml('mcp-dormant', 'dormant', true),
+        '- id: mcp-other-plugin',
         '  name: \'@deepseek-ai/dsh-some-other-plugin\'',
+        '  config:',
+        '    serverName: other-plugin',
         '  disabled: true',
         '',
       ].join('\n'),
@@ -286,7 +318,7 @@ describe('McpStatusRegistryService — list/register', () => {
     // HMR / a reload race could momentarily leave the on-disk file still
     // saying `disabled: true` for a server that already has a live handle;
     // the live status must not be shadowed by the synthesized row.
-    await writeFile(patchPath, '- id: both\n  name: \'@deepseek-ai/dsh-mcp-client\'\n  disabled: true\n', 'utf8')
+    await writeFile(patchPath, `${mcpMountYaml('mcp-both', 'both', true)}\n`, 'utf8')
     const registry = new McpStatusRegistryService(ctx, { patchPath })
     const { handle } = buildOAuthHandle(fixture, ctx, 'both')
     registry.register(httpConfig(fixture, 'both'), handle)
@@ -318,7 +350,7 @@ describe('McpStatusRegistryService — list/register', () => {
 
   it('a non-ENOENT readFile failure (Error instance) logs one warn and list() still returns live rows', async () => {
     const patchPath = join(dir, 'cordis.patch.yml')
-    await writeFile(patchPath, '- id: live\n  name: \'@deepseek-ai/dsh-mcp-client\'\n', 'utf8')
+    await writeFile(patchPath, `${mcpMountYaml('mcp-live', 'live')}\n`, 'utf8')
     const registry = new McpStatusRegistryService(ctx, { patchPath })
     const { handle } = buildOAuthHandle(fixture, ctx, 'live-despite-read-error')
     registry.register(httpConfig(fixture, 'live-despite-read-error'), handle)
@@ -340,7 +372,7 @@ describe('McpStatusRegistryService — list/register', () => {
 
   it('a non-ENOENT readFile failure (non-Error thrown value) logs one warn and list() still returns live rows', async () => {
     const patchPath = join(dir, 'cordis.patch.yml')
-    await writeFile(patchPath, '- id: live\n  name: \'@deepseek-ai/dsh-mcp-client\'\n', 'utf8')
+    await writeFile(patchPath, `${mcpMountYaml('mcp-live', 'live')}\n`, 'utf8')
     const registry = new McpStatusRegistryService(ctx, { patchPath })
     const { handle } = buildOAuthHandle(fixture, ctx, 'live-despite-nonerror-throw')
     registry.register(httpConfig(fixture, 'live-despite-nonerror-throw'), handle)
@@ -385,12 +417,8 @@ describe('McpStatusRegistryService — list/register', () => {
         '- id: group',
         '  insert:',
         '    - a plain string nested entry',
-        '    - id: sibling',
-        '      name: \'@deepseek-ai/dsh-mcp-client\'',
-        '      disabled: true',
-        '    - id: target',
-        '      name: \'@deepseek-ai/dsh-mcp-client\'',
-        '      disabled: true',
+        mcpMountYaml('mcp-sibling', 'sibling', true, '    '),
+        mcpMountYaml('mcp-target', 'target', true, '    '),
         '',
       ].join('\n'),
       'utf8',
@@ -409,16 +437,64 @@ describe('McpStatusRegistryService — list/register', () => {
 
     // Exercises the sibling function locateMcpMount (via setEnabled), over
     // the same garbage-entry shapes, continuing past `sibling` to reach
-    // `target`.
+    // `target` by `config.serverName` — never by `id`, which here is
+    // deliberately `mcp-target`, not `target`.
     await registry.setEnabled('target', true)
     const written = await readFile(patchPath, 'utf8')
-    expect(written).toMatch(/id: target\s*\n\s*name: '@deepseek-ai\/dsh-mcp-client'\s*\n\s*disabled: false/)
-    expect(written).toMatch(/id: sibling\s*\n\s*name: '@deepseek-ai\/dsh-mcp-client'\s*\n\s*disabled: true/)
+    expect(written).toMatch(/id: mcp-target\s*\n/)
+    expect(written).toMatch(/serverName: target\s*\n\s*disabled: false/)
+    expect(written).toMatch(/id: mcp-sibling\s*\n/)
+    expect(written).toMatch(/serverName: sibling\s*\n\s*disabled: true/)
   })
+
+  it(
+    'an mcp-client-named entry missing config, or whose config.serverName is not a valid-pattern string, '
+    + 'is skipped by both collectMcpPatchEntries and locateMcpMount',
+    async () => {
+      const patchPath = join(dir, 'cordis.patch.yml')
+      await writeFile(
+        patchPath,
+        [
+          '- id: mcp-no-config',
+          '  name: \'@deepseek-ai/dsh-mcp-client\'',
+          '  disabled: true',
+          '- id: mcp-non-string-servername',
+          '  name: \'@deepseek-ai/dsh-mcp-client\'',
+          '  config:',
+          '    serverName: 123',
+          '  disabled: true',
+          '- id: mcp-bad-pattern-servername',
+          '  name: \'@deepseek-ai/dsh-mcp-client\'',
+          '  config:',
+          '    serverName: \'not valid!\'',
+          '  disabled: true',
+          mcpMountYaml('mcp-real', 'real', true),
+          '',
+        ].join('\n'),
+        'utf8',
+      )
+      const registry = new McpStatusRegistryService(ctx, { patchPath })
+
+      // collectMcpPatchEntries (via list()): the three garbage shapes above
+      // are all skipped — none synthesizes a row — while the real mount
+      // still does.
+      const rows = await registry.list()
+      expect(rows).toEqual([
+        { serverName: 'real', state: 'disabled', attempts: 0, maxAttempts: 10 },
+      ])
+
+      // locateMcpMount (via setEnabled): the same garbage entries (in
+      // particular the config-less one) are skipped while scanning past
+      // them to reach the real mount.
+      await registry.setEnabled('real', true)
+      const written = await readFile(patchPath, 'utf8')
+      expect(written).toMatch(/serverName: real\s*\n\s*disabled: false/)
+    },
+  )
 
   it('unregister emits a final mcp/status-changed with state disabled when the mount is still named (disabled) in the patch file', async () => {
     const patchPath = join(dir, 'cordis.patch.yml')
-    await writeFile(patchPath, '- id: toggled\n  name: \'@deepseek-ai/dsh-mcp-client\'\n  disabled: true\n', 'utf8')
+    await writeFile(patchPath, `${mcpMountYaml('mcp-toggled', 'toggled', true)}\n`, 'utf8')
     const registry = new McpStatusRegistryService(ctx, { patchPath })
     const { handle } = buildOAuthHandle(fixture, ctx, 'toggled')
     const unregister = registry.register(httpConfig(fixture, 'toggled'), handle)
@@ -435,7 +511,7 @@ describe('McpStatusRegistryService — list/register', () => {
 
   it('unregister emits a final mcp/status-changed with removed: true when the mount is no longer in the patch file at all', async () => {
     const patchPath = join(dir, 'cordis.patch.yml')
-    await writeFile(patchPath, '- id: someone-else\n  name: \'@deepseek-ai/dsh-mcp-client\'\n', 'utf8')
+    await writeFile(patchPath, `${mcpMountYaml('mcp-someone-else', 'someone-else')}\n`, 'utf8')
     const registry = new McpStatusRegistryService(ctx, { patchPath })
     const { handle } = buildOAuthHandle(fixture, ctx, 'gone')
     const unregister = registry.register(httpConfig(fixture, 'gone'), handle)
@@ -461,9 +537,9 @@ describe('McpStatusRegistryService — list/register', () => {
   // profile states.
   describe('unregister emit decision is order-independent, driven by the patch file', () => {
     it.each([
-      { label: 'enabled', patch: (name: string) => `- id: ${name}\n  name: '@deepseek-ai/dsh-mcp-client'\n` },
-      { label: 'disabled', patch: (name: string) => `- id: ${name}\n  name: '@deepseek-ai/dsh-mcp-client'\n  disabled: true\n` },
-      { label: 'absent', patch: (_name: string) => '- id: someone-else\n  name: \'@deepseek-ai/dsh-mcp-client\'\n' },
+      { label: 'enabled', patch: (name: string) => `${mcpMountYaml(`mcp-${name}`, name)}\n` },
+      { label: 'disabled', patch: (name: string) => `${mcpMountYaml(`mcp-${name}`, name, true)}\n` },
+      { label: 'absent', patch: (_name: string) => `${mcpMountYaml('mcp-someone-else', 'someone-else')}\n` },
     ])(
       'register-new-then-dispose-old, profile $label: the fast path short-circuits — no event, regardless of what the file says',
       async ({ label, patch }) => {
@@ -491,7 +567,7 @@ describe('McpStatusRegistryService — list/register', () => {
     it('dispose-old-then-register-new, profile enabled: no event — the replacement reports its own status once it registers', async () => {
       const serverName = 'order-b-enabled'
       const patchPath = join(dir, 'cordis.patch.yml')
-      await writeFile(patchPath, `- id: ${serverName}\n  name: '@deepseek-ai/dsh-mcp-client'\n`, 'utf8')
+      await writeFile(patchPath, `${mcpMountYaml(`mcp-${serverName}`, serverName)}\n`, 'utf8')
       const registry = new McpStatusRegistryService(ctx, { patchPath })
       const config = httpConfig(fixture, serverName)
       const { handle: oldHandle } = buildOAuthHandle(fixture, ctx, serverName)
@@ -514,7 +590,7 @@ describe('McpStatusRegistryService — list/register', () => {
     it('dispose-old-then-register-new, profile disabled: one disabled event, emitted before the replacement ever registers', async () => {
       const serverName = 'order-b-disabled'
       const patchPath = join(dir, 'cordis.patch.yml')
-      await writeFile(patchPath, `- id: ${serverName}\n  name: '@deepseek-ai/dsh-mcp-client'\n  disabled: true\n`, 'utf8')
+      await writeFile(patchPath, `${mcpMountYaml(`mcp-${serverName}`, serverName, true)}\n`, 'utf8')
       const registry = new McpStatusRegistryService(ctx, { patchPath })
       const config = httpConfig(fixture, serverName)
       const { handle: oldHandle } = buildOAuthHandle(fixture, ctx, serverName)
@@ -533,7 +609,7 @@ describe('McpStatusRegistryService — list/register', () => {
     it('dispose-old-then-register-new, profile absent: one removed event, emitted before the replacement ever registers', async () => {
       const serverName = 'order-b-removed'
       const patchPath = join(dir, 'cordis.patch.yml')
-      await writeFile(patchPath, '- id: someone-else\n  name: \'@deepseek-ai/dsh-mcp-client\'\n', 'utf8')
+      await writeFile(patchPath, `${mcpMountYaml('mcp-someone-else', 'someone-else')}\n`, 'utf8')
       const registry = new McpStatusRegistryService(ctx, { patchPath })
       const config = httpConfig(fixture, serverName)
       const { handle: oldHandle } = buildOAuthHandle(fixture, ctx, serverName)
@@ -569,6 +645,24 @@ describe('McpStatusRegistryService — list/register', () => {
       expect(warns[0]).toContain('not valid YAML')
     })
   })
+
+  it(
+    'with no explicit patchPath and no profile loader mounted (ctx.baseUrl unset): '
+    + 'defaultPatchPath resolves undefined, so the constructor warns once and '
+    + 'registerOptions carries no patchPath, list() degrades to live rows only, '
+    + 'and setEnabled rejects loudly rather than guessing a path',
+    async () => {
+      const warns: string[] = []
+      vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warns.push(String(message)) }) as never)
+
+      const registry = new McpStatusRegistryService(ctx)
+      expect(warns).toHaveLength(1)
+      expect(warns[0]).toContain('ctx.baseUrl is unset')
+
+      await expect(registry.list()).resolves.toEqual([])
+      await expect(registry.setEnabled('srv', true)).rejects.toThrow(/this host has no profile file to edit/)
+    },
+  )
 })
 
 describe('McpStatusRegistryService — authorize-start', () => {
@@ -918,45 +1012,66 @@ describe('McpStatusRegistryService — set-enabled', () => {
     await expect(registry.setEnabled('srv', true)).rejects.toThrow(/does not contain a top-level list/)
   })
 
-  it('rejects a mount id that does not exist — set-enabled never inserts', async () => {
-    await writeFile(patchPath, '- id: other-mount\n  disabled: false\n', 'utf8')
-    await expect(registry.setEnabled('srv', true)).rejects.toThrow(/no mount with id "srv" exists/)
+  it('rejects a mount serverName that does not exist — set-enabled never inserts', async () => {
+    await writeFile(patchPath, `${mcpMountYaml('mcp-other-mount', 'other-mount', false)}\n`, 'utf8')
+    await expect(registry.setEnabled('srv', true)).rejects.toThrow(/no mount with serverName "srv" exists/)
   })
 
-  it('flips a flat top-level mount and writes an atomic backup', async () => {
-    await writeFile(patchPath, '- id: srv\n  disabled: true\n- id: other\n  disabled: false\n', 'utf8')
+  it('rejects when more than one mount shares the requested serverName — ids are opaque, never guesses which to toggle', async () => {
+    // Two distinct ids (mcp-srv-a, mcp-srv-b) both carrying config.serverName:
+    // srv — ambiguous, so set-enabled must refuse rather than pick one.
+    await writeFile(
+      patchPath,
+      [mcpMountYaml('mcp-srv-a', 'srv', true), mcpMountYaml('mcp-srv-b', 'srv', false), ''].join('\n'),
+      'utf8',
+    )
+    await expect(registry.setEnabled('srv', true)).rejects.toThrow(/2 mounts have serverName "srv".*refusing to guess/s)
+  })
+
+  it('flips a flat top-level mount by config.serverName, ignoring its unrelated id, and writes an atomic backup', async () => {
+    await writeFile(
+      patchPath,
+      [mcpMountYaml('mcp-srv', 'srv', true), mcpMountYaml('mcp-other', 'other', false), ''].join('\n'),
+      'utf8',
+    )
     await registry.setEnabled('srv', true)
 
     const written = await readFile(patchPath, 'utf8')
-    expect(written).toMatch(/id: srv/)
+    expect(written).toMatch(/serverName: srv/)
     expect(written).toMatch(/disabled: false/)
     // The other entry survives untouched.
-    expect(written).toMatch(/id: other/)
+    expect(written).toMatch(/serverName: other/)
 
     const dirEntries = await readdir(dir)
     expect(dirEntries.some(name => name.startsWith('cordis.patch.yml.bak-'))).toBe(true)
   })
 
-  it('flips a nested mount under a group\'s insert list', async () => {
+  it('flips a nested mount under a group\'s insert list, by config.serverName', async () => {
     await writeFile(
       patchPath,
-      '- id: group\n  insert:\n    - id: nested-srv\n      disabled: false\n    - id: sibling\n      disabled: false\n',
+      [
+        '- id: group',
+        '  insert:',
+        mcpMountYaml('mcp-nested-srv', 'nested-srv', false, '    '),
+        mcpMountYaml('mcp-sibling', 'sibling', false, '    '),
+        '',
+      ].join('\n'),
       'utf8',
     )
     await registry.setEnabled('nested-srv', false)
     const written = await readFile(patchPath, 'utf8')
-    expect(written).toMatch(/id: nested-srv\s*\n\s*disabled: true/)
-    expect(written).toMatch(/id: sibling\s*\n\s*disabled: false/)
+    expect(written).toMatch(/serverName: nested-srv\s*\n\s*disabled: true/)
+    expect(written).toMatch(/serverName: sibling\s*\n\s*disabled: false/)
   })
 
   it('refuses to write when the patch file changes between the read and the pre-rename re-check (SWD-164 sentinel: compare-before-write)', async () => {
-    await writeFile(patchPath, '- id: srv\n  disabled: true\n', 'utf8')
+    await writeFile(patchPath, `${mcpMountYaml('mcp-srv', 'srv', true)}\n`, 'utf8')
     // The SECOND readFile call setEnabled makes is its pre-rename re-check:
     // land a concurrent writer's edit right before it fires, simulating
     // another `set-enabled` call (or a hand edit) racing this one.
     fsRaceState.racePath = patchPath
     fsRaceState.raceAtCall = 2
-    fsRaceState.raceContents = '- id: srv\n  disabled: true\n- id: concurrent\n  disabled: false\n'
+    fsRaceState.raceContents = [mcpMountYaml('mcp-srv', 'srv', true), mcpMountYaml('mcp-concurrent', 'concurrent', false), ''].join('\n')
     fsRaceState.callsSeen = 0
     try {
       await expect(registry.setEnabled('srv', false)).rejects.toThrow(/changed since it was read — retry/)
@@ -965,14 +1080,14 @@ describe('McpStatusRegistryService — set-enabled', () => {
     }
     // Refused, not clobbered: the concurrent writer's content survives untouched.
     const written = await readFile(patchPath, 'utf8')
-    expect(written).toMatch(/id: concurrent/)
-    expect(written).toMatch(/id: srv\s*\n\s*disabled: true/)
+    expect(written).toMatch(/serverName: concurrent/)
+    expect(written).toMatch(/serverName: srv\s*\n\s*disabled: true/)
     // Never even attempted a backup for the refused write.
     expect(await readdir(dir)).toEqual(['cordis.patch.yml'])
   })
 
   it('never silently overwrites an existing same-timestamp backup', async () => {
-    await writeFile(patchPath, '- id: srv\n  disabled: true\n', 'utf8')
+    await writeFile(patchPath, `${mcpMountYaml('mcp-srv', 'srv', true)}\n`, 'utf8')
     // Pre-create every backup filename the collision-avoidance loop would try
     // at a frozen instant, forcing it to exhaust its attempts and fail loud.
     const now = new Date('2026-01-01T00:00:00.000Z')
@@ -991,7 +1106,7 @@ describe('McpStatusRegistryService — set-enabled', () => {
   })
 
   it('fails loud (Error instance) when the backup file cannot be created for a reason other than it already existing', async () => {
-    await writeFile(patchPath, '- id: srv\n  disabled: true\n', 'utf8')
+    await writeFile(patchPath, `${mcpMountYaml('mcp-srv', 'srv', true)}\n`, 'utf8')
     const error = new Error('EACCES: permission denied') as NodeJS.ErrnoException
     error.code = 'EACCES'
     fsRaceState.openWxFailError = error
@@ -999,13 +1114,13 @@ describe('McpStatusRegistryService — set-enabled', () => {
   })
 
   it('fails loud (non-Error thrown value) when the backup file cannot be created for a reason other than it already existing', async () => {
-    await writeFile(patchPath, '- id: srv\n  disabled: true\n', 'utf8')
+    await writeFile(patchPath, `${mcpMountYaml('mcp-srv', 'srv', true)}\n`, 'utf8')
     fsRaceState.openWxFailError = 'a plain thrown string, not an Error'
     await expect(registry.setEnabled('srv', false)).rejects.toThrow(/could not be backed up before set-enabled.*a plain thrown string, not an Error/s)
   })
 
   it('rejects the initial read (non-Error thrown value) with the error folded into the message', async () => {
-    await writeFile(patchPath, '- id: srv\n  disabled: true\n', 'utf8')
+    await writeFile(patchPath, `${mcpMountYaml('mcp-srv', 'srv', true)}\n`, 'utf8')
     fsRaceState.readFileFailPath = patchPath
     fsRaceState.readFileFailAtCall = 1
     fsRaceState.readFileFailError = 'a plain thrown string, not an Error'
@@ -1014,7 +1129,7 @@ describe('McpStatusRegistryService — set-enabled', () => {
   })
 
   it('rejects the pre-rename re-check (Error instance) when the file disappears between the two reads', async () => {
-    await writeFile(patchPath, '- id: srv\n  disabled: true\n', 'utf8')
+    await writeFile(patchPath, `${mcpMountYaml('mcp-srv', 'srv', true)}\n`, 'utf8')
     const error = new Error('EIO: i/o error') as NodeJS.ErrnoException
     error.code = 'EIO'
     fsRaceState.readFileFailPath = patchPath
@@ -1025,7 +1140,7 @@ describe('McpStatusRegistryService — set-enabled', () => {
   })
 
   it('rejects the pre-rename re-check (non-Error thrown value) when the file disappears between the two reads', async () => {
-    await writeFile(patchPath, '- id: srv\n  disabled: true\n', 'utf8')
+    await writeFile(patchPath, `${mcpMountYaml('mcp-srv', 'srv', true)}\n`, 'utf8')
     fsRaceState.readFileFailPath = patchPath
     fsRaceState.readFileFailAtCall = 2
     fsRaceState.readFileFailError = 'a plain thrown string, not an Error'
@@ -1034,7 +1149,7 @@ describe('McpStatusRegistryService — set-enabled', () => {
   })
 
   it('fails loud (Error instance) when the atomic rename fails, and the temp-file cleanup failure itself is swallowed', async () => {
-    await writeFile(patchPath, '- id: srv\n  disabled: true\n', 'utf8')
+    await writeFile(patchPath, `${mcpMountYaml('mcp-srv', 'srv', true)}\n`, 'utf8')
     const renameError = new Error('EXDEV: cross-device link not permitted') as NodeJS.ErrnoException
     renameError.code = 'EXDEV'
     const rmError = new Error('EACCES: permission denied') as NodeJS.ErrnoException
@@ -1048,82 +1163,139 @@ describe('McpStatusRegistryService — set-enabled', () => {
       .rejects.toThrow(/could not be written atomically.*EXDEV/s)
     // The original content is untouched — the failed write never replaced it.
     const written = await readFile(patchPath, 'utf8')
-    expect(written).toMatch(/id: srv\s*\n\s*disabled: true/)
+    expect(written).toMatch(/serverName: srv\s*\n\s*disabled: true/)
   })
 
   it('fails loud (non-Error thrown value) when the atomic rename fails', async () => {
-    await writeFile(patchPath, '- id: srv\n  disabled: true\n', 'utf8')
+    await writeFile(patchPath, `${mcpMountYaml('mcp-srv', 'srv', true)}\n`, 'utf8')
     fsRaceState.renameFailError = 'a plain thrown string, not an Error'
     await expect(registry.setEnabled('srv', false))
       .rejects.toThrow(/could not be written atomically.*a plain thrown string, not an Error/s)
   })
 })
 
-describe('ensureStatusRegistry — lazy mount-once-per-root dedup', () => {
-  // Neither test below exercises the default patchPath resolution (that is
-  // `defaultPatchPath`'s own describe block, below) — these bare Contexts
-  // have no `baseUrl`, so an explicit patchPath is required regardless of
-  // what defaultPatchPath would otherwise resolve.
-  it('two calls on the same root resolve to the same instance', async () => {
-    const ctx = new Context()
-    try {
-      const [a, b] = await Promise.all([
-        ensureStatusRegistry(ctx, { patchPath: '/nonexistent/cordis.patch.yml' }),
-        ensureStatusRegistry(ctx, { patchPath: '/nonexistent/cordis.patch.yml' }),
-      ])
-      expect(a).toBe(b)
-    } finally {
-      await ctx.fiber.dispose()
-    }
-  })
+describe('surviving disposal of the last mcp-client instance (SWD-164 round 5, defect 2)', () => {
+  it(
+    'this service, mounted independently of any mcp-client instance\'s own fiber, keeps answering '
+    + '(list, set-enabled) after the one instance that registered a handle disposes',
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-status-survive-'))
+      const patchPath = join(dir, 'cordis.patch.yml')
+      await writeFile(patchPath, `${mcpMountYaml('mcp-srv', 'srv', true)}\n`, 'utf8')
+      const fixture = await startOAuthFixture()
+      const root = await mountRegistry(join(dir, 'creds.yaml'))
+      try {
+        // Mirrors the real topology exactly: `McpStatusRegistryService` is
+        // mounted on `root` directly, standing in for its own permanent
+        // `cordis.patch.yml` Loader entry in production
+        // (`packages/bundle/web-app/cordis.patch.yml`) — never nested
+        // inside, triggered by, or in any way dependent on an mcp-client
+        // instance's own activation (that was the OLD, retired design:
+        // `ensureStatusRegistry`'s lazy `root.plugin()` mount, triggered
+        // from inside the first mcp-client instance to activate).
+        const registryFiber = root.plugin(McpStatusRegistryService, { patchPath })
+        await registryFiber
+        const registry = root.get('mcpStatus') as McpStatusRegistryService
 
-  it('a derived context\'s call still mounts on the shared root', async () => {
-    const root = new Context()
-    try {
-      const child = root.extend()
-      const [fromRoot, fromChild] = await Promise.all([
-        ensureStatusRegistry(root, { patchPath: '/nonexistent/cordis.patch.yml' }),
-        ensureStatusRegistry(child, { patchPath: '/nonexistent/cordis.patch.yml' }),
-      ])
-      expect(fromRoot).toBe(fromChild)
-    } finally {
-      await root.fiber.dispose()
-    }
-  })
-})
+        // One mcp-client instance registers a handle exactly the way
+        // `@deepseek-ai/dsh-mcp-client/src/index.ts`'s `apply()` does —
+        // unconditionally, via `registerMcpHandle`, inside its OWN child
+        // fiber — never through this service, and never knowing or caring
+        // whether this service is mounted anywhere at all.
+        const { handle } = buildOAuthHandle(fixture, root, 'srv')
+        const instanceFiber = root.plugin((ctx: Context) => {
+          ctx.effect(() => registerMcpHandle(ctx, httpConfig(fixture, 'srv'), handle, { patchPath }), 'instance')
+        })
+        await instanceFiber
 
-describe('defaultPatchPath — derives the patch-file path from the running profile, never a hardcoded name', () => {
-  it('resolves under profiles/web when ctx.baseUrl is the web profile directory', async () => {
-    const ctx = new Context()
-    ctx.baseUrl = 'file:///home/dsh/profiles/web/'
-    try {
-      const registry = await ensureStatusRegistry(ctx)
-      expect((registry as unknown as { patchPath: string }).patchPath)
-        .toBe('/home/dsh/profiles/web/cordis.patch.yml')
-    } finally {
-      await ctx.fiber.dispose()
-    }
-  })
+        // The one instance disposes (e.g. the Loader tore it down because
+        // the profile just disabled its only mount, or it crashed) — the
+        // registry service lives on its own independent mount, not inside
+        // the disposed instance's own fiber tree, so it must keep
+        // answering.
+        await instanceFiber.dispose()
 
-  it('never throws (mcp-client must still mount with no profile loader) when ctx.baseUrl is unset and no patchPath is given — warns once, degrades gracefully', async () => {
-    // e2e harnesses and embedded hosts have no `@deepseek-ai/dsh-app-boot`
-    // profile loader mounted at all, so `ctx.baseUrl` is never set — that
-    // must never block mcp-client activation (SWD-164 pilot finding:
-    // mcp-client.e2e.ts failed to mount entirely before this fix).
-    const ctx = new Context()
-    const warns: string[] = []
-    vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warns.push(String(message)) }) as never)
+        await expect(registry.list()).resolves.toEqual([
+          { serverName: 'srv', state: 'disabled', attempts: 0, maxAttempts: 10 },
+        ])
+        await registry.setEnabled('srv', true)
+        const written = await readFile(patchPath, 'utf8')
+        expect(written).toMatch(/serverName: srv\s*\n\s*disabled: false/)
 
-    const registry = await ensureStatusRegistry(ctx)
-    expect(warns.some(line => line.includes('ctx.baseUrl is unset'))).toBe(true)
+        // Scope note for the reviewer: this proves the Cordis-level
+        // guarantee (`ctx.get('mcpStatus')` and its RPC method bodies
+        // survive the registering instance's own disposal) — the SAME
+        // guarantee the old, retired `ensureStatusRegistry` design already
+        // satisfied at this level (it was never a Cordis fiber bug). What
+        // actually withdrew `mcp/set-enabled`'s STRICT Typert registration
+        // in production was one layer up: `@deepseek-ai/dsh-typert-loader`
+        // registers and withdraws a package's manifest keyed to a LOADER
+        // ENTRY, and the old design gave this service none of its own — it
+        // rode on whichever mcp-client Loader entry happened to trigger its
+        // lazy mount. Proving that layer survives end-to-end would require
+        // mounting `@deepseek-ai/dsh-typert-loader` and
+        // `@deepseek-ai/dsh-typert-registry` together with TWO real,
+        // package-name-resolved Loader entries (one for
+        // `@deepseek-ai/dsh-mcp-status`, one for
+        // `@deepseek-ai/dsh-mcp-client`) and asserting on
+        // `ctx.typert.local` directly — exercising two packages this task
+        // was explicitly told not to touch as test collaborators, for a
+        // guarantee that is otherwise a STRUCTURAL consequence of this
+        // package's own existence, not of any logic this suite can
+        // exercise: `@deepseek-ai/dsh-mcp-status` is a distinct package
+        // name from `@deepseek-ai/dsh-mcp-client`, mounted via its OWN,
+        // permanent entry in `packages/bundle/web-app/cordis.patch.yml`
+        // (sibling to, never nested under, any mcp-client entry) — so
+        // typert-loader's per-package-name reference counting (see that
+        // package's own `qualifies(entryName)`) can never tie this
+        // package's registration to an mcp-client entry's lifecycle. The
+        // root mount here stands in for that permanent Loader entry
+        // precisely because, now that the manifest is keyed to
+        // `@deepseek-ai/dsh-mcp-status` itself rather than to whichever
+        // mcp-client entry triggered a lazy mount, there is no longer any
+        // entry whose disposal this service's own registration could ever
+        // be tied to.
+      } finally {
+        await root.fiber.dispose()
+        await fixture.close()
+        await rm(dir, { recursive: true, force: true })
+      }
+    },
+  )
 
-    // list() degrades to live rows only — no synthesized disabled rows, but
-    // no throw either.
-    await expect(registry.list()).resolves.toEqual([])
-    // set-enabled has no file to edit on this host and must say so loudly,
-    // never silently no-op or guess a path.
-    await expect(registry.setEnabled('srv', true)).rejects.toThrow(/this host has no profile file to edit/)
+  it(
+    'late-mount order: an mcp-client handle registered into the handle store BEFORE this '
+    + 'service ever mounts is still returned by list() once the service does mount — '
+    + 'registerMcpHandle is unconditional and root-scoped (see handle-store.ts\'s own doc), '
+    + 'never dependent on this service already existing',
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-status-late-mount-'))
+      const patchPath = join(dir, 'cordis.patch.yml')
+      const fixture = await startOAuthFixture()
+      const root = await mountRegistry(join(dir, 'creds.yaml'))
+      try {
+        // One mcp-client instance registers its handle FIRST — unconditionally,
+        // exactly as `@deepseek-ai/dsh-mcp-client/src/index.ts`'s `apply()`
+        // does — strictly before `McpStatusRegistryService` has mounted
+        // anywhere at all on this root.
+        const { handle } = buildOAuthHandle(fixture, root, 'early')
+        const instanceFiber = root.plugin((ctx: Context) => {
+          ctx.effect(() => registerMcpHandle(ctx, httpConfig(fixture, 'early'), handle, { patchPath }), 'instance')
+        })
+        await instanceFiber
 
-    await ctx.fiber.dispose()
-  })
+        // The registry service mounts only now, strictly after that
+        // registration already landed in the root-scoped store.
+        const registryFiber = root.plugin(McpStatusRegistryService, { patchPath })
+        await registryFiber
+        const registry = root.get('mcpStatus') as McpStatusRegistryService
+
+        await expect(registry.list()).resolves.toEqual([handle.status()])
+      } finally {
+        await root.fiber.dispose()
+        await fixture.close()
+        await rm(dir, { recursive: true, force: true })
+      }
+    },
+  )
 })

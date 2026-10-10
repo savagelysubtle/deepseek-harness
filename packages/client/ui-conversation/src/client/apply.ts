@@ -16,8 +16,10 @@ import type {} from '@deepseek-ai/dsh-api-remotes/client'
 // (packages/api/remotes/src/client/index.ts) does not mount this namespace
 // yet — see the McpAttentionStore wiring below — so this package pulls the
 // generated descriptor's types directly rather than depending on that mount
-// landing first.
-import type {} from '@deepseek-ai/dsh-mcp-client/remote'
+// landing first. The generated Remote client artifact is published by
+// `@deepseek-ai/dsh-mcp-status` now, not mcp-client (SWD-164 round 5,
+// defect 2).
+import type {} from '@deepseek-ai/dsh-mcp-status/remote'
 // Type-only: pulls ui-settings-general's `settings/open-section` Events
 // merge — a type-only edge (devDependency + tsconfig reference only), not a
 // value import, so the one-way dependency rule above still holds.

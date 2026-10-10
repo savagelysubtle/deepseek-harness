@@ -1561,7 +1561,26 @@ export interface OAuthAuthConfig {
 }
 ```
 
-Source: [`packages/mcp/mcp-client/src/index.ts:162`](../packages/mcp/mcp-client/src/index.ts)
+Source: [`packages/mcp/mcp-client/src/index.ts:185`](../packages/mcp/mcp-client/src/index.ts)
+
+<a id="deepseek-aidsh-mcp-status"></a>
+
+## `@deepseek-ai/dsh-mcp-status`
+
+```ts config-catalog
+/** Options for {@link McpStatusRegistryService}; the `patchPath` override exists for tests only. */
+export interface McpStatusRegistryOptions {
+  /**
+   * Absolute path to the `cordis.patch.yml` `set-enabled` patches. Defaults
+   * to `@deepseek-ai/dsh-mcp-client`'s `defaultPatchPath` — the running
+   * profile's own patch file, resolved from `ctx.baseUrl`, never a
+   * hardcoded profile name.
+   */
+  patchPath?: string
+}
+```
+
+Source: [`packages/mcp/mcp-status/src/index.ts:154`](../packages/mcp/mcp-status/src/index.ts)
 
 <a id="deepseek-aidsh-message-feedback"></a>
 

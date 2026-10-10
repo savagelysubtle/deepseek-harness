@@ -6,31 +6,36 @@ import goalsRemote from '@deepseek-ai/dsh-goal/remote'
 import dynamicRemote from '@deepseek-ai/dsh-cordis-host-runner/remote'
 import pluginInventoryRemote from '@deepseek-ai/dsh-host-plugin-inventory/remote'
 import messageFeedbackRemote from '@deepseek-ai/dsh-message-feedback/remote'
-import mcpStatusRemote from '@deepseek-ai/dsh-mcp-client/remote'
+import mcpStatusRemote from '@deepseek-ai/dsh-mcp-status/remote'
 import type { TypertClientRemote } from '@deepseek-ai/dsh-typert-protocol'
 
 export type { TypertClientRemote as ClientRemote } from '@deepseek-ai/dsh-typert-protocol'
 export type { PluginInventorySnapshot } from '@deepseek-ai/dsh-host-plugin-inventory/types'
 // mcp-client has no dedicated `./types` subpath: `./status` IS its
-// client-safe wire-contract file, carrying both these two types and (below)
-// the `mcp/status-changed` Events augmentation.
+// client-safe wire-contract file, carrying these two plain wire types.
+// `mcp/status-changed`'s own Events augmentation moved to
+// `@deepseek-ai/dsh-mcp-status/status` (SWD-164 round 5, defect 2) — pulled
+// in below, alongside the other owner packages' `./types` Events exports.
 export type { McpServerState, McpServerStatus } from '@deepseek-ai/dsh-mcp-client/status'
 export type {} from '@deepseek-ai/dsh-commands/remote'
 export type {} from '@deepseek-ai/dsh-goal/remote'
 export type {} from '@deepseek-ai/dsh-host-plugin-inventory/remote'
 export type {} from '@deepseek-ai/dsh-message-feedback/remote'
-export type {} from '@deepseek-ai/dsh-mcp-client/remote'
+export type {} from '@deepseek-ai/dsh-mcp-status/remote'
 // The forwarded-event allowlist's selection seat: without it in the consumer's
 // compilation face `TypertRemoteEvent` is `never` and every `$on` call fails.
 export type { ApiRemoteForwardedEvent } from '../types.ts'
 // The owner packages' client-safe `./types` exports supply the `Events`
 // signatures `$on` hands to a listener, so a consumer reads the very
 // declaration the Host emits rather than a flattened restatement of it.
-// mcp-client's is `./status`, re-exported above.
+// the mcp status Remote namespace's is `./status`, carrying the
+// `mcp/status-changed` Events merge (`@deepseek-ai/dsh-mcp-status`, not
+// mcp-client — see above).
 export type {} from '@deepseek-ai/dsh-commands/types'
 export type {} from '@deepseek-ai/dsh-cordis-host-runner/types'
 export type {} from '@deepseek-ai/dsh-credentials/types'
 export type {} from '@deepseek-ai/dsh-llm/types'
+export type {} from '@deepseek-ai/dsh-mcp-status/status'
 export type {} from '@deepseek-ai/dsh-agent-presets/types'
 export type {} from '@deepseek-ai/dsh-settings/types'
 

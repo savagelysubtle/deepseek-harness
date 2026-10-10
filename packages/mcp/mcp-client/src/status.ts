@@ -1,28 +1,37 @@
 /**
- * Shared wire contract for one MCP server connection's live status: the state
- * enum, the point-in-time status shape, and the RPC/event names the Host's
- * status registry ({@link ../status-registry.ts}) and every client consumer
- * (Settings panel, in-chat notice) agree on. Kept intentionally small and
- * stable — client packages build against these names and shapes directly, so
- * a change here is a cross-package contract change, not a local refactor.
+ * Shared wire shape for one MCP server connection's live status: the state
+ * enum and the point-in-time status shape every client consumer (Settings
+ * panel, in-chat notice) and `@deepseek-ai/dsh-mcp-status`'s status registry
+ * agree on. Kept intentionally small and stable — client packages build
+ * against these names and shapes directly, so a change here is a
+ * cross-package contract change, not a local refactor.
+ *
+ * The RPC/event names, the `mcp/status-changed` Cordis `Events` augmentation,
+ * and the Remote-only status service itself live in
+ * `@deepseek-ai/dsh-mcp-status` (SWD-164 round 5, defect 2) — this package
+ * keeps only the two wire TYPES, since `ConnectionHandle.status()` in
+ * `./connection.ts` (which stays here) returns `McpServerStatus` directly.
  *
  * `disabled` names the connection supervisor's own `reconnect.enabled: false`
  * policy, NOT whether the plugin mount itself is loaded (the Loader's
  * `entry.disabled`, toggled by `mcp/set-enabled`) — the two "disabled"
- * concepts are deliberately independent; see the status-registry module doc
- * for the full reasoning. A mount the Loader never activated has no live
- * `ConnectionHandle`, but it still appears in `mcp/status` with state
- * `disabled` and `attempts: 0` as long as it is still named (disabled) in
- * the profile's `cordis.patch.yml` — otherwise the Tools panel could disable
- * a server and never have a way to re-enable it. Only a mount no longer
- * named in that file at all (removed from configuration entirely) is
- * missing from `mcp/status`'s listing; see `removed` below for how a client
- * is told to drop that row.
+ * concepts are deliberately independent; see `@deepseek-ai/dsh-mcp-status`'s
+ * status-registry module doc for the full reasoning. A mount the Loader
+ * never activated has no live `ConnectionHandle`, but it still appears in
+ * `mcp/status` with state `disabled` and `attempts: 0` as long as it is
+ * still named (disabled) in the profile's `cordis.patch.yml` — otherwise the
+ * Tools panel could disable a server and never have a way to re-enable it.
+ * Only a mount no longer named in that file at all (removed from
+ * configuration entirely) is missing from `mcp/status`'s listing; see
+ * `removed` below for how a client is told to drop that row.
  *
  * @module @deepseek-ai/dsh-mcp-client/status
  */
 
-/** Lifecycle state of one MCP server connection, as observed by the Host. */
+/**
+ * Lifecycle state of one MCP server connection, as observed by the Host.
+ * @typert object
+ */
 export type McpServerState =
   | 'connected'
   | 'connecting'
@@ -30,7 +39,26 @@ export type McpServerState =
   | 'gave-up'
   | 'disabled'
 
-/** Point-in-time status for one configured MCP server. */
+/**
+ * Point-in-time status for one configured MCP server.
+ *
+ * Tagged `@typert object` (no Remote service lives in this package anymore —
+ * that moved to `@deepseek-ai/dsh-mcp-status`, SWD-164 round 5, defect 2) so
+ * the typert workspace generator still treats this package as a cross-package
+ * type root: without an explicit surface marker, `mcp-client` has nothing a
+ * `registrationHasSurface` scan recognizes, drops out of the generator's
+ * discovered-package set entirely, and a consumer like `mcp-status` — which
+ * imports this very interface into a `declare module Events` signature —
+ * fails workspace analysis with "package reference McpServerStatus is not
+ * exported by @deepseek-ai/dsh-mcp-client at ./status" (the generator can no
+ * longer force this package's *source* into the bounded compiler program, so
+ * it only ever resolves the pre-built `.d.ts`, which the cross-package
+ * reference check never matches). This tag, plus this package keeping its
+ * own `./typert` export (see `package.json`; `./remote` stays absent since
+ * there is still no `@Remote` method here), is the sanctioned fix — the same
+ * pattern `packages/core/session/src/index.ts`'s plain `@typert object`
+ * classes use.
+ */
 export interface McpServerStatus {
   /** The server's configured namespace (`Config.serverName`). */
   serverName: string
@@ -52,45 +80,4 @@ export interface McpServerStatus {
    * synthesized rows for a currently-disabled-but-still-configured mount.
    */
   removed?: boolean
-}
-
-/** Typert namespace every Remote method and event below is published under. */
-export const MCP_STATUS_NAMESPACE = 'mcp'
-
-/** `@Remote` export name for {@link MCP_STATUS_ENDPOINT}: list every registered server's current status. */
-export const MCP_STATUS_METHOD = 'status'
-/** `@Remote` export name for {@link MCP_AUTHORIZE_START_ENDPOINT}: begin (or resume) OAuth consent for one server. */
-export const MCP_AUTHORIZE_START_METHOD = 'authorize-start'
-/** `@Remote` export name for {@link MCP_RECONNECT_ENDPOINT}: manually retry a given-up (or disabled) server now. */
-export const MCP_RECONNECT_METHOD = 'reconnect'
-/** `@Remote` export name for {@link MCP_SET_ENABLED_ENDPOINT}: persist a plugin mount's enabled flag. */
-export const MCP_SET_ENABLED_METHOD = 'set-enabled'
-
-/** Wire endpoint (`<namespace>/<method>`): list every registered server's current status. */
-export const MCP_STATUS_ENDPOINT = `${MCP_STATUS_NAMESPACE}/${MCP_STATUS_METHOD}`
-/** Wire endpoint: begin (or resume) the OAuth consent flow for one server. */
-export const MCP_AUTHORIZE_START_ENDPOINT = `${MCP_STATUS_NAMESPACE}/${MCP_AUTHORIZE_START_METHOD}`
-/** Wire endpoint: manually retry a given-up (or disabled) server now. */
-export const MCP_RECONNECT_ENDPOINT = `${MCP_STATUS_NAMESPACE}/${MCP_RECONNECT_METHOD}`
-/** Wire endpoint: persist a plugin mount's enabled flag via the `cordis.patch.yml` seam. */
-export const MCP_SET_ENABLED_ENDPOINT = `${MCP_STATUS_NAMESPACE}/${MCP_SET_ENABLED_METHOD}`
-/** Host → client event name: one server's status changed. Forwarded verbatim by the application's Host-event allowlist. */
-export const MCP_STATUS_CHANGED_EVENT = 'mcp/status-changed'
-
-/** Result of {@link MCP_AUTHORIZE_START_ENDPOINT}: the consent URL to open. */
-export interface McpAuthorizeStartResult {
-  /** The authorization URL the client should open in a new tab/window. */
-  consentUrl: string
-}
-
-declare module '@deepseek-ai/cordis' {
-  interface Events {
-    /**
-     * One server's status changed. Forwarded to clients verbatim only once
-     * `packages/api/remotes/src/remote-events.ts`'s allowlist names it.
-     * @param status - the server's new point-in-time status.
-     * @mode emit
-     */
-    'mcp/status-changed'(status: McpServerStatus): void
-  }
 }

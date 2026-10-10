@@ -30,10 +30,6 @@
       "types": "./lib/typert.host.d.ts",
       "default": "./lib/typert.host.js"
     },
-    "./remote": {
-      "types": "./lib/typert.remote-client.d.ts",
-      "default": "./lib/typert.remote-client.js"
-    },
     "./src/*": "./src/*",
     "./package.json": "./package.json"
   },
@@ -47,9 +43,7 @@
     "lib/status.js",
     "lib/types/**/*.d.ts",
     "lib/typert.host.js",
-    "lib/typert.host.d.ts",
-    "lib/typert.remote-client.js",
-    "lib/typert.remote-client.d.ts"
+    "lib/typert.host.d.ts"
   ],
   "license": "MIT",
   "peerDependencies": {
@@ -82,7 +76,6 @@
     "@deepseek-ai/dsh-subprocess": "workspace:^",
     "@deepseek-ai/dsh-timeout": "workspace:^",
     "@deepseek-ai/dsh-tools": "workspace:^",
-    "@deepseek-ai/dsh-typert-protocol": "workspace:^",
     "@modelcontextprotocol/server-everything": "^2026.7.4",
     "@modelcontextprotocol/server-filesystem": "^2026.7.4",
     "@deepseek-ai/cordis": "workspace:^"

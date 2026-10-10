@@ -2,7 +2,7 @@
  * Tools settings section, browser half: one Settings nav row (sibling of
  * `models`/`agent-presets`/`plugins`) listing every registered MCP server's
  * live connection status, with Authorize/Reconnect/Enable-Disable actions
- * over the Host's `mcp` Remote namespace (`@deepseek-ai/dsh-mcp-client`'s
+ * over the Host's `mcp` Remote namespace (`@deepseek-ai/dsh-mcp-status`'s
  * status registry, mounted centrally by `@deepseek-ai/dsh-api-remotes`).
  */
 

@@ -7,3 +7,4 @@
 | 包 | 职责 |
 |---|---|
 | [`mcp-client/`](mcp-client/README.md) | MCP 客户端桥接，将外部服务器工具注册到 `ctx.tools` |
+| [`mcp-status/`](mcp-status/README.md) | 为每个活跃的 mcp-client 连接提供永久挂载的 Remote 状态注册服务 |

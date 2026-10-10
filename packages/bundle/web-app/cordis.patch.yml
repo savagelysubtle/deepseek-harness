@@ -94,6 +94,13 @@
     - id: plugin-inventory
       name: '@deepseek-ai/dsh-host-plugin-inventory'
 
+    # Permanent mount, independent of any mcp-client server instance: its own
+    # Loader entry keeps the mcp/* Typert manifest registered for this
+    # entry's whole lifetime, so disabling the last live mcp-client server
+    # can never withdraw it (SWD-164).
+    - id: mcp-status
+      name: '@deepseek-ai/dsh-mcp-status'
+
     # The API gateway: the transport-agnostic dispatch face every client shape
     # shares. The base layer's agent-default-model service owns the default model.
     - id: api-gateway

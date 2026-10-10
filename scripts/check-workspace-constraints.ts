@@ -154,6 +154,10 @@ const packageFileExtras: Readonly<Record<string, readonly string[]>> = {
   // McpAuthorizeStartResult) to be exported from a public non-root subpath,
   // resolved through the package's ./status export.
   '@deepseek-ai/dsh-mcp-client': ['lib/status.js'],
+  // Same rationale, moved with the Remote-boundary types it now carries
+  // (McpAuthorizeStartResult, the mcp/status-changed Events augmentation) —
+  // SWD-164 round 5, defect 2.
+  '@deepseek-ai/dsh-mcp-status': ['lib/status.js'],
 }
 
 function sameStringList(actual: readonly string[] | undefined, expected: readonly string[]): boolean {

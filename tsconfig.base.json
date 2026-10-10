@@ -51,6 +51,17 @@
       "@deepseek-ai/dsh-typert-protocol/types": ["./packages/typert/protocol/src/types.ts"],
       "@deepseek-ai/dsh-typert-loader": ["./packages/typert/loader/src/index.ts"],
       "@deepseek-ai/dsh-session/invariant": ["./packages/core/session/src/invariant.ts"],
+      // Without this, the typert workspace generator resolves this subpath
+      // through mcp-client's package.json `exports` to the pre-built
+      // `lib/types/status.d.ts` instead of this source file; that .d.ts
+      // declares a textually-identical but DIFFERENT (non-reference-equal)
+      // `McpServerStatus` symbol than the one `src/status.ts` itself carries
+      // as a project-reference root, so `@deepseek-ai/dsh-mcp-status`'s own
+      // `declare module Events` signature — which imports this very type —
+      // fails workspace analysis ("package reference McpServerStatus is not
+      // exported by @deepseek-ai/dsh-mcp-client at ./status") even though the
+      // import is legitimate (SWD-164 round 5, defect 2).
+      "@deepseek-ai/dsh-mcp-client/status": ["./packages/mcp/mcp-client/src/status.ts"],
       "@deepseek-ai/dsh-typert-registry/types": ["./packages/typert/registry/src/types.ts"],
       "@deepseek-ai/dsh-typert-generator": ["./packages/typert/generator/src/index.ts"],
       "@deepseek-ai/dsh-session/types": ["./packages/core/session/src/types.ts"],

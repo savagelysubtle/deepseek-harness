@@ -14,8 +14,10 @@ import type { Agent, ModelSelection, ModelSelectionRef, AgentOptions, AgentStatu
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
 // Pulls in the `mcp/status-changed` Cordis Events augmentation so the
 // forwarding loop below type-checks it against a real signature, not an
-// absent key — same pattern as the agent-presets import above.
-import type {} from '@deepseek-ai/dsh-mcp-client/status'
+// absent key — same pattern as the agent-presets import above. The merge
+// lives in `@deepseek-ai/dsh-mcp-status` now, not mcp-client (SWD-164 round
+// 5, defect 2).
+import type {} from '@deepseek-ai/dsh-mcp-status/status'
 import { AttachmentError } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { contentHasImage, createUserMessage, freezeMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
