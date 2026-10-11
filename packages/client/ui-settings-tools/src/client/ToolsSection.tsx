@@ -217,6 +217,16 @@ function ServerRow({ status, authorize, reconnect, setEnabled, t }: ServerRowPro
       (error: unknown) => {
         setBusy(false)
         setActionError(messageOf(error))
+        // Close the confirmation on rejection too (same reset as a plain
+        // Cancel) — otherwise the Modal stays open, marks the rest of the
+        // page `inert` (`Modal.tsx`'s `syncBackgroundInert`), and the row
+        // alert just set above sits behind that mask: present in the DOM but
+        // unreachable and invisible until the user clicks Cancel, while
+        // Confirm sits right there inviting a blind retry with no
+        // explanation on screen. One display path for a rejected action,
+        // same as `onEnable`'s (which never opens a dialog at all).
+        setConfirmingDisable(false)
+        setAcknowledged(false)
       },
     )
   }
