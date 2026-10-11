@@ -198,29 +198,145 @@ const Auth: z<OAuthAuthConfig> = z.object({
   redirectPort: z.number().step(1).min(1).max(65_535).default(DEFAULT_OAUTH_REDIRECT_PORT),
 })
 
-export const Config = z.union([
-  z.object({
-    transport: z.const('stdio'),
-    serverName: z.string().required().pattern(SERVER_NAME_PATTERN),
-    command: z.string().required(),
-    args: z.array(String).default([]),
-    env: z.dict(String).default({}),
-    cwd: z.string().default(''),
-    toolCallTimeoutMs: z.number().default(DEFAULT_TOOL_CALL_TIMEOUT_MS),
-    failOnStartupError: z.boolean().default(false),
-    reconnect: Reconnect,
-  }),
-  z.object({
-    transport: z.const('streamable-http'),
-    serverName: z.string().required().pattern(SERVER_NAME_PATTERN),
-    url: z.string().required(),
-    headers: z.dict(String).default({}),
-    auth: Auth,
-    toolCallTimeoutMs: z.number().default(DEFAULT_TOOL_CALL_TIMEOUT_MS),
-    failOnStartupError: z.boolean().default(false),
-    reconnect: Reconnect,
-  }),
-]) as unknown as z<Config>
+const StdioBranch = z.object({
+  transport: z.const('stdio'),
+  serverName: z.string().required().pattern(SERVER_NAME_PATTERN),
+  command: z.string().required(),
+  args: z.array(String).default([]),
+  env: z.dict(String).default({}),
+  cwd: z.string().default(''),
+  toolCallTimeoutMs: z.number().default(DEFAULT_TOOL_CALL_TIMEOUT_MS),
+  failOnStartupError: z.boolean().default(false),
+  reconnect: Reconnect,
+}) as unknown as z<StdioConfig>
+
+const StreamableHttpBranch = z.object({
+  transport: z.const('streamable-http'),
+  serverName: z.string().required().pattern(SERVER_NAME_PATTERN),
+  url: z.string().required(),
+  headers: z.dict(String).default({}),
+  // Prevent Schemastery from materializing an omitted `auth` as `{}` (every
+  // z.object() carries an implicit `default: {}`), which would then fail
+  // `auth.mode missing required value` on a header-only, static-token
+  // mount — the README's own example (SWD-167). `auth: { mode: 'oauth' }`
+  // still resolves exactly as before: this default only applies when the
+  // key is absent.
+  auth: Auth.default(undefined as unknown as OAuthAuthConfig),
+  toolCallTimeoutMs: z.number().default(DEFAULT_TOOL_CALL_TIMEOUT_MS),
+  failOnStartupError: z.boolean().default(false),
+  reconnect: Reconnect,
+}) as unknown as z<StreamableHttpConfig>
+
+/** True for a plain, non-array object — the shape {@link CONFIG_TYPE}'s resolver can read `transport` off of. */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Matches the ` but got <value>` tail Schemastery's 'object', 'dict',
+ * 'string', 'const', 'array', and 'tuple' resolvers (vendor/schemastery/src
+ * /index.ts ~609-753) append to a type-mismatch message, interpolating the
+ * raw received value — to the end of the string (`[\s\S]*`, not `.*`), so a
+ * multi-line value is stripped along with the rest. A message with no such
+ * tail (e.g. "missing required value", or the serverName pattern message,
+ * which never embeds the value at all) does not match and is left alone.
+ */
+const BUT_GOT_TAIL_RE = / but got [\s\S]*$/
+
+/**
+ * Rewrite ANY error thrown resolving one Config branch so the raw value a
+ * Schemastery resolver interpolated into a type-mismatch message can never
+ * reach a caller or a log line — for every field, not a field-name
+ * allowlist (SWD-167 round 4, sentinel finding: a field allowlist — round
+ * 3's `headers`/`env` — chases a generic Schemastery behavior; `url`,
+ * `args`, and even `auth` itself can carry a live credential too, e.g. an
+ * operator pasting a token straight into `auth` instead of `headers`).
+ * Mutates `.message` on the SAME error object rather than constructing a
+ * replacement, so `.options.path` (what cordis's `resolveConfig` reports as
+ * the issue's `path` — the `$.url`/`$.args[1]`-style prefix that names which
+ * field is wrong), the `ValidationError` class, and its `~standard`
+ * -recognized prototype all survive completely unchanged; this also makes
+ * the rewrite correct no matter what `options.path` looks like, including
+ * missing or non-array, since nothing here ever reads it. The expectation
+ * text ("expected string", "missing required value", the serverName
+ * pattern, …) is untouched — only the interpolated value, when present, is
+ * dropped.
+ * @param error - the value caught resolving one Config branch. Always a
+ *   real `Error` with a string `.message` in practice: every throw inside
+ *   the 'object'/'dict'/'string'/'const'/'array'/'tuple' resolvers — the
+ *   only ones either branch ever reaches, both only ever handed a data
+ *   value this file has already confirmed is a plain record — is a
+ *   Schemastery `ValidationError`, and this Config defines no custom
+ *   validator that could throw anything else.
+ * @returns never: this always throws (the same error, message rewritten in place when there was a value to drop).
+ */
+function redactReceivedValue(error: unknown): never {
+  const thrown = error as Error
+  if (BUT_GOT_TAIL_RE.test(thrown.message)) {
+    thrown.message = thrown.message.replace(BUT_GOT_TAIL_RE, ' (received value withheld)')
+  }
+  throw thrown
+}
+
+/**
+ * Schemastery type name for this package's own discriminated Config union,
+ * registered once below via `z.extend` (a new entry in Schemastery's
+ * resolver registry — it does not touch the shared `'union'`/`'object'`
+ * resolvers any other schema in the process uses).
+ *
+ * SWD-167 round 2 (sentinel finding): the built-in `z.union()` resolver
+ * (vendor/schemastery/src/index.ts ~765-775) tries every branch and, if ALL
+ * fail, throws `` expected <union> but got ${JSON.stringify(data)} `` —
+ * dumping the ENTIRE candidate config, including a live bearer token in
+ * `headers.Authorization`, into a message that reaches the persistent host
+ * log through cordis's fiber reload path (vendor/cordis/src/fiber.ts).
+ * `transport` already discriminates the two branches unambiguously — every
+ * caller in this repo sets it (examples/, every test) — so this resolver
+ * dispatches directly to the ONE branch it names instead of trying both and
+ * falling through to that dump. A failure inside the matched branch reports
+ * its own specific, path-scoped field error (e.g. "url missing required
+ * value"), never the whole object.
+ */
+const CONFIG_TYPE = 'dsh-mcp-client-config'
+
+z.extend(CONFIG_TYPE, (data, _schema, options, strict) => {
+  const transport = isPlainRecord(data) ? data.transport : undefined
+  if (transport === 'stdio') {
+    try {
+      return z.resolve(data, StdioBranch, options, strict)
+    } catch (error) {
+      redactReceivedValue(error)
+    }
+  }
+  if (transport === 'streamable-http') {
+    try {
+      const resolved = z.resolve(data, StreamableHttpBranch, options, strict) as [Record<string, unknown>, unknown?]
+      // A bare `auth:` key in YAML parses to `auth: null`, which must behave
+      // exactly like an omitted `auth` (SWD-167 round 2, reviewer finding):
+      // `resolveAuthProvider` (connection.ts) only guards `=== undefined`, so
+      // a literal `null` would otherwise reach `config.auth.scope` and throw
+      // a TypeError at connect time instead of failing loud at validation.
+      // `resolved[0]` is always a plain object here — the 'object' resolver
+      // (vendor/schemastery/src/index.ts ~752) either returns one or throws
+      // (caught above) — so no extra shape guard is needed.
+      if (resolved[0].auth === null) delete resolved[0].auth
+      return resolved
+    } catch (error) {
+      redactReceivedValue(error)
+    }
+  }
+  // SWD-167 round 3 (sentinel finding C): never echo the raw `transport`
+  // value — a secret-shaped string here (an operator's paste-over-the-wrong-
+  // field mistake) would otherwise land in the host log unredacted.
+  throw new z.ValidationError(
+    transport === undefined
+      ? 'transport is required and must be "stdio" or "streamable-http"'
+      : `transport must be "stdio" or "streamable-http", not an unrecognized value of type ${typeof transport}`,
+    options,
+  )
+})
+
+export const Config = z({ type: CONFIG_TYPE }) as unknown as z<Config>
 
 // ---- Plugin apply ----
 

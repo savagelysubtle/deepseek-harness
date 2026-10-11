@@ -31,6 +31,8 @@ MCP 客户端桥接插件：连接外部 [Model Context Protocol](https://modelc
 
 模型会看到 `mcp__github__create_issue`、`mcp__web__search` 等工具，这与 Claude Code 和 Codex 使用的服务器限定形状相同。HMR（热模块替换）支持热替换：编辑配置项会触发断开 + 重新连接，无需重启进程；`serverName` 不变时会生成完全相同的工具名称。
 
+上面的 `mcp-web` 示例完全省略了 `auth`——对于仅通过 `headers` 认证的 streamable-http 服务器来说这是可以的；`auth` 只用于启用下面的 OAuth 流程。
+
 ## 配置
 
 | 字段 | 传输 | 必填 | 描述 |
