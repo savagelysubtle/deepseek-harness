@@ -112,7 +112,14 @@ import { CredentialsOAuthProvider } from '@deepseek-ai/dsh-mcp-client/src/oauth.
 import { registerMcpHandle } from '@deepseek-ai/dsh-mcp-client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-mcp-client/src/connection.ts'
 import type { McpServerState } from '@deepseek-ai/dsh-mcp-client/src/status.ts'
-import { HOST_CONSENT_TIMEOUT_MS, McpStatusRegistryService } from '../src/index.ts'
+import {
+  HOST_CONSENT_TIMEOUT_MS,
+  McpStatusRegistryService,
+  applyPatchEolConvention,
+  detectPatchEolConvention,
+  inferPatchStringifyOptions,
+  verifyLosslessEdit,
+} from '../src/index.ts'
 
 async function mountRegistry(credentialsPath: string): Promise<Context> {
   const ctx = new Context()
@@ -145,6 +152,93 @@ function mcpMountYaml(id: string, serverName: string, disabled?: boolean, indent
   if (disabled !== undefined) lines.push(`${indent}  disabled: ${String(disabled)}`)
   return lines.join('\n')
 }
+
+/**
+ * Isolate the one contiguous region where `before` and `after` differ by
+ * trimming their longest common prefix and longest common suffix — the same
+ * technique `verifyLosslessEdit` in `../src/index.ts` uses (see that
+ * function's own doc for why a full diff algorithm is unnecessary here: a
+ * `set-enabled` call only ever touches one entry's `disabled` key). Used
+ * below to assert PRECISELY what a rewrite changed, rather than the
+ * indent-tolerant `toMatch(/.../)` regexes the pre-SWD-170 tests relied on,
+ * which could not have told a one-line change from a whole-file reformat.
+ * @param before - the text before the edit.
+ * @param after - the text after the edit.
+ * @returns the differing region from each side (each either `[]` or exactly
+ *   one line in every passing case below) and the 1-based line at which the
+ *   two texts first diverge.
+ */
+function diffRegion(before: string, after: string): {
+  readonly beforeLines: readonly string[]
+  readonly afterLines: readonly string[]
+  readonly firstDifferentLine: number
+} {
+  const beforeLines = before.split('\n')
+  const afterLines = after.split('\n')
+  let prefixLength = 0
+  while (
+    prefixLength < beforeLines.length
+    && prefixLength < afterLines.length
+    && beforeLines[prefixLength] === afterLines[prefixLength]
+  ) prefixLength += 1
+  let suffixLength = 0
+  while (
+    suffixLength < beforeLines.length - prefixLength
+    && suffixLength < afterLines.length - prefixLength
+    && beforeLines[beforeLines.length - 1 - suffixLength] === afterLines[afterLines.length - 1 - suffixLength]
+  ) suffixLength += 1
+  return {
+    beforeLines: beforeLines.slice(prefixLength, beforeLines.length - suffixLength),
+    afterLines: afterLines.slice(prefixLength, afterLines.length - suffixLength),
+    firstDifferentLine: prefixLength + 1,
+  }
+}
+
+/**
+ * A representative slice of the real `web-stable` profile's own
+ * `cordis.patch.yml` (`~/.dsh/profiles/web-stable/cordis.patch.yml`) — same
+ * shape and the exact `!!js`-tagged `Authorization` header with its four
+ * comment lines above it, copied verbatim; no secret values (there are none
+ * in the source file either — the token is read from an env var at
+ * runtime, never written here). This is the precise SWD-169/SWD-170
+ * trigger: `set-enabled` must be able to toggle the UNRELATED python mount
+ * below without disturbing one byte of the supabase entry's comments or tag.
+ */
+const realProfileFixture = [
+  '- insert:',
+  '  - id: mcp-aichemistforge-python',
+  '    name: \'@deepseek-ai/dsh-mcp-client\'',
+  '    config:',
+  '      serverName: aichemistforge-python',
+  '      transport: stdio',
+  '      command: uv',
+  '      args:',
+  '      - run',
+  '      - --directory',
+  '      - /mnt/Dev/Coding/AiChemistCodex/AiChemistForge/ToolRack/Python',
+  '      - python',
+  '      - -m',
+  '      - unified_mcp_server.main',
+  '      - --stdio',
+  '      cwd: /mnt/Dev/Coding/AiChemistCodex/AiChemistForge/ToolRack/Python',
+  '      env:',
+  '        LOG_LEVEL: INFO',
+  '        ALLOWED_PATHS: /mnt/Dev/Coding/AiChemistCodex/AiChemistForge',
+  '- insert:',
+  '  - id: mcp-supabase',
+  '    name: \'@deepseek-ai/dsh-mcp-client\'',
+  '    config:',
+  '      serverName: supabase',
+  '      transport: streamable-http',
+  '      url: https://mcp.supabase.com/mcp?project_ref=ucwymeeqykodfhhfcott&features=docs%2Caccount%2Cdatabase%2Cdebugging%2Cdevelopment%2Cfunctions%2Cbranching',
+  '      # Supabase\'s hosted OAuth consent page is broken for public PKCE clients',
+  '      # (supabase/auth#2408, #2820, open as of 2026-10-10); use a scoped personal',
+  '      # access token instead. The value comes from ~/.dsh/secrets/mcp.env, loaded',
+  '      # by restart-stable.sh — never written here.',
+  '      headers:',
+  '        Authorization: !!js \'`Bearer ${process.env.SUPABASE_ACCESS_TOKEN}`\'',
+  '',
+].join('\n')
 
 function httpConfig(fixture: OAuthFixture, serverName: string): StreamableHttpConfig {
   return {
@@ -254,6 +348,177 @@ async function authorizeStartOnSharedListener(
 ): ReturnType<McpStatusRegistryService['authorizeStart']> {
   return vi.waitFor(() => registry.authorizeStart(serverName), { timeout: 2_000, interval: 20 })
 }
+
+describe('verifyLosslessEdit', () => {
+  // Direct unit tests of every branch, rather than relying only on
+  // `setEnabled` integration scenarios above and below — some shapes here
+  // (a single added or changed line that is NOT itself a `disabled:` line)
+  // are not reachable through any real `setEnabled` call, since `doc.setIn`
+  // never writes anything else; they exist as defense-in-depth against a
+  // future change to this function or its caller, and this is the only way
+  // to prove they are exercised at all.
+  it('a true no-op (identical text) is ok', () => {
+    const text = 'a\nb\nc\n'
+    expect(verifyLosslessEdit(text, text)).toEqual({ kind: 'ok' })
+  })
+
+  it('a single added line that IS a disabled line is ok', () => {
+    expect(verifyLosslessEdit('a\nb\nc\n', 'a\n  disabled: true\nb\nc\n')).toEqual({ kind: 'ok' })
+  })
+
+  it('a single added line that is NOT a disabled line is refused', () => {
+    expect(verifyLosslessEdit('a\nb\nc\n', 'a\nsomething else entirely\nb\nc\n')).toEqual({
+      kind: 'unexpected-difference',
+      line: 2,
+    })
+  })
+
+  it('a single changed line, disabled on both sides at the SAME indentation, is ok', () => {
+    expect(verifyLosslessEdit('a\n  disabled: true\nc\n', 'a\n  disabled: false\nc\n')).toEqual({ kind: 'ok' })
+  })
+
+  it('a single changed line, disabled on both sides but at DIFFERENT indentation, is refused (a value change may never also smuggle in a re-indent)', () => {
+    expect(verifyLosslessEdit('a\n  disabled: true\nc\n', 'a\n    disabled: false\nc\n')).toEqual({
+      kind: 'unexpected-difference',
+      line: 2,
+    })
+  })
+
+  it('a single changed line where the BEFORE side is not a disabled line is refused', () => {
+    expect(verifyLosslessEdit('a\nsomething else\nc\n', 'a\n  disabled: true\nc\n')).toEqual({
+      kind: 'unexpected-difference',
+      line: 2,
+    })
+  })
+
+  it('a single changed line where the AFTER side is not a disabled line is refused', () => {
+    expect(verifyLosslessEdit('a\n  disabled: true\nc\n', 'a\nsomething else\nc\n')).toEqual({
+      kind: 'unexpected-difference',
+      line: 2,
+    })
+  })
+
+  it('a differing region wider than one line on either side (a second, unrelated change) is refused', () => {
+    expect(verifyLosslessEdit('a\nb\nc\nd\n', 'a\nX\nY\nd\n')).toEqual({
+      kind: 'unexpected-difference',
+      line: 2,
+    })
+  })
+})
+
+describe('inferPatchStringifyOptions', () => {
+  // Direct unit tests, same rationale as `verifyLosslessEdit`'s own block
+  // above: this function never parses YAML at all (it is a line scan over
+  // raw text), so these fixtures need not be valid YAML documents — they
+  // only need to exercise one specific branch of the scan each. The two
+  // `setEnabled`-level integration tests in the "SWD-170 round 2" describe
+  // further down prove the inferred options actually round-trip a REAL
+  // document; these prove the inference itself, branch by branch.
+  it('the real profile\'s own 2-space, `insert:`-aligned convention infers { indent: 2, indentSeq: false }', () => {
+    const text = [
+      '- insert:',
+      '  - id: mcp-a',
+      '    name: \'@x\'',
+      '    config:',
+      '      serverName: a',
+      '',
+    ].join('\n')
+    expect(inferPatchStringifyOptions(text)).toEqual({ indent: 2, indentSeq: false })
+  })
+
+  it('the same shape re-indented to 4 spaces, `indentSeq: true` style infers { indent: 4, indentSeq: true }', () => {
+    const text = [
+      '- id: group',
+      '  insert:',
+      '      - id: mcp-a',
+      '        name: \'@x\'',
+      '        config:',
+      '            serverName: a',
+      '',
+    ].join('\n')
+    expect(inferPatchStringifyOptions(text)).toEqual({ indent: 4, indentSeq: true })
+  })
+
+  it('a file with no "<key>:"-only line at all (every key has an inline value) falls back to yaml\'s own defaults', () => {
+    const text = 'id: a\nname: b\ndisabled: false\n'
+    expect(inferPatchStringifyOptions(text)).toEqual({ indent: 2, indentSeq: true })
+  })
+
+  it('a "<key>:"-only line with no child at all (end of file) is never mistaken for evidence of either kind', () => {
+    expect(inferPatchStringifyOptions('trailer:\n')).toEqual({ indent: 2, indentSeq: true })
+  })
+
+  it('blank lines and a comment line between a key and its nested sequence child are skipped when locating it', () => {
+    const text = [
+      'insert:',
+      '',
+      '  # a comment before the list',
+      '  - id: a',
+      '',
+    ].join('\n')
+    expect(inferPatchStringifyOptions(text)).toEqual({ indent: 2, indentSeq: true })
+  })
+
+  it('a block-sequence item at a SHALLOWER column than its purported parent key is not that key\'s own nested content (an empty/null-valued key)', () => {
+    const text = [
+      '- group:',
+      '- lonely',
+      '',
+    ].join('\n')
+    expect(inferPatchStringifyOptions(text)).toEqual({ indent: 2, indentSeq: true })
+  })
+
+  it('a mapping "child" at or below its key\'s own column is not that key\'s nested content either — scanning continues and finds the real indent width later in the file', () => {
+    const text = [
+      '- foo:',
+      '  bar: 1',
+      'baz:',
+      '    qux: 1',
+      '',
+    ].join('\n')
+    expect(inferPatchStringifyOptions(text)).toEqual({ indent: 4, indentSeq: true })
+  })
+})
+
+describe('detectPatchEolConvention', () => {
+  it('detects CRLF from the FIRST line break', () => {
+    expect(detectPatchEolConvention('a\r\nb\r\n')).toEqual({ crlf: true, trailingNewline: true })
+  })
+
+  it('detects plain LF (no `\\r` before the first `\\n`)', () => {
+    expect(detectPatchEolConvention('a\nb\n')).toEqual({ crlf: false, trailingNewline: true })
+  })
+
+  it('detects a missing trailing newline', () => {
+    expect(detectPatchEolConvention('a\nb')).toEqual({ crlf: false, trailingNewline: false })
+  })
+
+  it('a single-line file with no line break at all is treated as LF, with no trailing newline', () => {
+    expect(detectPatchEolConvention('a')).toEqual({ crlf: false, trailingNewline: false })
+  })
+})
+
+describe('applyPatchEolConvention', () => {
+  // Direct unit tests covering all four `{ crlf, trailingNewline }`
+  // combinations — the two `setEnabled`-level integration tests in the
+  // "SWD-170 round 2" EOL describe further down prove this round-trips a
+  // REAL document end to end; these pin the conversion itself.
+  it('CRLF + trailing newline: converts every `\\n` to `\\r\\n`, keeps the trailing newline', () => {
+    expect(applyPatchEolConvention('a\nb\n', { crlf: true, trailingNewline: true })).toBe('a\r\nb\r\n')
+  })
+
+  it('LF + trailing newline: returns the text completely unchanged', () => {
+    expect(applyPatchEolConvention('a\nb\n', { crlf: false, trailingNewline: true })).toBe('a\nb\n')
+  })
+
+  it('CRLF + no trailing newline: converts, then strips the resulting single trailing `\\r\\n`', () => {
+    expect(applyPatchEolConvention('a\nb\n', { crlf: true, trailingNewline: false })).toBe('a\r\nb')
+  })
+
+  it('LF + no trailing newline: strips the single trailing `\\n`', () => {
+    expect(applyPatchEolConvention('a\nb\n', { crlf: false, trailingNewline: false })).toBe('a\nb')
+  })
+})
 
 describe('McpStatusRegistryService — list/register', () => {
   let dir: string
@@ -444,9 +709,17 @@ describe('McpStatusRegistryService — list/register', () => {
         '- a plain string top-level entry',
         '- id: group',
         '  insert:',
-        '    - a plain string nested entry',
-        mcpMountYaml('mcp-sibling', 'sibling', true, '    '),
-        mcpMountYaml('mcp-target', 'target', true, '    '),
+        // `insert:`'s own children sit at the SAME column as `insert:`
+        // itself (the "unindented block sequence" style, `indentSeq:
+        // false`) — this is the real `web-stable` profile's own
+        // convention, which `inferPatchStringifyOptions` detects from the
+        // file rather than hardcoding (SWD-170 round 2): writing back a
+        // DIFFERENTLY-indented `insert:` child would itself count as
+        // "other content changed" and trip the lossless-edit verification,
+        // which is not what this test is exercising.
+        '  - a plain string nested entry',
+        mcpMountYaml('mcp-sibling', 'sibling', true, '  '),
+        mcpMountYaml('mcp-target', 'target', true, '  '),
         '',
       ].join('\n'),
       'utf8',
@@ -1134,131 +1407,373 @@ describe('McpStatusRegistryService — set-enabled', () => {
   // a profile's token-header expression) and every comment on the file.
   // These four pin the guard's exact blocking behavior, its exact non-
   // blocking behavior, and that it never touches disk when it blocks.
-  describe('SWD-169: refuses to write back a file with an unpreservable YAML tag', () => {
-    // One mount, `config.serverName` plus a nested `headers` entry carrying
-    // the token-header expression the Loader's own `!!js` dialect
-    // understands (`vendor/include/src/index.ts`'s `JsExpr`) and the `yaml`
-    // package does not — the exact SWD-169 trigger. Line 6 is the
-    // `Authorization:` line in both fixtures below; only the tag's own
-    // column shifts between the shorthand and verbatim spellings.
-    const jsTaggedPatch = [
-      '- id: mcp-srv',
-      '  name: \'@deepseek-ai/dsh-mcp-client\'',
-      '  config:',
-      '    serverName: srv',
-      '    headers:',
-      '      Authorization: !!js \'`Bearer ${process.env.TOKEN}`\'',
-      '',
-    ].join('\n')
+  describe(
+    'SWD-170: lossless disabled-flag rewrite (replaces SWD-169\'s pre-write tag-enumeration guard with a '
+    + 'post-serialize verification that the ONLY change is the targeted `disabled:` line)',
+    () => {
+      it(
+        'disabling an unrelated entry in the real profile\'s own shape changes EXACTLY one line — every comment '
+        + 'and the `!!js`-tagged Authorization line on the untouched supabase entry survive byte-identical',
+        async () => {
+          await writeFile(patchPath, realProfileFixture, 'utf8')
+          await registry.setEnabled('aichemistforge-python', false)
+          const disabledText = await readFile(patchPath, 'utf8')
 
-    it(
-      'a `!!js` tagged scalar refuses with a redacted path, line/column, tag, and remedy on the wire — '
-      + 'logs the real path server-side — and leaves the file untouched',
-      async () => {
-        const warns: string[] = []
-        vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warns.push(String(message)) }) as never)
+          const added = diffRegion(realProfileFixture, disabledText)
+          expect(added.beforeLines).toEqual([])
+          expect(added.afterLines).toEqual(['    disabled: true'])
 
-        await writeFile(patchPath, jsTaggedPatch, 'utf8')
-        await expect(registry.setEnabled('srv', true)).rejects.toThrow(
-          new RegExp(
-            'cordis patch file "<path>" has a YAML tag at line 6, column 27 \\("tag:yaml\\.org,2002:js"\\) '
-            + 'that a plain write-back cannot preserve — edit the file by hand and restart the host \\(SWD-169\\)',
-          ),
-        )
-        // Never written: the exact pre-existing bytes survive, and no backup
-        // was ever attempted for a write that never happened.
-        expect(await readFile(patchPath, 'utf8')).toBe(jsTaggedPatch)
-        expect(await readdir(dir)).toEqual(['cordis.patch.yml'])
+          // Every comment line and the `!!js` tag line on the untouched
+          // supabase entry survive byte-identical — the whole point of
+          // SWD-170 — asserted directly against the original fixture's own
+          // lines rather than only inferred from the diff-region check above.
+          for (const line of realProfileFixture.split('\n')) {
+            if (line.includes('#') || line.includes('!!js')) {
+              expect(disabledText).toContain(line)
+            }
+          }
 
-        // Sentinel round 1: the thrown message (crosses the /api wire, can
-        // land in shipped logs) is redacted like every sibling error in this
-        // method — asserted above via "<path>" rather than the real path.
-        // The real, actionable absolute path is logged here, server-side
-        // only, for whoever has to go hand-edit the file.
-        expect(warns).toHaveLength(1)
-        expect(warns[0]).toContain(patchPath)
-        expect(warns[0]).toContain('has a YAML tag at line 6, column 27 ("tag:yaml.org,2002:js")')
-      },
-    )
-
-    it('the verbatim tag form `!<tag:yaml.org,2002:js>` refuses the same way', async () => {
-      const verbatimTagged = [
-        '- id: mcp-srv',
-        '  name: \'@deepseek-ai/dsh-mcp-client\'',
-        '  config:',
-        '    serverName: srv',
-        '    headers:',
-        '      Authorization: !<tag:yaml.org,2002:js> \'`Bearer ${process.env.TOKEN}`\'',
-        '',
-      ].join('\n')
-      await writeFile(patchPath, verbatimTagged, 'utf8')
-      await expect(registry.setEnabled('srv', true)).rejects.toThrow(
-        new RegExp(
-          'cordis patch file "<path>" has a YAML tag at line 6, column 46 \\("tag:yaml\\.org,2002:js"\\) '
-          + 'that a plain write-back cannot preserve',
-        ),
+          // Re-enable: the entry now already carries `disabled: true`, so
+          // this is a value-changed-in-place edit, not an added line — still
+          // exactly one line different from the just-disabled state.
+          await registry.setEnabled('aichemistforge-python', true)
+          const reenabledText = await readFile(patchPath, 'utf8')
+          const reenabled = diffRegion(disabledText, reenabledText)
+          expect(reenabled.beforeLines).toEqual(['    disabled: true'])
+          expect(reenabled.afterLines).toEqual(['    disabled: false'])
+        },
       )
-      expect(await readFile(patchPath, 'utf8')).toBe(verbatimTagged)
-    })
 
-    it(
-      'a `!!timestamp` tag — the yaml package\'s own "known but not core" YAML-1.1 tag that resolves '
-      + 'with no warning at all yet is still lossy on write-back — is blocked the same way',
-      async () => {
-        const timestampTagged = [
-          '- id: mcp-srv',
-          '  name: \'@deepseek-ai/dsh-mcp-client\'',
-          '  config:',
-          '    serverName: srv',
-          '    lastRotated: !!timestamp 2020-01-01',
+      it('an entry already carrying `disabled: false` has its value changed in place — one line, never a duplicate key', async () => {
+        const text = `${mcpMountYaml('mcp-srv', 'srv', false)}\n`
+        await writeFile(patchPath, text, 'utf8')
+        await registry.setEnabled('srv', false)
+        const written = await readFile(patchPath, 'utf8')
+        const diff = diffRegion(text, written)
+        expect(diff.beforeLines).toEqual(['  disabled: false'])
+        expect(diff.afterLines).toEqual(['  disabled: true'])
+        expect(written.match(/disabled:/g)).toHaveLength(1)
+      })
+
+      it('the LAST entry in the document (nothing but a trailing newline after its new disabled line) round-trips as a one-line diff', async () => {
+        const text = `${[mcpMountYaml('mcp-a', 'a', false), mcpMountYaml('mcp-last', 'last')].join('\n')}\n`
+        await writeFile(patchPath, text, 'utf8')
+        await registry.setEnabled('last', false)
+        const written = await readFile(patchPath, 'utf8')
+        const diff = diffRegion(text, written)
+        expect(diff.beforeLines).toEqual([])
+        expect(diff.afterLines).toEqual(['  disabled: true'])
+      })
+
+      it('a nested entry under a group\'s insert list round-trips as a one-line diff, its sibling untouched', async () => {
+        const text = [
+          '- id: group',
+          '  insert:',
+          mcpMountYaml('mcp-nested', 'nested', undefined, '  '),
+          mcpMountYaml('mcp-sibling', 'sibling', false, '  '),
           '',
         ].join('\n')
-        await writeFile(patchPath, timestampTagged, 'utf8')
-        await expect(registry.setEnabled('srv', true)).rejects.toThrow(
-          /has a YAML tag at line 5, column 30 \("tag:yaml\.org,2002:timestamp"\) that a plain write-back cannot preserve/,
-        )
-        expect(await readFile(patchPath, 'utf8')).toBe(timestampTagged)
-      },
-    )
+        await writeFile(patchPath, text, 'utf8')
+        await registry.setEnabled('nested', false)
+        const written = await readFile(patchPath, 'utf8')
+        const diff = diffRegion(text, written)
+        expect(diff.beforeLines).toEqual([])
+        expect(diff.afterLines).toEqual(['    disabled: true'])
+        expect(written).toMatch(/serverName: sibling\s*\n\s*disabled: false/)
+      })
 
-    it('a file with no custom tags at all writes exactly as before (the guard is a no-op)', async () => {
-      await writeFile(patchPath, `${mcpMountYaml('mcp-srv', 'srv', true)}\n`, 'utf8')
-      await registry.setEnabled('srv', true)
-      const written = await readFile(patchPath, 'utf8')
-      expect(written).toMatch(/serverName: srv\s*\n\s*disabled: false/)
-    })
+      it(
+        'a `!!js` tagged scalar on the TOGGLED entry itself is preserved — tag, quoting, and the token '
+        + 'expression\'s value all survive, and the write succeeds (SWD-169 used to refuse this outright)',
+        async () => {
+          const jsTaggedPatch = [
+            '- id: mcp-srv',
+            '  name: \'@deepseek-ai/dsh-mcp-client\'',
+            '  config:',
+            '    serverName: srv',
+            '    headers:',
+            '      Authorization: !!js \'`Bearer ${process.env.TOKEN}`\'',
+            '',
+          ].join('\n')
+          await writeFile(patchPath, jsTaggedPatch, 'utf8')
+          await registry.setEnabled('srv', true)
+          const written = await readFile(patchPath, 'utf8')
+          const diff = diffRegion(jsTaggedPatch, written)
+          expect(diff.beforeLines).toEqual([])
+          expect(diff.afterLines).toEqual(['  disabled: false'])
+          expect(written).toContain('Authorization: !!js \'`Bearer ${process.env.TOKEN}`\'')
+        },
+      )
 
-    it('an explicit tag the yaml package\'s core schema already resolves both ways (`!!str`) is not blocked', async () => {
-      await writeFile(
-        patchPath,
-        [
+      it(
+        'a `!!timestamp` tag — the yaml package\'s own "known but not core" YAML-1.1 tag SWD-169 used to block '
+        + 'outright — now round-trips successfully too: the generic lossless-edit verification subsumes the '
+        + 'old tag-specific enumeration rather than needing its own entry in it',
+        async () => {
+          const timestampTagged = [
+            '- id: mcp-srv',
+            '  name: \'@deepseek-ai/dsh-mcp-client\'',
+            '  config:',
+            '    serverName: srv',
+            '    lastRotated: !!timestamp 2020-01-01',
+            '',
+          ].join('\n')
+          await writeFile(patchPath, timestampTagged, 'utf8')
+          await registry.setEnabled('srv', true)
+          const written = await readFile(patchPath, 'utf8')
+          const diff = diffRegion(timestampTagged, written)
+          expect(diff.beforeLines).toEqual([])
+          expect(diff.afterLines).toEqual(['  disabled: false'])
+          expect(written).toContain('lastRotated: !!timestamp 2020-01-01')
+        },
+      )
+
+      it('an explicit tag the yaml package\'s core schema already resolves both ways (`!!str`) round-trips with no custom-tag help needed', async () => {
+        const text = [
           '- id: mcp-srv',
           '  name: \'@deepseek-ai/dsh-mcp-client\'',
           '  config:',
           '    serverName: !!str srv',
           '  disabled: true',
           '',
-        ].join('\n'),
-        'utf8',
-      )
-      await registry.setEnabled('srv', true)
-      const written = await readFile(patchPath, 'utf8')
-      expect(written).toMatch(/serverName: srv\s*\n\s*disabled: false/)
-    })
+        ].join('\n')
+        await writeFile(patchPath, text, 'utf8')
+        await registry.setEnabled('srv', true)
+        const written = await readFile(patchPath, 'utf8')
+        // The `!!str` tag itself is preserved too (a side effect of editing
+        // the live `Document` in place instead of rebuilding a plain
+        // object) — that is a strict improvement over the pre-SWD-170
+        // write path, not something this test needs to assert either way;
+        // what matters is that the edit is still exactly one line.
+        const diff = diffRegion(text, written)
+        expect(diff.beforeLines).toEqual(['  disabled: true'])
+        expect(diff.afterLines).toEqual(['  disabled: false'])
+      })
 
-    it('a file with only comments (no tags) is unaffected by the guard — comments are already stripped by the existing write path, unchanged by this ticket', async () => {
-      const withComments = [
-        '# a leading comment, pre-existing behavior strips this',
-        mcpMountYaml('mcp-srv', 'srv', true),
-        '',
-      ].join('\n')
-      await writeFile(patchPath, withComments, 'utf8')
-      await registry.setEnabled('srv', true)
-      const written = await readFile(patchPath, 'utf8')
-      expect(written).not.toContain('# a leading comment')
-      expect(written).toMatch(/serverName: srv\s*\n\s*disabled: false/)
-    })
-  })
+      it('a file with comments is now UNaffected by set-enabled — comments survive, where the pre-SWD-170 write path always stripped them', async () => {
+        const withComments = [
+          '# a leading comment',
+          mcpMountYaml('mcp-srv', 'srv', true),
+          '',
+        ].join('\n')
+        await writeFile(patchPath, withComments, 'utf8')
+        await registry.setEnabled('srv', true)
+        const written = await readFile(patchPath, 'utf8')
+        expect(written).toContain('# a leading comment')
+        expect(written).toMatch(/serverName: srv\s*\n\s*disabled: false/)
+      })
+
+      it(
+        'refuses when the rewrite would alter unrelated content — here, the verbatim tag spelling '
+        + '`!<tag:yaml.org,2002:js>` gets normalized to its `!!js` shorthand on write-back, a REAL lossy '
+        + 'construct this verification catches (replacing SWD-169\'s own enumeration of this exact case)',
+        async () => {
+          const verbatimTagged = [
+            '- id: mcp-srv',
+            '  name: \'@deepseek-ai/dsh-mcp-client\'',
+            '  config:',
+            '    serverName: srv',
+            '    headers:',
+            '      Authorization: !<tag:yaml.org,2002:js> \'`Bearer ${process.env.TOKEN}`\'',
+            '',
+          ].join('\n')
+          await writeFile(patchPath, verbatimTagged, 'utf8')
+          const warns: string[] = []
+          vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warns.push(String(message)) }) as never)
+
+          await expect(registry.setEnabled('srv', true)).rejects.toThrow(
+            new RegExp(
+              'mcp set-enabled: cordis patch file "<path>" could not be rewritten without altering other content '
+              + '\\(first unexpected difference at line 6\\) — edit the file by hand and restart the host \\(SWD-170\\)',
+            ),
+          )
+          // Never written: the exact pre-existing bytes survive, and no
+          // backup was ever attempted for a write that never happened.
+          expect(await readFile(patchPath, 'utf8')).toBe(verbatimTagged)
+          expect(await readdir(dir)).toEqual(['cordis.patch.yml'])
+
+          // The thrown message (crosses the /api wire, can land in shipped
+          // logs) stays redacted like every sibling error in this method —
+          // asserted above via "<path>" rather than the real path. The
+          // real, actionable absolute path is logged here, server-side
+          // only, for whoever has to go hand-edit the file.
+          expect(warns).toHaveLength(1)
+          expect(warns[0]).toContain(patchPath)
+          expect(warns[0]).toContain('could not be rewritten without altering other content (first unexpected difference at line 6)')
+        },
+      )
+
+      describe('SWD-170 round 2: `indent`/`indentSeq` inferred from the file\'s own formatting, not hardcoded', () => {
+        it(
+          'a profile hand-written with 4-space, `indentSeq: true` block sequences (sequence items indented '
+          + 'FURTHER than their parent key, `yaml`\'s own default — the opposite of the real `web-stable` '
+          + 'profile\'s own `insert:` convention) round-trips as a one-line diff too — the old hardcoded '
+          + '`indentSeq: false` would have reformatted every item in this `insert:` list and been refused',
+          async () => {
+            const text = [
+              '- id: group',
+              '  insert:',
+              '      - id: mcp-nested',
+              '        name: \'@deepseek-ai/dsh-mcp-client\'',
+              '        config:',
+              '            serverName: nested',
+              '      - id: mcp-sibling',
+              '        name: \'@deepseek-ai/dsh-mcp-client\'',
+              '        config:',
+              '            serverName: sibling',
+              '        disabled: false',
+              '',
+            ].join('\n')
+            await writeFile(patchPath, text, 'utf8')
+            await registry.setEnabled('nested', false)
+            const written = await readFile(patchPath, 'utf8')
+            const diff = diffRegion(text, written)
+            expect(diff.beforeLines).toEqual([])
+            expect(diff.afterLines).toEqual(['        disabled: true'])
+            // The untouched sibling's own 4-space/indentSeq-true formatting
+            // survives byte-identical — not just "a" one-line diff, but
+            // specifically this one.
+            expect(written).toContain('      - id: mcp-sibling')
+            expect(written).toContain('            serverName: sibling')
+          },
+        )
+
+        it(
+          'a file mixing double-quoted and single-quoted scalars round-trips as a one-line diff — '
+          + '`doc.toString({ singleQuote: true })` never rewrites an EXISTING scalar\'s own quote style, '
+          + 'only a brand-new one (and the `disabled` flag is always an unquoted boolean, never quoted at all)',
+          async () => {
+            const text = [
+              '- id: mcp-srv',
+              '  name: "@deepseek-ai/dsh-mcp-client"',
+              '  config:',
+              '    serverName: srv',
+              '    url: "https://example.com"',
+              '    label: \'already-single\'',
+              '',
+            ].join('\n')
+            await writeFile(patchPath, text, 'utf8')
+            await registry.setEnabled('srv', true)
+            const written = await readFile(patchPath, 'utf8')
+            const diff = diffRegion(text, written)
+            expect(diff.beforeLines).toEqual([])
+            expect(diff.afterLines).toEqual(['  disabled: false'])
+            expect(written).toContain('name: "@deepseek-ai/dsh-mcp-client"')
+            expect(written).toContain('url: "https://example.com"')
+            expect(written).toContain('label: \'already-single\'')
+          },
+        )
+      })
+
+      describe(
+        'SWD-170 round 2: the rewrite matches the ORIGINAL file\'s own line-ending convention '
+        + '(no trailing newline, and CRLF)',
+        () => {
+          it('a fixture with no trailing newline round-trips as a one-line diff, and the written file still has none', async () => {
+            // `mcpMountYaml` itself never appends a trailing newline — every
+            // OTHER test in this file adds one explicitly
+            // (`` `${mcpMountYaml(...)}\n` ``); this one deliberately does not.
+            const text = mcpMountYaml('mcp-srv', 'srv', false)
+            await writeFile(patchPath, text, 'utf8')
+            // `disabled: false` already → `setEnabled('srv', false)` flips it
+            // to `true` (`disabled` is always `!enabled`); `setEnabled('srv',
+            // true)` would be a true no-op here, not what this test needs.
+            await registry.setEnabled('srv', false)
+            const written = await readFile(patchPath, 'utf8')
+            const diff = diffRegion(text, written)
+            expect(diff.beforeLines).toEqual(['  disabled: false'])
+            expect(diff.afterLines).toEqual(['  disabled: true'])
+            expect(written.endsWith('\n')).toBe(false)
+          })
+
+          it('a CRLF fixture round-trips as a one-line diff, and the written file is still CRLF throughout', async () => {
+            const lfText = `${mcpMountYaml('mcp-srv', 'srv', false)}\n`
+            const text = lfText.replace(/\n/g, '\r\n')
+            await writeFile(patchPath, text, 'utf8')
+            await registry.setEnabled('srv', false)
+            const written = await readFile(patchPath, 'utf8')
+            const diff = diffRegion(text, written)
+            expect(diff.beforeLines).toEqual(['  disabled: false\r'])
+            expect(diff.afterLines).toEqual(['  disabled: true\r'])
+            // CRLF throughout: every `\n` is immediately preceded by a `\r`
+            // (no bare `\n`), and the CR count matches the line count (one
+            // `\r` per `\n`) — not just "contains some `\r\n` somewhere".
+            expect(/(?<!\r)\n/.test(written)).toBe(false)
+            const crCount = (written.match(/\r/g) ?? []).length
+            const lfCount = (written.match(/\n/g) ?? []).length
+            expect(crCount).toBe(lfCount)
+            expect(crCount).toBeGreaterThan(0)
+          })
+
+          it('an ADDED `disabled:` line in a CRLF file (the key was absent) gets `\\r\\n` too, not a bare `\\n`', async () => {
+            const lfText = `${mcpMountYaml('mcp-srv', 'srv')}\n`
+            const text = lfText.replace(/\n/g, '\r\n')
+            await writeFile(patchPath, text, 'utf8')
+            await registry.setEnabled('srv', false)
+            const written = await readFile(patchPath, 'utf8')
+            const diff = diffRegion(text, written)
+            expect(diff.beforeLines).toEqual([])
+            expect(diff.afterLines).toEqual(['  disabled: true\r'])
+            expect(/(?<!\r)\n/.test(written)).toBe(false)
+          })
+        },
+      )
+
+      it(
+        'refuses with a controlled, redacted message — never the underlying `yaml` error text — when the '
+        + 'matched entry is a YAML alias/anchor reference `doc.setIn` cannot deep-set into (SWD-170 round 2)',
+        async () => {
+          // `locateMcpMount` matches on `doc.toJS()`'s fully-resolved plain
+          // objects: entry 1 here resolves (via the alias `*srvAnchor`) to
+          // `{ id: 'mcp-srv', name: '@deepseek-ai/dsh-mcp-client', config: {
+          // serverName: 'srv' } }` — a UNIQUE match for "srv", since the
+          // anchor's own definition sits on an unrelated `stash:` key nested
+          // inside entry 0 (never independently scanned as its own
+          // top-level mount) rather than on a competing top-level entry.
+          // But the live `Document` node AT entry 1's own array slot is
+          // actually an Alias, not a Map — confirmed empirically that
+          // `doc.setIn([1, 'disabled'], ...)` throws
+          // "Expected YAML collection at 1. Remaining path: disabled" for
+          // exactly this shape.
+          const aliasedPatch = [
+            '- id: mcp-decoy',
+            '  name: \'@deepseek-ai/dsh-mcp-client\'',
+            '  config:',
+            '    serverName: decoy',
+            '  stash: &srvAnchor',
+            '    id: mcp-srv',
+            '    name: \'@deepseek-ai/dsh-mcp-client\'',
+            '    config:',
+            '      serverName: srv',
+            '- *srvAnchor',
+            '',
+          ].join('\n')
+          await writeFile(patchPath, aliasedPatch, 'utf8')
+          const warns: string[] = []
+          vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warns.push(String(message)) }) as never)
+
+          await expect(registry.setEnabled('srv', true)).rejects.toThrow(
+            new RegExp(
+              '^mcp set-enabled: cordis patch file "<path>" entry for "srv" is not a plain mapping the host can edit '
+              + 'in place \\(YAML alias or anchor reference\\) — edit the file by hand and restart the host \\(SWD-170\\)$',
+            ),
+          )
+          // Never written: the exact pre-existing bytes survive, and no
+          // backup was ever attempted for a write that never happened.
+          expect(await readFile(patchPath, 'utf8')).toBe(aliasedPatch)
+          expect(await readdir(dir)).toEqual(['cordis.patch.yml'])
+
+          // The real, actionable path is logged server-side; the thrown
+          // message (crosses the /api wire) stays redacted like every
+          // sibling error in this method, and the underlying `yaml` error
+          // text ("Expected YAML collection...") never appears anywhere.
+          expect(warns).toHaveLength(1)
+          expect(warns[0]).toContain(patchPath)
+          expect(warns[0]).not.toContain('Expected YAML collection')
+        },
+      )
+    },
+  )
 
   it('rejects a mount serverName that does not exist — set-enabled never inserts', async () => {
     await writeFile(patchPath, `${mcpMountYaml('mcp-other-mount', 'other-mount', false)}\n`, 'utf8')
@@ -1300,8 +1815,12 @@ describe('McpStatusRegistryService — set-enabled', () => {
       [
         '- id: group',
         '  insert:',
-        mcpMountYaml('mcp-nested-srv', 'nested-srv', false, '    '),
-        mcpMountYaml('mcp-sibling', 'sibling', false, '    '),
+        // 2-space, matching `insert:`'s own column (the "unindented block
+        // sequence" style, `indentSeq: false`, that `inferPatchStringifyOptions`
+        // detects for this fixture) — see the identical note on the
+        // fixture above in this describe block.
+        mcpMountYaml('mcp-nested-srv', 'nested-srv', false, '  '),
+        mcpMountYaml('mcp-sibling', 'sibling', false, '  '),
         '',
       ].join('\n'),
       'utf8',

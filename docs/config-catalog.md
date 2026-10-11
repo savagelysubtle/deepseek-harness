@@ -1561,7 +1561,7 @@ export interface OAuthAuthConfig {
 }
 ```
 
-Source: [`packages/mcp/mcp-client/src/index.ts:185`](../packages/mcp/mcp-client/src/index.ts)
+Source: [`packages/mcp/mcp-client/src/index.ts:189`](../packages/mcp/mcp-client/src/index.ts)
 
 <a id="deepseek-aidsh-mcp-status"></a>
 
@@ -1580,7 +1580,7 @@ export interface McpStatusRegistryOptions {
 }
 ```
 
-Source: [`packages/mcp/mcp-status/src/index.ts:229`](../packages/mcp/mcp-status/src/index.ts)
+Source: [`packages/mcp/mcp-status/src/index.ts:501`](../packages/mcp/mcp-status/src/index.ts)
 
 <a id="deepseek-aidsh-message-feedback"></a>
 
