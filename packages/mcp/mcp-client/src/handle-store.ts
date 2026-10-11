@@ -29,7 +29,8 @@ import { open, readFile } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { parse as parseYaml } from 'yaml'
+import { parseDocument } from 'yaml'
+import type { Document, ScalarTag } from 'yaml'
 import type { Context } from '@deepseek-ai/cordis'
 import { SERVER_NAME_PATTERN } from './index.ts'
 import type { Config } from './index.ts'
@@ -45,6 +46,102 @@ const MCP_CLIENT_PACKAGE_NAME = '@deepseek-ai/dsh-mcp-client'
 
 /** Bound on disambiguating backup-filename suffixes, mirroring `org-served-roster.ts`. */
 const MAX_BACKUP_FILENAME_ATTEMPTS = 100
+
+/**
+ * `ScalarTag` preserving the boot loader's own `!!js` dialect
+ * (`tag:yaml.org,2002:js` — `vendor/include/src/index.ts`'s `JsExpr`) through
+ * a `yaml`-package parse/stringify round trip. Profiles use this tag for
+ * token-header expressions (e.g. `Authorization: !!js '`Bearer
+ * ${process.env.TOKEN}`'`); the `yaml` package's default (core) schema has no
+ * entry for it at all, so a bare `parseDocument`/`parse()` call resolves it
+ * with a `TAG_RESOLVE_FAILED` warning and silently degrades the scalar to a
+ * plain untagged string — on the very next `stringify()`, that string loses
+ * the `!!js` tag for good (SWD-169's root cause).
+ *
+ * This is a plain `ScalarTag` OBJECT, not a `Tag` class instance — the `yaml`
+ * package's own `Tag` export is a class for a different purpose (collection
+ * tags with a `nodeClass`); a scalar custom tag is just an object matching
+ * this shape (`node_modules/yaml/dist/schema/types.d.ts`'s `ScalarTag`
+ * interface) passed through `customTags`.
+ *
+ * `identify: () => false` is deliberate: this tag must never CLAIM a value
+ * that was not already explicitly tagged `!!js` in the source text — unlike
+ * a real custom type, there is no distinct in-memory representation to
+ * identify by here; `resolve` hands back the scalar's raw string completely
+ * unmodified, so every `toJS()`/`toJSON()` consumer of a `!!js`-tagged node
+ * sees exactly the plain string it always did. No `default` (always
+ * `false`: this tag is never chosen for an UNtagged scalar) and no custom
+ * `stringify` are needed — the `yaml` package's own default scalar
+ * stringifier already re-emits a node's explicit `.tag` once that `.tag`
+ * actually survives parsing, which is the one thing registering this tag
+ * changes. Verified empirically (SWD-170 investigation) against the real
+ * `web-stable` profile's own
+ * `Authorization: !!js '`Bearer ${process.env.SUPABASE_ACCESS_TOKEN}`'`
+ * line: parsing with this tag registered and re-`toString`ing with NO edit
+ * at all reproduces the file byte-for-byte — tag, quoting, comments, key
+ * order, and the trailing newline all included — and the `TAG_RESOLVE_FAILED`
+ * warning that previously fired on every read no longer does.
+ */
+export const JS_EXPR_SCALAR_TAG: ScalarTag = {
+  tag: 'tag:yaml.org,2002:js',
+  identify: () => false,
+  default: false,
+  resolve: (value: string) => value,
+}
+
+/** Every custom tag {@link parsePatchDocument} registers beyond the `yaml` package's core schema. */
+export const PATCH_CUSTOM_TAGS: readonly ScalarTag[] = [JS_EXPR_SCALAR_TAG]
+
+/**
+ * Parse `text` into a CST-backed `yaml` `Document` rather than a plain JS
+ * value: a `Document`'s `toString()` preserves every comment, blank line,
+ * key order, and quoting style the source carries, and — with
+ * {@link PATCH_CUSTOM_TAGS} registered — its explicit tags too, where a
+ * plain `parse()`/`stringify()` round trip discards all of that on the very
+ * first write (SWD-169/SWD-170). `set-enabled` edits the returned `Document`
+ * in place (`doc.setIn(path, value)`) and re-serializes IT, rather than
+ * rebuilding a fresh plain-object document from scratch the way the old
+ * `buildNextMcpPatches` did.
+ * @param text - the patch file's current bytes, decoded as UTF-8.
+ * @returns the parsed document. Never throws itself (`parseDocument` never
+ *   does) — see {@link parsePatchFile} for the caller-facing helper that
+ *   turns a parse problem into a thrown `Error`, from whichever of the two
+ *   different stages actually detects it.
+ */
+export function parsePatchDocument(text: string): Document.Parsed {
+  return parseDocument(text, { customTags: [...PATCH_CUSTOM_TAGS] })
+}
+
+/** {@link parsePatchFile}'s result: the editable document alongside its already-resolved plain-JS form. */
+export interface ParsedPatchFile {
+  /** The CST-backed document — edit this (`doc.setIn(...)`) and `doc.toString(...)` it for a lossless rewrite. */
+  readonly doc: Document.Parsed
+  /** `doc.toJS()`, already computed — the same plain value {@link locateMcpMount}/`collectMcpPatchEntries` expect. */
+  readonly patches: unknown
+}
+
+/**
+ * Parse `text` and eagerly resolve it to its plain-JS form in one call,
+ * throwing the FIRST problem either stage finds: `doc.errors[0]` for a
+ * composer-level problem (a duplicate key, a bad indent, an unknown tag with
+ * no custom resolution, ...), or whatever `doc.toJS()` itself throws for a
+ * problem that only surfaces at JS-conversion time (an unresolved alias is
+ * the only one in practice — the `yaml` package resolves aliases lazily,
+ * during `toJS()`, not during compose). Every existing caller of this
+ * module's old `parse()`-based read relied on a single try/catch around one
+ * call that could fail either way; this preserves that shape while also
+ * handing back the editable {@link Document} `set-enabled` needs.
+ * @param text - the patch file's current bytes, decoded as UTF-8.
+ * @returns the parsed document and its plain-JS form.
+ * @throws the first parse or resolution problem, always an `Error` instance
+ *   (the `yaml` package never throws anything else from either stage).
+ */
+export function parsePatchFile(text: string): ParsedPatchFile {
+  const doc = parsePatchDocument(text)
+  const [firstError] = doc.errors
+  if (firstError !== undefined) throw firstError
+  return { doc, patches: doc.toJS() }
+}
 
 /**
  * Resolve the running profile's own `cordis.patch.yml` — never a hardcoded
@@ -311,11 +408,13 @@ export async function readMcpPatchEntries(
   }
   let patches: unknown
   try {
-    patches = parseYaml(bytes.toString('utf8'))
+    patches = parsePatchFile(bytes.toString('utf8')).patches
   } catch (error: unknown) {
-    // `: String(error)` is unreachable: the `yaml` package's `parse()` only
-    // ever throws `YAMLParseError` (and its siblings in that module), all of
-    // which extend `Error` — a non-Error throw from `parse()` cannot occur.
+    // `: String(error)` is unreachable: `parsePatchFile` only ever throws
+    // `doc.errors[0]` (a `YAMLParseError` and its siblings) or whatever
+    // `doc.toJS()` itself throws for a problem that only surfaces at JS-
+    // conversion time (an unresolved alias, in practice) — both are always
+    // `Error` instances, never a non-Error throw.
     /* v8 ignore next -- see proof above */
     ctx.logger.warn(`mcp status: cordis patch file is not valid YAML: ${error instanceof Error ? error.message : String(error)}`)
     return undefined
@@ -325,30 +424,6 @@ export async function readMcpPatchEntries(
     return undefined
   }
   return collectMcpPatchEntries(patches)
-}
-
-/**
- * Build the next patch document with minimal new objects, writing an
- * explicit `disabled: true|false` onto exactly the matched entry — always
- * explicit (never omitted on enable) so the written file is unambiguous on
- * a re-read regardless of what Cordis treats as the key's absent default.
- * @param patches - the parsed top-level patch list.
- * @param location - the matched mount's position, from {@link locateMcpMount}.
- * @param enabled - the proposed enablement.
- * @returns the next top-level patch list.
- */
-export function buildNextMcpPatches(patches: readonly unknown[], location: McpMountLocation, enabled: boolean): unknown[] {
-  const next = [...patches]
-  if (location.insertIndex === undefined) {
-    next[location.topIndex] = { ...location.entry, disabled: !enabled }
-    return next
-  }
-  const currentTop = next[location.topIndex] as Record<string, unknown>
-  const currentInsert = currentTop.insert as unknown[]
-  const nextInsert = [...currentInsert]
-  nextInsert[location.insertIndex] = { ...location.entry, disabled: !enabled }
-  next[location.topIndex] = { ...currentTop, insert: nextInsert }
-  return next
 }
 
 /** Per-root live handle maps; dedup mirrors `activeServerNames` in `index.ts`. */

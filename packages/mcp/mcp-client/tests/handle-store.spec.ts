@@ -18,11 +18,12 @@ import { Context } from '@deepseek-ai/cordis'
 import type { StreamableHttpConfig } from '../src/index.ts'
 import {
   backupPatchBytes,
-  buildNextMcpPatches,
   defaultPatchPath,
   hashMcpPatchBytes,
   listMcpHandles,
   locateMcpMount,
+  parsePatchDocument,
+  parsePatchFile,
   readMcpPatchEntries,
   redactAbsolutePaths,
   registerMcpHandle,
@@ -35,10 +36,14 @@ import type { McpServerStatus } from '../src/status.ts'
 // real fs failure (Node's fs module only ever throws Error/ErrnoException
 // instances), so it is injected via `vi.mock`, one-shot — same pattern
 // `packages/mcp/mcp-status/tests/status-registry.spec.ts` uses for its own
-// copy's identical branch. Off by default (`openWxFailError` undefined) so
-// every other test's `open` call passes straight through to the real
-// implementation.
-const fsOpenFailState = vi.hoisted(() => ({ openWxFailError: undefined as unknown }))
+// copy's identical branch. Off by default (`openWxFailError`/
+// `readFileFailPath` undefined) so every other test's `open`/`readFile`
+// call passes straight through to the real implementation.
+const fsOpenFailState = vi.hoisted(() => ({
+  openWxFailError: undefined as unknown,
+  readFileFailPath: undefined as string | undefined,
+  readFileFailError: undefined as unknown,
+}))
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
@@ -53,6 +58,20 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       }
       return actual.open(...args)
     },
+    readFile: (async (...args: Parameters<typeof actual.readFile>) => {
+      const [path] = args
+      if (
+        fsOpenFailState.readFileFailPath !== undefined
+        && typeof path === 'string'
+        && path === fsOpenFailState.readFileFailPath
+      ) {
+        const error = fsOpenFailState.readFileFailError
+        fsOpenFailState.readFileFailPath = undefined // one-shot
+        fsOpenFailState.readFileFailError = undefined
+        throw error
+      }
+      return actual.readFile(...args)
+    }) as typeof actual.readFile,
   }
 })
 
@@ -310,6 +329,21 @@ describe('readMcpPatchEntries', () => {
     expect(await readMcpPatchEntries(ctx, undefined)).toBeUndefined()
   })
 
+  it('warns once and returns undefined for a non-ENOENT read failure (non-Error thrown value)', async () => {
+    ctx = new Context()
+    dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-handle-store-'))
+    const patchPath = join(dir, 'cordis.patch.yml')
+    await writeFile(patchPath, `${mcpMountYaml('mcp-srv', 'srv', false)}\n`, 'utf8')
+    fsOpenFailState.readFileFailPath = patchPath
+    fsOpenFailState.readFileFailError = 'a plain thrown string, not an Error'
+    const warns: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warns.push(String(message)) }) as never)
+
+    expect(await readMcpPatchEntries(ctx, patchPath)).toBeUndefined()
+    expect(warns).toHaveLength(1)
+    expect(warns[0]).toContain('a plain thrown string, not an Error')
+  })
+
   it('warns once and returns undefined for malformed YAML', async () => {
     ctx = new Context()
     dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-handle-store-'))
@@ -335,6 +369,45 @@ describe('readMcpPatchEntries', () => {
     expect(warns).toHaveLength(1)
     expect(warns[0]).toContain('does not contain a top-level list')
   })
+
+  it(
+    'emits no process "warning" event for a `!!js`-tagged entry (SWD-169\'s TAG_RESOLVE_FAILED no longer fires '
+    + 'now that `parsePatchDocument` registers the tag) and returns the correct entries',
+    async () => {
+      ctx = new Context()
+      dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-handle-store-'))
+      const patchPath = join(dir, 'cordis.patch.yml')
+      await writeFile(
+        patchPath,
+        [
+          '- id: mcp-supabase',
+          '  name: \'@deepseek-ai/dsh-mcp-client\'',
+          '  config:',
+          '    serverName: supabase',
+          '    headers:',
+          '      # a comment sitting right above the tagged scalar',
+          '      Authorization: !!js \'`Bearer ${process.env.TOKEN}`\'',
+          mcpMountYaml('mcp-flat', 'flat', false),
+          '',
+        ].join('\n'),
+        'utf8',
+      )
+      const warnings: unknown[] = []
+      const onWarning = (warning: unknown): void => { warnings.push(warning) }
+      process.on('warning', onWarning)
+      let entries: Awaited<ReturnType<typeof readMcpPatchEntries>>
+      try {
+        entries = await readMcpPatchEntries(ctx, patchPath)
+      } finally {
+        process.off('warning', onWarning)
+      }
+      expect(warnings).toEqual([])
+      expect(entries).toEqual(new Map([
+        ['supabase', { disabled: false }],
+        ['flat', { disabled: false }],
+      ]))
+    },
+  )
 
   it('collects only valid mcp-client mounts, flat and nested, skipping non-object and invalid-serverName entries', async () => {
     ctx = new Context()
@@ -410,21 +483,56 @@ describe('locateMcpMount', () => {
     ]
     expect(locateMcpMount(patches, 'real')).toEqual({ kind: 'found', location: { topIndex: 5, entry: real } })
   })
+
+  it('skips a well-formed mcp-client entry whose config.serverName simply does not match, continuing to the real mount', () => {
+    const mismatched = { id: 'mcp-other', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'other' } }
+    const real = { id: 'mcp-real', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'real' } }
+    expect(locateMcpMount([mismatched, real], 'real')).toEqual({ kind: 'found', location: { topIndex: 1, entry: real } })
+  })
 })
 
-describe('buildNextMcpPatches', () => {
-  it('writes an explicit disabled flag onto a flat top-level entry', () => {
-    const entry = { id: 'mcp-a', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'a' } }
-    const next = buildNextMcpPatches([entry], { topIndex: 0, entry }, true)
-    expect(next).toEqual([{ ...entry, disabled: false }])
+describe('parsePatchDocument / parsePatchFile', () => {
+  // The real `web-stable` profile's own trigger for SWD-169/SWD-170: a
+  // leading comment, a blank-line-free block, and a `headers.Authorization`
+  // scalar carrying the boot loader's `!!js` dialect — copied in shape (not
+  // value) from `~/.dsh/profiles/web-stable/cordis.patch.yml`, which holds
+  // the exact same construct with no secret values.
+  const jsTaggedWithComments = [
+    '# why this needs the raw expression, not a literal token',
+    '- id: mcp-srv',
+    '  name: \'@deepseek-ai/dsh-mcp-client\'',
+    '  config:',
+    '    serverName: srv',
+    '    headers:',
+    '      Authorization: !!js \'`Bearer ${process.env.TOKEN}`\'',
+    '',
+  ].join('\n')
+
+  it(
+    'registers the `!!js` custom tag: no parse errors or warnings, the tag resolves to its raw string via toJS(), '
+    + 'and a no-edit round trip reproduces the source byte-for-byte (tag, quoting, comment, and trailing newline included)',
+    () => {
+      const doc = parsePatchDocument(jsTaggedWithComments)
+      expect(doc.errors).toEqual([])
+      expect(doc.warnings).toEqual([])
+      const patches = doc.toJS() as [{ config: { headers: { Authorization: unknown } } }]
+      expect(patches[0].config.headers.Authorization).toBe('`Bearer ${process.env.TOKEN}`')
+      expect(doc.toString({ indentSeq: false, singleQuote: true })).toBe(jsTaggedWithComments)
+    },
+  )
+
+  it('parsePatchFile returns the document and its already-resolved plain-JS form, kept in sync', () => {
+    const { doc, patches } = parsePatchFile(`${mcpMountYaml('mcp-srv', 'srv', true)}\n`)
+    expect(Array.isArray(patches)).toBe(true)
+    expect(doc.toJS()).toEqual(patches)
   })
 
-  it('writes an explicit disabled flag onto a nested entry without disturbing its siblings', () => {
-    const nested = { id: 'mcp-b', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'b' } }
-    const sibling = { id: 'mcp-c', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'c' } }
-    const group = { id: 'group', insert: [nested, sibling] }
-    const next = buildNextMcpPatches([group], { topIndex: 0, insertIndex: 0, entry: nested }, false)
-    expect(next).toEqual([{ id: 'group', insert: [{ ...nested, disabled: true }, sibling] }])
+  it('throws the composer\'s own first error for malformed YAML (a problem `doc.errors` catches)', () => {
+    expect(() => parsePatchFile(': : not yaml ][')).toThrow(/Nested mappings are not allowed in compact mappings/)
+  })
+
+  it('throws whatever toJS() itself throws for a problem that only surfaces at JS-conversion time (an unresolved alias)', () => {
+    expect(() => parsePatchFile('key: *missing\n')).toThrow(/Unresolved alias/)
   })
 })
 

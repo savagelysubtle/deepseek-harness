@@ -46,11 +46,14 @@ export { ConsentTimeoutError, startAuthorizationCallbackListener } from './oauth
 export type { AuthorizationCallbackListener, CaptureAuthorizationCodeOptions } from './oauth-callback.ts'
 export {
   backupPatchBytes,
-  buildNextMcpPatches,
   defaultPatchPath,
   hashMcpPatchBytes,
   listMcpHandles,
   locateMcpMount,
+  JS_EXPR_SCALAR_TAG,
+  PATCH_CUSTOM_TAGS,
+  parsePatchDocument,
+  parsePatchFile,
   readMcpPatchEntries,
   redactAbsolutePaths,
   registerMcpHandle,
@@ -61,6 +64,7 @@ export type {
   McpMountLocation,
   McpMountLookup,
   McpPatchEntry,
+  ParsedPatchFile,
   RegisterMcpHandleOptions,
 } from './handle-store.ts'
 export type { McpServerState, McpServerStatus } from './status.ts'

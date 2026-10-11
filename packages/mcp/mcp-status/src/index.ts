@@ -49,17 +49,16 @@
 
 import { createHash, randomBytes } from 'node:crypto'
 import { open, readFile, rename, rm } from 'node:fs/promises'
-import { LineCounter, parse as parseYaml, parseDocument, stringify as stringifyYaml, visit } from 'yaml'
 import type { Context } from '@deepseek-ai/cordis'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
 import { auth as sdkAuth } from '@modelcontextprotocol/sdk/client/auth.js'
 // Typert-generated ./typert and ./remote artifacts import Zod at runtime.
 import type {} from 'zod'
 import {
-  buildNextMcpPatches,
   defaultPatchPath,
   listMcpHandles,
   locateMcpMount,
+  parsePatchFile,
   readMcpPatchEntries,
   redactAbsolutePaths,
   registerMcpHandle,
@@ -69,7 +68,7 @@ import {
   ConsentTimeoutError,
   startAuthorizationCallbackListener,
 } from '@deepseek-ai/dsh-mcp-client'
-import type { Config, ConnectionHandle, RegisterMcpHandleOptions } from '@deepseek-ai/dsh-mcp-client'
+import type { Config, ConnectionHandle, McpMountLookup, RegisterMcpHandleOptions } from '@deepseek-ai/dsh-mcp-client'
 import type { McpServerStatus } from '@deepseek-ai/dsh-mcp-client/status'
 import type { McpAuthorizeStartResult } from './status.ts'
 
@@ -151,78 +150,351 @@ function hashMcpPatchBytes(bytes: Uint8Array): string {
 }
 
 /**
- * Fully-qualified tag URIs the `yaml` package's default ('core') schema
- * resolves implicitly on both read and write — the exact array
- * `node_modules/yaml/dist/schema/core/schema.js` exports — so an explicit
- * `!!tag` naming one of these is a no-op: a plain `parse()` + `stringify()`
- * round trip reproduces it unchanged. Anything else left on a composed
- * node's own `.tag` is confirmed lossy on that same round trip (SWD-169):
- * the boot loader's `!!js` dialect (`tag:yaml.org,2002:js` —
- * `vendor/include/src/index.ts`'s `JsExpr`, the trigger for this guard —
- * profiles use it for token-header expressions like
- * `Authorization: !!js '`Bearer ${process.env.TOKEN}`'`) resolves with a
- * `TAG_RESOLVE_FAILED` warning and silently degrades to a plain string; the
- * `yaml` package's own YAML-1.1 "known but not core" tags (`!!timestamp`,
- * `!!binary`, `!!set`, `!!omap`, `!!pairs`, `!!merge` —
- * `schema/tags.js`'s `coreKnownTags`) resolve with no warning at all yet
- * still lose their explicit tag on write-back (verified directly against
- * this package's own `yaml` dependency during investigation). Scoped to
- * tags only, deliberately: this file's write path already strips comments
- * on every `set-enabled` call today (`parseYaml` → `stringifyYaml`, both
- * plain), and that existing, pre-SWD-169 behavior is out of scope here.
+ * A line matching this is `verifyLosslessEdit`'s one permitted kind of
+ * change: an explicit `disabled: true|false` key, added or value-changed in
+ * place. Capture group 1 is the line's leading whitespace, compared between
+ * the before/after line in the "changed in place" case below so a line that
+ * merely LOOKS like a disabled flag at the wrong indentation (e.g. inside an
+ * unrelated nested mapping) is never mistaken for the real one. The
+ * trailing `\r?` (SWD-170 round 2) tolerates a CRLF file's own lines, which
+ * still carry their `\r` when split on bare `\n` alone — `original` and
+ * `rewritten` are both converted to the SAME convention by
+ * `applyPatchEolConvention` before either ever reaches this regex, so a
+ * line either has a trailing `\r` on BOTH sides or neither, never a mix.
  */
-const SAFE_CORE_YAML_TAGS: ReadonlySet<string> = new Set([
-  'tag:yaml.org,2002:map',
-  'tag:yaml.org,2002:seq',
-  'tag:yaml.org,2002:str',
-  'tag:yaml.org,2002:null',
-  'tag:yaml.org,2002:bool',
-  'tag:yaml.org,2002:int',
-  'tag:yaml.org,2002:float',
-])
+const DISABLED_LINE_RE = /^(\s*)disabled: (?:true|false)\r?$/
 
-/** One YAML tag {@link findUnsafeYamlTag} found that a plain round trip cannot preserve. */
-interface UnsafeYamlTag {
-  /** The tag's fully-qualified URI, e.g. `tag:yaml.org,2002:js`. */
-  readonly tag: string
-  /** 1-based source line of the tag's node. */
-  readonly line: number
-  /** 1-based source column of the tag's node. */
-  readonly column: number
+/** Outcome of {@link verifyLosslessEdit}. Exported for this module's own direct unit tests only — not part of the Remote surface. */
+export type LosslessEditVerification =
+  | { readonly kind: 'ok' }
+  | { readonly kind: 'unexpected-difference'; readonly line: number }
+
+/**
+ * Prove the SHAPE of the change `rewritten` makes to `original`: exactly
+ * one differing region, consisting of one `disabled:` line — either a
+ * brand-new line (the key was absent) or an existing line's value changed
+ * in place (the key was already present) — and nothing else at all: no
+ * comment, no blank line, no other key, no re-flowed collection, no
+ * re-indented block scalar, no tag spelling normalized to its other form.
+ * `set-enabled` no longer trusts the `yaml` package's Document-based round
+ * trip to be lossless by construction — SWD-169's own `findUnsafeYamlTag`
+ * tried to enumerate every way it ISN'T (tags only) and missed whole other
+ * classes (re-flowed flow collections, re-indented block scalars, a
+ * verbatim tag spelling getting normalized to its shorthand) — this
+ * instead proves that one property empirically, on the actual bytes about
+ * to be written, and refuses to write anything whose SHAPE it cannot
+ * prove this way.
+ *
+ * This is deliberately only HALF of `setEnabled`'s overall proof, and
+ * knows nothing about which mount the changed line belongs to: a function
+ * given two arbitrary texts cannot know that on its own. The other half —
+ * that the one `disabled:` line this function found is the RIGHT one, on
+ * the entry `locateMcpMount` actually matched for the requested
+ * `serverName` — is `setEnabled`'s own job, proven separately by
+ * re-parsing `rewritten` and re-running `locateMcpMount` against it,
+ * confirming `disabled === !enabled` for that exact `serverName` (its
+ * "self-validate" step, right after this function returns `'ok'`).
+ * SHAPE here, LOCATION there — together, not either alone, are what make
+ * the write provably safe.
+ *
+ * Works by trimming the longest common PREFIX and the longest common SUFFIX
+ * of the two texts' lines (a `set-enabled` call only ever touches one
+ * contiguous region — exactly one entry's `disabled` key — so this is not a
+ * general-purpose diff, just enough to isolate that one region and name
+ * exactly what changed inside it). Anything OTHER than the two permitted
+ * shapes below — including a second, unrelated changed region anywhere
+ * else in the file, which widens this same middle slice past one line —
+ * falls through to the refusal.
+ * @param original - the patch file's bytes before this edit, as read from disk.
+ * @param rewritten - the `Document`'s own `toString()` after the edit.
+ * @returns `'ok'`, or `'unexpected-difference'` naming the 1-based line (in
+ *   either text — they are identical up to this point) where the two texts
+ *   first diverge.
+ */
+export function verifyLosslessEdit(original: string, rewritten: string): LosslessEditVerification {
+  const originalLines = original.split('\n')
+  const rewrittenLines = rewritten.split('\n')
+
+  let prefixLength = 0
+  while (
+    prefixLength < originalLines.length
+    && prefixLength < rewrittenLines.length
+    && originalLines[prefixLength] === rewrittenLines[prefixLength]
+  ) prefixLength += 1
+
+  let suffixLength = 0
+  while (
+    suffixLength < originalLines.length - prefixLength
+    && suffixLength < rewrittenLines.length - prefixLength
+    && originalLines[originalLines.length - 1 - suffixLength] === rewrittenLines[rewrittenLines.length - 1 - suffixLength]
+  ) suffixLength += 1
+
+  const originalMiddle = originalLines.slice(prefixLength, originalLines.length - suffixLength)
+  const rewrittenMiddle = rewrittenLines.slice(prefixLength, rewrittenLines.length - suffixLength)
+
+  const ok = { kind: 'ok' as const }
+  if (originalMiddle.length === 0 && rewrittenMiddle.length === 0) {
+    // A true no-op: `enabled` already matched the entry's existing
+    // `disabled` value, so `doc.setIn` wrote back the exact same scalar and
+    // nothing in the document changed at all — the most lossless outcome
+    // there is, not a difference to flag.
+    return ok
+  }
+  if (originalMiddle.length === 0 && rewrittenMiddle.length === 1) {
+    // Added: the key was absent before, so `rewrittenMiddle` is the only
+    // thing that must look like a disabled line — there is nothing on the
+    // "before" side to compare its indentation against. The non-null
+    // assertion is proven by the `.length === 1` check just above: index 0
+    // always exists.
+    // oxlint-disable-next-line typescript/no-non-null-assertion
+    if (DISABLED_LINE_RE.test(rewrittenMiddle[0]!)) return ok
+  } else if (originalMiddle.length === 1 && rewrittenMiddle.length === 1) {
+    // Changed in place: both sides must be a disabled line, at the SAME
+    // indentation — a value change may never also smuggle in a re-indent.
+    // Both non-null assertions are proven by the two `.length === 1` checks
+    // just above.
+    // oxlint-disable-next-line typescript/no-non-null-assertion
+    const beforeMatch = DISABLED_LINE_RE.exec(originalMiddle[0]!)
+    // oxlint-disable-next-line typescript/no-non-null-assertion
+    const afterMatch = DISABLED_LINE_RE.exec(rewrittenMiddle[0]!)
+    if (beforeMatch !== null && afterMatch !== null && beforeMatch[1] === afterMatch[1]) return ok
+  }
+  return { kind: 'unexpected-difference', line: prefixLength + 1 }
 }
 
 /**
- * Find the first explicit YAML tag in `text` outside
- * {@link SAFE_CORE_YAML_TAGS}, composing the whole document (never throwing
- * on a parse error — a genuinely malformed file is `setEnabled`'s existing
- * `parseYaml` call's problem, not this one's) and walking every composed
- * node in document order via `visit`. Written against the schema boundary
- * itself rather than an `!!js`-specific string check, so it catches the
- * verbatim form (`!<tag:yaml.org,2002:js>`) and any other future custom tag
- * the exact same way `!!js` triggered this guard.
- * @param text - the patch file's current bytes, decoded as UTF-8.
- * @returns the first offending tag's identity and position, or `undefined`
- *   when every explicit tag in `text` (there may be none at all) is one the
- *   `yaml` package's default schema resolves both ways.
+ * Stringify options {@link McpStatusRegistryService.setEnabled} derives from
+ * the patch file's OWN existing formatting via
+ * {@link inferPatchStringifyOptions}, rather than a fixed convention.
  */
-function findUnsafeYamlTag(text: string): UnsafeYamlTag | undefined {
-  const lineCounter = new LineCounter()
-  const doc = parseDocument(text, { lineCounter })
-  let found: UnsafeYamlTag | undefined
-  visit(doc, {
-    Node(_key, node) {
-      if (typeof node.tag !== 'string' || SAFE_CORE_YAML_TAGS.has(node.tag)) return undefined
-      // `range` is typed optional/nullable only because NodeBase also covers
-      // hand-built nodes (`doc.createNode()`); every node `visit` reaches
-      // here was composed by `parseDocument` itself, which always sets it
-      // (compose-scalar.js/compose-collection.js both assign it unconditionally).
-      // oxlint-disable-next-line typescript/no-non-null-assertion
-      const { line, col } = lineCounter.linePos(node.range![0])
-      found = { tag: node.tag, line, column: col }
-      return visit.BREAK
-    },
-  })
-  return found
+export interface PatchStringifyOptions {
+  readonly indent: number
+  readonly indentSeq: boolean
+}
+
+/**
+ * `yaml`'s own stringify defaults — the fallback for whichever of
+ * `indent`/`indentSeq` {@link inferPatchStringifyOptions} finds no evidence
+ * for in the file, which, by construction, means the document has no node
+ * left for that option to actually affect anyway.
+ */
+const DEFAULT_PATCH_INDENT = 2
+const DEFAULT_PATCH_INDENT_SEQ = true
+
+/**
+ * Matches a line whose ENTIRE value is `<key>:` (optionally preceded by one
+ * `- ` sequence-item marker) with nothing else on it — the key's value
+ * lives on subsequent, deeper-indented lines, and THAT is what tells
+ * {@link inferPatchStringifyOptions} how this file indents a key's
+ * children. Capture 1: leading whitespace. Capture 2: the optional `- `
+ * marker (and any extra spaces after it), so its width can be added to
+ * capture 1's to get the key TEXT's own column, not the dash's.
+ */
+const KEY_ONLY_LINE_RE = /^(\s*)(-\s+)?[^\s#:][^:]*:$/
+
+/**
+ * First non-blank, non-`#`-comment line in `lines` at or after `fromIndex`,
+ * or `undefined` if none remains — isolates the blank/comment-skipping
+ * branches so {@link findIndentSeqEvidence} and
+ * {@link findIndentWidthEvidence}'s own branching stays about indentation.
+ */
+function nextContentLine(lines: readonly string[], fromIndex: number): string | undefined {
+  for (let i = fromIndex; i < lines.length; i++) {
+    // `i` is always a valid index into `lines` inside this loop's own bound.
+    // oxlint-disable-next-line typescript/no-non-null-assertion
+    const line = lines[i]!
+    if (line.trim() === '' || line.trimStart().startsWith('#')) continue
+    return line
+  }
+  return undefined
+}
+
+/** Leading-whitespace column of `line` — `\s*` always matches at position 0, so `exec` never returns `null` here. */
+function indentColumn(line: string): number {
+  // oxlint-disable-next-line typescript/no-non-null-assertion
+  return /^(\s*)/.exec(line)![1]!.length
+}
+
+/**
+ * Find the first `<key>:`-only line in `lines` immediately followed (modulo
+ * blank/comment lines) by a nested block SEQUENCE item (`- `), and report
+ * whether that item sits strictly deeper than the key's own column
+ * (`indentSeq: true`, `yaml`'s own default) or shares it exactly
+ * (`indentSeq: false`, e.g. the real `web-stable` profile's own `insert:`
+ * lists). A child at a column LESS than the key's is not valid nested
+ * content under that key at all (an empty/null-valued key) and is skipped.
+ * @returns `undefined` if no such example exists anywhere in the file.
+ */
+function findIndentSeqEvidence(lines: readonly string[]): boolean | undefined {
+  for (let i = 0; i < lines.length; i++) {
+    // oxlint-disable-next-line typescript/no-non-null-assertion
+    const line = lines[i]!
+    const match = KEY_ONLY_LINE_RE.exec(line.trimEnd())
+    if (match === null) continue
+    // Group 1 (`\s*`) always participates, even on a zero-width match.
+    // oxlint-disable-next-line typescript/no-non-null-assertion
+    const keyColumn = match[1]!.length + (match[2]?.length ?? 0)
+    const child = nextContentLine(lines, i + 1)
+    if (child === undefined || !/^\s*-(?:\s|$)/.test(child)) continue
+    const childColumn = indentColumn(child)
+    if (childColumn < keyColumn) continue
+    return childColumn > keyColumn
+  }
+  return undefined
+}
+
+/**
+ * Find the first `<key>:`-only line in `lines` immediately followed (modulo
+ * blank/comment lines) by a nested MAPPING key (anything that is not a
+ * block sequence item), and report the column delta between the two — this
+ * file's `indent` width, since a mapping's own indent never depends on
+ * `indentSeq`. A child at a column at or below the key's own is not a
+ * nested mapping under that key (an empty/null-valued key, or a sibling)
+ * and is skipped.
+ * @returns `undefined` if no such example exists anywhere in the file.
+ */
+function findIndentWidthEvidence(lines: readonly string[]): number | undefined {
+  for (let i = 0; i < lines.length; i++) {
+    // oxlint-disable-next-line typescript/no-non-null-assertion
+    const line = lines[i]!
+    const match = KEY_ONLY_LINE_RE.exec(line.trimEnd())
+    if (match === null) continue
+    // oxlint-disable-next-line typescript/no-non-null-assertion
+    const keyColumn = match[1]!.length + (match[2]?.length ?? 0)
+    const child = nextContentLine(lines, i + 1)
+    if (child === undefined || /^\s*-(?:\s|$)/.test(child)) continue
+    const childColumn = indentColumn(child)
+    if (childColumn <= keyColumn) continue
+    return childColumn - keyColumn
+  }
+  return undefined
+}
+
+/**
+ * Infer the block-sequence indentation convention (`indentSeq`) and mapping
+ * indent width (`indent`) `doc.toString()` needs to reproduce THIS file's
+ * own formatting, rather than a fixed convention baked into `setEnabled` —
+ * SWD-170 round 1 hardcoded `indentSeq: false`, which matches the real
+ * `web-stable` profile's own `insert:` lists (sequence items share their
+ * parent key's column) but would reformat — and then be refused by
+ * {@link verifyLosslessEdit} as "other content changed" — any profile
+ * written with `yaml`'s own default `indentSeq: true` style (sequence
+ * items indented further than their parent key) or a 4-space indent
+ * instead of 2 (SWD-170 round 2).
+ *
+ * `yaml`'s `Document` exposes no API for "what indent/indentSeq did this
+ * file use" — both are stringify-only options; the CST does not retain
+ * either as a per-node preference — so this does a small line scan of the
+ * ORIGINAL text instead, the same thing a human skimming the file would do:
+ * see {@link findIndentSeqEvidence} and {@link findIndentWidthEvidence} for
+ * exactly what each one looks for. Only the FIRST example of each kind
+ * anywhere in the file is used — a best-effort inference for a file
+ * assumed to be internally consistent, not a full re-derivation of the
+ * parser's own state. Whichever of the two has no example in the file at
+ * all falls back to `yaml`'s own default, which, by construction, has no
+ * node left in the document for that default to actually affect.
+ *
+ * Quote style needs no equivalent inference: probed empirically (see the
+ * `singleQuote` option passed alongside this function's result in
+ * `setEnabled`) that `doc.toString({ singleQuote: true })` never rewrites
+ * an EXISTING quoted scalar's style — `yaml`'s `Document` round-trips each
+ * scalar's own original type (plain/single/double/block) regardless of
+ * this document-level option, which only steers the style chosen for a
+ * brand-new, not-yet-styled scalar (exactly what `doc.setIn`'s boolean
+ * value is — and a boolean is never quoted at all, so even that never
+ * applies here in practice).
+ *
+ * Either way, {@link verifyLosslessEdit} remains the real backstop: a wrong
+ * inference simply refuses the write rather than silently reformatting the
+ * file.
+ * @param text - the patch file's original bytes, as read from disk.
+ * @returns the `indent`/`indentSeq` pair to pass to `doc.toString()`.
+ */
+export function inferPatchStringifyOptions(text: string): PatchStringifyOptions {
+  const lines = text.split('\n')
+  return {
+    indent: findIndentWidthEvidence(lines) ?? DEFAULT_PATCH_INDENT,
+    indentSeq: findIndentSeqEvidence(lines) ?? DEFAULT_PATCH_INDENT_SEQ,
+  }
+}
+
+/**
+ * A patch file's own line-ending convention, detected from its RAW bytes as
+ * read from disk — never from `yaml`'s own output (see
+ * {@link applyPatchEolConvention}'s doc for why the two can disagree, and
+ * why that disagreement matters).
+ */
+export interface PatchEolConvention {
+  /**
+   * `true` when the file's line breaks are `\r\n`, detected from the FIRST
+   * line break only. A file that mixes both conventions in different
+   * places is not fully handled — see {@link applyPatchEolConvention}'s
+   * doc — and may still be refused by `verifyLosslessEdit` as "other
+   * content changed"; that is acceptable, since refusing is always safe
+   * and this is a best-effort match for an internally-consistent file, the
+   * same stance {@link inferPatchStringifyOptions} takes on indentation.
+   */
+  readonly crlf: boolean
+  /**
+   * `true` when the file's very last character is part of a line break
+   * (i.e. it ends in a trailing newline, of either style). `yaml`'s
+   * `Document.toString()` always appends exactly one trailing `\n`
+   * regardless of what the source file did.
+   */
+  readonly trailingNewline: boolean
+}
+
+/**
+ * Detect `text`'s own line-ending convention, straight from its RAW bytes
+ * — this must only ever be called on the ORIGINAL file content read from
+ * disk, never on `yaml`'s own `doc.toString()` output, which always uses
+ * bare `\n` and always ends in exactly one trailing newline no matter what
+ * the source looked like.
+ * @param text - the file's original bytes, decoded as UTF-8 text.
+ * @returns `text`'s own detected line-ending convention.
+ */
+export function detectPatchEolConvention(text: string): PatchEolConvention {
+  const firstNewlineIndex = text.indexOf('\n')
+  return {
+    crlf: firstNewlineIndex > 0 && text[firstNewlineIndex - 1] === '\r',
+    trailingNewline: text.endsWith('\n'),
+  }
+}
+
+/**
+ * Rewrite `yaml`'s own `doc.toString()` output to match the ORIGINAL
+ * file's line-ending convention, so `verifyLosslessEdit` ends up comparing
+ * the two texts like with like (SWD-170 round 2). Without this step: a
+ * CRLF file's every line would differ from `yaml`'s bare-`\n` output,
+ * tripping the verification's prefix scan at line 1 and refusing EVERY
+ * CRLF file's `set-enabled` call unconditionally (`yaml` normalizes CRLF
+ * to LF on parse and never re-emits it on its own); and a file with no
+ * final trailing newline would differ on its last line too, turning an
+ * otherwise one-line edit into a spurious two-line "difference" (the real
+ * change, plus `yaml`'s own forced trailing `\n`) and refusing a
+ * perfectly safe write.
+ *
+ * Converts every `\n` in `text` to `\r\n` when `convention.crlf` is set
+ * (safe because `yaml`'s own stringify output is always pure `\n` to begin
+ * with — it never emits a bare `\r` of its own), then strips the single
+ * resulting trailing line break entirely when `convention.trailingNewline`
+ * is `false`.
+ *
+ * A file that mixes both conventions in different places is not restored
+ * exactly by this (only the FIRST line break's style is detected, by
+ * {@link detectPatchEolConvention}), so such a file may still trip
+ * `verifyLosslessEdit` and be refused. That is acceptable: refusing is
+ * always safe, and this function only needs to make the common,
+ * internally-consistent case succeed, the same stance
+ * `inferPatchStringifyOptions` takes on indentation.
+ * @param text - `doc.toString()`'s own output (bare `\n`, one trailing newline).
+ * @param convention - the ORIGINAL file's convention, from {@link detectPatchEolConvention}.
+ * @returns `text`, rewritten to match `convention`.
+ */
+export function applyPatchEolConvention(text: string, convention: PatchEolConvention): string {
+  const crlfText = convention.crlf ? text.replace(/\n/g, '\r\n') : text
+  if (convention.trailingNewline) return crlfText
+  return convention.crlf ? crlfText.replace(/\r\n$/, '') : crlfText.replace(/\n$/, '')
 }
 
 /** Options for {@link McpStatusRegistryService}; the `patchPath` override exists for tests only. */
@@ -560,33 +832,15 @@ export class McpStatusRegistryService extends TypertRemoteService {
     } catch (error: unknown) {
       throw new Error(`mcp set-enabled: cordis patch file could not be read: ${redactAbsolutePaths(error instanceof Error ? error.message : String(error))}`)
     }
-    // Guard BEFORE computing or writing anything else (SWD-169): a profile
-    // line like `Authorization: !!js '`Bearer ${process.env.TOKEN}`'` round-trips
-    // through this method's plain parse()/stringify() with the tag silently
-    // dropped — every comment on the file goes with it too, pre-existing and
-    // out of scope — turning a live token-header expression into a dead
-    // literal string on every server this method ever touches, not only the
-    // one the caller named. Never write in that case. The thrown message
-    // (crosses the /api wire to any client, and can land in shipped logs)
-    // stays redacted like every sibling error below — sentinel round 1 —
-    // naming the file only as "<path>"; the full absolute path is logged
-    // here, server-side only, for whoever has to go find and hand-edit it.
-    const unsafeTag = findUnsafeYamlTag(currentBytes.toString('utf8'))
-    if (unsafeTag !== undefined) {
-      const message = `mcp set-enabled: cordis patch file "${this.patchPath}" has a YAML tag at line ${String(unsafeTag.line)}, `
-        + `column ${String(unsafeTag.column)} ("${unsafeTag.tag}") that a plain write-back cannot preserve — `
-        + 'edit the file by hand and restart the host (SWD-169)'
-      this.ctx.logger.warn(message)
-      throw new Error(redactAbsolutePaths(message))
-    }
     const readToken = hashMcpPatchBytes(currentBytes)
-    let patches: unknown
+    const currentText = currentBytes.toString('utf8')
+    let parsedPatchFile: ReturnType<typeof parsePatchFile>
     try {
-      patches = parseYaml(currentBytes.toString('utf8'))
+      parsedPatchFile = parsePatchFile(currentText)
     } catch (error: unknown) {
       // `: String(error)` is unreachable: see the identical proof on
-      // `readMcpPatchEntries`'s own YAML-parse catch (handle-store.ts) — the
-      // `yaml` package's `parse()` only ever throws `Error` subclasses.
+      // `readMcpPatchEntries`'s own YAML-parse catch (handle-store.ts) —
+      // `parsePatchFile` only ever throws `Error` instances.
       /* v8 ignore next -- see proof above */
       const detail = error instanceof Error ? error.message : String(error)
       // Keep only the first line (sentinel round 1): the `yaml` package's
@@ -601,6 +855,7 @@ export class McpStatusRegistryService extends TypertRemoteService {
       const firstLine = newlineIndex === -1 ? detail : detail.slice(0, newlineIndex)
       throw new Error(`mcp set-enabled: cordis patch file is not valid YAML: ${redactAbsolutePaths(firstLine)}`)
     }
+    const { doc, patches } = parsedPatchFile
     if (!Array.isArray(patches)) {
       throw new Error('mcp set-enabled: cordis patch file does not contain a top-level list')
     }
@@ -611,26 +866,89 @@ export class McpStatusRegistryService extends TypertRemoteService {
     if (lookup.kind === 'ambiguous') {
       throw new Error(`mcp set-enabled: ${String(lookup.count)} mounts have serverName "${serverName}" in the cordis patch file — refusing to guess which one to toggle`)
     }
-    const location = lookup.location
-    const nextPatches = buildNextMcpPatches(patches, location, enabled)
-    const nextText = stringifyYaml(nextPatches, { indentSeq: false, singleQuote: true })
+    const { topIndex, insertIndex } = lookup.location
+    // Always an explicit `disabled: !enabled` (never omitted on enable), so
+    // the written file is unambiguous on a re-read regardless of what
+    // Cordis treats as the key's absent default — mirrors the old
+    // `buildNextMcpPatches`'s own rule, now applied as a single targeted
+    // edit on the live `Document` instead of a from-scratch plain-object
+    // rebuild (SWD-170: the rebuild is what lost every comment and tag).
+    const disabledPath = insertIndex === undefined
+      ? [topIndex, 'disabled']
+      : [topIndex, 'insert', insertIndex, 'disabled']
+    let nextText: string
+    try {
+      doc.setIn(disabledPath, !enabled)
+      // SWD-170 round 2: derive `indent`/`indentSeq` from THIS file's own
+      // existing formatting (see `inferPatchStringifyOptions`'s doc) instead
+      // of a fixed convention — a profile written with `yaml`'s own default
+      // `indentSeq: true` style, or a 4-space indent, must round-trip as a
+      // one-line diff exactly like the real `web-stable` profile's own
+      // `indentSeq: false` / 2-space convention does.
+      const rawNextText = doc.toString({ ...inferPatchStringifyOptions(currentText), singleQuote: true })
+      // SWD-170 round 2: `yaml`'s own `toString()` always uses bare `\n`
+      // line breaks and always appends exactly one trailing newline,
+      // whatever the source file did — convert back to the ORIGINAL
+      // file's own convention here so `verifyLosslessEdit` below compares
+      // like with like, rather than refusing every CRLF file
+      // unconditionally and every no-final-newline file as a two-line
+      // change (see `applyPatchEolConvention`'s own doc).
+      nextText = applyPatchEolConvention(rawNextText, detectPatchEolConvention(currentText))
+    } catch {
+      // `locateMcpMount` matches on `doc.toJS()`'s fully-resolved plain
+      // objects, which look identical whether a given array slot is a
+      // real YAML mapping or an ALIAS reference to one defined elsewhere
+      // in the document — `doc.setIn` cannot deep-set into an alias node,
+      // and throws the `yaml` package's own uncontrolled, unprefixed,
+      // unredacted "Expected YAML collection at N. Remaining path:
+      // disabled" (confirmed empirically against exactly this shape).
+      // Converted here into the same controlled refusal every other
+      // failure in this method produces: the underlying `yaml` error text
+      // is deliberately NEVER included (it can echo the file's own
+      // path/content) — only this fixed, actionable message.
+      const message = `mcp set-enabled: cordis patch file "${this.patchPath}" entry for "${serverName}" is not a `
+        + 'plain mapping the host can edit in place (YAML alias or anchor reference) — '
+        + 'edit the file by hand and restart the host (SWD-170)'
+      this.ctx.logger.warn(message)
+      throw new Error(redactAbsolutePaths(message))
+    }
+
+    // SWD-170: prove the rewrite altered NOTHING but that one `disabled:`
+    // line before ever trusting it enough to self-validate or write it —
+    // see `verifyLosslessEdit`'s own doc for why this replaces SWD-169's
+    // pre-write `findUnsafeYamlTag` tag enumeration. The thrown message
+    // (crosses the /api wire, can land in shipped logs) stays redacted like
+    // every sibling error in this method — naming the file only as
+    // "<path>"; the full absolute path is logged here, server-side only,
+    // for whoever has to go find and hand-edit it.
+    const verification = verifyLosslessEdit(currentText, nextText)
+    if (verification.kind === 'unexpected-difference') {
+      const message = `mcp set-enabled: cordis patch file "${this.patchPath}" could not be rewritten without altering `
+        + `other content (first unexpected difference at line ${String(verification.line)}) — `
+        + 'edit the file by hand and restart the host (SWD-170)'
+      this.ctx.logger.warn(message)
+      throw new Error(redactAbsolutePaths(message))
+    }
 
     // Self-validate through the same reader before anything touches disk.
-    const reparsed: unknown = parseYaml(nextText)
-    // `: undefined` arm is unreachable: `nextPatches` is always a plain
-    // array (buildNextMcpPatches's return type), and stringifying an array
-    // with the `yaml` package then re-parsing the result always yields an
-    // array back — `reparsed` is never anything else here.
+    // Never throws here: `nextText` is `doc`'s own `toString()` of a
+    // document that itself just parsed without error, after one `setIn` —
+    // `parsePatchFile` parsing it back can never fail.
+    const reparsed = parsePatchFile(nextText).patches
+    // `: undefined` arm is unreachable: `nextText` is always `doc`'s own
+    // `toString()` after a `setIn` on an array-rooted document, and
+    // re-parsing the `yaml` package's own output always yields an array
+    // back — `reparsed` is never anything else here.
     /* v8 ignore next -- see proof above */
-    const rereadLookup = Array.isArray(reparsed) ? locateMcpMount(reparsed, serverName) : undefined
+    const rereadLookup: McpMountLookup | undefined = Array.isArray(reparsed) ? locateMcpMount(reparsed, serverName) : undefined
     const rereadEnabled = rereadLookup !== undefined && rereadLookup.kind === 'found'
       && rereadLookup.location.entry.disabled === !enabled
-    // Unreachable: `buildNextMcpPatches` always writes an explicit
-    // `disabled: !enabled` onto exactly the entry `locateMcpMount` matched,
-    // and re-locating that same, unreordered document always finds the same
-    // entry with that same boolean faithfully round-tripped through the
-    // `yaml` package — `rereadEnabled` is always true here. Kept as a named
-    // diagnostic in case a future refactor of either helper breaks that.
+    // Unreachable: `doc.setIn` always writes an explicit `disabled: !enabled`
+    // onto exactly the entry `locateMcpMount` matched, and re-locating that
+    // same, unreordered document always finds the same entry with that same
+    // boolean faithfully round-tripped through the `yaml` package —
+    // `rereadEnabled` is always true here. Kept as a named diagnostic in
+    // case a future refactor of either helper breaks that.
     /* v8 ignore next 3 -- see proof above */
     if (!rereadEnabled) {
       throw new Error(`mcp set-enabled: produced document failed self-validation for mount "${serverName}"`)
