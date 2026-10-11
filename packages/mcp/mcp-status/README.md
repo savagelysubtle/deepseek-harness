@@ -15,7 +15,7 @@ The fix is this package: it carries its own permanent Loader entry (mounted in [
 - `mcp/status` lists every registered server's current status, plus a synthesized `disabled` row (no live handle) for every other mcp-client mount the profile's `cordis.patch.yml` marks disabled — a Tools panel can always show a re-enable action for a server it just disabled.
 - `mcp/authorize-start` begins (or resumes) one server's OAuth consent flow: probes reachability, binds the shared loopback listener, and returns the consent URL. The listener is single-flight across every server, not per-server.
 - `mcp/reconnect` manually retries a given-up or disabled server now.
-- `mcp/set-enabled` persists a plugin mount's enabled flag via an atomic `cordis.patch.yml` read-modify-write, matched by `config.serverName` — never the mount's opaque `id`.
+- `mcp/set-enabled` persists a plugin mount's enabled flag via an atomic `cordis.patch.yml` read-modify-write, matched by `config.serverName` — never the mount's opaque `id`. Before writing anything, it refuses outright if the current file carries any YAML tag its own `yaml` dependency cannot round-trip — the boot loader's `!!js` dialect (a token-header expression like `Authorization: !!js` in a profile) chief among them — logging the real file path to the host log and throwing an error naming the tag's line/column, the tag itself, and the remedy ("edit the file by hand and restart the host (SWD-169)"), with the path itself redacted on the wire, rather than silently dropping the tag (and every comment) on write-back.
 
 The service is Remote-only and deliberately declares no same-process Cordis `Context` merge. Client packages consume it through the explicit [`api-remotes`](../../api/remotes/README.md) assembly rather than importing the Host implementation.
 
@@ -31,3 +31,4 @@ None; this package never assembles model input.
 
 - **The consent loopback listener is single-flight** — only one `authorize-start` flow may be pending at a time across every registered server.
 - **No provenance or history beyond the current patch file and live handles** — `set-enabled` never inserts a new mount, and `list()` reports only what the handle store and the current `cordis.patch.yml` say right now.
+- **The tag refusal above is a guard, not a fix** — `set-enabled` still cannot write back a file carrying an unpreservable tag at all; a tag-preserving writer is tracked as a separate follow-up (SWD-169).

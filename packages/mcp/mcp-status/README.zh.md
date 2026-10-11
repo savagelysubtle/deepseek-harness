@@ -15,7 +15,7 @@
 - `mcp/status` 列出每个已注册服务器的当前状态,并为 profile 的 `cordis.patch.yml` 标记为 disabled 的其他 mcp-client 挂载合成一行 `disabled` 状态(没有存活的 handle)——Tools 面板始终可以为刚被停用的服务器显示重新启用的操作。
 - `mcp/authorize-start` 开始(或恢复)某个服务器的 OAuth 授权流程:探测可达性、绑定共享的本地回调监听器,并返回授权 URL。该监听器在所有服务器之间是单飞的,不是按服务器各自独立的。
 - `mcp/reconnect` 立即手动重试一个已放弃或已停用的服务器。
-- `mcp/set-enabled` 通过原子的 `cordis.patch.yml` 读-改-写操作持久化某个插件挂载的启用标志,按 `config.serverName` 匹配——绝不使用挂载本身不透明的 `id`。
+- `mcp/set-enabled` 通过原子的 `cordis.patch.yml` 读-改-写操作持久化某个插件挂载的启用标志,按 `config.serverName` 匹配——绝不使用挂载本身不透明的 `id`。写入前,如果当前文件携带任何自身 `yaml` 依赖无法原样往返保留的 YAML 标签——其中最典型的是启动加载器的 `!!js` 方言(例如 profile 中 `Authorization: !!js` 这类令牌头表达式)——它会直接拒绝:将真实文件路径记录到 host 日志,并抛出一个指明标签所在行列号、标签本身,以及修复方式("edit the file by hand and restart the host (SWD-169)")的错误——该错误在线上(wire)传输时会将路径本身做脱敏处理——而不是在写回时悄悄丢弃该标签(以及所有注释)。
 
 该服务仅供 Remote 使用,刻意不声明同进程 Cordis `Context` merge。Client 包通过显式的 [`api-remotes`](../../api/remotes/README.md) 组合消费它,而不导入 Host 实现。
 
@@ -31,3 +31,4 @@
 
 - **授权回调监听器是单飞的** —— 在所有已注册服务器中,同一时间只能有一个 `authorize-start` 流程处于待定状态。
 - **除当前 patch 文件和存活 handle 外没有来源或历史记录** —— `set-enabled` 永不插入新挂载,`list()` 仅报告 handle 存储与当前 `cordis.patch.yml` 此刻所说的内容。
+- **上面的标签拒绝只是一道防护,不是修复** —— `set-enabled` 仍然完全无法写回携带不可保留标签的文件;保留标签的写入器作为独立的后续工作单独跟踪(SWD-169)。

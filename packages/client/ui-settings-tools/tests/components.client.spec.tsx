@@ -216,6 +216,43 @@ describe('ToolsSection', () => {
       expect((await screen.findByRole('alert')).textContent).toBe('patch write failed')
     })
 
+    // A rejected confirmDisable must close the confirmation the same way
+    // Cancel does. Otherwise the Modal stays open and marks every OTHER
+    // direct child of document.body inert (Modal.tsx's syncBackgroundInert)
+    // -- including the RTL render container holding this row's own alert
+    // text -- so the failure text above is present in the DOM but
+    // unreachable and invisible behind the mask. `findByRole('alert')`
+    // alone cannot catch that regression: RTL's role queries do not account
+    // for `inert` at all, so the prior test above would keep passing even
+    // with the dialog stuck open (SWD-164 precedent: jsdom/RTL text queries
+    // have missed inert/focus bugs before) -- assert on the dialog's
+    // absence and the actual `inert` attribute instead.
+    it('closes the confirmation on a rejected Disable so the row alert is reachable, not left inert behind the mask', async () => {
+      const bundle = bench([statusOf('alpha', { state: 'connected' })])
+      bundle.setEnabled.mockRejectedValueOnce(new Error('patch write failed'))
+      render(<ToolsSection {...bundle} />)
+      fireEvent.click(await screen.findByRole('button', { name: 'Disable' }))
+      fireEvent.click(await screen.findByRole('checkbox'))
+      const dialog = screen.getByRole('dialog')
+      const portalRoot = dialog.parentElement as HTMLElement
+      // While the dialog is open, every OTHER direct child of document.body
+      // (here, the RTL render container) is marked inert.
+      const backgroundSiblings = Array.from(document.body.children)
+        .filter(el => el !== portalRoot) as HTMLElement[]
+      expect(backgroundSiblings.length).toBeGreaterThan(0)
+      for (const sibling of backgroundSiblings) expect(sibling.inert).toBe(true)
+
+      fireEvent.click(within(dialog).getByRole('button', { name: en.disableConfirmConfirm }))
+
+      const alert = await screen.findByRole('alert')
+      expect(alert.textContent).toBe('patch write failed')
+      // The dialog is gone outright, not merely covered -- and the
+      // background it had marked inert is live again, so the alert sits in
+      // reachable content rather than behind a mask only Cancel would lift.
+      expect(screen.queryByRole('dialog')).toBeNull()
+      for (const sibling of backgroundSiblings) expect(sibling.inert).toBe(false)
+    })
+
     it('ignores Cancel while a confirmed Disable is still in flight', async () => {
       const bundle = bench([statusOf('alpha', { state: 'connected' })])
       let resolve: () => void = () => {}

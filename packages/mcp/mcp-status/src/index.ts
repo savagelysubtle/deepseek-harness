@@ -49,7 +49,7 @@
 
 import { createHash, randomBytes } from 'node:crypto'
 import { open, readFile, rename, rm } from 'node:fs/promises'
-import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
+import { LineCounter, parse as parseYaml, parseDocument, stringify as stringifyYaml, visit } from 'yaml'
 import type { Context } from '@deepseek-ai/cordis'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
 import { auth as sdkAuth } from '@modelcontextprotocol/sdk/client/auth.js'
@@ -148,6 +148,81 @@ async function backupPatchBytes(path: string, currentBytes: Buffer): Promise<str
  */
 function hashMcpPatchBytes(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex')
+}
+
+/**
+ * Fully-qualified tag URIs the `yaml` package's default ('core') schema
+ * resolves implicitly on both read and write — the exact array
+ * `node_modules/yaml/dist/schema/core/schema.js` exports — so an explicit
+ * `!!tag` naming one of these is a no-op: a plain `parse()` + `stringify()`
+ * round trip reproduces it unchanged. Anything else left on a composed
+ * node's own `.tag` is confirmed lossy on that same round trip (SWD-169):
+ * the boot loader's `!!js` dialect (`tag:yaml.org,2002:js` —
+ * `vendor/include/src/index.ts`'s `JsExpr`, the trigger for this guard —
+ * profiles use it for token-header expressions like
+ * `Authorization: !!js '`Bearer ${process.env.TOKEN}`'`) resolves with a
+ * `TAG_RESOLVE_FAILED` warning and silently degrades to a plain string; the
+ * `yaml` package's own YAML-1.1 "known but not core" tags (`!!timestamp`,
+ * `!!binary`, `!!set`, `!!omap`, `!!pairs`, `!!merge` —
+ * `schema/tags.js`'s `coreKnownTags`) resolve with no warning at all yet
+ * still lose their explicit tag on write-back (verified directly against
+ * this package's own `yaml` dependency during investigation). Scoped to
+ * tags only, deliberately: this file's write path already strips comments
+ * on every `set-enabled` call today (`parseYaml` → `stringifyYaml`, both
+ * plain), and that existing, pre-SWD-169 behavior is out of scope here.
+ */
+const SAFE_CORE_YAML_TAGS: ReadonlySet<string> = new Set([
+  'tag:yaml.org,2002:map',
+  'tag:yaml.org,2002:seq',
+  'tag:yaml.org,2002:str',
+  'tag:yaml.org,2002:null',
+  'tag:yaml.org,2002:bool',
+  'tag:yaml.org,2002:int',
+  'tag:yaml.org,2002:float',
+])
+
+/** One YAML tag {@link findUnsafeYamlTag} found that a plain round trip cannot preserve. */
+interface UnsafeYamlTag {
+  /** The tag's fully-qualified URI, e.g. `tag:yaml.org,2002:js`. */
+  readonly tag: string
+  /** 1-based source line of the tag's node. */
+  readonly line: number
+  /** 1-based source column of the tag's node. */
+  readonly column: number
+}
+
+/**
+ * Find the first explicit YAML tag in `text` outside
+ * {@link SAFE_CORE_YAML_TAGS}, composing the whole document (never throwing
+ * on a parse error — a genuinely malformed file is `setEnabled`'s existing
+ * `parseYaml` call's problem, not this one's) and walking every composed
+ * node in document order via `visit`. Written against the schema boundary
+ * itself rather than an `!!js`-specific string check, so it catches the
+ * verbatim form (`!<tag:yaml.org,2002:js>`) and any other future custom tag
+ * the exact same way `!!js` triggered this guard.
+ * @param text - the patch file's current bytes, decoded as UTF-8.
+ * @returns the first offending tag's identity and position, or `undefined`
+ *   when every explicit tag in `text` (there may be none at all) is one the
+ *   `yaml` package's default schema resolves both ways.
+ */
+function findUnsafeYamlTag(text: string): UnsafeYamlTag | undefined {
+  const lineCounter = new LineCounter()
+  const doc = parseDocument(text, { lineCounter })
+  let found: UnsafeYamlTag | undefined
+  visit(doc, {
+    Node(_key, node) {
+      if (typeof node.tag !== 'string' || SAFE_CORE_YAML_TAGS.has(node.tag)) return undefined
+      // `range` is typed optional/nullable only because NodeBase also covers
+      // hand-built nodes (`doc.createNode()`); every node `visit` reaches
+      // here was composed by `parseDocument` itself, which always sets it
+      // (compose-scalar.js/compose-collection.js both assign it unconditionally).
+      // oxlint-disable-next-line typescript/no-non-null-assertion
+      const { line, col } = lineCounter.linePos(node.range![0])
+      found = { tag: node.tag, line, column: col }
+      return visit.BREAK
+    },
+  })
+  return found
 }
 
 /** Options for {@link McpStatusRegistryService}; the `patchPath` override exists for tests only. */
@@ -485,6 +560,25 @@ export class McpStatusRegistryService extends TypertRemoteService {
     } catch (error: unknown) {
       throw new Error(`mcp set-enabled: cordis patch file could not be read: ${redactAbsolutePaths(error instanceof Error ? error.message : String(error))}`)
     }
+    // Guard BEFORE computing or writing anything else (SWD-169): a profile
+    // line like `Authorization: !!js '`Bearer ${process.env.TOKEN}`'` round-trips
+    // through this method's plain parse()/stringify() with the tag silently
+    // dropped — every comment on the file goes with it too, pre-existing and
+    // out of scope — turning a live token-header expression into a dead
+    // literal string on every server this method ever touches, not only the
+    // one the caller named. Never write in that case. The thrown message
+    // (crosses the /api wire to any client, and can land in shipped logs)
+    // stays redacted like every sibling error below — sentinel round 1 —
+    // naming the file only as "<path>"; the full absolute path is logged
+    // here, server-side only, for whoever has to go find and hand-edit it.
+    const unsafeTag = findUnsafeYamlTag(currentBytes.toString('utf8'))
+    if (unsafeTag !== undefined) {
+      const message = `mcp set-enabled: cordis patch file "${this.patchPath}" has a YAML tag at line ${String(unsafeTag.line)}, `
+        + `column ${String(unsafeTag.column)} ("${unsafeTag.tag}") that a plain write-back cannot preserve — `
+        + 'edit the file by hand and restart the host (SWD-169)'
+      this.ctx.logger.warn(message)
+      throw new Error(redactAbsolutePaths(message))
+    }
     const readToken = hashMcpPatchBytes(currentBytes)
     let patches: unknown
     try {
@@ -494,7 +588,18 @@ export class McpStatusRegistryService extends TypertRemoteService {
       // `readMcpPatchEntries`'s own YAML-parse catch (handle-store.ts) — the
       // `yaml` package's `parse()` only ever throws `Error` subclasses.
       /* v8 ignore next -- see proof above */
-      throw new Error(`mcp set-enabled: cordis patch file is not valid YAML: ${error instanceof Error ? error.message : String(error)}`)
+      const detail = error instanceof Error ? error.message : String(error)
+      // Keep only the first line (sentinel round 1): the `yaml` package's
+      // own parse errors often print a source codeframe after it — the
+      // file's own content, verbatim, including whatever secret-shaped
+      // value sits on the offending line (e.g. a duplicate `Authorization:
+      // Bearer <token>` key) — and that full message crosses the /api wire
+      // to any client. The first line alone already names the problem and
+      // its line/column; redact what's left for the same reason every
+      // sibling error in this method does.
+      const newlineIndex = detail.indexOf('\n')
+      const firstLine = newlineIndex === -1 ? detail : detail.slice(0, newlineIndex)
+      throw new Error(`mcp set-enabled: cordis patch file is not valid YAML: ${redactAbsolutePaths(firstLine)}`)
     }
     if (!Array.isArray(patches)) {
       throw new Error('mcp set-enabled: cordis patch file does not contain a top-level list')

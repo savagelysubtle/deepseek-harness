@@ -1045,12 +1045,14 @@ describe('McpStatusRegistryService — reconnect', () => {
 describe('McpStatusRegistryService — set-enabled', () => {
   let dir: string
   let patchPath: string
+  let ctx: Context
   let registry: McpStatusRegistryService
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-set-enabled-'))
     patchPath = join(dir, 'cordis.patch.yml')
-    registry = new McpStatusRegistryService(new Context(), { patchPath })
+    ctx = new Context()
+    registry = new McpStatusRegistryService(ctx, { patchPath })
   })
 
   afterEach(async () => {
@@ -1075,14 +1077,187 @@ describe('McpStatusRegistryService — set-enabled', () => {
     await expect(registry.setEnabled('srv', true)).rejects.toThrow(/cordis patch file could not be read/)
   })
 
-  it('rejects when the patch file is not valid YAML', async () => {
+  it('rejects when the patch file is not valid YAML, keeping only the parse error\'s first line', async () => {
     await writeFile(patchPath, ': : not yaml ][', 'utf8')
-    await expect(registry.setEnabled('srv', true)).rejects.toThrow(/not valid YAML/)
+    // The `yaml` package's own message for this input carries a source
+    // codeframe after the first line (`\n\n: : not yaml ][\n  ^\n`) — the
+    // thrown message must stop at the first line, never echo the frame.
+    await expect(registry.setEnabled('srv', true)).rejects.toThrow(
+      /^mcp set-enabled: cordis patch file is not valid YAML: Nested mappings are not allowed in compact mappings at line 1, column 3:$/,
+    )
   })
+
+  it(
+    'a duplicate-key parse error never echoes the offending lines\' own content verbatim '
+    + '(sentinel round 1: a secret-shaped plain scalar sitting on those lines must not reach the thrown message)',
+    async () => {
+      await writeFile(
+        patchPath,
+        [
+          '- id: mcp-srv',
+          '  config:',
+          '    Authorization: Bearer sk-secret-abc123',
+          '    Authorization: Bearer sk-secret-abc123',
+          '',
+        ].join('\n'),
+        'utf8',
+      )
+      const rejection = await registry.setEnabled('srv', true).then(
+        () => { throw new Error('UNEXPECTED_SUCCESS: expected a duplicate-key parse failure') },
+        (error: unknown) => error,
+      )
+      expect(String(rejection)).toMatch(
+        /^Error: mcp set-enabled: cordis patch file is not valid YAML: Map keys must be unique at line 4, column 5:$/,
+      )
+      expect(String(rejection)).not.toContain('sk-secret-abc123')
+      expect(String(rejection)).not.toContain('Bearer')
+    },
+  )
+
+  it(
+    'a single-line parse error with no source codeframe at all (an unresolved alias) passes through unchanged, redacted',
+    async () => {
+      await writeFile(patchPath, 'key: *missing\n', 'utf8')
+      await expect(registry.setEnabled('srv', true)).rejects.toThrow(
+        /^mcp set-enabled: cordis patch file is not valid YAML: Unresolved alias \(the anchor must be set before the alias\): missing$/,
+      )
+    },
+  )
 
   it('rejects when the patch file has no top-level list', async () => {
     await writeFile(patchPath, 'id: srv\n', 'utf8')
     await expect(registry.setEnabled('srv', true)).rejects.toThrow(/does not contain a top-level list/)
+  })
+
+  // SWD-169: a plain yaml parse()/stringify() round trip silently drops any
+  // tag the boot loader's own schema understands (`!!js` chief among them —
+  // a profile's token-header expression) and every comment on the file.
+  // These four pin the guard's exact blocking behavior, its exact non-
+  // blocking behavior, and that it never touches disk when it blocks.
+  describe('SWD-169: refuses to write back a file with an unpreservable YAML tag', () => {
+    // One mount, `config.serverName` plus a nested `headers` entry carrying
+    // the token-header expression the Loader's own `!!js` dialect
+    // understands (`vendor/include/src/index.ts`'s `JsExpr`) and the `yaml`
+    // package does not — the exact SWD-169 trigger. Line 6 is the
+    // `Authorization:` line in both fixtures below; only the tag's own
+    // column shifts between the shorthand and verbatim spellings.
+    const jsTaggedPatch = [
+      '- id: mcp-srv',
+      '  name: \'@deepseek-ai/dsh-mcp-client\'',
+      '  config:',
+      '    serverName: srv',
+      '    headers:',
+      '      Authorization: !!js \'`Bearer ${process.env.TOKEN}`\'',
+      '',
+    ].join('\n')
+
+    it(
+      'a `!!js` tagged scalar refuses with a redacted path, line/column, tag, and remedy on the wire — '
+      + 'logs the real path server-side — and leaves the file untouched',
+      async () => {
+        const warns: string[] = []
+        vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warns.push(String(message)) }) as never)
+
+        await writeFile(patchPath, jsTaggedPatch, 'utf8')
+        await expect(registry.setEnabled('srv', true)).rejects.toThrow(
+          new RegExp(
+            'cordis patch file "<path>" has a YAML tag at line 6, column 27 \\("tag:yaml\\.org,2002:js"\\) '
+            + 'that a plain write-back cannot preserve — edit the file by hand and restart the host \\(SWD-169\\)',
+          ),
+        )
+        // Never written: the exact pre-existing bytes survive, and no backup
+        // was ever attempted for a write that never happened.
+        expect(await readFile(patchPath, 'utf8')).toBe(jsTaggedPatch)
+        expect(await readdir(dir)).toEqual(['cordis.patch.yml'])
+
+        // Sentinel round 1: the thrown message (crosses the /api wire, can
+        // land in shipped logs) is redacted like every sibling error in this
+        // method — asserted above via "<path>" rather than the real path.
+        // The real, actionable absolute path is logged here, server-side
+        // only, for whoever has to go hand-edit the file.
+        expect(warns).toHaveLength(1)
+        expect(warns[0]).toContain(patchPath)
+        expect(warns[0]).toContain('has a YAML tag at line 6, column 27 ("tag:yaml.org,2002:js")')
+      },
+    )
+
+    it('the verbatim tag form `!<tag:yaml.org,2002:js>` refuses the same way', async () => {
+      const verbatimTagged = [
+        '- id: mcp-srv',
+        '  name: \'@deepseek-ai/dsh-mcp-client\'',
+        '  config:',
+        '    serverName: srv',
+        '    headers:',
+        '      Authorization: !<tag:yaml.org,2002:js> \'`Bearer ${process.env.TOKEN}`\'',
+        '',
+      ].join('\n')
+      await writeFile(patchPath, verbatimTagged, 'utf8')
+      await expect(registry.setEnabled('srv', true)).rejects.toThrow(
+        new RegExp(
+          'cordis patch file "<path>" has a YAML tag at line 6, column 46 \\("tag:yaml\\.org,2002:js"\\) '
+          + 'that a plain write-back cannot preserve',
+        ),
+      )
+      expect(await readFile(patchPath, 'utf8')).toBe(verbatimTagged)
+    })
+
+    it(
+      'a `!!timestamp` tag — the yaml package\'s own "known but not core" YAML-1.1 tag that resolves '
+      + 'with no warning at all yet is still lossy on write-back — is blocked the same way',
+      async () => {
+        const timestampTagged = [
+          '- id: mcp-srv',
+          '  name: \'@deepseek-ai/dsh-mcp-client\'',
+          '  config:',
+          '    serverName: srv',
+          '    lastRotated: !!timestamp 2020-01-01',
+          '',
+        ].join('\n')
+        await writeFile(patchPath, timestampTagged, 'utf8')
+        await expect(registry.setEnabled('srv', true)).rejects.toThrow(
+          /has a YAML tag at line 5, column 30 \("tag:yaml\.org,2002:timestamp"\) that a plain write-back cannot preserve/,
+        )
+        expect(await readFile(patchPath, 'utf8')).toBe(timestampTagged)
+      },
+    )
+
+    it('a file with no custom tags at all writes exactly as before (the guard is a no-op)', async () => {
+      await writeFile(patchPath, `${mcpMountYaml('mcp-srv', 'srv', true)}\n`, 'utf8')
+      await registry.setEnabled('srv', true)
+      const written = await readFile(patchPath, 'utf8')
+      expect(written).toMatch(/serverName: srv\s*\n\s*disabled: false/)
+    })
+
+    it('an explicit tag the yaml package\'s core schema already resolves both ways (`!!str`) is not blocked', async () => {
+      await writeFile(
+        patchPath,
+        [
+          '- id: mcp-srv',
+          '  name: \'@deepseek-ai/dsh-mcp-client\'',
+          '  config:',
+          '    serverName: !!str srv',
+          '  disabled: true',
+          '',
+        ].join('\n'),
+        'utf8',
+      )
+      await registry.setEnabled('srv', true)
+      const written = await readFile(patchPath, 'utf8')
+      expect(written).toMatch(/serverName: srv\s*\n\s*disabled: false/)
+    })
+
+    it('a file with only comments (no tags) is unaffected by the guard — comments are already stripped by the existing write path, unchanged by this ticket', async () => {
+      const withComments = [
+        '# a leading comment, pre-existing behavior strips this',
+        mcpMountYaml('mcp-srv', 'srv', true),
+        '',
+      ].join('\n')
+      await writeFile(patchPath, withComments, 'utf8')
+      await registry.setEnabled('srv', true)
+      const written = await readFile(patchPath, 'utf8')
+      expect(written).not.toContain('# a leading comment')
+      expect(written).toMatch(/serverName: srv\s*\n\s*disabled: false/)
+    })
   })
 
   it('rejects a mount serverName that does not exist — set-enabled never inserts', async () => {
