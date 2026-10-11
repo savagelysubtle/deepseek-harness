@@ -409,13 +409,120 @@ function unwrapExpr(expr: ts.Expression): ts.Expression {
   return e
 }
 
+/** Find a top-level `const <name> = <expr>` (exported or not) in a file's
+ * own statements, returning its unwrapped initializer, or null. Does not
+ * follow imports — custom-type schema pieces (SWD-167) are, by convention,
+ * package-local to the entry file, same as the schema expression itself. */
+function findTopLevelConstInit(ctx: FileCtx, name: string): ts.Expression | null {
+  for (const stmt of ctx.sf.statements) {
+    if (!ts.isVariableStatement(stmt)) continue
+    for (const decl of stmt.declarationList.declarations) {
+      if (ts.isIdentifier(decl.name) && decl.name.text === name && decl.initializer) {
+        return unwrapExpr(decl.initializer)
+      }
+    }
+  }
+  return null
+}
+
+/** Resolve an expression to a string literal value: a literal directly, or
+ * an Identifier naming a top-level `const <name> = '<value>'` in the same
+ * file — the repo's convention for naming a custom Schemastery type (e.g.
+ * `const CONFIG_TYPE = 'dsh-mcp-client-config'`). */
+function resolveStringLiteral(ctx: FileCtx, expr: ts.Expression): string | undefined {
+  const e = unwrapExpr(expr)
+  if (ts.isStringLiteral(e)) return e.text
+  if (ts.isIdentifier(e)) {
+    const init = findTopLevelConstInit(ctx, e.text)
+    if (init && ts.isStringLiteral(init)) return init.text
+  }
+  return undefined
+}
+
+/** Read the `type` property of an object literal and resolve it to a string
+ * (literal or named constant), or undefined when there is no such property
+ * or its value cannot be resolved statically. */
+function customSchemaTypeName(ctx: FileCtx, objectLiteral: ts.ObjectLiteralExpression): string | undefined {
+  for (const prop of objectLiteral.properties) {
+    if (!ts.isPropertyAssignment(prop)) continue
+    const key = ts.isStringLiteral(prop.name) ? prop.name.text : prop.name.getText(ctx.sf)
+    if (key === 'type') return resolveStringLiteral(ctx, prop.initializer)
+  }
+  return undefined
+}
+
+/** Find `z.extend(<type>, <resolver>)` among a file's top-level expression
+ * statements, matching `<type>` against `typeName` via `resolveStringLiteral`.
+ * Returns the resolver argument expression, or null when no match exists. */
+function findExtendCall(ctx: FileCtx, typeName: string): ts.Expression | null {
+  for (const stmt of ctx.sf.statements) {
+    if (!ts.isExpressionStatement(stmt)) continue
+    const call = unwrapExpr(stmt.expression)
+    if (!ts.isCallExpression(call) || !ts.isPropertyAccessExpression(call.expression)) continue
+    if (call.expression.name.text !== 'extend') continue
+    const [typeArg, resolverArg] = call.arguments
+    if (!typeArg || !resolverArg || resolveStringLiteral(ctx, typeArg) !== typeName) continue
+    return resolverArg
+  }
+  return null
+}
+
+/** Resolve a `z.extend(...)` resolver argument to its function body: an
+ * inline arrow/function expression, or an Identifier naming a function
+ * declaration or a `const <name> = (...) => {...}` in the same file. */
+function resolveResolverFn(ctx: FileCtx, expr: ts.Expression): ts.Node | null {
+  const e = unwrapExpr(expr)
+  if (ts.isArrowFunction(e) || ts.isFunctionExpression(e)) return e.body
+  if (!ts.isIdentifier(e)) return null
+  for (const stmt of ctx.sf.statements) {
+    if (ts.isFunctionDeclaration(stmt) && stmt.name?.text === e.text && stmt.body) return stmt.body
+  }
+  const init = findTopLevelConstInit(ctx, e.text)
+  return init && (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) ? init.body : null
+}
+
+/**
+ * Collect every Identifier a `z.extend` resolver body hands to Schemastery
+ * AS A SCHEMA to resolve: the second argument of a `<recv>.resolve(data,
+ * <Schema>, …)` call, or the receiver of `<Schema>['~standard']`. Does NOT
+ * treat every identifier the resolver calls as a schema reference — e.g. a
+ * local type guard like `isPlainRecord(data)` is a perfectly ordinary helper
+ * call, not a schema, and misreading it as one would hard-error a resolver
+ * that never names a non-walkable schema at all.
+ *
+ * A schema argument in one of those two positions that is NOT a plain
+ * Identifier (an inline `z.object(…)` passed straight to `.resolve`, say) is
+ * a hard violation rather than a silent skip: skipping it left `refs`
+ * non-empty whenever the SAME resolver also named at least one Identifier
+ * branch, so the empty-resolver guard below never caught it, and the key set
+ * came out silently thinner than the real schema — the module's own
+ * fail-loud contract (round 5 reviewer finding, SWD-167).
+ */
+function collectResolverSchemaRefs(node: ts.Node, where: string, refs: Set<string>, violations: string[]): void {
+  const notWalkable = `${where}: resolver hands .resolve a schema argument that is not a top-level const this generator can walk; declare it as 'const X = z.object(...)' at top level.`
+  const visit = (n: ts.Node): void => {
+    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && n.expression.name.text === 'resolve' && n.arguments[1]) {
+      if (ts.isIdentifier(n.arguments[1])) refs.add(n.arguments[1].text)
+      else violations.push(notWalkable)
+    }
+    if (ts.isElementAccessExpression(n) && ts.isStringLiteralLike(n.argumentExpression) && n.argumentExpression.text === '~standard') {
+      if (ts.isIdentifier(n.expression)) refs.add(n.expression.text)
+      else violations.push(notWalkable)
+    }
+    ts.forEachChild(n, visit)
+  }
+  visit(node)
+}
+
 /**
  * Statically walk a schemastery schema expression to its key paths plus the
  * packages whose schemas an intersect composes. A key path is the top-level
  * key or a nested path through object/array compositions (`agents[].id`).
  * Handles the declaration forms the repo uses — `z.object({…})` (possibly behind
- * chained calls) and `z.intersect([X.Config, …])` — and hard-errors on
- * anything else, so a schema the walk cannot see fails the gate instead of
+ * chained calls), `z.intersect([X.Config, …])`, `z.union([…])`, and a
+ * custom-type dispatcher (`z({ type: <TYPE> })` paired with a matching
+ * `z.extend(<TYPE>, <resolver>)` in the same file, SWD-167) — and hard-errors
+ * on anything else, so a schema the walk cannot see fails the gate instead of
  * silently thinning it. Nested values that are neither `object` nor `array`
  * compositions (primitives, unions, dynamic-key dicts) contribute no paths.
  */
@@ -449,8 +556,52 @@ function walkSchemaExpr(
     const inner = unwrapExpr(call.expression.expression)
     if (ts.isCallExpression(inner)) collectValuePaths(inner, base)
   }
+  // Custom schema type (`z({ type: <TYPE> })`, built via `Schema.extend`
+  // rather than one of Schemastery's `.object()/.union()/...` factories —
+  // those get an auto-generated `z.<type>(...)` dotted call, a custom type
+  // never does, so this construction is always a bare call on `z` itself).
+  // The construction carries no field literal of its own, so instead find
+  // the SAME type's `z.extend(<TYPE>, <resolver>)` in this file and walk
+  // every schema its resolver body hands to `.resolve(data, <Schema>, …)`
+  // (or indexes via `<Schema>['~standard']`), unioning their keys exactly
+  // like `.union([...])` does above — a discriminated custom dispatcher is,
+  // for cataloging purposes, a union of its branches (SWD-167).
+  const walkCustomType = (typeName: string): void => {
+    const resolverExpr = findExtendCall(ctx, typeName)
+    if (!resolverExpr) {
+      violations.push(`${where}: custom schema type '${typeName}' has no matching 'z.extend(${JSON.stringify(typeName)}, …)' in this file.`)
+      return
+    }
+    const resolverBody = resolveResolverFn(ctx, resolverExpr)
+    if (!resolverBody) {
+      violations.push(`${where}: 'z.extend(${JSON.stringify(typeName)}, …)' resolver is not an inline function or a function declared in this file.`)
+      return
+    }
+    const refs = new Set<string>()
+    collectResolverSchemaRefs(resolverBody, where, refs, violations)
+    if (refs.size === 0) {
+      violations.push(`${where}: '${typeName}' resolver calls no '.resolve(data, <Schema>, …)' (or '<Schema>["~standard"]') the generator can see.`)
+      return
+    }
+    for (const name of refs) {
+      const init = findTopLevelConstInit(ctx, name)
+      if (!init) {
+        violations.push(`${where}: '${typeName}' resolver references '${name}', which is not a top-level 'const ${name} = …' in this file.`)
+        continue
+      }
+      visit(init)
+    }
+  }
   const visit = (e: ts.Expression): void => {
     const call = unwrapExpr(e)
+    const bareCallArg0 = ts.isCallExpression(call) && ts.isIdentifier(call.expression) ? call.arguments[0] : undefined
+    if (bareCallArg0 && ts.isObjectLiteralExpression(bareCallArg0)) {
+      const typeName = customSchemaTypeName(ctx, bareCallArg0)
+      if (typeName !== undefined) {
+        walkCustomType(typeName)
+        return
+      }
+    }
     if (!ts.isCallExpression(call) || !ts.isPropertyAccessExpression(call.expression)) {
       violations.push(`${where}: schema expression is not a statically walkable schemastery call.`)
       return

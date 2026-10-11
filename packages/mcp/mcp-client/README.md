@@ -31,6 +31,8 @@ One plugin instance per MCP server in `cordis.yml`:
 
 The model sees `mcp__github__create_issue`, `mcp__web__search`, … — the same server-qualified shape Claude Code and Codex use. HMR hot-swaps: editing the entry triggers disconnect + reconnect without process restart; an unchanged `serverName` reproduces identical tool names.
 
+The `mcp-web` entry above omits `auth` entirely — fine for any streamable-http server authenticated purely through `headers`; `auth` is only for opting into the OAuth flow below.
+
 ## Config
 
 | Field | Transport | Required | Description |

@@ -444,6 +444,111 @@ export function apply(ctx: Context, config: Config): void {}
   })
 })
 
+/** Two interfaces plus a discriminated `Config` union, shared by the
+ * custom-type-dispatch fixtures below (SWD-167). */
+const DISCRIMINATED_BRANCHES = `/** Fixture branch A. */
+export interface ConfigA {
+  /** Discriminant. */
+  kind: 'a'
+  /** A field. */
+  aField?: string
+}
+/** Fixture branch B. */
+export interface ConfigB {
+  /** Discriminant. */
+  kind: 'b'
+  /** B field. */
+  bField?: string
+}
+/** Fixture config dispatched via a custom schemastery type. */
+export type Config = ConfigA | ConfigB
+`
+
+describe('gen-config-catalog custom-type (z.extend) dispatch', () => {
+  it('walks a custom-type dispatcher as the union of the branches its resolver calls z.resolve on', () => {
+    const entries = collectConfigCatalog(make({
+      'src/index.ts': `import type { Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
+${DISCRIMINATED_BRANCHES}
+const BranchA = z.object({ kind: z.const('a'), aField: z.string() }) as unknown as z<ConfigA>
+const BranchB = z.object({ kind: z.const('b'), bField: z.string() }) as unknown as z<ConfigB>
+const CUSTOM_TYPE = 'fixture-custom-config'
+z.extend(CUSTOM_TYPE, (data, _schema, options, strict) => {
+  if (data.kind === 'a') return z.resolve(data, BranchA, options, strict)
+  return z.resolve(data, BranchB, options, strict)
+})
+export const Config = z({ type: CUSTOM_TYPE }) as unknown as z<Config>
+/** Load. */
+export function apply(ctx: Context, config: Config): void {}
+`,
+    }))
+    expect(entries[0]?.schemaKeys).toEqual(['kind', 'aField', 'kind', 'bField'])
+  })
+
+  it('hard-errors on a resolver mixing one named branch with one INLINE schema, rather than silently thinning the key set', () => {
+    expect(() => collectConfigCatalog(make({
+      'src/index.ts': `import type { Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
+${DISCRIMINATED_BRANCHES}
+const BranchA = z.object({ kind: z.const('a'), aField: z.string() }) as unknown as z<ConfigA>
+const CUSTOM_TYPE = 'fixture-custom-config'
+z.extend(CUSTOM_TYPE, (data, _schema, options, strict) => {
+  if (data.kind === 'a') return z.resolve(data, BranchA, options, strict)
+  return z.resolve(data, z.object({ kind: z.const('b'), bSecretField: z.string() }), options, strict)
+})
+export const Config = z({ type: CUSTOM_TYPE }) as unknown as z<Config>
+/** Load. */
+export function apply(ctx: Context, config: Config): void {}
+`,
+    }))).toThrow(/resolver hands \.resolve a schema argument that is not a top-level const this generator can walk/)
+  })
+
+  it('hard-errors when the custom type has no matching z.extend in the file', () => {
+    expect(() => collectConfigCatalog(make({
+      'src/index.ts': `import type { Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
+${DOCUMENTED_CONFIG}
+export const Config = z({ type: 'ghost-type' }) as unknown as z<Config>
+/** Load. */
+export function apply(ctx: Context, config: Config): void {}
+`,
+    }))).toThrow(/custom schema type 'ghost-type' has no matching 'z\.extend\("ghost-type", …\)' in this file/)
+  })
+
+  it('hard-errors when the resolver references something that is not walkable', () => {
+    expect(() => collectConfigCatalog(make({
+      'src/index.ts': `import type { Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
+${DOCUMENTED_CONFIG}
+const NotASchema = 'just a string'
+const CUSTOM_TYPE = 'fixture-custom-config'
+z.extend(CUSTOM_TYPE, (data, _schema, options, strict) => {
+  return z.resolve(data, NotASchema, options, strict)
+})
+export const Config = z({ type: CUSTOM_TYPE }) as unknown as z<Config>
+/** Load. */
+export function apply(ctx: Context, config: Config): void {}
+`,
+    }))).toThrow(/schema expression is not a statically walkable schemastery call/)
+  })
+
+  it('leaves an ordinary z.union([...]) file unaffected by the custom-type walk', () => {
+    const entries = collectConfigCatalog(make({
+      'src/index.ts': `import type { Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
+${DISCRIMINATED_BRANCHES}
+export const Config = z.union([
+  z.object({ kind: z.const('a'), aField: z.string() }),
+  z.object({ kind: z.const('b'), bField: z.string() }),
+]) as unknown as z<Config>
+/** Load. */
+export function apply(ctx: Context, config: Config): void {}
+`,
+    }))
+    expect(entries[0]?.schemaKeys).toEqual(['kind', 'aField', 'kind', 'bField'])
+  })
+})
+
 describe('gen-config-catalog render', () => {
   it('renders sections, fences, and the terse classification lists', () => {
     const root = makeRoot()
