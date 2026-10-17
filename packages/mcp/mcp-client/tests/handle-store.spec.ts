@@ -357,6 +357,33 @@ describe('readMcpPatchEntries', () => {
     expect(warns[0]).toContain('not valid YAML')
   })
 
+  it('logs only the first line of a YAML parse error, never the quoted code frame (SWD-171)', async () => {
+    ctx = new Context()
+    dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-handle-store-'))
+    const patchPath = join(dir, 'cordis.patch.yml')
+    const secret = 'Bearer sbp_FAKE_FIXTURE_VALUE_000'
+    await writeFile(
+      patchPath,
+      `- name: x\n  headers:\n    Authorization: Bearer first\n    Authorization: ${secret}\n`,
+      'utf8',
+    )
+    const logged: string[] = []
+    const record = ((message: unknown) => { logged.push(String(message)) }) as never
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(record)
+    for (const level of ['info', 'error', 'debug'] as const) {
+      vi.spyOn(ctx.logger, level).mockImplementation(record)
+    }
+
+    expect(await readMcpPatchEntries(ctx, patchPath)).toBeUndefined()
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(logged[0]).toContain('not valid YAML')
+    expect(logged[0]).not.toContain('\n')
+    for (const line of logged) {
+      expect(line).not.toContain('sbp_FAKE_FIXTURE_VALUE_000')
+      expect(line).not.toContain('Authorization')
+    }
+  })
+
   it('warns once and returns undefined for a document with no top-level list', async () => {
     ctx = new Context()
     dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-handle-store-'))
