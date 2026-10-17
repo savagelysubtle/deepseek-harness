@@ -415,8 +415,11 @@ export async function readMcpPatchEntries(
     // `doc.toJS()` itself throws for a problem that only surfaces at JS-
     // conversion time (an unresolved alias, in practice) — both are always
     // `Error` instances, never a non-Error throw.
+    // Only the first line is logged: a yaml parse error's message carries a
+    // source code frame after it that quotes the profile's own lines verbatim
+    // (SWD-171), the same trim `McpStatus.setEnabled` applies.
     /* v8 ignore next -- see proof above */
-    ctx.logger.warn(`mcp status: cordis patch file is not valid YAML: ${error instanceof Error ? error.message : String(error)}`)
+    ctx.logger.warn(`mcp status: cordis patch file is not valid YAML: ${redactAbsolutePaths((error instanceof Error ? error.message : String(error)).replace(/\n[\s\S]*$/, ''))}`)
     return undefined
   }
   if (!Array.isArray(patches)) {
