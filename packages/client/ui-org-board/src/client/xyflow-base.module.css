@@ -19,60 +19,60 @@
 :global(.react-flow) {
   direction: ltr;
 
-  --xy-edge-stroke-default: #b1b1b7;
+  --xy-edge-stroke-default: var(--dsw-alias-label-tertiary);
   --xy-edge-stroke-width-default: 1;
-  --xy-edge-stroke-selected-default: #555;
+  --xy-edge-stroke-selected-default: var(--dsw-alias-label-secondary);
 
-  --xy-connectionline-stroke-default: #b1b1b7;
+  --xy-connectionline-stroke-default: var(--dsw-alias-label-tertiary);
   --xy-connectionline-stroke-width-default: 1;
 
-  --xy-attribution-background-color-default: rgba(255, 255, 255, 0.5);
+  --xy-attribution-background-color-default: color-mix(in srgb, var(--dsw-alias-bg-layer-1) 50%, transparent);
 
-  --xy-minimap-background-color-default: #fff;
-  --xy-minimap-mask-background-color-default: rgba(240, 240, 240, 0.6);
+  --xy-minimap-background-color-default: var(--dsw-alias-bg-layer-1);
+  --xy-minimap-mask-background-color-default: color-mix(in srgb, var(--dsw-alias-bg-base) 60%, transparent);
   --xy-minimap-mask-stroke-color-default: transparent;
   --xy-minimap-mask-stroke-width-default: 1;
-  --xy-minimap-node-background-color-default: #e2e2e2;
+  --xy-minimap-node-background-color-default: var(--dsw-alias-bg-layer-3);
   --xy-minimap-node-stroke-color-default: transparent;
   --xy-minimap-node-stroke-width-default: 2;
 
   --xy-background-color-default: transparent;
-  --xy-background-pattern-dots-color-default: #91919a;
-  --xy-background-pattern-lines-color-default: #eee;
-  --xy-background-pattern-cross-color-default: #e2e2e2;
+  --xy-background-pattern-dots-color-default: var(--dsw-alias-border-l3);
+  --xy-background-pattern-lines-color-default: var(--dsw-alias-border-l2);
+  --xy-background-pattern-cross-color-default: var(--dsw-alias-border-l2);
   background-color: var(--xy-background-color, var(--xy-background-color-default));
-  --xy-node-border-default: 1px solid #bbb;
-  --xy-node-border-selected-default: 1px solid #555;
+  --xy-node-border-default: 1px solid var(--dsw-alias-border-l2);
+  --xy-node-border-selected-default: 1px solid var(--dsw-alias-label-primary);
 
-  --xy-handle-background-color-default: #333;
+  --xy-handle-background-color-default: var(--dsw-alias-border-l3);
 
-  --xy-selection-background-color-default: rgba(150, 150, 180, 0.1);
-  --xy-selection-border-default: 1px dotted rgba(155, 155, 155, 0.8);
-  --xy-resize-background-color-default: #3367d9;
+  --xy-selection-background-color-default: color-mix(in srgb, var(--dsw-alias-label-primary) 10%, transparent);
+  --xy-selection-border-default: 1px dotted var(--dsw-alias-border-l3);
+  --xy-resize-background-color-default: var(--dsw-alias-brand-primary);
 }
 :global(.react-flow.dark) {
-  --xy-edge-stroke-default: #3e3e3e;
+  --xy-edge-stroke-default: var(--dsw-alias-label-tertiary);
   --xy-edge-stroke-width-default: 1;
-  --xy-edge-stroke-selected-default: #727272;
+  --xy-edge-stroke-selected-default: var(--dsw-alias-label-secondary);
 
-  --xy-connectionline-stroke-default: #b1b1b7;
+  --xy-connectionline-stroke-default: var(--dsw-alias-label-tertiary);
   --xy-connectionline-stroke-width-default: 1;
 
-  --xy-attribution-background-color-default: rgba(150, 150, 150, 0.25);
+  --xy-attribution-background-color-default: color-mix(in srgb, var(--dsw-alias-label-tertiary) 25%, transparent);
 
-  --xy-minimap-background-color-default: #141414;
-  --xy-minimap-mask-background-color-default: rgba(60, 60, 60, 0.6);
+  --xy-minimap-background-color-default: var(--dsw-alias-bg-layer-1);
+  --xy-minimap-mask-background-color-default: color-mix(in srgb, var(--dsw-alias-bg-base) 60%, transparent);
   --xy-minimap-mask-stroke-color-default: transparent;
   --xy-minimap-mask-stroke-width-default: 1;
-  --xy-minimap-node-background-color-default: #2b2b2b;
+  --xy-minimap-node-background-color-default: var(--dsw-alias-bg-layer-3);
   --xy-minimap-node-stroke-color-default: transparent;
   --xy-minimap-node-stroke-width-default: 2;
 
-  --xy-background-color-default: #141414;
-  --xy-background-pattern-dots-color-default: #555;
-  --xy-background-pattern-lines-color-default: #333;
-  --xy-background-pattern-cross-color-default: #333;
-  --xy-node-color-default: #f8f8f8;
+  --xy-background-color-default: var(--dsw-alias-bg-layer-1);
+  --xy-background-pattern-dots-color-default: var(--dsw-alias-border-l3);
+  --xy-background-pattern-lines-color-default: var(--dsw-alias-border-l2);
+  --xy-background-pattern-cross-color-default: var(--dsw-alias-border-l2);
+  --xy-node-color-default: var(--dsw-alias-label-primary);
 }
 :global(.react-flow__background) {
   background-color: var(--xy-background-color-props, var(--xy-background-color, var(--xy-background-color-default)));
@@ -298,7 +298,7 @@
 }
 :global(.react-flow__attribution a) {
     text-decoration: none;
-    color: #999;
+    color: var(--dsw-alias-label-tertiary);
   }
 @keyframes dashdraw {
   from {
@@ -452,7 +452,7 @@
 :global(.react-flow__resize-control.handle) {
   width: 5px;
   height: 5px;
-  border: 1px solid #fff;
+  border: 1px solid var(--dsw-alias-bg-layer-1);
   border-radius: 1px;
   background-color: var(--xy-resize-background-color, var(--xy-resize-background-color-default));
   translate: -50% -50%;
@@ -520,4 +520,30 @@
 :global(.react-flow__resize-control.line.bottom) {
   border-bottom-width: 1px;
   top: 100%;
+}
+
+/* Zoom controls: themed with the app's own tokens (structure above is the
+   library's; only colour/shape is ours). */
+:global(.react-flow__controls) {
+  overflow: hidden;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  box-shadow: var(--dsw-shadow-lv3);
+}
+:global(.react-flow__controls-button) {
+  border: none;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+:global(.react-flow__controls-button:last-child) {
+  border-bottom: none;
+}
+:global(.react-flow__controls-button:hover) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+:global(.react-flow__controls-button:disabled) {
+  color: var(--dsw-alias-label-tertiary);
+  cursor: default;
 }

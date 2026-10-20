@@ -1,6 +1,6 @@
 /**
  * Custom React Flow node: a seat's name plus its distinguishing badge row
- * (lead / test seat / not fully served / may mail anyone). Selection state
+ * (lead / test seat / not fully served / may mail anyone) and a served-status dot. Selection state
  * is NOT React Flow's own built-in `selected` flag — the board owns which
  * seat is selected (so a click can also drive the side detail panel) and
  * passes that decision down through `data.selected`.
@@ -16,6 +16,10 @@ export interface SeatNodeData extends Record<string, unknown> {
   name: string
   badges: readonly SeatBadge[]
   selected: boolean
+  /** Served state for the status dot; `null` when drift failed and the state is unknown (no dot, never a false green). */
+  served: boolean | null
+  /** Accessible name for the status dot (empty when `served` is `null`). */
+  statusLabel: string
 }
 
 /** The one custom node type this board registers. */
@@ -38,7 +42,7 @@ const BADGE_CLASS: Record<SeatBadge['kind'], string | undefined> = {
  * @returns the node card.
  */
 export function SeatNode({ data }: NodeProps<SeatNodeType>) {
-  const { name, badges, selected } = data
+  const { name, badges, selected, served, statusLabel } = data
   const unserved = badges.some(badge => badge.kind === 'unserved')
   return (
     <div className={clsx(css.node, selected && css.nodeSelected, unserved && css.nodeUnserved)}>
@@ -46,7 +50,16 @@ export function SeatNode({ data }: NodeProps<SeatNodeType>) {
           since it may play either side of any [from, to] pair. */}
       <Handle type="target" position={Position.Left} className={css.handle} />
       <Handle type="source" position={Position.Right} className={css.handle} />
-      <div className={css.nodeName}>{name}</div>
+      <div className={css.nodeHeader}>
+        <div className={css.nodeName}>{name}</div>
+        {served !== null && (
+          <span
+            role="img"
+            aria-label={statusLabel}
+            className={clsx(css.statusDot, served ? css.statusDotServed : css.statusDotUnserved)}
+          />
+        )}
+      </div>
       {badges.length > 0 && (
         <div className={css.badgeRow}>
           {badges.map(badge => (

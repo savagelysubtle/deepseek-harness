@@ -209,6 +209,28 @@ describe('OrgBoardControl', () => {
     expect(load).toHaveBeenCalledTimes(1)
   })
 
+  it('Refresh lives in the board toolbar and reloads even while a board is showing', async () => {
+    const { load } = renderControl({ state: READY_STATE })
+    fireEvent.click(screen.getByRole('button', { name: 'Org Board' }))
+    await screen.findByRole('dialog')
+    load.mockClear()
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(load).toHaveBeenCalledTimes(1)
+  })
+
+  it('Escape closes the seat drawer first and only then the whole modal', async () => {
+    renderControl({ state: READY_STATE })
+    fireEvent.click(screen.getByRole('button', { name: 'Org Board' }))
+    await screen.findByRole('dialog')
+    fireEvent.click(screen.getByText('alfred'))
+    expect(screen.getByRole('complementary')).toBeTruthy()
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(screen.queryByRole('complementary')).toBeNull()
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
   it('closing the modal and reopening it re-issues load', async () => {
     const { load } = renderControl()
     fireEvent.click(screen.getByRole('button', { name: 'Org Board' }))
