@@ -37,6 +37,8 @@ export interface OrgSeat {
   readonly sessionId?: string
   /** Marks a throwaway seat; an edge may never cross the test boundary. */
   readonly test?: boolean
+  /** optional department name used by the Org Board to group seats; a comms grouping, not rank. */
+  readonly department?: string
   /** Restricts which tools the seat's agent may use; absent means unrestricted. */
   readonly tools?: OrgSeatTools
 }
@@ -112,6 +114,8 @@ export interface OrgRegistryDocumentSeat {
   readonly sessionId?: string
   /** Marks a throwaway seat; an edge may never cross the test boundary. */
   readonly test?: boolean
+  /** optional department name used by the Org Board to group seats; a comms grouping, not rank. */
+  readonly department?: string
   /** Restricts which tools the seat's agent may use; absent means unrestricted. */
   readonly tools?: OrgSeatTools
 }
