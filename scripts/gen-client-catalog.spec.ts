@@ -8,7 +8,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
@@ -227,35 +228,49 @@ describe('the real workspace surface', () => {
     // for every file class') writes a probe matching this exact name into a
     // real client package's src/ and deletes it in a finally. The catalog scan
     // must never list it, so a concurrent run of both specs cannot race the
-    // probe's deletion into an ENOENT.
-    const probePath = join(process.cwd(), 'packages/client/ui-primitives/src', `oxlint-contract-${randomUUID()}.ts`)
-    await writeFile(probePath, [
-      "declare module '@deepseek-ai/dsh-client-ui-slots' {",
-      '  interface SlotMap {',
-      "    'oxlint-contract-probe.seat': {",
-      "      kind: 'single'",
-      "      scope: 'root'",
-      '    }',
-      '  }',
-      '}',
-      '',
-      '/** Exported probe type that must not leak into the catalog type index. */',
-      'export interface OxlintContractProbeType {',
-      '  value: string',
-      '}',
-      '',
-    ].join('\n'))
+    // probe's deletion into an ENOENT. The probe lives in a throwaway fixture
+    // root here, so this test neither parses the monorepo nor races that spec.
+    const root = await mkdtemp(join(tmpdir(), 'gen-client-catalog-'))
     try {
-      const files = scanSlotFiles(process.cwd(), SOURCE_GLOBS)
+      const srcDir = join(root, 'packages/client/fixture-pkg/src')
+      await mkdir(srcDir, { recursive: true })
+      await writeFile(join(root, 'packages/client/fixture-pkg/package.json'), JSON.stringify({ name: 'fixture-pkg' }))
+      const declarationText = (key: string, typeName: string): string => [
+        "declare module '@deepseek-ai/dsh-client-ui-slots' {",
+        '  interface SlotMap {',
+        `    /** Pass a component; it replaces nothing, and absence renders nothing (${key}). */`,
+        `    '${key}': {`,
+        "      kind: 'single'",
+        "      scope: 'root'",
+        '    }',
+        '  }',
+        '}',
+        '',
+        `/** Exported type for ${key}. */`,
+        `export interface ${typeName} {`,
+        '  value: string',
+        '}',
+        '',
+      ].join('\n')
+      await writeFile(join(srcDir, 'legit.ts'), declarationText('fixture-legit.seat', 'FixtureLegitType'))
+      await writeFile(
+        join(srcDir, `oxlint-contract-${randomUUID()}.ts`),
+        declarationText('oxlint-contract-probe.seat', 'OxlintContractProbeType'),
+      )
+
+      const files = scanSlotFiles(root, SOURCE_GLOBS)
+      expect(files.some(file => file.rel.endsWith('/legit.ts'))).toBe(true)
       expect(files.some(file => file.rel.includes('oxlint-contract-'))).toBe(false)
 
-      const types = indexExportedTypes(process.cwd(), SOURCE_GLOBS)
+      const types = indexExportedTypes(root, SOURCE_GLOBS)
+      expect(types.has('FixtureLegitType')).toBe(true)
       expect(types.has('OxlintContractProbeType')).toBe(false)
 
-      const entries = collectSlotEntries(process.cwd())
+      const entries = collectSlotEntries(root)
+      expect(entries.some(entry => entry.key === 'fixture-legit.seat')).toBe(true)
       expect(entries.some(entry => entry.key === 'oxlint-contract-probe.seat')).toBe(false)
     } finally {
-      await rm(probePath, { force: true })
+      await rm(root, { recursive: true, force: true })
     }
-  }, 30_000)
+  })
 })

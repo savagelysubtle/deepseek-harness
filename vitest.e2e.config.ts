@@ -1,6 +1,6 @@
 import tsconfigPaths from 'vite-tsconfig-paths'
 import { defineConfig } from 'vitest/config'
-import { standardDecoratorPlugin, vitestExecArgv } from './vitest.shared.ts'
+import { positiveIntFromEnv, standardDecoratorPlugin, vitestExecArgv } from './vitest.shared.ts'
 
 // Real-API suite, separate because it spends tokens. Each test self-skips without
 // its provider credential for keyless CI; credentialed workflows preflight the
@@ -14,17 +14,6 @@ try {
 }
 
 const DEFAULT_E2E_MAX_WORKERS = 4
-
-function positiveIntFromEnv(name: string, fallback: number): number {
-  const raw = process.env[name]
-  if (raw === undefined || raw === '') return fallback
-
-  const value = Number(raw)
-  if (!Number.isInteger(value) || value < 1) {
-    throw new Error(`${name} must be a positive integer, got ${JSON.stringify(raw)}`)
-  }
-  return value
-}
 
 const e2eMaxWorkers = positiveIntFromEnv('DSH_E2E_MAX_WORKERS', DEFAULT_E2E_MAX_WORKERS)
 

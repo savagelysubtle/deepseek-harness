@@ -40,3 +40,21 @@ export function standardDecoratorPlugin() {
     },
   }
 }
+
+/**
+ * Read a positive-integer setting from the environment.
+ * @param name - environment variable to read.
+ * @param fallback - value used when the variable is unset or empty.
+ * @returns the parsed positive integer, or `fallback`.
+ * @throws when the variable is set to anything but a positive integer.
+ */
+export function positiveIntFromEnv(name: string, fallback: number): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '') return fallback
+
+  const value = Number(raw)
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive integer, got ${JSON.stringify(raw)}`)
+  }
+  return value
+}

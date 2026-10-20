@@ -1,9 +1,10 @@
 import { spawnSync } from 'node:child_process'
+import { availableParallelism } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import tsconfigPaths from 'vite-tsconfig-paths'
 import { resolvePwshPath } from './packages/shell/pwsh-local/src/resolve.ts'
 import { defineConfig } from 'vitest/config'
-import { standardDecoratorPlugin, vitestExecArgv } from './vitest.shared.ts'
+import { positiveIntFromEnv, standardDecoratorPlugin, vitestExecArgv } from './vitest.shared.ts'
 import { COVERAGE_EXEMPT_ENV, coverageExemptHeavySuites } from './scripts/coverage-exempt.ts'
 
 // Prints exact `path:line:col` records for every uncovered statement, branch
@@ -115,9 +116,16 @@ const processBoundTests = [
   'packages/workflow/workflow-worker-thread/tests/session.spec.ts',
 ]
 
+// SWD-172: uncapped, vitest fans out to every core, and under that load the
+// parse-heavy and timer-sensitive specs flake. Cap local runs at half the cores
+// (floor 2); `DSH_VITEST_MAX_WORKERS` overrides. CI passes `--maxWorkers` via
+// scripts/run-gates.ts, which wins over this config value.
+const maxWorkers = positiveIntFromEnv('DSH_VITEST_MAX_WORKERS', Math.max(2, Math.floor(availableParallelism() / 2)))
+
 export default defineConfig({
   plugins: [pathsPlugin(), standardDecoratorPlugin()],
   test: {
+    maxWorkers,
     setupFiles: ['./scripts/test-invariants.ts'],
     // .tsx: client component specs (jsdom via per-file @vitest-environment pragma).
     include: testIncludes,
