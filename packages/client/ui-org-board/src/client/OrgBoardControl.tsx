@@ -8,7 +8,7 @@
  */
 import { useEffect, useState } from 'react'
 import clsx from 'clsx'
-import { Button, IconBranchOutline16, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconBranchOutline16, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { OrgBoardFace } from './slots.ts'
@@ -58,18 +58,9 @@ export function OrgBoardControl({
         title={t('modal.title')}
         className={clsx(css.dialog)}
       >
-        <div className={css.refreshRow}>
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={state.status === 'loading'}
-            onClick={() => { void load() }}
-          >
-            {t('refresh')}
-          </Button>
-        </div>
         <OrgBoard
           state={state}
+          onRefresh={() => { void load() }}
           t={t}
           addSeat={addSeat}
           removeSeat={removeSeat}

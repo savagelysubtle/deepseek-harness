@@ -9,7 +9,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  cleanup, fireEvent, render, screen, waitFor, within,
+  act, cleanup, fireEvent, render, screen, waitFor, within,
 } from '@testing-library/react'
 import type { ResponseValue } from '@deepseek-ai/dsh-api-remotes/client'
 import type { LocaleKeysOf } from '@deepseek-ai/dsh-client-ui-slots'
@@ -18,7 +18,13 @@ import type { OrgBoardProps } from '../src/client/OrgBoard.tsx'
 import type { OrgBoardState, OrgBoardWriteNotice } from '../src/client/org-board-store.ts'
 import { en, type OrgBoardKey } from '../src/client/locales.ts'
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+  // Drop any size override a test installed, restoring jsdom's own (0) getters.
+  Reflect.deleteProperty(HTMLElement.prototype, 'clientWidth')
+  Reflect.deleteProperty(HTMLElement.prototype, 'clientHeight')
+})
 
 /**
  * jsdom has no real layout engine, so React Flow's own geometry measurement
@@ -27,8 +33,10 @@ afterEach(cleanup)
  * This is the documented jsdom stub recipe (xyflow/xyflow#377): all four
  * pieces are required together -- removing any one leaves edges undrawn.
  */
+/** Every live stub observer's callback, so a test can announce a container resize. */
+const observerCallbacks: ResizeObserverCallback[] = []
 class ResizeObserverStub {
-  constructor(private readonly callback: ResizeObserverCallback) {}
+  constructor(private readonly callback: ResizeObserverCallback) { observerCallbacks.push(callback) }
   // React Flow measures a node's DOM size from *this* callback firing, not
   // from offsetWidth/offsetHeight directly -- a no-op observe() (the usual
   // stub shape for components that only need ResizeObserver to exist) leaves
@@ -51,6 +59,7 @@ class DOMMatrixReadOnlyStub {
   m22 = 1
 }
 beforeEach(() => {
+  observerCallbacks.length = 0
   vi.stubGlobal('ResizeObserver', ResizeObserverStub)
   vi.stubGlobal('DOMMatrixReadOnly', DOMMatrixReadOnlyStub)
   vi.stubGlobal('DOMMatrix', DOMMatrixReadOnlyStub)
@@ -127,12 +136,14 @@ function verbs() {
  */
 function renderBoard(state: OrgBoardState, overrides: Partial<ReturnType<typeof verbs>> = {}) {
   const v = { ...verbs(), ...overrides }
-  const utils = render(<OrgBoard state={state} t={translate} {...v} />)
+  const onRefresh = vi.fn()
+  const utils = render(<OrgBoard state={state} t={translate} onRefresh={onRefresh} {...v} />)
   return {
     ...utils,
     ...v,
+    onRefresh,
     rerenderWithState: (next: OrgBoardState) => {
-      utils.rerender(<OrgBoard state={next} t={translate} {...v} />)
+      utils.rerender(<OrgBoard state={next} t={translate} onRefresh={onRefresh} {...v} />)
     },
   }
 }
@@ -187,10 +198,14 @@ const BASE_VALUE: ResponseValue<'org.get'> = {
 describe('OrgBoard', () => {
   it('renders only the top-level failure banner on an outer RPC error, nothing else', () => {
     const state: OrgBoardState = { status: 'error', error: 'connection lost', value: null, write: { pending: false, notice: null }, servedWrite: { pending: false, notice: null } }
-    renderBoard(state)
+    const { onRefresh } = renderBoard(state)
     expect(screen.getByRole('alert').textContent).toBe('Org board unavailable: connection lost')
     expect(screen.queryByText(/Profile:/)).toBeNull()
     expect(screen.queryByText('Drift (registry vs. served rosters)')).toBeNull()
+    // A failure must still offer the way out: Refresh lives in the board's toolbar.
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(onRefresh).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('button', { name: 'Add seat' })).toBeNull()
   })
 
   it('still renders the failure banner (with an empty reason, never a crash) if error is somehow null on an error status', () => {
@@ -209,6 +224,7 @@ describe('OrgBoard', () => {
     const state: OrgBoardState = { status: 'loading', error: null, value: null, write: { pending: false, notice: null }, servedWrite: { pending: false, notice: null } }
     renderBoard(state)
     expect(screen.getByText('Loading organisation…')).toBeTruthy()
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Refresh' }).disabled).toBe(true)
   })
 
   it('always shows the profile once a response has landed, even when everything else failed', () => {
@@ -261,20 +277,73 @@ describe('OrgBoard', () => {
     expect(screen.getByText('Tool-mailbox roster unavailable: patch file unreadable')).toBeTruthy()
   })
 
-  it('drift registered-but-unserved and served-but-unregistered rows surface with their roster detail', () => {
+  it('drift registered-but-unserved and served-but-unregistered rows surface with their roster detail, behind the drift chip', () => {
     renderBoard(ready(BASE_VALUE))
+    // Collapsed by default: the chip carries the count, the lists are not rendered.
+    expect(screen.queryByText('Registered but not served (1)')).toBeNull()
+    const chip = screen.getByRole('button', { name: '2 drift' })
+    expect(chip.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(chip)
+    expect(chip.getAttribute('aria-expanded')).toBe('true')
     expect(screen.getByText('Registered but not served (1)')).toBeTruthy()
     expect(screen.getByText('robin — missing from: mailbox-bridge')).toBeTruthy()
     expect(screen.getByText('Served but not registered (1)')).toBeTruthy()
     expect(screen.getByText('ghost — served by: mailbox-bridge')).toBeTruthy()
   })
 
-  it('an empty drift report shows None on both sides', () => {
+  it('clicking the drift chip again collapses the lists', () => {
+    renderBoard(ready(BASE_VALUE))
+    const chip = screen.getByRole('button', { name: '2 drift' })
+    fireEvent.click(chip)
+    expect(screen.getByText('Registered but not served (1)')).toBeTruthy()
+    fireEvent.click(chip)
+    expect(screen.queryByText('Registered but not served (1)')).toBeNull()
+  })
+
+  it('an empty drift report hides the chip entirely (nothing to expand)', () => {
     const state = ready({ ...BASE_VALUE, drift: { ok: true, rows: [] } })
     renderBoard(state)
-    expect(screen.getByText('Registered but not served (0)')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /drift/ })).toBeNull()
+    expect(screen.queryByText('Registered but not served (0)')).toBeNull()
+  })
+
+  it('a one-sided drift report shows None on the empty side', () => {
+    const state = ready({
+      ...BASE_VALUE,
+      drift: { ok: true, rows: [{ seat: 'robin', registered: true, servedByMailboxBridge: false, servedByToolMailbox: true }] },
+    })
+    renderBoard(state)
+    fireEvent.click(screen.getByRole('button', { name: '1 drift' }))
+    expect(screen.getByText('Registered but not served (1)')).toBeTruthy()
     expect(screen.getByText('Served but not registered (0)')).toBeTruthy()
-    expect(screen.getAllByText('None')).toHaveLength(2)
+    expect(screen.getAllByText('None')).toHaveLength(1)
+  })
+
+  it('an unregistered-only drift report shows None under the registered-but-unserved side', () => {
+    const state = ready({
+      ...BASE_VALUE,
+      drift: { ok: true, rows: [{ seat: 'ghost', registered: false, servedByMailboxBridge: true, servedByToolMailbox: false }] },
+    })
+    renderBoard(state)
+    fireEvent.click(screen.getByRole('button', { name: '1 drift' }))
+    expect(screen.getByText('Registered but not served (0)')).toBeTruthy()
+    expect(screen.getByText('ghost — served by: mailbox-bridge')).toBeTruthy()
+    expect(screen.getAllByText('None')).toHaveLength(1)
+  })
+
+  it('an expanded drift section disappears if a reload brings the drift down to zero', () => {
+    const view = renderBoard(ready(BASE_VALUE))
+    fireEvent.click(screen.getByRole('button', { name: '2 drift' }))
+    expect(screen.getByText('Registered but not served (1)')).toBeTruthy()
+    view.rerenderWithState(ready({ ...BASE_VALUE, drift: { ok: true, rows: [] } }))
+    expect(screen.queryByText('Registered but not served (1)')).toBeNull()
+    expect(screen.queryByText(/Registered but not served/)).toBeNull()
+  })
+
+  it('a failed drift shows no chip and no lists, only its banner', () => {
+    renderBoard(ready({ ...BASE_VALUE, drift: { ok: false, reason: 'mailboxBridge unavailable' } }))
+    expect(screen.queryByRole('button', { name: /drift/ })).toBeNull()
+    expect(screen.getByText('Drift unavailable: mailboxBridge unavailable')).toBeTruthy()
   })
 
   it('a registry with zero seats shows an explicit empty message, not a bare canvas', () => {
@@ -293,7 +362,7 @@ describe('OrgBoard', () => {
     expect(screen.getByText(/0 seat\(s\)/)).toBeTruthy()
   })
 
-  it('draws seat nodes with their badges and the detail hint before any selection', () => {
+  it('draws seat nodes with their badges and no detail drawer before any selection', () => {
     const { container } = renderBoard(ready(BASE_VALUE))
     expect(screen.getByText('alfred')).toBeTruthy()
     expect(screen.getByText('batman')).toBeTruthy()
@@ -309,7 +378,22 @@ describe('OrgBoard', () => {
     expect(within(batmanNode).getByText('Test seat')).toBeTruthy()
     // robin has a drift row (missing from mailbox-bridge), so its node badges too.
     expect(within(robinNode).getByText('Not fully served')).toBeTruthy()
-    expect(screen.getByText('Select a seat to see its details.')).toBeTruthy()
+    expect(screen.queryByText('Select a seat to see its details.')).toBeNull()
+    expect(screen.queryByRole('complementary')).toBeNull()
+  })
+
+  it('shows one served-status dot per seat, green-served vs not-fully-served', () => {
+    const { container } = renderBoard(ready(BASE_VALUE))
+    const dots = (name: string) => within(container.querySelector(`.react-flow__node[data-id="${name}"]`) as HTMLElement).getAllByRole('img', { hidden: true })
+    expect(dots('alfred').map(dot => dot.getAttribute('aria-label'))).toEqual(['served'])
+    expect(dots('batman').map(dot => dot.getAttribute('aria-label'))).toEqual(['served'])
+    expect(dots('robin').map(dot => dot.getAttribute('aria-label'))).toEqual(['not fully served'])
+    expect(container.querySelectorAll('[role="img"][aria-label="served"]')).toHaveLength(2)
+  })
+
+  it('shows no status dot at all when drift failed (unknown is never drawn as served)', () => {
+    const { container } = renderBoard(ready({ ...BASE_VALUE, drift: { ok: false, reason: 'mailboxBridge unavailable' } }))
+    expect(container.querySelectorAll('.react-flow__node[data-id] [role="img"]')).toHaveLength(0)
   })
 
   it('clicking a seat node opens its detail panel with cwd, session id, and editable tool lists', () => {
@@ -335,14 +419,124 @@ describe('OrgBoard', () => {
     expect(screen.getAllByText('No tool restrictions')).toHaveLength(1)
   })
 
-  it('clicking the pane clears the selection back to the hint', () => {
+  it('clicking the pane closes the drawer', () => {
     const { container } = renderBoard(ready(BASE_VALUE))
     fireEvent.click(screen.getByText('alfred'))
-    expect(screen.queryByText('Select a seat to see its details.')).toBeNull()
+    expect(screen.getByRole('complementary')).toBeTruthy()
     const pane = container.querySelector('.react-flow__pane')
     expect(pane).toBeTruthy()
     fireEvent.click(pane as Element)
-    expect(screen.getByText('Select a seat to see its details.')).toBeTruthy()
+    expect(screen.queryByRole('complementary')).toBeNull()
+  })
+
+  it('the drawer is closed by default, opens on node click, and closes with its Close button', () => {
+    renderBoard(ready(BASE_VALUE))
+    expect(screen.queryByRole('complementary')).toBeNull()
+    fireEvent.click(screen.getByText('batman'))
+    expect(within(screen.getByRole('complementary')).getByText('/org/deepseek-harness')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Close details' }))
+    expect(screen.queryByRole('complementary')).toBeNull()
+  })
+
+  it('Escape closes the drawer and does not reach the surrounding modal handler', () => {
+    renderBoard(ready(BASE_VALUE))
+    const outer = vi.fn()
+    const outerListener = (event: KeyboardEvent) => { if (event.key === 'Escape') outer() }
+    document.addEventListener('keydown', outerListener)
+    fireEvent.click(screen.getByText('batman'))
+    fireEvent.keyDown(document.body, { key: 'Enter' })
+    expect(screen.getByRole('complementary')).toBeTruthy()
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(screen.queryByRole('complementary')).toBeNull()
+    expect(outer).not.toHaveBeenCalled()
+    // With no drawer open the key is left alone for the modal to use.
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(outer).toHaveBeenCalledTimes(1)
+    document.removeEventListener('keydown', outerListener)
+  })
+
+  it('Escape is left to an open confirmation instead of closing the drawer underneath it', () => {
+    renderBoard(ready(BASE_VALUE))
+    fireEvent.click(screen.getByText('batman'))
+    fireEvent.click(screen.getByRole('button', { name: 'Remove seat' }))
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(screen.getByRole('complementary')).toBeTruthy()
+  })
+
+  it('the toolbar carries the profile, Add seat and Refresh; Refresh calls the provided reload', () => {
+    const { onRefresh } = renderBoard(ready(BASE_VALUE))
+    expect(screen.getByText('Profile: web-stable')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Add seat' })).toBeTruthy()
+    const refresh = screen.getByRole<HTMLButtonElement>('button', { name: 'Refresh' })
+    expect(refresh.disabled).toBe(false)
+    fireEvent.click(refresh)
+    expect(onRefresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('the toolbar filter dims non-matching seats, a clear control resets it, and an empty query dims nothing', () => {
+    const { container } = renderBoard(ready(BASE_VALUE))
+    const wrapper = (name: string) => container.querySelector(`.react-flow__node[data-id="${name}"]`) as HTMLElement
+    const dimmed = (name: string) => /nodeDimmed/.test(wrapper(name).className)
+    expect(['alfred', 'batman', 'robin'].some(dimmed)).toBe(false)
+    expect(screen.queryByRole('button', { name: 'Clear filter' })).toBeNull()
+    const input = screen.getByPlaceholderText('Filter seats')
+    fireEvent.change(input, { target: { value: 'ROB' } })
+    expect(dimmed('robin')).toBe(false)
+    expect(dimmed('alfred')).toBe(true)
+    expect(dimmed('batman')).toBe(true)
+    fireEvent.change(input, { target: { value: 'lead' } })
+    expect([dimmed('alfred'), dimmed('batman'), dimmed('robin')]).toEqual([false, true, true])
+    fireEvent.change(input, { target: { value: 'test' } })
+    expect([dimmed('alfred'), dimmed('batman'), dimmed('robin')]).toEqual([true, false, true])
+    fireEvent.change(input, { target: { value: 'unserved' } })
+    expect([dimmed('alfred'), dimmed('batman'), dimmed('robin')]).toEqual([true, true, false])
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filter' }))
+    expect((input as HTMLInputElement).value).toBe('')
+    expect(['alfred', 'batman', 'robin'].some(dimmed)).toBe(false)
+  })
+
+  it('a filter box is not offered when the registry failed', () => {
+    renderBoard(ready({ ...BASE_VALUE, registry: { ok: false, reason: 'registry.yml not found' }, drift: { ok: false, reason: 'x' } }))
+    expect(screen.queryByPlaceholderText('Filter seats')).toBeNull()
+  })
+
+  it('refits (without remounting) when the chart container changes size, and cancels a pending fit on unmount', async () => {
+    const frames: FrameRequestCallback[] = []
+    const requestFrame = vi.fn((callback: FrameRequestCallback) => frames.push(callback))
+    const cancelFrame = vi.fn()
+    vi.stubGlobal('requestAnimationFrame', requestFrame)
+    vi.stubGlobal('cancelAnimationFrame', cancelFrame)
+    const { container, unmount } = renderBoard(ready(BASE_VALUE))
+    await waitFor(() => { expect(requestFrame).toHaveBeenCalled() })
+    const flow = container.querySelector('.react-flow')
+    const before = requestFrame.mock.calls.length
+    // The drift panel shrinking the chart: height changes, width does not.
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get: () => 400 })
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 1284 })
+    act(() => { for (const callback of observerCallbacks) callback([], {} as ResizeObserver) })
+    await waitFor(() => { expect(requestFrame.mock.calls.length).toBeGreaterThan(before) })
+    expect(cancelFrame).toHaveBeenCalled()
+    // The latest frame runs the real fit without throwing, on the SAME instance.
+    act(() => { frames.at(-1)?.(0) })
+    expect(container.querySelector('.react-flow')).toBe(flow)
+    unmount()
+  })
+
+  it('fits a phone-width canvas to width via the viewport instead of fitView', async () => {
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => frames.push(callback)))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 366 })
+    const { container } = renderBoard(ready(BASE_VALUE))
+    await waitFor(() => { expect(frames.length).toBeGreaterThan(0) })
+    act(() => { frames.at(-1)?.(0) })
+    expect(container.querySelector('.react-flow')).toBeTruthy()
+  })
+
+  it('renders the zoom controls', () => {
+    const { container } = renderBoard(ready(BASE_VALUE))
+    expect(container.querySelector('.react-flow__controls')).toBeTruthy()
+    expect(container.querySelector('.react-flow__controls-interactive')).toBeNull()
   })
 
   it('renders zero edges by default, even though the registry declares one (SWD-163 step 8)', async () => {

@@ -36,24 +36,62 @@
 }
 
 /* Doubled class beats Modal's own .dialog regardless of stylesheet order
-   (same trick DirectoryBrowser.module.css uses for a wide dialog). */
+   (same trick DirectoryBrowser.module.css uses for a wide dialog). The board
+   is a near-full-screen workspace: tall and wide, with the shared Modal's
+   own chrome (shell, header, close button, focus/inert handling) untouched --
+   only dialog-scoped spacing is overridden here. */
 .dialog.dialog {
-  width: min(1180px, 100%);
+  width: min(1800px, 100%);
+  height: calc(100dvh - 48px);
+  gap: 0;
+  padding-bottom: 12px;
 }
 
-/* This is the board's own root -- rendered inside Modal's `.body`
-   (OrgBoardControl.tsx mounts it as Modal's children, alongside the
-   sibling Refresh row). Modal itself stays a fixed-height, non-scrolling
-   shell (ui-primitives/Modal.module.css); this is the one element that
-   actually scrolls, so the modal's title row and the Refresh row above it
-   stay in place by construction while only the board's own body moves. */
+/* Assumes Modal's DOM: the content div is the dialog's first child and the
+   body is that div's last child (ui-primitives/Modal.tsx). Modal's content column and its body fill the fixed-height dialog, and the
+   body drops its 20px top margin and wide side padding so the board owns the
+   space. Scoped to this dialog by the doubled class above. */
+.dialog.dialog > div {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.dialog.dialog > div > div:last-child {
+  flex: 1 1 auto;
+  margin-top: 0;
+  padding: 0 12px;
+}
+
+@media (max-width: 720px) {
+  .dialog.dialog {
+    /* Modal's root pads 24px and the dialog is a flex item that shrinks to
+       fit, which is what held it at viewport - 48px. flex: none stops the
+       shrink; the centred flex row then overflows the root's padding evenly
+       on every side, so the dialog covers the whole viewport. */
+    flex: none;
+    width: 100dvw;
+    max-width: 100dvw;
+    height: 100dvh;
+    max-height: 100dvh;
+    margin: 0;
+    padding-bottom: 0;
+    border: none;
+    border-radius: 0;
+  }
+}
+
+/* This is the board's own root -- rendered inside Modal's `.body`. The
+   chart row takes the remaining height; the column only scrolls when a
+   short window cannot fit the toolbar, notices and the chart's own floor. */
 .content {
+  position: relative;
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
-  gap: 16px;
+  gap: 8px;
   min-width: 0;
   min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
   /* .node (the seat card) already paints the l2 elevation this sheet
@@ -63,16 +101,85 @@
   --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
 }
 
-.refreshRow {
+/* One toolbar row: profile on the left, actions on the right. */
+.toolbar {
   display: flex;
-  justify-content: flex-end;
-  margin-bottom: 12px;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .profileLine {
   margin: 0;
   color: var(--dsw-alias-label-secondary);
   font-size: 12px;
+}
+
+.toolbarActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.driftChip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 10px;
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 40%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent);
+  color: var(--dsw-alias-state-error-primary);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.driftChip[aria-expanded='true'] {
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 22%, transparent);
+}
+
+.searchBox {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.searchInput {
+  box-sizing: border-box;
+  width: 180px;
+  height: 28px;
+  padding: 0 26px 0 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.searchClear {
+  position: absolute;
+  right: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.searchClear:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 .banner {
@@ -89,16 +196,16 @@
 }
 
 .banner[data-variant='error'] {
-  color: var(--dsw-alias-status-danger, #e5484d);
-  background: color-mix(in srgb, var(--dsw-alias-status-danger, #e5484d) 10%, var(--dsw-alias-bg-layer-1));
+  color: var(--dsw-alias-state-error-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, var(--dsw-alias-bg-layer-1));
 }
 
 /* The 'conflict' write notice is informational -- a reload already corrected
    the view -- so it gets its own, less alarming color rather than sharing
    the error/refusal red used by invalid/rejected/write-failed. */
 .banner[data-variant='warning'] {
-  color: var(--dsw-alias-status-warning, #f5a623);
-  background: color-mix(in srgb, var(--dsw-alias-status-warning, #f5a623) 10%, var(--dsw-alias-bg-layer-1));
+  color: var(--dsw-alias-state-warn-label);
+  background: color-mix(in srgb, var(--dsw-alias-state-warn-label) 10%, var(--dsw-alias-bg-layer-1));
 }
 
 .noticeRetry {
@@ -118,13 +225,6 @@
   color: var(--dsw-alias-label-primary);
 }
 
-.sectionHeaderRow {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
 /* Legend row (SWD-163 step 9): one swatch per existing badge class, plus a
    plain-text note on the edge-reveal interaction added alongside it --
    edges are never a badge, so they get no swatch of their own. */
@@ -133,6 +233,12 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+.legendTitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
 }
 
 .legendHint {
@@ -160,7 +266,7 @@
 .addSeatInput {
   height: 28px;
   padding: 0 8px;
-  border: 1px solid var(--dsw-alias-border-primary, #3a3a3a);
+  border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 8px;
   background: var(--dsw-alias-bg-layer-2);
   color: var(--dsw-alias-label-primary);
@@ -170,8 +276,17 @@
 .addSeatError {
   margin: 0;
   flex: 1 1 100%;
-  color: var(--dsw-alias-status-danger, #e5484d);
+  color: var(--dsw-alias-state-error-primary);
   font-size: 12px;
+}
+
+.driftSection {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 30dvh;
+  overflow-y: auto;
 }
 
 .driftGrid {
@@ -224,32 +339,32 @@
 }
 
 .layoutRow {
+  position: relative;
   display: flex;
-  gap: 12px;
+  flex: 1 1 0;
   align-items: stretch;
   min-width: 0;
-}
-
-@media (max-width: 720px) {
-  .layoutRow {
-    flex-direction: column;
-  }
+  min-height: 0;
 }
 
 .canvasWrap {
   position: relative;
   flex: 1 1 auto;
   min-width: 0;
-  /* A fixed height used to force the modal's dialog taller than the
-     viewport could ever accommodate (the board's own `.content` above now
-     scrolls its body instead). A floor, not a fixed size: the canvas can
-     settle shorter than 460px inside a cramped layout row, but never
-     unusably small. */
-  min-height: 320px;
-  border: 1px solid var(--dsw-alias-border-primary, #3a3a3a);
+  /* A floor, not a fixed size: the chart takes whatever height the dialog
+     leaves, but never less than half the viewport. */
+  min-height: 50dvh;
+  border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 12px;
   overflow: hidden;
   background: var(--dsw-alias-bg-layer-1);
+}
+
+/* React Flow fills the wrapper by absolute positioning, so it never depends
+   on a percentage height resolving through the flex row. */
+.flow.flow {
+  position: absolute;
+  inset: 0;
 }
 
 .canvasEmpty {
@@ -264,14 +379,21 @@
   padding: 16px;
 }
 
+/* Seat details: an overlay drawer over the chart's right edge (a bottom
+   sheet on phones), rendered only while a seat is selected. */
 .detailPanel {
-  flex: none;
-  width: 260px;
-  min-width: 220px;
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 6;
+  box-sizing: border-box;
+  width: min(320px, 90%);
   padding: 12px;
-  border: 1px solid var(--dsw-alias-border-primary, #3a3a3a);
-  border-radius: 12px;
-  background: var(--dsw-alias-bg-layer-1);
+  border-left: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 0 12px 12px 0;
+  background: var(--dsw-alias-bg-layer-2);
+  box-shadow: var(--dsw-shadow-lv3);
   overflow-y: auto;
   /* This sheet also paints a layer-2 (elevated) surface -- .node, the seat
      card -- so its scrollbar thumb takes the l2 elevation tokens (see
@@ -282,14 +404,20 @@
 
 @media (max-width: 720px) {
   .detailPanel {
-    width: 100%;
+    top: auto;
+    left: 0;
+    width: auto;
+    height: 60%;
+    border-top: 1px solid var(--dsw-alias-border-l2);
+    border-left: none;
+    border-radius: 12px 12px 0 0;
   }
 }
 
-.detailHint {
-  margin: 0;
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 12px;
+.detailActions {
+  display: flex;
+  flex: none;
+  gap: 6px;
 }
 
 .detailName {
@@ -301,6 +429,7 @@
 }
 
 .detailHeaderRow {
+  margin-bottom: 16px;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -312,7 +441,7 @@
 }
 
 .detailRow {
-  margin: 0 0 10px;
+  margin: 0 0 14px;
 }
 
 .toolsField {
@@ -325,7 +454,7 @@
 .toolsInput {
   height: 26px;
   padding: 0 8px;
-  border: 1px solid var(--dsw-alias-border-primary, #3a3a3a);
+  border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 8px;
   background: var(--dsw-alias-bg-layer-2);
   color: var(--dsw-alias-label-primary);
@@ -335,7 +464,7 @@
 }
 
 .detailLabel {
-  margin: 0 0 2px;
+  margin: 0 0 4px;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.02em;
@@ -347,6 +476,10 @@
   font-size: 12px;
   color: var(--dsw-alias-label-primary);
   word-break: break-word;
+}
+
+.detailPanel > .detailValue {
+  margin: 0 0 14px;
 }
 
 .detailList {
@@ -361,9 +494,9 @@
    ours. */
 .node {
   box-sizing: border-box;
-  width: 168px;
+  width: 208px;
   padding: 8px 10px;
-  border: 1px solid var(--dsw-alias-border-primary, #3a3a3a);
+  border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 10px;
   background: var(--dsw-alias-bg-layer-2);
   cursor: pointer;
@@ -375,14 +508,46 @@
 }
 
 .nodeUnserved {
-  border-color: var(--dsw-alias-status-danger, #e5484d);
+  border-color: var(--dsw-alias-state-error-primary);
+}
+
+/* Filtered out by the toolbar search: faded and inert. On the React Flow
+   node wrapper (via the node's className), whose own inline pointer-events
+   is why this needs !important. */
+.nodeDimmed {
+  opacity: 0.3;
+  pointer-events: none !important;
+}
+
+.nodeHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .nodeName {
-  font-size: 12px;
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 14px;
   font-weight: 600;
+  line-height: 20px;
   color: var(--dsw-alias-label-primary);
   word-break: break-word;
+}
+
+.statusDot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.statusDotServed {
+  background: var(--dsw-alias-state-success-primary);
+}
+
+.statusDotUnserved {
+  background: var(--dsw-alias-state-error-primary);
 }
 
 .badgeRow {
@@ -393,11 +558,15 @@
 }
 
 .badge {
-  display: inline-block;
-  padding: 1px 6px;
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  min-height: 20px;
+  padding: 2px 8px;
+  border: 1px solid transparent;
   border-radius: 999px;
-  font-size: 10px;
-  line-height: 1.6;
+  font-size: 12px;
+  line-height: 16px;
   white-space: nowrap;
 }
 
@@ -412,13 +581,16 @@
 }
 
 .badgeUnserved {
-  background: color-mix(in srgb, var(--dsw-alias-status-danger, #e5484d) 18%, transparent);
-  color: var(--dsw-alias-status-danger, #e5484d);
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 18%, transparent);
+  color: var(--dsw-alias-state-error-primary);
 }
 
+/* Neutral outline: "may mail anyone" is a permission, not a state, so it
+   takes no status colour. */
 .badgeCallUp {
-  background: color-mix(in srgb, #3367d9 18%, transparent);
-  color: #3367d9;
+  border-color: var(--dsw-alias-border-l2);
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
 }
 
 /* nodesConnectable is now true (SWD-134 slice 4 step 4) so a handle must be
@@ -431,7 +603,7 @@
   height: 8px;
   min-width: 8px;
   min-height: 8px;
-  border: 1px solid var(--dsw-alias-border-primary, #3a3a3a);
+  border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 50%;
   background: var(--dsw-alias-bg-layer-1);
   opacity: 0.6;

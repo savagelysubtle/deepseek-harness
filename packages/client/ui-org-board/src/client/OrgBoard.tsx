@@ -23,9 +23,10 @@
  * (via a `key={selectedSeat}`) whenever the selection changes, rather than
  * `OrgBoard` reaching for `useEffect` to resync a shared buffer.
  */
-import { useState } from 'react'
-import type { FormEvent } from 'react'
-import { Background, ReactFlow } from '@xyflow/react'
+import { useEffect, useState } from 'react'
+import type { FormEvent, ReactNode } from 'react'
+import clsx from 'clsx'
+import { Background, Controls, ReactFlow, useReactFlow } from '@xyflow/react'
 import type { Connection, Edge } from '@xyflow/react'
 import { Button, RiskConfirmation } from '@deepseek-ai/dsh-client-ui-primitives'
 import './xyflow-base.module.css'
@@ -34,17 +35,56 @@ import { removeSeat as previewRemoveSeat } from './edit.ts'
 import type { OrgBoardServedWriteNotice, OrgBoardWriteNotice, OrgBoardState } from './org-board-store.ts'
 import {
   driftLists, missingRosterLabels, seatBadges, seatNamesOf, seatServedStatus, servedRosterLabels, unservedByName,
-  type DriftLists, type OrgBoardTranslate, type SeatServedStatus,
+  type OrgBoardTranslate, type SeatServedStatus,
 } from './derive.ts'
+import { applyFit } from './fit.ts'
+import { seatMatchesFilter } from './filter.ts'
 import { gridPositions } from './layout.ts'
+import { useCanvasColumns } from './use-canvas-columns.ts'
 import { SeatNode, type SeatNodeType } from './SeatNode.tsx'
 
 const NODE_TYPES = { seat: SeatNode }
+
+/** Mail-permission line styling: token-driven so the chart follows the app's theme. */
+const EDGE_STYLE = { stroke: 'var(--dsw-alias-label-secondary)', strokeWidth: 1.5 }
+
+/** Props for the chart's refit controller. */
+interface FitControllerProps {
+  width: number
+  height: number
+  columns: number
+  /** Changes whenever the seat set does. */
+  seatKey: string
+}
+
+/**
+ * Re-frames the chart whenever its container resizes (width OR height), its
+ * column count changes, or its seats change -- never by remounting, which
+ * left a stale zoom after a window resize or after the drift panel shrank
+ * the chart. `fitView` itself queues until the nodes are measured, so a fit
+ * requested before then still lands; a burst of changes is coalesced into one
+ * fit per animation frame. Renders nothing.
+ * @param props - the container size, column count and a seat-set key.
+ * @returns nothing.
+ */
+function FitController({
+  width, height, columns, seatKey,
+}: FitControllerProps) {
+  const instance = useReactFlow()
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => { applyFit(instance, width, columns) })
+    return () => { cancelAnimationFrame(frame) }
+    // width/height/columns/seatKey are the triggers, not values read inside.
+  }, [instance, width, height, columns, seatKey])
+  return null
+}
 
 /** Props for the board body rendered inside the modal. */
 export interface OrgBoardProps {
   state: OrgBoardState
   t: OrgBoardTranslate
+  /** Re-issue `org.get`; the toolbar's Refresh button. Read-only, so it needs no confirmation. */
+  onRefresh: () => void
   /**
    * Add one new seat. See {@link OrgBoardFace.addSeat} in `slots.ts` -- these
    * six verbs share that exact signature shape, so `OrgBoardControl.tsx`
@@ -217,13 +257,45 @@ function SeatToolsEditor({
   )
 }
 
+/** Props for the board's one toolbar row. */
+interface ToolbarProps {
+  profileText: string
+  refreshLabel: string
+  refreshDisabled: boolean
+  onRefresh: () => void
+  /** Chip, search box and Add seat button, left of Refresh. */
+  children?: ReactNode
+}
+
+/**
+ * The single toolbar row: profile text on the left, actions on the right.
+ * Rendered in every board state -- an RPC failure must still offer Refresh.
+ * @param props - the profile text, the Refresh wiring, and the other actions.
+ * @returns the toolbar row.
+ */
+function Toolbar({
+  profileText, refreshLabel, refreshDisabled, onRefresh, children,
+}: ToolbarProps) {
+  return (
+    <div className={css.toolbar}>
+      <p className={css.profileLine}>{profileText}</p>
+      <div className={css.toolbarActions}>
+        {children}
+        <Button type="button" variant="ghost" size="sm" disabled={refreshDisabled} onClick={onRefresh}>
+          {refreshLabel}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 /**
  * Render the org board body.
  * @param props - the latest `org.get` snapshot, the bound translate, and the five write verbs.
  * @returns the status banner, or the full board once a response has landed.
  */
 export function OrgBoard({
-  state, t,
+  state, t, onRefresh,
   addSeat,
   removeSeat,
   addEdge,
@@ -243,6 +315,9 @@ export function OrgBoard({
   const [addSeatName, setAddSeatName] = useState('')
   const [addSeatCwd, setAddSeatCwd] = useState('')
   const [addSeatValidationError, setAddSeatValidationError] = useState<string | null>(null)
+  const [driftOpen, setDriftOpen] = useState(false)
+  const [filter, setFilter] = useState('')
+  const { ref: canvasRef, columns, width: canvasWidth, height: canvasHeight, measured } = useCanvasColumns()
   const [seatToRemove, setSeatToRemove] = useState<string | null>(null)
   const [removeAcknowledged, setRemoveAcknowledged] = useState(false)
   const [edgeToRemove, setEdgeToRemove] = useState<{ from: string; to: string } | null>(null)
@@ -268,9 +343,31 @@ export function OrgBoard({
   // resend of the same unacknowledged payload.
   const [servedLastAttempt, setServedLastAttempt] = useState<(() => Promise<void>) | null>(null)
 
+  // A confirmation (its own Modal) closes itself on Escape, so the drawer
+  // must not also swallow that key while one is open.
+  const confirmOpen = seatToRemove !== null || edgeToRemove !== null || servedToggle !== null
+  // Escape closes the seat drawer. Registered on the capture phase and
+  // stopped there so the surrounding Modal's own Escape handler (which would
+  // close the whole board) does not also fire. Only live while a drawer is
+  // open, and removed on close; no focus, inert or body state is touched.
+  useEffect(() => {
+    if (selectedSeat === null || confirmOpen) return undefined
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.stopPropagation()
+      setSelectedSeat(null)
+    }
+    document.addEventListener('keydown', onKeyDown, true)
+    return () => { document.removeEventListener('keydown', onKeyDown, true) }
+  }, [selectedSeat, confirmOpen])
+
+  const refreshLabel = t('refresh')
+  const refreshDisabled = state.status === 'loading'
+
   if (state.status === 'error') {
     return (
       <div className={css.content}>
+        <Toolbar profileText="" refreshLabel={refreshLabel} refreshDisabled={refreshDisabled} onRefresh={onRefresh} />
         <div className={css.banner} data-variant="error" role="alert">
           {t('error.rpc', { reason: state.error ?? '' })}
         </div>
@@ -281,7 +378,7 @@ export function OrgBoard({
   if (state.value === null) {
     return (
       <div className={css.content}>
-        <p className={css.profileLine}>{t('loading')}</p>
+        <Toolbar profileText={t('loading')} refreshLabel={refreshLabel} refreshDisabled={refreshDisabled} onRefresh={onRefresh} />
       </div>
     )
   }
@@ -321,7 +418,7 @@ export function OrgBoard({
   // detail panel below).
   const splitSeatNames = (lists?.unserved ?? []).filter(row => seatServedStatus(row) === 'split').map(row => row.seat)
   const seatNames = registry.ok ? seatNamesOf(registry.registry) : []
-  const positions = gridPositions(seatNames)
+  const positions = gridPositions(seatNames, columns)
 
   const nodes: SeatNodeType[] = registry.ok
     ? seatNames.map((name) => {
@@ -331,16 +428,28 @@ export function OrgBoard({
       // fall back to an empty seat rather than crashing mid-render.
       /* v8 ignore next -- defensive: seat is always present for a name drawn from this same registry's own keys. */
       const record = seat ?? { cwd: '' }
+      const badges = seatBadges(name, record, registry.registry.callUp, driftLookup.get(name), t)
+      const unserved = badges.some(badge => badge.kind === 'unserved')
+      const matches = seatMatchesFilter(name, {
+        lead: badges.some(badge => badge.kind === 'lead'),
+        test: badges.some(badge => badge.kind === 'test'),
+        unserved,
+      }, filter)
       return {
         id: name,
         type: 'seat',
+        className: clsx(!matches && css.nodeDimmed),
         // positions is gridPositions(seatNames), so it always has this name.
         /* v8 ignore next -- defensive: positions.get(name) is always set for a name drawn from seatNames. */
         position: positions.get(name) ?? { x: 0, y: 0 },
         data: {
           name,
-          badges: seatBadges(name, record, registry.registry.callUp, driftLookup.get(name), t),
+          badges,
           selected: name === selectedSeat,
+          // Unknown (no dot) whenever drift failed: an empty drift lookup
+          // then says nothing about a seat, and must not read as served.
+          served: drift.ok ? !unserved : null,
+          statusLabel: unserved ? t('status.unserved') : t('status.served'),
         },
       }
     })
@@ -358,6 +467,7 @@ export function OrgBoard({
         source: from,
         target: to,
         type: 'straight',
+        style: EDGE_STYLE,
       }))
     : []
 
@@ -449,9 +559,64 @@ export function OrgBoard({
     setAddSeatOpen(false)
   }
 
+  const driftCount = lists === undefined ? 0 : lists.unserved.length + lists.unregistered.length
+  const showDrift = driftOpen && lists !== undefined && driftCount > 0
+
   return (
     <div className={css.content}>
-      <p className={css.profileLine}>{t('profile.label', { profile })}</p>
+      <Toolbar
+        profileText={t('profile.label', { profile })}
+        refreshLabel={refreshLabel}
+        refreshDisabled={refreshDisabled}
+        onRefresh={onRefresh}
+      >
+        {driftCount > 0 && (
+          <button
+            type="button"
+            className={css.driftChip}
+            aria-expanded={driftOpen}
+            onClick={() => { setDriftOpen(open => !open) }}
+          >
+            {t('drift.chip', { count: driftCount })}
+          </button>
+        )}
+        {registry.ok && (
+          <>
+            <div className={css.searchBox}>
+              <input
+                type="text"
+                className={css.searchInput}
+                value={filter}
+                placeholder={t('toolbar.filter.placeholder')}
+                aria-label={t('toolbar.filter.placeholder')}
+                onChange={(event) => { setFilter(event.currentTarget.value) }}
+              />
+              {filter !== '' && (
+                <button
+                  type="button"
+                  className={css.searchClear}
+                  aria-label={t('toolbar.filter.clear')}
+                  onClick={() => { setFilter('') }}
+                >
+                  ×
+                </button>
+              )}
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={pending}
+              onClick={() => {
+                setAddSeatValidationError(null)
+                setAddSeatOpen(open => !open)
+              }}
+            >
+              {addSeatOpen ? t('action.cancel') : t('addSeat.trigger')}
+            </Button>
+          </>
+        )}
+      </Toolbar>
 
       {notice !== null && (
         <div className={css.banner} data-variant={writeNoticeVariant(notice.kind)} role="alert">
@@ -505,81 +670,20 @@ export function OrgBoard({
         </div>
       )}
 
-      <div className={css.section}>
-        <h3 className={css.sectionTitle}>{t('drift.title')}</h3>
-        {!drift.ok
-          ? (
-            <div className={css.banner} data-variant="error" role="alert">
-              {t('error.drift', { reason: drift.reason })}
-            </div>
-          )
-          : (() => {
-            // drift.ok is true in this branch, and driftLists() only ever
-            // returns undefined for a failed drift result, so lists is
-            // always populated here -- narrow once instead of every usage
-            // below needing an optional-chain fallback that can never fire.
-            const rows = lists as DriftLists
-            return (
-              <div className={css.driftGrid}>
-                <div className={css.driftColumn}>
-                  <p className={css.driftColumnTitle}>
-                    {t('drift.unserved.title', { count: rows.unserved.length })}
-                  </p>
-                  {rows.unserved.length > 0
-                    ? (
-                      <ul className={css.driftList}>
-                        {rows.unserved.map(row => (
-                          <li key={row.seat} className={css.driftItem}>
-                            {t('drift.unserved.item', { seat: row.seat, rosters: missingRosterLabels(row, t).join(', ') })}
-                          </li>
-                        ))}
-                      </ul>
-                    )
-                    : <p className={css.driftEmpty}>{t('drift.unserved.empty')}</p>}
-                </div>
-                <div className={css.driftColumn}>
-                  <p className={css.driftColumnTitle}>
-                    {t('drift.unregistered.title', { count: rows.unregistered.length })}
-                  </p>
-                  {rows.unregistered.length > 0
-                    ? (
-                      <ul className={css.driftList}>
-                        {rows.unregistered.map(row => (
-                          <li key={row.seat} className={css.driftItem}>
-                            {t('drift.unregistered.item', { seat: row.seat, rosters: servedRosterLabels(row, t).join(', ') })}
-                          </li>
-                        ))}
-                      </ul>
-                    )
-                    : <p className={css.driftEmpty}>{t('drift.unregistered.empty')}</p>}
-                </div>
-              </div>
-            )
-          })()}
-      </div>
+      {!drift.ok && (
+        <div className={css.banner} data-variant="error" role="alert">
+          {t('error.drift', { reason: drift.reason })}
+        </div>
+      )}
 
       {registry.ok && (
-        <div className={css.section}>
-          <div className={css.sectionHeaderRow}>
-            <h3 className={css.sectionTitle}>
+        <>
+          <div className={css.legendRow}>
+            <span className={css.legendTitle}>
               {t('graph.title')}
               {' — '}
               {t('graph.seatCount', { count: seatNames.length })}
-            </h3>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={pending}
-              onClick={() => {
-                setAddSeatValidationError(null)
-                setAddSeatOpen(open => !open)
-              }}
-            >
-              {addSeatOpen ? t('action.cancel') : t('addSeat.trigger')}
-            </Button>
-          </div>
-          <div className={css.legendRow}>
+            </span>
             <span className={`${css.badge} ${css.badgeLead}`}>{t('badge.lead')}</span>
             <span className={`${css.badge} ${css.badgeTest}`}>{t('badge.test')}</span>
             <span className={`${css.badge} ${css.badgeUnserved}`}>{t('badge.unserved')}</span>
@@ -615,73 +719,73 @@ export function OrgBoard({
             </form>
           )}
           <div className={css.layoutRow}>
-            <div className={css.canvasWrap}>
+            <div className={css.canvasWrap} ref={canvasRef}>
               {seatNames.length === 0
                 ? <div className={css.canvasEmpty}>{t('graph.empty')}</div>
-                : (
-                  <ReactFlow
-                    // Remount when the seat set changes so the view re-fits.
-                    // `fitView` alone only fits on mount, so an added seat
-                    // landed outside the canvas with nothing to bring it back
-                    // -- the save had worked and the board looked like it had
-                    // done nothing, which is the failure this board exists to
-                    // expose. Keyed on the seat names because that is exactly
-                    // what changes the layout's extent.
-                    key={seatNames.join('\u0000')}
-                    nodes={nodes}
-                    edges={edges}
-                    nodeTypes={NODE_TYPES}
-                    onNodeClick={(_event, node) => { setSelectedSeat(node.id) }}
-                    onPaneClick={() => { setSelectedSeat(null) }}
-                    // Hover reveals a seat's own mail-permission lines without
-                    // disturbing the selection -- leaving only clears the
-                    // hover highlight, never selectedSeat (see `edges` above).
-                    onNodeMouseEnter={(_event, node) => { setHoveredSeat(node.id) }}
-                    onNodeMouseLeave={() => { setHoveredSeat(null) }}
-                    onConnect={(connection: Connection) => {
-                      if (pending) return
-                      setLastAttempt(() => () => addEdge(connection.source, connection.target))
-                      void addEdge(connection.source, connection.target)
-                    }}
-                    onEdgeClick={(_event, edge) => {
-                      if (pending) return
-                      setEdgeToRemove({ from: edge.source, to: edge.target })
-                    }}
-                    // nodesConnectable drives dragging a line between two
-                    // seats (addEdge); elementsSelectable and nodesDraggable
-                    // stay false -- DELIBERATE and load-bearing. If elements
-                    // became selectable, React Flow's own default
-                    // Backspace-deletes-the-selection behaviour goes live and
-                    // removes edges PURELY IN THE BROWSER WITH NO SAVE AT
-                    // ALL: a board that looks edited, is not, and silently
-                    // reverts on reload -- exactly the defect this whole
-                    // ticket exists to remove. onNodeClick/onEdgeClick both
-                    // still fire with elementsSelectable false (verified:
-                    // React Flow attaches onClick directly to each edge's
-                    // wrapping <g> regardless of its selectable state, and to
-                    // each node's wrapper the same way; the existing
-                    // "clicking a seat node opens its detail panel" test
-                    // already proved onNodeClick fires here, and this slice
-                    // adds the matching onEdgeClick coverage below).
-                    nodesDraggable={false}
-                    nodesConnectable={!pending}
-                    elementsSelectable={false}
-                    panOnScroll
-                    zoomOnScroll
-                    fitView
-                    proOptions={{ hideAttribution: true }}
-                  >
-                    <Background />
-                  </ReactFlow>
-                )}
+                : !measured
+                  ? null
+                  : (
+                    <ReactFlow
+                      className={css.flow}
+                      // ONE instance, never remounted: refits are driven by
+                      // FitController below (resize, columns, seat set). Not drawn
+                      // until the container has been measured, so the first paint
+                      // already has its final column count.
+                      nodes={nodes}
+                      edges={edges}
+                      nodeTypes={NODE_TYPES}
+                      onNodeClick={(_event, node) => { setSelectedSeat(node.id) }}
+                      onPaneClick={() => { setSelectedSeat(null) }}
+                      // Hover reveals a seat's own mail-permission lines without
+                      // disturbing the selection -- leaving only clears the
+                      // hover highlight, never selectedSeat (see `edges` above).
+                      onNodeMouseEnter={(_event, node) => { setHoveredSeat(node.id) }}
+                      onNodeMouseLeave={() => { setHoveredSeat(null) }}
+                      onConnect={(connection: Connection) => {
+                        if (pending) return
+                        setLastAttempt(() => () => addEdge(connection.source, connection.target))
+                        void addEdge(connection.source, connection.target)
+                      }}
+                      onEdgeClick={(_event, edge) => {
+                        if (pending) return
+                        setEdgeToRemove({ from: edge.source, to: edge.target })
+                      }}
+                      // nodesConnectable drives dragging a line between two
+                      // seats (addEdge); elementsSelectable and nodesDraggable
+                      // stay false -- DELIBERATE and load-bearing. If elements
+                      // became selectable, React Flow's own default
+                      // Backspace-deletes-the-selection behaviour goes live and
+                      // removes edges PURELY IN THE BROWSER WITH NO SAVE AT
+                      // ALL: a board that looks edited, is not, and silently
+                      // reverts on reload -- exactly the defect this whole
+                      // ticket exists to remove. onNodeClick/onEdgeClick both
+                      // still fire with elementsSelectable false (verified:
+                      // React Flow attaches onClick directly to each edge's
+                      // wrapping <g> regardless of its selectable state, and to
+                      // each node's wrapper the same way; the existing
+                      // "clicking a seat node opens its detail panel" test
+                      // already proved onNodeClick fires here, and this slice
+                      // adds the matching onEdgeClick coverage below).
+                      nodesDraggable={false}
+                      nodesConnectable={!pending}
+                      elementsSelectable={false}
+                      panOnScroll
+                      zoomOnScroll
+                      minZoom={0.4}
+                      proOptions={{ hideAttribution: true }}
+                    >
+                      <Background />
+                      <Controls showInteractive={false} />
+                      <FitController width={canvasWidth} height={canvasHeight} columns={columns} seatKey={seatNames.join('\u0000')} />
+                    </ReactFlow>
+                  )}
             </div>
-            <div className={css.detailPanel}>
-              {selectedRecord === undefined
-                ? <p className={css.detailHint}>{t('detail.hint')}</p>
-                : (
-                  <>
-                    <div className={css.detailHeaderRow}>
-                      <p className={css.detailName}>{selectedSeat}</p>
+            {selectedRecord !== undefined && (
+              <aside className={css.detailPanel}>
+                <>
+                  <div className={css.detailHeaderRow}>
+                    <p className={css.detailName}>{selectedSeat}</p>
+                    <div className={css.detailActions}>
                       <Button
                         type="button"
                         variant="outline"
@@ -691,64 +795,68 @@ export function OrgBoard({
                       >
                         {t('seat.remove.trigger')}
                       </Button>
-                    </div>
-                    <div className={css.detailRow}>
-                      <p className={css.detailLabel}>{t('detail.cwd')}</p>
-                      <p className={css.detailValue}>{selectedRecord.cwd}</p>
-                    </div>
-                    <div className={css.detailRow}>
-                      <p className={css.detailLabel}>{t('detail.session')}</p>
-                      <p className={css.detailValue}>{selectedRecord.sessionId ?? t('detail.session.none')}</p>
-                    </div>
-                    <div className={css.detailRow}>
-                      <p className={css.detailLabel}>{t('detail.served.label')}</p>
-                      {selectedServedStatus !== null && (
-                        <p className={css.detailValue}>{servedStatusLabel(selectedServedStatus, t)}</p>
-                      )}
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        // Genuinely disabled -- a real `disabled` attribute,
-                        // never a CSS-only affordance -- whenever `!drift.ok`:
-                        // with no honest baseline to toggle from, acting on a
-                        // guessed empty list would write a roster derived
-                        // from nothing. The existing `error.drift` banner
-                        // above already explains why; this adds no new text.
-                        disabled={pending || servedPending || !drift.ok}
-                        onClick={() => {
-                          /* v8 ignore next -- defensive: rendered only inside the selectedRecord branch, which requires
-                             selectedSeat !== null in the same render */
-                          if (selectedSeat === null) return
-                          setServedToggle({ name: selectedSeat, nextServed: !selectedCurrentlyServedByMailboxBridge })
-                        }}
-                      >
-                        {t('detail.served.toggle')}
+                      <Button type="button" variant="ghost" size="sm" onClick={() => { setSelectedSeat(null) }}>
+                        {t('detail.close')}
                       </Button>
                     </div>
-                    {!hasAllow && !hasDeny && (
-                      <p className={css.detailValue}>{t('detail.tools.none')}</p>
+                  </div>
+                  <div className={css.detailRow}>
+                    <p className={css.detailLabel}>{t('detail.cwd')}</p>
+                    <p className={css.detailValue}>{selectedRecord.cwd}</p>
+                  </div>
+                  <div className={css.detailRow}>
+                    <p className={css.detailLabel}>{t('detail.session')}</p>
+                    <p className={css.detailValue}>{selectedRecord.sessionId ?? t('detail.session.none')}</p>
+                  </div>
+                  <div className={css.detailRow}>
+                    <p className={css.detailLabel}>{t('detail.served.label')}</p>
+                    {selectedServedStatus !== null && (
+                      <p className={css.detailValue}>{servedStatusLabel(selectedServedStatus, t)}</p>
                     )}
-                    <SeatToolsEditor
-                      key={selectedSeat}
-                      allow={selectedRecord.tools?.allow ?? []}
-                      deny={selectedRecord.tools?.deny ?? []}
-                      disabled={pending}
-                      allowLabel={t('detail.tools.allow')}
-                      denyLabel={t('detail.tools.deny')}
-                      saveLabel={t('action.save')}
-                      onSave={(allow, deny) => {
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      // Genuinely disabled -- a real `disabled` attribute,
+                      // never a CSS-only affordance -- whenever `!drift.ok`:
+                      // with no honest baseline to toggle from, acting on a
+                      // guessed empty list would write a roster derived
+                      // from nothing. The existing `error.drift` banner
+                      // above already explains why; this adds no new text.
+                      disabled={pending || servedPending || !drift.ok}
+                      onClick={() => {
                         /* v8 ignore next -- defensive: rendered only inside the selectedRecord branch, which requires
                            selectedSeat !== null in the same render */
                         if (selectedSeat === null) return
-                        const name = selectedSeat
-                        setLastAttempt(() => () => setSeatTools(name, allow, deny))
-                        void setSeatTools(name, allow, deny)
+                        setServedToggle({ name: selectedSeat, nextServed: !selectedCurrentlyServedByMailboxBridge })
                       }}
-                    />
-                  </>
-                )}
-            </div>
+                    >
+                      {t('detail.served.toggle')}
+                    </Button>
+                  </div>
+                  {!hasAllow && !hasDeny && (
+                    <p className={css.detailValue}>{t('detail.tools.none')}</p>
+                  )}
+                  <SeatToolsEditor
+                    key={selectedSeat}
+                    allow={selectedRecord.tools?.allow ?? []}
+                    deny={selectedRecord.tools?.deny ?? []}
+                    disabled={pending}
+                    allowLabel={t('detail.tools.allow')}
+                    denyLabel={t('detail.tools.deny')}
+                    saveLabel={t('action.save')}
+                    onSave={(allow, deny) => {
+                      /* v8 ignore next -- defensive: rendered only inside the selectedRecord branch, which requires
+                         selectedSeat !== null in the same render */
+                      if (selectedSeat === null) return
+                      const name = selectedSeat
+                      setLastAttempt(() => () => setSeatTools(name, allow, deny))
+                      void setSeatTools(name, allow, deny)
+                    }}
+                  />
+                </>
+              </aside>
+            )}
           </div>
 
           <RiskConfirmation
@@ -832,6 +940,46 @@ export function OrgBoard({
               void setSeatServed(name, nextServed, acknowledgeSplit)
             }}
           />
+        </>
+      )}
+
+      {showDrift && (
+        <div className={css.driftSection}>
+          <h3 className={css.sectionTitle}>{t('drift.title')}</h3>
+          <div className={css.driftGrid}>
+            <div className={css.driftColumn}>
+              <p className={css.driftColumnTitle}>
+                {t('drift.unserved.title', { count: lists.unserved.length })}
+              </p>
+              {lists.unserved.length > 0
+                ? (
+                  <ul className={css.driftList}>
+                    {lists.unserved.map(row => (
+                      <li key={row.seat} className={css.driftItem}>
+                        {t('drift.unserved.item', { seat: row.seat, rosters: missingRosterLabels(row, t).join(', ') })}
+                      </li>
+                    ))}
+                  </ul>
+                )
+                : <p className={css.driftEmpty}>{t('drift.unserved.empty')}</p>}
+            </div>
+            <div className={css.driftColumn}>
+              <p className={css.driftColumnTitle}>
+                {t('drift.unregistered.title', { count: lists.unregistered.length })}
+              </p>
+              {lists.unregistered.length > 0
+                ? (
+                  <ul className={css.driftList}>
+                    {lists.unregistered.map(row => (
+                      <li key={row.seat} className={css.driftItem}>
+                        {t('drift.unregistered.item', { seat: row.seat, rosters: servedRosterLabels(row, t).join(', ') })}
+                      </li>
+                    ))}
+                  </ul>
+                )
+                : <p className={css.driftEmpty}>{t('drift.unregistered.empty')}</p>}
+            </div>
+          </div>
         </div>
       )}
     </div>
