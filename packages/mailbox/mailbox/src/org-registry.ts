@@ -62,6 +62,8 @@ export interface OrgRegistrySeat {
   readonly sessionId?: string
   /** Marks a throwaway seat; an edge may never cross the test boundary. */
   readonly test?: boolean
+  /** optional department name used by the Org Board to group seats; a comms grouping, not rank. */
+  readonly department?: string
   /** Restricts which tools the seat's agent may use; absent means unrestricted. */
   readonly tools?: OrgRegistrySeatTools
 }
@@ -138,12 +140,14 @@ export function parseOrgRegistry(text: string, options: OrgRegistryParseOptions 
     if (seat.test !== undefined && typeof seat.test !== 'boolean') {
       throw new Error(`org registry field seats.${name}.test must be a boolean when present`)
     }
+    const department = seat.department === undefined ? undefined : parseSeatDepartment(seat.department, name)
     const tools = seat.tools === undefined ? undefined : parseSeatTools(seat.tools, name)
     seats[name] = {
       cwd: expandTilde(seat.cwd, home),
       ...seat.lead === undefined ? {} : { lead: seat.lead },
       ...seat.sessionId === undefined ? {} : { sessionId: seat.sessionId },
       ...seat.test === undefined ? {} : { test: seat.test },
+      ...department === undefined ? {} : { department },
       ...tools === undefined ? {} : { tools },
     }
   }
@@ -543,6 +547,29 @@ function assertNonEmptyString(value: unknown, label: string): asserts value is s
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new Error(`org registry field "${label}" must be a non-empty string`)
   }
+}
+
+/** Longest permitted department name, after trimming. */
+const MAX_DEPARTMENT_LENGTH = 48
+
+/**
+ * Validate one seat's `department` field and return it trimmed.
+ * @param value - the raw `department` value.
+ * @param seatName - the seat, for the error message.
+ * @returns the trimmed department name.
+ * @throws when the value is not a non-empty string of at most 48 characters without control characters.
+ */
+function parseSeatDepartment(value: unknown, seatName: string): string {
+  const label = `seats.${seatName}.department`
+  assertNonEmptyString(value, label)
+  const trimmed = value.trim()
+  if (trimmed.length > MAX_DEPARTMENT_LENGTH) {
+    throw new Error(`org registry field "${label}" must be at most ${MAX_DEPARTMENT_LENGTH} characters`)
+  }
+  if (/[\u0000-\u001f\u007f]/.test(trimmed)) {
+    throw new Error(`org registry field "${label}" must not contain control characters`)
+  }
+  return trimmed
 }
 
 /**

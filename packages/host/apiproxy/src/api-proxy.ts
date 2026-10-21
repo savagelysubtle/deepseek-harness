@@ -453,7 +453,7 @@ function resolvedOrgRegistryView(registry: OrgRegistry): OrgRegistryView {
  * already leaves every seat's `cwd` exactly as authored — absolute, or
  * relative to `baseDir` — so this is a plain reshape, never a resolve: the
  * mailbox-side `OrgRegistry`/`OrgRegistrySeat` fields (`baseDir`, `seats`,
- * `edges`, `callUp`; per-seat `cwd`/`lead`/`sessionId`/`test`/`tools`) are
+ * `edges`, `callUp`; per-seat `cwd`/`lead`/`sessionId`/`test`/`department`/`tools`) are
  * structurally identical to `OrgRegistryDocument`/`OrgRegistryDocumentSeat`
  * field-for-field, so TypeScript accepts this object literal without a cast.
  * @param registry - the parsed registry, cwd unresolved.

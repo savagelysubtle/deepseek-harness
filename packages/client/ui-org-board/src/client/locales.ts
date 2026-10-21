@@ -27,6 +27,8 @@ export type OrgBoardKey =
   | 'graph.title'
   | 'graph.empty'
   | 'graph.seatCount'
+  | 'band.unassigned'
+  | 'band.count'
   | 'badge.lead'
   | 'badge.test'
   | 'badge.unserved'
@@ -115,6 +117,8 @@ export const zh: Record<OrgBoardKey, string> = {
   'graph.title': '席位与邮件权限',
   'graph.empty': '注册表中没有任何席位。',
   'graph.seatCount': '{count} 个席位',
+  'band.unassigned': '未分配部门',
+  'band.count': '{count} 个席位',
   'badge.lead': '负责人',
   'badge.test': '测试席位',
   'badge.unserved': '未完全提供服务',
@@ -197,6 +201,8 @@ export const en: Record<OrgBoardKey, string> = {
   'graph.title': 'Seats and mail permissions',
   'graph.empty': 'No seats in the registry.',
   'graph.seatCount': '{count} seat(s)',
+  'band.unassigned': 'Unassigned',
+  'band.count': '{count} seat(s)',
   'badge.lead': 'Lead',
   'badge.test': 'Test seat',
   'badge.unserved': 'Not fully served',

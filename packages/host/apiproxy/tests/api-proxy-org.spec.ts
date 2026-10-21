@@ -26,6 +26,7 @@ import { stringify as stringifyYaml } from 'yaml'
 import type { ApiProxy, OrgRegistryDocument } from '../src/api/index.ts'
 import type { RpcRequest, RpcResponse } from '../src/api/rpc.ts'
 import { RpcId } from '../src/api/rpc.ts'
+import { orgGetValueSchema, orgRegistryDocumentSchema, orgWriteRequestSchema } from '../src/api/org.schema.ts'
 import { createApiProxy, type ApiProxyDefaults } from '../src/api-proxy.ts'
 
 let dirs: string[] = []
@@ -82,7 +83,7 @@ function expectErr<T>(response: RpcResponse<T>): { code: string; message: string
 /** Minimal valid registry YAML: baseDir plus a seats map, edges/callUp omitted unless given. */
 function writeRegistry(
   dir: string,
-  seats: Record<string, { cwd?: string; test?: boolean }>,
+  seats: Record<string, { cwd?: string; test?: boolean; department?: string }>,
   extra: { edges?: [string, string][]; callUp?: string[] } = {},
 ): string {
   const path = join(dir, 'registry.yml')
@@ -90,7 +91,11 @@ function writeRegistry(
     baseDir: dir,
     seats: Object.fromEntries(Object.entries(seats).map(([name, seat]) => [
       name,
-      { cwd: seat.cwd ?? '.', ...seat.test === undefined ? {} : { test: seat.test } },
+      {
+        cwd: seat.cwd ?? '.',
+        ...seat.test === undefined ? {} : { test: seat.test },
+        ...seat.department === undefined ? {} : { department: seat.department },
+      },
     ])),
     ...extra.edges === undefined ? {} : { edges: extra.edges },
     ...extra.callUp === undefined ? {} : { callUp: extra.callUp },
@@ -458,6 +463,81 @@ describe('org.get', () => {
     expect(value.servedRosterToken.ok).toBe(false)
     if (value.servedRosterToken.ok) throw new Error('unreachable')
     expect(value.servedRosterToken.reason).toContain('cordis.patch.yml')
+  })
+})
+
+describe('seat department (SWD-178)', () => {
+  it('org.get returns departments, the value schema keeps them, and a registry without them still parses', async () => {
+    const registryDir = tempDir('dsh-org-registry-')
+    const profileDir = tempDir('dsh-org-profile-')
+    writeProfile(profileDir, [
+      { id: 'mailbox-bridge', addresses: ['tt-alpha'] },
+      { id: 'tool-mailbox', addresses: ['tt-alpha'] },
+    ])
+    const withPath = writeRegistry(registryDir, { 'tt-alpha': { department: 'Gotham' }, 'tt-bravo': {} })
+    const withValue = expectOk(await api(await floor(), { orgRegistryPath: withPath, orgProfileDir: profileDir }).org.get(request()))
+    const parsed = orgGetValueSchema.parse(withValue)
+    if (!parsed.registry.ok) throw new Error('unreachable')
+    expect(parsed.registry.registry.seats['tt-alpha']?.department).toBe('Gotham')
+    expect(parsed.registry.document.seats['tt-alpha']?.department).toBe('Gotham')
+    expect('department' in (parsed.registry.registry.seats['tt-bravo'] as object)).toBe(false)
+
+    const withoutDir = tempDir('dsh-org-registry-')
+    const withoutPath = writeRegistry(withoutDir, { 'tt-alpha': {}, 'tt-bravo': {} })
+    const withoutValue = expectOk(await api(await floor(), { orgRegistryPath: withoutPath, orgProfileDir: profileDir }).org.get(request()))
+    expect(() => orgGetValueSchema.parse(withoutValue)).not.toThrow()
+  })
+
+  it('the served rosters and drift report are identical with and without departments', async () => {
+    const profileDir = tempDir('dsh-org-profile-')
+    writeProfile(profileDir, [
+      { id: 'mailbox-bridge', addresses: ['tt-alpha', 'tt-ghost'] },
+      { id: 'tool-mailbox', addresses: ['tt-alpha'] },
+    ])
+    const seats = { 'tt-alpha': {}, 'tt-bravo': {} }
+    const plain = expectOk(await api(await floor(), {
+      orgRegistryPath: writeRegistry(tempDir('dsh-org-registry-'), seats), orgProfileDir: profileDir,
+    }).org.get(request()))
+    const grouped = expectOk(await api(await floor(), {
+      orgRegistryPath: writeRegistry(tempDir('dsh-org-registry-'), {
+        'tt-alpha': { department: 'Gotham' }, 'tt-bravo': { department: 'Temple' },
+      }),
+      orgProfileDir: profileDir,
+    }).org.get(request()))
+    expect(grouped.mailboxBridge).toEqual(plain.mailboxBridge)
+    expect(grouped.toolMailbox).toEqual(plain.toolMailbox)
+    expect(grouped.drift).toEqual(plain.drift)
+  })
+
+  it('org.write round-trips every department through the schema, the file, and a re-read', async () => {
+    const registryDir = tempDir('dsh-org-registry-')
+    const registryPath = writeRegistry(registryDir, { 'tt-alpha': {} })
+    const app = api(await floor(), { orgRegistryPath: registryPath, orgProfileDir: tempDir('dsh-org-profile-') })
+    const before = expectOk(await app.org.get(request()))
+    if (!before.registry.ok) throw new Error('unreachable')
+    const document: OrgRegistryDocument = {
+      baseDir: registryDir,
+      seats: { 'tt-alpha': { cwd: '.', department: 'Gotham' }, 'tt-bravo': { cwd: '.', department: 'Temple' }, 'tt-charlie': { cwd: '.' } },
+      edges: [],
+      callUp: [],
+    }
+    expect(orgRegistryDocumentSchema.parse(document)).toEqual(document)
+    expect(orgWriteRequestSchema.parse({ document, expectedToken: before.registry.token }).document).toEqual(document)
+    const written = expectOk(await app.org.write(requestWith({ document, expectedToken: before.registry.token })))
+    expect(written.registry.seats['tt-alpha']?.department).toBe('Gotham')
+    expect(written.registry.seats['tt-bravo']?.department).toBe('Temple')
+    const after = expectOk(await app.org.get(request()))
+    if (!after.registry.ok) throw new Error('unreachable')
+    expect(after.registry.document.seats['tt-alpha']?.department).toBe('Gotham')
+    expect(after.registry.document.seats['tt-bravo']?.department).toBe('Temple')
+    expect('department' in (after.registry.document.seats['tt-charlie'] as object)).toBe(false)
+    expect(readFileSync(registryPath, 'utf8')).toContain('department: Gotham')
+  })
+
+  it('the document schema rejects an empty or over-long department', () => {
+    const seat = (department: string): unknown => ({ baseDir: '/p', seats: { 'tt-alpha': { cwd: '.', department } }, edges: [], callUp: [] })
+    expect(orgRegistryDocumentSchema.safeParse(seat('')).success).toBe(false)
+    expect(orgRegistryDocumentSchema.safeParse(seat('x'.repeat(49))).success).toBe(false)
   })
 })
 

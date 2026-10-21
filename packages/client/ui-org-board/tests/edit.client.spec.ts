@@ -297,3 +297,45 @@ describe('setSeatTools', () => {
     expect(doc).toEqual(before)
   })
 })
+
+describe('department round trip (SWD-178)', () => {
+  /** baseDocument() with a department on two seats (robin deliberately has none). */
+  function departmentDocument(): OrgRegistryDocument {
+    const doc = baseDocument()
+    return {
+      ...doc,
+      seats: {
+        ...doc.seats,
+        alfred: { ...seatOf(doc, 'alfred'), department: 'Ops' },
+        batman: { ...seatOf(doc, 'batman'), department: 'Ops' },
+      },
+    }
+  }
+
+  /** Every seat's department, `undefined` for a seat that has none. */
+  function departments(doc: OrgRegistryDocument): Record<string, string | undefined> {
+    return Object.fromEntries(Object.entries(doc.seats).map(([name, seat]) => [name, seat.department]))
+  }
+
+  it('addSeat keeps every existing seat\'s department in the written document', () => {
+    const result = addSeat(departmentDocument(), 'newbie', '/org/newbie')
+    if (!result.ok) throw new Error('expected addSeat to succeed')
+    expect(departments(result.document)).toEqual({
+      alfred: 'Ops', batman: 'Ops', robin: undefined, newbie: undefined,
+    })
+  })
+
+  it('addEdge and removeEdge keep every seat\'s department', () => {
+    const added = addEdge(departmentDocument(), 'alfred', 'robin')
+    if (!added.ok) throw new Error('expected addEdge to succeed')
+    const removed = removeEdge(added.document, 'alfred', 'batman')
+    if (!removed.ok) throw new Error('expected removeEdge to succeed')
+    expect(departments(removed.document)).toEqual({ alfred: 'Ops', batman: 'Ops', robin: undefined })
+  })
+
+  it('removeSeat keeps the remaining seats\' departments', () => {
+    const result = removeSeat(departmentDocument(), 'robin')
+    if (!result.ok) throw new Error('expected removeSeat to succeed')
+    expect(departments(result.document)).toEqual({ alfred: 'Ops', batman: 'Ops' })
+  })
+})

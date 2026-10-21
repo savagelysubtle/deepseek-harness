@@ -20,6 +20,7 @@ export const orgSeatSchema = z.object({
   lead: z.boolean().optional(),
   sessionId: z.string().optional(),
   test: z.boolean().optional(),
+  department: z.string().min(1).max(48).optional(),
   tools: orgSeatToolsSchema.optional(),
 }) satisfies z.ZodType<Wire<OrgSeat>>
 
@@ -40,6 +41,7 @@ export const orgRegistryDocumentSeatSchema = z.object({
   lead: z.boolean().optional(),
   sessionId: z.string().optional(),
   test: z.boolean().optional(),
+  department: z.string().min(1).max(48).optional(),
   tools: orgSeatToolsSchema.optional(),
 }) satisfies z.ZodType<Wire<OrgRegistryDocumentSeat>>
 

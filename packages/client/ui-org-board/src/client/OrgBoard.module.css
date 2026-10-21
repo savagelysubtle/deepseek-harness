@@ -614,3 +614,40 @@
   opacity: 1;
   background: var(--dsw-alias-label-primary);
 }
+
+/* React Flow gives every node wrapper an inline pointer-events, hence !important. */
+.bandNode {
+  pointer-events: none !important;
+}
+
+/* Department band: a non-interactive backdrop behind the seat cards. */
+.band {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  padding: 6px 8px 0;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 4%, transparent);
+  pointer-events: none;
+}
+
+.bandTitleRow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.bandTitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bandCount {
+  flex: none;
+}

@@ -39,11 +39,12 @@ import {
 } from './derive.ts'
 import { applyFit } from './fit.ts'
 import { seatMatchesFilter } from './filter.ts'
-import { gridPositions } from './layout.ts'
+import { bandLayout } from './layout.ts'
 import { useCanvasColumns } from './use-canvas-columns.ts'
 import { SeatNode, type SeatNodeType } from './SeatNode.tsx'
+import { BandNode, type BandNodeType } from './BandNode.tsx'
 
-const NODE_TYPES = { seat: SeatNode }
+const NODE_TYPES = { seat: SeatNode, band: BandNode }
 
 /** Mail-permission line styling: token-driven so the chart follows the app's theme. */
 const EDGE_STYLE = { stroke: 'var(--dsw-alias-label-secondary)', strokeWidth: 1.5 }
@@ -52,30 +53,33 @@ const EDGE_STYLE = { stroke: 'var(--dsw-alias-label-secondary)', strokeWidth: 1.
 interface FitControllerProps {
   width: number
   height: number
-  columns: number
+  /** The layout's content width in px. */
+  layoutWidth: number
+  /** The layout's content height in px. */
+  layoutHeight: number
   /** Changes whenever the seat set does. */
   seatKey: string
 }
 
 /**
  * Re-frames the chart whenever its container resizes (width OR height), its
- * column count changes, or its seats change -- never by remounting, which
+ * layout width changes, or its seats change -- never by remounting, which
  * left a stale zoom after a window resize or after the drift panel shrank
  * the chart. `fitView` itself queues until the nodes are measured, so a fit
  * requested before then still lands; a burst of changes is coalesced into one
  * fit per animation frame. Renders nothing.
- * @param props - the container size, column count and a seat-set key.
+ * @param props - the container size, layout width and a seat-set key.
  * @returns nothing.
  */
 function FitController({
-  width, height, columns, seatKey,
+  width, height, layoutWidth, layoutHeight, seatKey,
 }: FitControllerProps) {
   const instance = useReactFlow()
   useEffect(() => {
-    const frame = requestAnimationFrame(() => { applyFit(instance, width, columns) })
+    const frame = requestAnimationFrame(() => { applyFit(instance, width, height, layoutWidth, layoutHeight) })
     return () => { cancelAnimationFrame(frame) }
-    // width/height/columns/seatKey are the triggers, not values read inside.
-  }, [instance, width, height, columns, seatKey])
+    // width/height/layoutWidth/layoutHeight/seatKey are the triggers, not values read inside.
+  }, [instance, width, height, layoutWidth, layoutHeight, seatKey])
   return null
 }
 
@@ -418,9 +422,9 @@ export function OrgBoard({
   // detail panel below).
   const splitSeatNames = (lists?.unserved ?? []).filter(row => seatServedStatus(row) === 'split').map(row => row.seat)
   const seatNames = registry.ok ? seatNamesOf(registry.registry) : []
-  const positions = gridPositions(seatNames, columns)
-
-  const nodes: SeatNodeType[] = registry.ok
+  // Per-seat view: badges and filter match are computed once, then feed both
+  // the layout input (lead / department) and the node data below.
+  const seatViews = registry.ok
     ? seatNames.map((name) => {
       const seat = registry.registry.seats[name]
       // Present for every name from seatNamesOf(registry.registry) (its own
@@ -430,30 +434,60 @@ export function OrgBoard({
       const record = seat ?? { cwd: '' }
       const badges = seatBadges(name, record, registry.registry.callUp, driftLookup.get(name), t)
       const unserved = badges.some(badge => badge.kind === 'unserved')
+      const lead = badges.some(badge => badge.kind === 'lead')
       const matches = seatMatchesFilter(name, {
-        lead: badges.some(badge => badge.kind === 'lead'),
+        lead,
         test: badges.some(badge => badge.kind === 'test'),
         unserved,
       }, filter)
-      return {
-        id: name,
-        type: 'seat',
-        className: clsx(!matches && css.nodeDimmed),
-        // positions is gridPositions(seatNames), so it always has this name.
-        /* v8 ignore next -- defensive: positions.get(name) is always set for a name drawn from seatNames. */
-        position: positions.get(name) ?? { x: 0, y: 0 },
-        data: {
-          name,
-          badges,
-          selected: name === selectedSeat,
-          // Unknown (no dot) whenever drift failed: an empty drift lookup
-          // then says nothing about a seat, and must not read as served.
-          served: drift.ok ? !unserved : null,
-          statusLabel: unserved ? t('status.unserved') : t('status.served'),
-        },
-      }
+      return { name, badges, unserved, lead, matches, department: record.department }
     })
     : []
+  // Computed per render, not memoised: this runs after the loading / error
+  // early returns above, where a hook would break the rules of hooks, and it
+  // is a sort over a few dozen seats.
+  const layout = bandLayout(
+    seatViews.map(({ name, lead, department }) => ({ name, lead, department })),
+    columns,
+  )
+  const matchesByName = new Map(seatViews.map(view => [view.name, view.matches]))
+
+  const bandNodes: BandNodeType[] = layout.bands.map(band => ({
+    id: `band:${band.key}`,
+    type: 'band',
+    className: clsx(css.bandNode),
+    position: { x: band.x, y: band.y },
+    zIndex: -1,
+    draggable: false,
+    selectable: false,
+    focusable: false,
+    connectable: false,
+    style: { width: band.width, height: band.height },
+    data: {
+      title: band.title ?? t('band.unassigned'),
+      countLabel: t('band.count', { count: band.count }),
+      dimmed: filter.trim() !== '' && band.seatNames.every(name => matchesByName.get(name) === false),
+    },
+  }))
+
+  const seatNodes: SeatNodeType[] = seatViews.map(view => ({
+    id: view.name,
+    type: 'seat',
+    className: clsx(!view.matches && css.nodeDimmed),
+    // layout.seats has every name that was fed to bandLayout, i.e. every seat view.
+    /* v8 ignore next -- defensive: layout.seats.get(name) is always set for a name drawn from seatNames. */
+    position: layout.seats.get(view.name) ?? { x: 0, y: 0 },
+    data: {
+      name: view.name,
+      badges: view.badges,
+      selected: view.name === selectedSeat,
+      // Unknown (no dot) whenever drift failed: an empty drift lookup
+      // then says nothing about a seat, and must not read as served.
+      served: drift.ok ? !view.unserved : null,
+      statusLabel: view.unserved ? t('status.unserved') : t('status.served'),
+    },
+  }))
+  const nodes: Array<BandNodeType | SeatNodeType> = [...bandNodes, ...seatNodes]
 
   // Zero edges by default (SWD-163 step 8): only a line touching the
   // hovered seat OR the selected seat draws, in either direction -- an
@@ -734,12 +768,12 @@ export function OrgBoard({
                       nodes={nodes}
                       edges={edges}
                       nodeTypes={NODE_TYPES}
-                      onNodeClick={(_event, node) => { setSelectedSeat(node.id) }}
+                      onNodeClick={(_event, node) => { if (node.type === 'seat') setSelectedSeat(node.id) }}
                       onPaneClick={() => { setSelectedSeat(null) }}
                       // Hover reveals a seat's own mail-permission lines without
                       // disturbing the selection -- leaving only clears the
                       // hover highlight, never selectedSeat (see `edges` above).
-                      onNodeMouseEnter={(_event, node) => { setHoveredSeat(node.id) }}
+                      onNodeMouseEnter={(_event, node) => { if (node.type === 'seat') setHoveredSeat(node.id) }}
                       onNodeMouseLeave={() => { setHoveredSeat(null) }}
                       onConnect={(connection: Connection) => {
                         if (pending) return
@@ -770,13 +804,13 @@ export function OrgBoard({
                       nodesConnectable={!pending}
                       elementsSelectable={false}
                       panOnScroll
-                      zoomOnScroll
+                      zoomOnScroll={false}
                       minZoom={0.4}
                       proOptions={{ hideAttribution: true }}
                     >
                       <Background />
                       <Controls showInteractive={false} />
-                      <FitController width={canvasWidth} height={canvasHeight} columns={columns} seatKey={seatNames.join('\u0000')} />
+                      <FitController width={canvasWidth} height={canvasHeight} layoutWidth={layout.width} layoutHeight={layout.height} seatKey={seatNames.join('\u0000')} />
                     </ReactFlow>
                   )}
             </div>

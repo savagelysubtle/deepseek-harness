@@ -1166,3 +1166,85 @@ describe('OrgBoard seat tools editing: non-empty deny list (SWD-134 slice 4 step
     expect(setSeatTools).toHaveBeenCalledWith('robin', undefined, ['web', 'exec'])
   })
 })
+
+/** BASE_VALUE with departments: alfred + batman in Ops, robin in no department. */
+function withDepartments(): ResponseValue<'org.get'> {
+  if (!BASE_VALUE.registry.ok) throw new Error('fixture registry must be ok')
+  const { registry, document } = BASE_VALUE.registry
+  return {
+    ...BASE_VALUE,
+    registry: {
+      ...BASE_VALUE.registry,
+      registry: {
+        ...registry,
+        seats: {
+          ...registry.seats,
+          alfred: { ...registry.seats.alfred!, department: 'Ops' },
+          batman: { ...registry.seats.batman!, department: 'Ops' },
+        },
+      },
+      document,
+    },
+  }
+}
+
+describe('OrgBoard department bands (SWD-178)', () => {
+  const band = (container: HTMLElement, key: string) =>
+    container.querySelector<HTMLElement>(`.react-flow__node[data-id="band:${key}"]`) as HTMLElement
+
+  it('draws one band per department with its title and seat count, and an Unassigned band for the rest', () => {
+    const { container } = renderBoard(ready(withDepartments()))
+    const ops = band(container, 'dept:Ops')
+    expect(within(ops).getByText('Ops')).toBeTruthy()
+    expect(within(ops).getByText('2 seat(s)')).toBeTruthy()
+    const unassigned = band(container, 'unassigned')
+    expect(within(unassigned).getByText('Unassigned')).toBeTruthy()
+    expect(within(unassigned).getByText('1 seat(s)')).toBeTruthy()
+  })
+
+  it('emits band nodes before seat nodes, behind them (zIndex -1)', () => {
+    const { container } = renderBoard(ready(withDepartments()))
+    const ids = [...container.querySelectorAll('.react-flow__node')].map(node => node.getAttribute('data-id'))
+    expect(ids.slice(0, 2)).toEqual(['band:dept:Ops', 'band:unassigned'])
+    expect(band(container, 'dept:Ops').style.zIndex).toBe('-1')
+  })
+
+  it('bands are not selectable: clicking or hovering one selects nothing and opens no drawer', async () => {
+    const { container } = renderBoard(ready(withDepartments()))
+    const ops = band(container, 'dept:Ops')
+    fireEvent.mouseEnter(ops)
+    fireEvent.click(ops)
+    expect(screen.queryByRole('complementary')).toBeNull()
+    expect(container.querySelectorAll('.react-flow__edge')).toHaveLength(0)
+    // The wrapper opts out of pointer events entirely, so a real click falls through to the pane.
+    expect(ops.className).toMatch(/bandNode/)
+  })
+
+  it('dims a band only when a filter is active and none of its seats match', () => {
+    const { container } = renderBoard(ready(withDepartments()))
+    const dimmed = (key: string) => /nodeDimmed/.test(band(container, key).innerHTML)
+    expect([dimmed('dept:Ops'), dimmed('unassigned')]).toEqual([false, false])
+    const input = screen.getByPlaceholderText('Filter seats')
+    // Matches robin only: Ops (no match) dims, Unassigned stays lit.
+    fireEvent.change(input, { target: { value: 'rob' } })
+    expect([dimmed('dept:Ops'), dimmed('unassigned')]).toEqual([true, false])
+    // Matches batman only: one matching seat is enough to keep Ops lit.
+    fireEvent.change(input, { target: { value: 'batman' } })
+    expect([dimmed('dept:Ops'), dimmed('unassigned')]).toEqual([false, true])
+    fireEvent.change(input, { target: { value: 'nobody-matches' } })
+    expect([dimmed('dept:Ops'), dimmed('unassigned')]).toEqual([true, true])
+    fireEvent.change(input, { target: { value: '' } })
+    expect([dimmed('dept:Ops'), dimmed('unassigned')]).toEqual([false, false])
+  })
+
+  it('draws revealed edges above the band surfaces', async () => {
+    const { container } = renderBoard(ready(withDepartments()))
+    fireEvent.mouseEnter(container.querySelector('.react-flow__node[data-id="alfred"]') as Element)
+    await waitFor(() => { expect(container.querySelector('.react-flow__edge')).toBeTruthy() })
+    const edgeLayer = container.querySelector('.react-flow__edge')?.closest('svg') as SVGElement
+    const edgeZ = Number((edgeLayer.style.zIndex || (container.querySelector('.react-flow__edge') as SVGElement).style.zIndex))
+    // No z override: lines sit at React Flow's default 0, above the bands (-1) and not above seat cards.
+    expect(edgeZ).toBe(0)
+    expect(edgeZ).toBeGreaterThan(Number(band(container, 'dept:Ops').style.zIndex))
+  })
+})

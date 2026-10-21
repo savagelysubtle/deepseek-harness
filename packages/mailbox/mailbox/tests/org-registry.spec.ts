@@ -159,6 +159,32 @@ describe('parseOrgRegistry', () => {
     expect(() => parseOrgRegistry(document)).toThrow(message)
   })
 
+  it('rejects a malformed seat department, naming seats.<name>.department', () => {
+    const base = 'baseDir: /p\nseats:\n  tt-alpha: { cwd: one, department: '
+    const bad: [string, string][] = [
+      ['""', 'must be a non-empty string'],
+      ['"   "', 'must be a non-empty string'],
+      ['7', 'must be a non-empty string'],
+      [JSON.stringify('x'.repeat(49)), 'at most 48 characters'],
+      [JSON.stringify('Be\u0007ta'), 'must not contain control characters'],
+    ]
+    for (const [value, wording] of bad) {
+      expect(() => parseOrgRegistry(`${base}${value} }\n`)).toThrow('seats.tt-alpha.department')
+      expect(() => parseOrgRegistry(`${base}${value} }\n`)).toThrow(wording)
+    }
+  })
+
+  it('keeps a valid seat department, trimmed, and omits the field when absent', () => {
+    const registry = parseOrgRegistry(
+      'baseDir: /p\nseats:\n  tt-alpha: { cwd: one, department: Beta }\n  tt-bravo: { cwd: two, department: " Beta " }\n'
+      + '  tt-charlie: { cwd: three, department: ' + JSON.stringify('x'.repeat(48)) + ' }\n  tt-delta: { cwd: four }\n',
+    )
+    expect(registry.seats['tt-alpha']?.department).toBe('Beta')
+    expect(registry.seats['tt-bravo']?.department).toBe('Beta')
+    expect(registry.seats['tt-charlie']?.department).toBe('x'.repeat(48))
+    expect('department' in (registry.seats['tt-delta'] as object)).toBe(false)
+  })
+
   it('rejects edges naming unknown seats, self-edges, and malformed pairs', () => {
     const base = 'baseDir: /projects\nseats:\n  a: { cwd: one }\n  b: { cwd: two }\n'
     expect(() => parseOrgRegistry(`${base}edges:\n  - [a, ghost]\n`)).toThrow('unknown seat "ghost"')
@@ -442,6 +468,26 @@ describe('loadOrgRegistryWithToken and writeOrgRegistry', () => {
     const { registry, token } = await loadOrgRegistryWithToken(path)
     expect(Object.keys(registry.seats)).toEqual(['alfred'])
     expect(token).toBe(hashOrgRegistryBytes(readFileSync(path)))
+  })
+
+  it('round-trips every seat department through write and re-read', async () => {
+    const dir = tempRegistryDir()
+    const path = seedRegistry(dir, { 'tt-alpha': {} })
+    const before = await loadOrgRegistryWithToken(path)
+    await writeOrgRegistry(path, {
+      baseDir: dir,
+      seats: {
+        'tt-alpha': { cwd: '.', department: 'Gotham' },
+        'tt-bravo': { cwd: '.', department: 'Temple' },
+        'tt-charlie': { cwd: '.' },
+      },
+      edges: [],
+      callUp: [],
+    }, before.token)
+    const after = await loadOrgRegistryWithToken(path)
+    expect(after.registry.seats['tt-alpha']?.department).toBe('Gotham')
+    expect(after.registry.seats['tt-bravo']?.department).toBe('Temple')
+    expect('department' in (after.registry.seats['tt-charlie'] as object)).toBe(false)
   })
 
   it('writes a valid document and returns a new token that differs from the one it replaced', async () => {
