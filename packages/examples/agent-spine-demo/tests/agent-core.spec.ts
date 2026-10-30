@@ -656,18 +656,21 @@ describe('dsh-agent-spine-demo bundle', () => {
       await waitForIdle(ctx, handle.agent)
 
       expect(adapter.requests).toHaveLength(1)
-      // Both notices merge into the user's message, so order is checked on the
-      // text the model reads: workspace rules, then the catalog, then the task.
+      // The notices render as ONE notice-only message ahead of the user's task
+      // message (workspace rules before the catalog); the task message is last
+      // and holds only the task.
       const messages = adapter.requests[0]!.messages
-      expect(messages).toHaveLength(1)
-      const text = messageText(messages[0])
-      const workspaceIndex = text.indexOf('workspace rule before skills')
-      const catalogIndex = text.indexOf('prefix-order-skill')
-      const taskIndex = text.lastIndexOf('hi')
+      expect(messages).toHaveLength(2)
+      const notices = messageText(messages[0])
+      const task = messageText(messages[1])
+      const workspaceIndex = notices.indexOf('workspace rule before skills')
+      const catalogIndex = notices.indexOf('prefix-order-skill')
       expect(workspaceIndex).toBeGreaterThanOrEqual(0)
       expect(catalogIndex).toBeGreaterThanOrEqual(0)
       expect(workspaceIndex).toBeLessThan(catalogIndex)
-      expect(catalogIndex).toBeLessThan(taskIndex)
+      expect(task.endsWith('hi')).toBe(true)
+      expect(task).not.toContain('workspace rule before skills')
+      expect(task).not.toContain('prefix-order-skill')
       await handle.dispose()
       await ctx.fiber.dispose()
     } finally {

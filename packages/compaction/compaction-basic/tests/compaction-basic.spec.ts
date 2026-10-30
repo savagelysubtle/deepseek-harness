@@ -2026,7 +2026,7 @@ describe('summarization input parity with the dispatched request (renderDispatch
     expect(compact.calls[0]!.input.messages).toEqual(dispatched)
   })
 
-  it('founder plus same-run notices render as the one merged message the loop dispatches', async () => {
+  it('founder plus same-run notices render as the notice block then the founder message, as the loop dispatches', async () => {
     const compact = service()
     const session = noticeConversation()
     const nodes = session.surface.nodes
@@ -2034,11 +2034,12 @@ describe('summarization input parity with the dispatched request (renderDispatch
     await compact.compactRegion(nodes[0]!, nodes[3]!, agent(session, MODEL), SIGNAL)
     const { messages } = compact.calls[0]!.input
     expect(messages).toEqual(dispatched)
-    expect(messages).toHaveLength(2)
-    const text = messages[0]!.content.map(block => block.type === 'text' ? block.text : '').join('')
-    expect(text).toMatch(
-      /\] This message is the founder's own[^\n]*\n\n.* catalog reminder\n\n.* instructions reminder\n\n.* founder asks$/,
-    )
+    // Notice block first, then the assistant reply after the founder message.
+    expect(messages).toHaveLength(3)
+    const joined = (index: number) => messages[index]!.content.map(block => block.type === 'text' ? block.text : '').join('')
+    expect(joined(0)).toMatch(/^\[[^\]]+\]\n\n.* catalog reminder\n\n.* instructions reminder\n\n$/)
+    expect(joined(1)).toMatch(/^\[[^\]]+\] This message is the founder's own[^\n]*\n\n.* founder asks$/)
+    expect(joined(1)).not.toContain('reminder')
   })
 
   it('a notice-only region stamps as one message of its own', async () => {
@@ -2060,7 +2061,7 @@ describe('summarization input parity with the dispatched request (renderDispatch
     const cutRun = dispatchedPrefix(session, 2)
     await compact.compactRegion(nodes[0]!, nodes[1]!, agent(session, MODEL), SIGNAL)
     const { messages } = compact.calls[0]!.input
-    expect(messages).toHaveLength(1)
+    expect(messages).toHaveLength(2)
     expect(messages[0]).not.toEqual(fullRun)
     expect(messages).toEqual(cutRun)
   })

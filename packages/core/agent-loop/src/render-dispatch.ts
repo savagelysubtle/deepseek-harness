@@ -68,11 +68,6 @@ export function isMergeableNoticeSource(source: MessageSource): boolean {
     || (source.kind === 'plugin' && (source.plugin === TOOL_JOBS_PLUGIN || source.plugin === CONTEXT_PRESSURE_PLUGIN))
 }
 
-/** Whether `source` is a tool-jobs notice (never merged under a founder head). */
-function isToolJobsSource(source: MessageSource): boolean {
-  return source.kind === 'plugin' && source.plugin === TOOL_JOBS_PLUGIN
-}
-
 /**
  * Whether a message is a mergeable harness notice: an allowlisted source AND
  * no text that could forge the founder marker or a dispatch stamp line.
@@ -120,12 +115,15 @@ function withSeparator(content: readonly ContentBlock[]): ContentBlock[] {
  * the result depends only on the argument bytes and `timeZone`.
  *
  * Runs: a stampable user message starts a run (its head); following stampable
- * messages join while they are {@link isMergeableNotice}. A non-notice head
- * renders LAST in the merged message, after its notices in log order; an
- * all-notice run keeps log order. Under a founder head, `tool-jobs` notices
- * are hoisted ahead as their own stamped messages so the founder's text still
- * renders last. A lone message is just stamped. The merged message keeps the
- * head's id and source and its header uses the head's own time.
+ * messages join while they are {@link isMergeableNotice}. A non-founder,
+ * non-notice head renders LAST in the merged message, after its notices in log
+ * order; an all-notice run keeps log order. A founder head is NEVER merged: its
+ * content is exactly the header (stamp, marker) plus its own blocks, and the
+ * run's notices render as one all-notice message placed immediately before it
+ * (header = the first notice's own time, id and source = the first notice's), so
+ * file-sourced or model-labelled notice text never sits beneath the founder
+ * marker. A lone message is just stamped; a merged message keeps the head's id
+ * and source and its header uses the head's own time.
  * @param timed - `session.deriveTimedMessages()` (or an equivalent region).
  * @param options - the stamp zone.
  * @returns the messages to dispatch; non-stampable elements are the SAME references.
@@ -149,22 +147,27 @@ export function renderDispatch(
     }
     const headIsFounder = isFounderMessage(head.source)
     const headIsNotice = isMergeableNotice(head)
-    const hoisted: TimedMessage[] = []
     const members: TimedMessage[] = []
     while (i < timed.length) {
       // i < timed.length, so the element exists.
       // oxlint-disable-next-line typescript/no-non-null-assertion
       const next = timed[i]!
       if (!isStampable(next.message) || !isMergeableNotice(next.message)) break
-      if (headIsFounder && isToolJobsSource(next.message.source)) hoisted.push(next)
-      else members.push(next)
+      members.push(next)
       i++
     }
-    for (const lifted of hoisted) {
-      out.push({
-        ...lifted.message,
-        content: [headerBlock(lifted.message, lifted.time, timeZone), ...lifted.message.content],
-      })
+    if (headIsFounder) {
+      // A founder message is never merged with anything: its own text is the only
+      // thing that renders beneath the founder marker. Notices that followed it in
+      // the run render as ONE all-notice message immediately BEFORE it.
+      const first = members[0]
+      if (first !== undefined) {
+        const noticeContent: ContentBlock[] = [headerBlock(first.message, first.time, timeZone)]
+        for (const member of members) noticeContent.push(...withSeparator(member.message.content))
+        out.push({ ...first.message, content: noticeContent })
+      }
+      out.push({ ...head, content: [headerBlock(head, entry.time, timeZone), ...head.content] })
+      continue
     }
     const content: ContentBlock[] = [headerBlock(head, entry.time, timeZone)]
     if (headIsNotice) {
