@@ -10,12 +10,13 @@ import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, { createUserMessage, LlmError, ReasoningEffortId  } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmModelReasoningInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId, foldRequestHeader } from '@deepseek-ai/dsh-session'
-import SystemPrompt, { formatDateTime } from '@deepseek-ai/dsh-system-prompt'
+import SystemPrompt, { formatMessageStamp } from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import { isClockMessage } from '../src/clock.ts'
+import { renderDispatch, resolveDispatchTimeZone } from '../src/render-dispatch.ts'
+import { STAMP_SHAPE } from './dispatch-fixtures.ts'
 import { TOOL_SNAPSHOT_SETTLE_MS } from '../src/constants.ts'
 import { FOUNDER_MARKER_TEXT } from '../src/founder-marker.ts'
 import { MockAdapter, textResponse, toolCallResponse } from './mock-adapter.ts'
@@ -77,21 +78,13 @@ function send(agent: Agent, text: string) {
 }
 
 /**
- * Assert `previous` is a strict value-prefix of `current`, once each request's
- * own unconditional clock tail message (SWD-113, see `../src/clock.ts`) is set
- * aside: that tail is never persisted, so it never appears anywhere in a LATER
- * request's own session-derived messages, and comparing the raw arrays would
- * see it as a divergence rather than the append-only extension it actually is.
+ * Assert `previous` is a strict value-prefix of `current`: with the per-message
+ * stamp built from each message's own logged time, nothing already dispatched
+ * ever changes as the conversation grows.
  */
 function expectPrefixExtension(previous: GenerateOptions, current: GenerateOptions) {
-  const previousTail = previous.messages[previous.messages.length - 1]
-  const currentTail = current.messages[current.messages.length - 1]
-  expect(previousTail !== undefined && isClockMessage(previousTail)).toBe(true)
-  expect(currentTail !== undefined && isClockMessage(currentTail)).toBe(true)
-  const previousMessages = previous.messages.slice(0, -1)
-  const currentMessages = current.messages.slice(0, -1)
-  expect(currentMessages.length).toBeGreaterThan(previousMessages.length)
-  expect(currentMessages.slice(0, previousMessages.length)).toEqual([...previousMessages])
+  expect(current.messages.length).toBeGreaterThan(previous.messages.length)
+  expect(current.messages.slice(0, previous.messages.length)).toEqual([...previous.messages])
   expect(current.system).toEqual(previous.system)
   expect(current.tools).toEqual(previous.tools)
 }
@@ -629,59 +622,42 @@ describe('request stability across the loop', () => {
     expect(adapter.requests[2]!.messages.length).toBeGreaterThan(adapter.requests[1]!.messages.length)
   })
 
-  it('every dispatched request ends with the unconditional clock tail message (SWD-113), never logged to the session', async () => {
-    // Two steps in ONE turn (a tool call, then the concluding text), with the
-    // injected clock crossing a minute boundary between them — proving the
-    // clock is fresh on every dispatch while the system prompt (which no
-    // longer carries it at all) stays byte-identical, and the tail message
-    // never becomes part of the durable session log.
+  it('no standalone clock message: the stamp rides each user message, built from its own logged time, never logged', async () => {
+    // Two steps in ONE turn (a tool call, then the concluding text). The stamp
+    // is a pure function of the logged event time, so the first message renders
+    // identically on both dispatches and no extra message is appended.
     const adapter = new MockAdapter([
       toolCallResponse('c1', 'echo', { text: 'one' }, 'first'),
       textResponse('done'),
     ])
-    const ctx = new Context()
-    await ctx.plugin(LlmRuntime)
-    await ctx.plugin(SessionStore)
-    await ctx.plugin(SystemPrompt, { persona: 'stable base' })
-    await ctx.plugin(ToolRuntime)
-    await ctx.plugin(AgentRegistry)
-    let tick = new Date('2026-01-01T00:00:30Z')
-    await ctx.plugin(AgentLoop, { agents: [], now: () => tick })
-    ctx.llm.registerAdapter(['mock'], adapter)
+    const ctx = await harness(adapter)
     registerEcho(ctx)
     const agent = ctx.agentLoop.create(SessionId('clock-tail'), { provider: 'mock', model: 'mock' })
-
-    // 'agent/pre-step' fires once per step, before that step's own
-    // buildRequest() reads the clock — bumping it on step 2's own pre-step
-    // event happens before step 2's request is built, but after step 1's
-    // was already dispatched (untouched, at the original tick).
-    ctx.on('agent/pre-step', async (payload, next) => {
-      if (payload.step === 2) tick = new Date('2026-01-01T00:01:30Z')
-      return next()
-    })
 
     send(agent, 'go')
     await waitForIdle(ctx, agent)
 
     expect(adapter.requests).toHaveLength(2)
-    // The system prompt no longer carries the clock at all — fully stable
-    // across both steps, unlike before SWD-113 moved it off `system`.
     expect(adapter.requests[0]!.system).toEqual(adapter.requests[1]!.system)
 
     const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
-    const lastMessageOf = (options: GenerateOptions) => options.messages[options.messages.length - 1]!
-    const first = lastMessageOf(adapter.requests[0]!)
-    const second = lastMessageOf(adapter.requests[1]!)
-    expect(isClockMessage(first)).toBe(true)
-    expect(isClockMessage(second)).toBe(true)
-    expect(first.content).toEqual([{ type: 'text', text: formatDateTime(new Date('2026-01-01T00:00:30Z'), zone) }])
-    expect(second.content).toEqual([{ type: 'text', text: formatDateTime(new Date('2026-01-01T00:01:30Z'), zone) }])
+    const userEvent = agent.session.events.find(e => e.type === 'user/message')!
+    const stamp = formatMessageStamp(new Date(userEvent.time), zone)
+    const firstDispatched = adapter.requests[0]!.messages
+    // Step 1: only the stamped user message; no trailing clock message.
+    expect(firstDispatched).toHaveLength(1)
+    expect(firstDispatched[0]!.content).toEqual([{ type: 'text', text: `${stamp}\n\n` }, { type: 'text', text: 'go' }])
+    // Step 2: same first message byte for byte, then assistant and tool result untouched.
+    const secondDispatched = adapter.requests[1]!.messages
+    expect(secondDispatched[0]).toEqual(firstDispatched[0])
+    expect(secondDispatched.map(m => m.role)).toEqual(['user', 'assistant', 'user'])
+    expect(secondDispatched[2]!.source.kind).toBe('tool')
+    expect(secondDispatched[2]!.content.every(block => block.type === 'tool-result')).toBe(true)
 
-    // Never written to the session log: no persisted user/message is the clock.
-    expect(agent.session.events.some(e => e.type === 'user/message' && isClockMessage(e.data))).toBe(false)
+    // Logged bytes unchanged: the persisted user message has no stamp.
+    expect(userEvent.type === 'user/message' && userEvent.data.content).toEqual([{ type: 'text', text: 'go' }])
+    expect(JSON.stringify(agent.session.events)).not.toContain('Current date and time')
 
-    // The clock changing is not, by itself, a header change — it never
-    // touches `system` at all now, so only the anchoring snapshot is logged.
     const headerEvents = agent.session.events.filter(e => e.type === 'request/header')
     expect(headerEvents).toHaveLength(1)
     expect(headerEvents[0]?.type === 'request/header' && headerEvents[0].data.reason).toBe('initial')
@@ -828,24 +804,19 @@ describe('request stability across the loop', () => {
         && e.data.step === stepStart.data.step,
       )!
       // Messages: the entered batch is logged after step/start, so rebuild the
-      // complete dispatch prefix through a completely fresh Session. The
-      // dispatched request's LAST message is the unconditional clock tail
-      // (SWD-113, see `../src/clock.ts`) — never logged, so it has no
-      // counterpart in the rebuilt session; verify it separately, then
-      // compare the rest byte-equal.
+      // complete dispatch prefix through a completely fresh Session and render
+      // it with the same pure function the loop uses.
       const rebuilt = Session.create(SessionId(`rebuild-${index}`), structuredClone(events.slice(0, firstChunk.seq)))
-      const dispatchedMessages = structuredClone(request.messages)
-      const clockTail = dispatchedMessages.pop()!
-      expect(isClockMessage(clockTail)).toBe(true)
-      expect(dispatchedMessages).toEqual(rebuilt.deriveMessages())
+      expect(structuredClone(request.messages))
+        .toEqual(renderDispatch(rebuilt.deriveTimedMessages(), { timeZone: resolveDispatchTimeZone() }))
 
       // Header: the latest request/header snapshot up to this step's dispatch
       // (its header event sits between step/start and the first chunk).
       const header = foldRequestHeader(events.slice(0, firstChunk.seq))!
       expect(request.model).toBe(header.config.model)
       expect(request.reasoningEffort).toBe(header.config.reasoningEffort)
-      // The clock no longer lives in `system` at all, so the dispatched and
-      // folded system text are byte-exact — no scrub needed.
+      // The clock does not live in `system`, so the dispatched and folded
+      // system text are byte-exact — no scrub needed.
       expect(request.system).toEqual(header.system)
       expect(structuredClone(request.tools ?? [])).toEqual(structuredClone(header.tools ?? []))
       expect(request.temperature).toBe(header.config.temperature)
@@ -1507,7 +1478,7 @@ describe('per-message founder marker (SWD-156)', () => {
     expect(adapter.requests).toHaveLength(1)
     const dispatchedUserMessage = adapter.requests[0]!.messages.find(message => message.role === 'user')!
     expect(dispatchedUserMessage.content).toEqual([
-      { type: 'text', text: `${FOUNDER_MARKER_TEXT}\n\n` },
+      { type: 'text', text: expect.stringMatching(new RegExp(`^${STAMP_SHAPE} ${FOUNDER_MARKER_TEXT.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n\\n$`)) as unknown },
       { type: 'text', text: 'do the thing' },
     ])
 

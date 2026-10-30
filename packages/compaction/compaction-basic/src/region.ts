@@ -16,9 +16,10 @@ import {
 } from '@deepseek-ai/dsh-compaction'
 import type { CompactionResult } from '@deepseek-ai/dsh-compaction'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
-import { markFounderMessages } from '@deepseek-ai/dsh-agent-loop'
+import { renderDispatch, resolveDispatchTimeZone } from '@deepseek-ai/dsh-agent-loop'
+import type { TimedMessage } from '@deepseek-ai/dsh-agent-loop'
 import { createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
-import type { Message, UserMessage } from '@deepseek-ai/dsh-llm'
+import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { TokenMeasurement, TokenMeter } from '@deepseek-ai/dsh-token-meter'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -502,22 +503,26 @@ function buildSummarizationInput(
 ): SummarizationInput {
   const header = session.requestHeader()
   const events = session.events
-  const regionMessages = shadowedSeqs
+  const regionMessages: TimedMessage[] = []
+  for (const seq of shadowedSeqs) {
     // shadowedSeqs are current surface seqs, so each is a valid log index.
     // oxlint-disable-next-line typescript/no-non-null-assertion
-    .map(seq => session.deriveEventMessage(events[seq]!))
-    .filter((message): message is Message => message !== null)
+    const event = events[seq]!
+    const message = session.deriveEventMessage(event)
+    if (message !== null) regionMessages.push({ message, time: event.time })
+  }
   return {
     ...header?.system === undefined ? {} : { system: header.system },
     ...header?.tools === undefined ? {} : { tools: header.tools },
-    // The last routed request this call mimics (SWD-156, buildRequest) marks
-    // founder-stamped messages with a leading request-only text block before
-    // dispatch; this replay must carry the identical marker on the identical
-    // messages, or the auxiliary call stops being a byte-exact prefix of that
-    // request and the provider's warm prefix cache this input exists to reuse
-    // is lost on every founder session. Never persisted: `regionMessages`
-    // itself (and the session log it was derived from) is untouched.
-    messages: markFounderMessages(regionMessages),
+    // The last routed request this call mimics (buildRequest) renders every
+    // user message through renderDispatch (per-message time stamp, founder
+    // marker, notice merge); this replay must go through the identical
+    // function on the identical messages and event times, or the auxiliary
+    // call stops being a byte-exact prefix of that request and the provider's
+    // warm prefix cache this input exists to reuse is lost. Never persisted:
+    // the session log is untouched. A region cut in the middle of a run
+    // renders that run on its own (one-call cache miss, accepted).
+    messages: renderDispatch(regionMessages, { timeZone: resolveDispatchTimeZone() }),
   }
 }
 

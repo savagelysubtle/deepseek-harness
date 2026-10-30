@@ -700,6 +700,8 @@ export class Session {
 
   /** The derived-message cache: frozen projections, extended per unseen node. */
   private derived: Message[] = []
+  /** Event time of each entry of {@link derived}, index-parallel to it. */
+  private derivedTimes: number[] = []
   /** Surface position (nodes projected) the cache has reached. */
   private derivedNodes = 0
   /** {@link SurfaceManager.replaceGeneration} the cache was built under. */
@@ -724,11 +726,37 @@ export class Session {
    * @returns a fresh array of the shared, frozen derived history.
    */
   deriveMessages(): Message[] {
+    this.syncDerived()
+    return [...this.derived]
+  }
+
+  /**
+   * {@link deriveMessages} with each message's own logged event time. The
+   * messages are exactly those `deriveMessages()` returns (same shared frozen
+   * objects, same order; a surface node deriving to null is skipped in both),
+   * paired with `event.time` of the surface node that produced them. Shares
+   * the derived cache, so it costs O(new nodes) and rebuilds on a surface
+   * rewrite exactly like `deriveMessages()`.
+   * @returns a fresh array of `{ message, time }` pairs, one per derived message.
+   */
+  deriveTimedMessages(): Array<{ message: Message; time: number }> {
+    this.syncDerived()
+    return this.derived.map((message, index) => ({
+      message,
+      // derivedTimes is pushed in lockstep with derived, so the index always exists.
+      // oxlint-disable-next-line typescript/no-non-null-assertion
+      time: this.derivedTimes[index]!,
+    }))
+  }
+
+  /** Bring {@link derived} and {@link derivedTimes} up to the current surface. */
+  private syncDerived(): void {
     const surface = this.surface
     const nodes = surface.nodes
     const generation = surface.replaceGeneration
     if (generation !== this.derivedGeneration) {
       this.derived = []
+      this.derivedTimes = []
       this.derivedNodes = 0
       this.derivedGeneration = generation
     }
@@ -736,14 +764,17 @@ export class Session {
       // Surface sequences are built from this.log — seq is always a valid
       // index by construction. The non-null assertion expresses that invariant.
       // oxlint-disable-next-line typescript/no-non-null-assertion
-      const msg = this.deriveEventMessage(this.log[seq]!)
+      const event = this.log[seq]!
+      const msg = this.deriveEventMessage(event)
       // A surface node is one of the five message-producing types, but an
       // empty-content assistant/message (a max-tokens step that hosts only
       // usage) derives to null and must not enter the transcript.
-      if (msg) this.derived.push(msg)
+      if (msg) {
+        this.derived.push(msg)
+        this.derivedTimes.push(event.time)
+      }
     }
     this.derivedNodes = nodes.length
-    return [...this.derived]
   }
 
   /**

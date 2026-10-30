@@ -184,15 +184,6 @@ export interface Config {
    * takes the detectors' own sane defaults — see {@link resolveLoopGuardConfig}.
    */
   loopGuard?: LoopGuardConfig
-  /**
-   * Clock the unconditional per-request clock tail message (SWD-113, see
-   * `./clock.ts`) reads from, called once per dispatched request (default
-   * `() => new Date()`). Overridable so tests can fix the instant instead of
-   * depending on `process.env.TZ`, which does not reliably update a
-   * long-running process. A code-only override — like {@link loopGuard}, not
-   * schema-validated, since a `cordis.yml` entry cannot express a function.
-   */
-  now?: () => Date
   /** Agents created or resumed at plugin startup. */
   agents: (AgentOptions & {
     /** Stable config label used in logs and as the fresh combined-id prefix. */
@@ -221,7 +212,7 @@ export interface LoopGuardConfig {
 
 依赖：[`AgentOptions`](subsystems/core.md) · [`SessionId`](subsystems/core.md)
 
-Source: [`packages/core/agent-loop/src/index.ts:278`](../packages/core/agent-loop/src/index.ts)
+Source: [`packages/core/agent-loop/src/index.ts:283`](../packages/core/agent-loop/src/index.ts)
 
 <a id="deepseek-aidsh-agent-presets"></a>
 
@@ -2552,14 +2543,13 @@ export interface Config {
    * depending on `process.env.TZ`, which does not reliably update a
    * long-running process. The zone is always the process's own resolved zone
    * (`Intl.DateTimeFormat().resolvedOptions().timeZone`) and is not
-   * configurable here — see {@link formatDateTime} to format an explicit
-   * zone directly.
+   * configurable here.
    */
   now?: () => Date
 }
 ```
 
-来源：[`packages/core/system-prompt/src/index.ts:288`](../packages/core/system-prompt/src/index.ts)
+来源：[`packages/core/system-prompt/src/index.ts:245`](../packages/core/system-prompt/src/index.ts)
 
 <a id="deepseek-aidsh-terminal-bash"></a>
 

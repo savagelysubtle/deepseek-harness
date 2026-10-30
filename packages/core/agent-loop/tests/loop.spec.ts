@@ -7,7 +7,7 @@ import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import { isClockMessage } from '../src/clock.ts'
+import { anyStampBlock } from './dispatch-fixtures.ts'
 import { MockAdapter, maxTokensResponse, textResponse, toolCallResponse } from './mock-adapter.ts'
 
 function driverDone(agent: Agent): Promise<void> {
@@ -441,9 +441,10 @@ describe('agent loop', () => {
         ? [event]
         : [])
     expect(runtimeContexts).toHaveLength(2)
+    // The re-emitted snapshot is a mergeable notice: it rides inside the message
+    // before it (its text intact, source = that head's), not as its own message.
     expect(adapter.requests[1]?.messages.some(message =>
-      message.source.kind === 'plugin'
-      && message.source.plugin === '@deepseek-ai/dsh-system-prompt')).toBe(true)
+      message.content.some(block => block.type === 'text' && block.text.includes('Mode: read-only.')))).toBe(true)
   })
 
   it('clears compacted runtime context after the active set becomes empty', async () => {
@@ -470,13 +471,12 @@ describe('agent loop', () => {
 
     send(agent, 'after compaction')
     await waitForIdle(ctx, agent)
+    // The clearing snapshot is a mergeable notice, so it rides inside the
+    // preceding message with its logged text intact.
     const clearing = adapter.requests[1]?.messages.find(message =>
-      message.source.kind === 'plugin'
-      && message.source.plugin === '@deepseek-ai/dsh-system-prompt')
-    expect(clearing?.content).toEqual([{
-      type: 'text',
-      text: 'Current runtime context: none. Earlier runtime-context snapshots no longer apply.',
-    }])
+      message.content.some(block => block.type === 'text'
+        && block.text === 'Current runtime context: none. Earlier runtime-context snapshots no longer apply.'))
+    expect(clearing).toBeDefined()
   })
 
   it('does not clear runtime context after an unrelated replacement', async () => {
@@ -1009,17 +1009,14 @@ describe('agent loop', () => {
 
     expect(steps).toBe(2)
     expect(adapter.requests).toHaveLength(2)
-    // The dispatched request's LAST message is the unconditional clock tail
-    // (SWD-113, see `../src/clock.ts`) — never logged, so it has no
-    // counterpart in the session-derived history below; check it separately.
+    // Every user message carries its own header stamp at dispatch time; there is
+    // no standalone clock message after the history.
     const dispatchedMessages = adapter.requests[1]!.messages
-    const clockTail = dispatchedMessages[dispatchedMessages.length - 1]
-    expect(clockTail !== undefined && isClockMessage(clockTail)).toBe(true)
-    expect(dispatchedMessages.slice(0, -1)).toEqual([
+    expect(dispatchedMessages).toEqual([
       {
         id: expect.any(String) as unknown,
         role: 'user',
-        content: [{ type: 'text', text: 'go' }],
+        content: [anyStampBlock(), { type: 'text', text: 'go' }],
         source: { kind: 'user' },
       },
       {
@@ -1031,7 +1028,7 @@ describe('agent loop', () => {
       {
         id: expect.any(String) as unknown,
         role: 'user',
-        content: [{ type: 'text', text: 'continue after truncation' }],
+        content: [anyStampBlock(), { type: 'text', text: 'continue after truncation' }],
         source: { kind: 'plugin', plugin: 'max-tokens-test' },
       },
     ])
