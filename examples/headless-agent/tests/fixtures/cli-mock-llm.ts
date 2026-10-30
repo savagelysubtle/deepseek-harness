@@ -33,10 +33,11 @@ class CliMockAdapter extends LlmAdapter {
       yield { type: 'finish', reason: { kind: 'error', failure: { code: 'SERVER', message: 'CLI mock provider failed' } } }
       return
     }
-    // SWD-113: the loop unconditionally appends a never-persisted clock tail message
-    // after every real message, so the actual last message (the tool result, when
-    // present) sits one position before the tail.
-    const toolResult = options.messages.at(-2)?.content.find(block => block.type === 'tool-result')
+    // The dispatched messages carry no trailing clock message (each user message has its own
+    // header stamp), so look for the tool result by content rather than by position.
+    const toolResult = options.messages
+      .flatMap(message => message.content)
+      .findLast(block => block.type === 'tool-result')
     if (toolResult === undefined) {
       const args = JSON.stringify({ command: 'printf CLI_TOOL_ROUND_TRIP', description: 'Prove the CLI tool round trip.' })
       yield { type: 'block-start', index: 0, blockType: 'tool-call' }

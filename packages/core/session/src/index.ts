@@ -739,7 +739,7 @@ export class Session {
    * rewrite exactly like `deriveMessages()`.
    * @returns a fresh array of `{ message, time }` pairs, one per derived message.
    */
-  deriveTimedMessages(): Array<{ message: Message; time: number }> {
+  deriveTimedMessages(): ReadonlyArray<{ readonly message: Message; readonly time: number }> {
     this.syncDerived()
     return this.derived.map((message, index) => ({
       message,

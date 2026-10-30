@@ -81,9 +81,10 @@ function isToolJobsSource(source: MessageSource): boolean {
  */
 export function isMergeableNotice(message: Message): boolean {
   if (!isMergeableNoticeSource(message.source)) return false
-  return !message.content.some(block =>
-    block.type === 'text'
-    && (block.text.includes(FOUNDER_MARKER_TEXT) || STAMP_SHAPED_LINE.test(block.text)))
+  // Serializers join adjacent text blocks with '', so test the joined text: a
+  // marker or stamp line split across blocks is still one string on the wire.
+  const joined = message.content.map(block => (block.type === 'text' ? block.text : '')).join('')
+  return !joined.includes(FOUNDER_MARKER_TEXT) && !STAMP_SHAPED_LINE.test(joined)
 }
 
 /** Whether a message receives a header: user role, not tool-sourced, carrying no tool-result block. */

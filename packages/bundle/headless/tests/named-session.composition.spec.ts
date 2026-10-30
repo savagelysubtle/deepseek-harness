@@ -166,6 +166,17 @@ async function boot(args: readonly string[], adapter: ScriptedAdapter): Promise<
   }
 }
 
+/** Block 0 of a dispatched founder message: stamp, space, founder marker, blank line. */
+function founderHeader(): { type: 'text'; text: unknown } {
+  const marker = FOUNDER_MARKER_TEXT.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`)
+  return {
+    type: 'text',
+    text: expect.stringMatching(
+      new RegExp(String.raw`^\[[A-Z][a-z]{2} \d{4}-\d{2}-\d{2} \d{2}:\d{2} [^\]]+\] ${marker}\n\n$`),
+    ) as unknown,
+  }
+}
+
 describe('named sessions over the real composition', () => {
   // Real-Loader composition resolves workspace packages through tsx at test
   // time; first resolution is slow enough to trip cold-cache budgets.
@@ -192,16 +203,14 @@ describe('named sessions over the real composition', () => {
     expect(line.type).toBe('text')
     expect(line.sessionID).toMatch(/^named-[0-9a-f]{32}$/)
     expect(line.part).toEqual({ type: 'text', text: 'first answer' })
-    // The dispatched request's very last message is the agent loop's
-    // unconditional clock tail (SWD-113); the real user message sits just
-    // before it.
-    const firstLastMessage = first.requests.at(-1)?.messages.at(-2)
+    // The founder's task is the last dispatched message, and nothing is appended after it.
+    const firstLastMessage = first.requests.at(-1)?.messages.at(-1)
     if (firstLastMessage === undefined) throw new Error('the first run produced no model message')
-    // Headless founder-stamps every task, so the SWD-156 marker leads the content.
+    // Headless founder-stamps every task, so one stamp+marker header block leads the content.
     expect(firstLastMessage).toMatchObject({
       role: 'user',
       content: [
-        { type: 'text', text: `${FOUNDER_MARKER_TEXT}\n\n` },
+        founderHeader(),
         { type: 'text', text: 'first task' },
       ],
     })
@@ -213,14 +222,13 @@ describe('named sessions over the real composition', () => {
     const conversation = JSON.stringify(second.requests[0]?.messages)
     expect(conversation).toContain('first task')
     expect(conversation).toContain('first answer')
-    // The last message is the agent loop's unconditional clock tail (SWD-113).
-    const lastMessage = second.requests.at(-1)?.messages.at(-2)
+    const lastMessage = second.requests.at(-1)?.messages.at(-1)
     if (lastMessage === undefined) throw new Error('the resumed run produced no model message')
-    // Headless founder-stamps every task, so the SWD-156 marker leads the content.
+    // Headless founder-stamps every task, so one stamp+marker header block leads the content.
     expect(lastMessage).toMatchObject({
       role: 'user',
       content: [
-        { type: 'text', text: `${FOUNDER_MARKER_TEXT}\n\n` },
+        founderHeader(),
         { type: 'text', text: 'second task' },
       ],
     })

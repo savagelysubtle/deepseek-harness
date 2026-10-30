@@ -401,19 +401,17 @@ describe('dsh-agent-spine-demo bundle', () => {
       handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }))
       await waitForIdle(ctx, handle.agent)
 
-      // The dispatched request's LAST message is the agent loop's
-      // unconditional clock tail (SWD-113) — never logged, so it has no
-      // counterpart in session-derived history; check it separately, then
-      // compare the rest exactly.
+      // No agent-instructions notice (disabled), so the one dispatched message
+      // is the user's own: a stamp header block, then the logged content. No
+      // trailing clock message exists any more.
       const dispatchedMessages = adapter.requests[0]?.messages ?? []
-      expect(dispatchedMessages.at(-1)?.source).toEqual({
-        kind: 'plugin',
-        plugin: '@deepseek-ai/dsh-agent-loop/clock',
-      })
-      expect(dispatchedMessages.slice(0, -1)).toEqual([{
+      expect(dispatchedMessages).toEqual([{
         id: expect.any(String) as unknown,
         role: 'user',
-        content: [{ type: 'text', text: 'hi' }],
+        content: [
+          { type: 'text', text: expect.stringMatching(/^\[[A-Z][a-z]{2} \d{4}-\d{2}-\d{2} \d{2}:\d{2} [^\]]+\]\n\n$/) as unknown },
+          { type: 'text', text: 'hi' },
+        ],
         source: { kind: 'user' },
       }])
       await handle.dispose()
@@ -658,15 +656,18 @@ describe('dsh-agent-spine-demo bundle', () => {
       await waitForIdle(ctx, handle.agent)
 
       expect(adapter.requests).toHaveLength(1)
-      const workspaceIndex = adapter.requests[0]!.messages.findIndex(
-        message => messageText(message).includes('workspace rule before skills'),
-      )
-      const catalogIndex = adapter.requests[0]!.messages.findIndex(
-        message => messageText(message).includes('prefix-order-skill'),
-      )
+      // Both notices merge into the user's message, so order is checked on the
+      // text the model reads: workspace rules, then the catalog, then the task.
+      const messages = adapter.requests[0]!.messages
+      expect(messages).toHaveLength(1)
+      const text = messageText(messages[0])
+      const workspaceIndex = text.indexOf('workspace rule before skills')
+      const catalogIndex = text.indexOf('prefix-order-skill')
+      const taskIndex = text.lastIndexOf('hi')
       expect(workspaceIndex).toBeGreaterThanOrEqual(0)
       expect(catalogIndex).toBeGreaterThanOrEqual(0)
       expect(workspaceIndex).toBeLessThan(catalogIndex)
+      expect(catalogIndex).toBeLessThan(taskIndex)
       await handle.dispose()
       await ctx.fiber.dispose()
     } finally {

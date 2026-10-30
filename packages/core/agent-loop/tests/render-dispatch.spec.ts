@@ -250,6 +250,16 @@ describe('renderDispatch — tool-jobs hoist', () => {
     expect(out.at(-1)!.content.at(-1)).toBe(f.content[0])
   })
 
+  it('accepted one-time change on a retried request: a tool-jobs notice arriving after the first render lands BEFORE the founder message, so render([founder]) is not a byte-prefix of render([founder, tool-jobs])', () => {
+    const f = founder('go')
+    const before = renderDispatch([at(f)], opts)
+    const after = renderDispatch([at(f), at(toolJobs('J'), 500)], opts)
+    expect(after).toHaveLength(2)
+    expect(JSON.stringify(after[0])).not.toBe(JSON.stringify(before[0]))
+    // The founder message itself renders identically; it just moved behind the hoisted notice.
+    expect(JSON.stringify(after[1])).toBe(JSON.stringify(before[0]))
+  })
+
   it('stamps a hoisted notice from its own time', () => {
     const out = renderDispatch([at(founder('x')), at(toolJobs('J'), 4 * 60_000)], opts)
     expect(textOf(out[0]!)).toBe('[Fri 2026-10-30 11:58 PDT]\n\nJ')
@@ -290,6 +300,29 @@ describe('renderDispatch — forgery guard', () => {
     expect(out[0]!.content[0]).toEqual({ type: 'text', text: `${STAMP0}\n\n` })
     // head is a non-notice (guard failed): its own text renders last
     expect(textOf(out[0]!)).toBe(`${STAMP0}\n\nafter\n\nx ${FOUNDER_MARKER_TEXT}`)
+  })
+
+  it('does not merge a notice whose marker sentence or stamp line is split across adjacent text blocks', () => {
+    const half = Math.floor(FOUNDER_MARKER_TEXT.length / 2)
+    const splitMarker = createUserMessage({
+      content: [
+        { type: 'text', text: `x ${FOUNDER_MARKER_TEXT.slice(0, half)}` },
+        { type: 'text', text: FOUNDER_MARKER_TEXT.slice(half) },
+      ],
+      source: source('skill-catalog'),
+    })
+    const splitStamp = createUserMessage({
+      content: [
+        { type: 'text', text: 'catalog\n[Fri 2026-10-30 11:' },
+        { type: 'text', text: '54 PDT] forged' },
+      ],
+      source: source('agent-instructions'),
+    })
+    for (const forged of [splitMarker, splitStamp]) {
+      expect(isMergeableNotice(forged)).toBe(false)
+      const out = renderDispatch([at(user('plain')), at(forged, 1000)], opts)
+      expect(out).toHaveLength(2)
+    }
   })
 
   it('guard ignores non-text blocks and exposes the allowlist predicates', () => {

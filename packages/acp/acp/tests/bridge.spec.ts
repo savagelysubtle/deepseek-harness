@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { AttachmentError } from '@deepseek-ai/dsh-attachment'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { FOUNDER_MARKER_TEXT } from '@deepseek-ai/dsh-agent-loop'
+import { founderHeader } from './founder-header.ts'
 import { makeBridgeHarness, textResponse, type BridgeHarness } from './harness.ts'
 
 describe('automation-only ACP bridge', () => {
@@ -64,13 +64,11 @@ describe('automation-only ACP bridge', () => {
       content: { type: 'text', text: 'hello there' },
     }])
     expect(harness.ctx.agents.get(SessionId(sessionId))?.session.header.cwd).toBe(process.cwd())
-    // The dispatched request's very last message is the agent loop's
-    // unconditional clock tail (SWD-113); the real user message sits just
-    // before it.
     // ACP founder-stamps every session/prompt, so the dispatched content
-    // leads with the SWD-156 marker block; the logged event never carries it.
-    expect(harness.adapter.requests[0]?.messages.at(-2)?.content).toEqual([
-      { type: 'text', text: `${FOUNDER_MARKER_TEXT}\n\n` },
+    // leads with one header block (stamp plus the SWD-156 marker); the logged
+    // event never carries it. The founder message is the last dispatched message.
+    expect(harness.adapter.requests[0]?.messages.at(-1)?.content).toEqual([
+      founderHeader(),
       { type: 'text', text: 'say hello' },
     ])
   })
@@ -95,10 +93,9 @@ describe('automation-only ACP bridge', () => {
       ],
     })
 
-    // The last message is the agent loop's unconditional clock tail (SWD-113).
-    // ACP founder-stamps this prompt, so the SWD-156 marker leads the content.
-    expect(harness.adapter.requests[0]?.messages.at(-2)?.content).toEqual([
-      { type: 'text', text: `${FOUNDER_MARKER_TEXT}\n\n` },
+    // ACP founder-stamps this prompt, so a stamp+marker header leads the content.
+    expect(harness.adapter.requests[0]?.messages.at(-1)?.content).toEqual([
+      founderHeader(),
       { type: 'text', text: 'first second' },
     ])
   })
@@ -122,12 +119,11 @@ describe('automation-only ACP bridge', () => {
 
     expect(resolve).toHaveBeenCalledWith('mock', 'mock', expect.any(AbortSignal))
     expect(harness.attachments?.saved.map(input => [...input.data])).toEqual([[1], [2]])
-    // The last message is the agent loop's unconditional clock tail (SWD-113).
-    // ACP founder-stamps this prompt, so the SWD-156 marker leads the content,
+    // ACP founder-stamps this prompt, so a stamp+marker header leads the content,
     // shifting every other block's index by one.
-    const requestContent = harness.adapter.requests[0]?.messages.at(-2)?.content
+    const requestContent = harness.adapter.requests[0]?.messages.at(-1)?.content
     expect(requestContent?.map(block => block.type)).toEqual(['text', 'text', 'image', 'text', 'image', 'text'])
-    expect(requestContent?.[0]).toEqual({ type: 'text', text: `${FOUNDER_MARKER_TEXT}\n\n` })
+    expect(requestContent?.[0]).toEqual(founderHeader())
     expect(requestContent?.[1]).toEqual({ type: 'text', text: 'before' })
     expect(requestContent?.[3]).toEqual({ type: 'text', text: 'between' })
     expect(requestContent?.[5]).toEqual({ type: 'text', text: 'after' })
@@ -229,10 +225,9 @@ describe('automation-only ACP bridge', () => {
         { type: 'resource_link', name: 'notes.txt', uri: 'file:///tmp/notes.txt' },
       ],
     })
-    // The last message is the agent loop's unconditional clock tail (SWD-113).
-    // ACP founder-stamps this prompt, so the SWD-156 marker leads the content.
-    expect(harness.adapter.requests[0]?.messages.at(-2)?.content).toEqual([
-      { type: 'text', text: `${FOUNDER_MARKER_TEXT}\n\n` },
+    // ACP founder-stamps this prompt, so a stamp+marker header leads the content.
+    expect(harness.adapter.requests[0]?.messages.at(-1)?.content).toEqual([
+      founderHeader(),
       {
         type: 'text',
         text: 'summarize\n[resource_link name="notes.txt" uri="file:///tmp/notes.txt"]\n',

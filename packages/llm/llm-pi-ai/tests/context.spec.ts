@@ -163,9 +163,9 @@ describe('pi-ai request context conversion', () => {
   })
 
   it('serializes a marker-led user message as the marker, a blank line, then the original text (SWD-156)', () => {
-    // The marker block is produced at request-build time by
-    // packages/core/agent-loop/src/founder-marker.ts (markFounderMessages),
-    // never by this adapter. Built literally here (not imported from
+    // The marker rides in block 0 of a founder message, built at dispatch time by
+    // packages/core/agent-loop/src/render-dispatch.ts (renderDispatch) as part of
+    // the per-message stamp header, never by this adapter. Built literally here (not imported from
     // agent-loop) to keep llm-pi-ai independent of agent-loop; this proves
     // only that the existing generic `type:'text'` flattening (flattenText,
     // context.ts ~line 14) carries a leading marker block to the wire for
@@ -226,5 +226,44 @@ describe('pi-ai request context conversion', () => {
     expect(() => toPiAssistant(
       history('assistant', [{ type: 'image', attachment: ref }]),
     )).toThrow(/assistant image output/)
+  })
+
+  // Dispatch no longer ends in a clock message: a stamped, merged user message
+  // (header, notice, separator, head) must become exactly one pi-ai user message.
+  describe('merged dispatch messages', () => {
+    const merged = (): Message => user([
+      { type: 'text', text: '[Fri 2026-10-30 11:54 PDT]\n\n' },
+      { type: 'text', text: 'skill catalog notice' },
+      { type: 'text', text: '\n\n' },
+      { type: 'text', text: 'the task' },
+    ])
+    const expectedText = '[Fri 2026-10-30 11:54 PDT]\n\nskill catalog notice\n\nthe task'
+
+    it('converts to one user message with the blocks concatenated (text-only path)', () => {
+      const context = toPiContext(request([merged()]))
+      expect(context.messages).toEqual([{ role: 'user', content: expectedText, timestamp: 0 }])
+    })
+
+    it('converts to one user message whose text parts concatenate exactly (image-capable path)', async () => {
+      const context = await toPiContext(request([merged()]), attachments)
+      expect(context.messages).toHaveLength(1)
+      const only = context.messages[0]
+      expect(only?.role).toBe('user')
+      const content = (only as { content: unknown }).content
+      const text = typeof content === 'string'
+        ? content
+        : (content as { type: string; text?: string }[]).map(part => part.text ?? '').join('')
+      expect(text).toBe(expectedText)
+    })
+
+    it('keeps assistant(toolCall) directly followed by toolResult on both paths', async () => {
+      const messages = [
+        history('assistant', [{ type: 'tool-call', id: CallId('call-1'), name: 'lookup', arguments: '{}' }]),
+        user([{ type: 'tool-result', toolCallId: CallId('call-1'), content: [{ type: 'text', text: 'result' }] }]),
+      ]
+      for (const context of [toPiContext(request(messages)), await toPiContext(request(messages), attachments)]) {
+        expect(context.messages.map(message => message.role)).toEqual(['assistant', 'toolResult'])
+      }
+    })
   })
 })

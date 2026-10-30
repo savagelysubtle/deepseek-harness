@@ -271,9 +271,9 @@ describe('serializeRequest', () => {
 })
 
 describe('founder marker (SWD-156)', () => {
-  // The marker block is produced at request-build time by
-  // packages/core/agent-loop/src/founder-marker.ts (markFounderMessages),
-  // never by this adapter. It is built literally here (not imported from
+  // The marker rides in block 0 of a founder message, built at dispatch time by
+  // packages/core/agent-loop/src/render-dispatch.ts (renderDispatch) as part of
+  // the per-message stamp header, never by this adapter. It is built literally here (not imported from
   // agent-loop) so llm-deepseek stays independent of agent-loop; this proves
   // only that the existing generic `type:'text'` flattening (flattenText,
   // serialize.ts ~line 56) and user-role handling (~lines 128-130) carry a
@@ -354,5 +354,46 @@ describe('review fixes: assistant content shapes', () => {
       source: { kind: 'plugin', plugin: 'test' },
     })])
     expect(wire[0]).toMatchObject({ content: '' })
+  })
+
+  // Dispatch no longer ends in a clock message: a stamped, merged user message
+  // (header, notice, separator, head) must reach the wire as exactly one user
+  // message whose text is the plain concatenation.
+  it('serializes a merged dispatch message to one user message with the blocks concatenated', () => {
+    const wire = serializeMessages([
+      createUserMessage({
+        content: [
+          { type: 'text', text: '[Fri 2026-10-30 11:54 PDT]\n\n' },
+          { type: 'text', text: 'skill catalog notice' },
+          { type: 'text', text: '\n\n' },
+          { type: 'text', text: 'the task' },
+        ],
+        source: { kind: 'user' },
+      }),
+    ])
+    expect(wire).toEqual([{
+      role: 'user',
+      content: '[Fri 2026-10-30 11:54 PDT]\n\nskill catalog notice\n\nthe task',
+    }])
+  })
+
+  it('keeps assistant(tool_calls) directly followed by the tool message, with no user message between', () => {
+    const wire = serializeMessages([
+      createMessage({
+        role: 'assistant',
+        content: [{ type: 'tool-call', id: CallId('call-1'), name: 'lookup', arguments: '{}' }],
+        source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+      }),
+      createUserMessage({
+        content: [{
+          type: 'tool-result',
+          toolCallId: CallId('call-1'),
+          content: [{ type: 'text', text: 'result' }],
+        }],
+        source: { kind: 'tool', callId: CallId('call-1') },
+      }),
+    ])
+    expect(wire.map(message => message.role)).toEqual(['assistant', 'tool'])
+    expect(wire[1]).toEqual({ role: 'tool', tool_call_id: 'call-1', content: 'result' })
   })
 })

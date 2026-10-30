@@ -2,7 +2,7 @@ import { createUserMessage, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { FOUNDER_MARKER_TEXT } from '@deepseek-ai/dsh-agent-loop'
+import { founderHeader } from './founder-header.ts'
 import {
   errorResponse,
   makeBridgeHarness,
@@ -221,9 +221,10 @@ describe('ACP prompt lifecycle', () => {
     await harness.client.prompt({ sessionId, prompt: [{ type: 'text', text: 'go' }] })
 
     expect(harness.adapter.requests).toHaveLength(1)
+    // Block 0 is one header (stamp + marker); the logged text follows it.
     const dispatchedUserMessage = harness.adapter.requests[0]!.messages.find(message => message.role === 'user')!
     expect(dispatchedUserMessage.content).toEqual([
-      { type: 'text', text: `${FOUNDER_MARKER_TEXT}\n\n` },
+      founderHeader(),
       { type: 'text', text: 'go' },
     ])
 

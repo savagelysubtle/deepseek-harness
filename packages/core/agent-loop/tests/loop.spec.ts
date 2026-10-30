@@ -443,8 +443,10 @@ describe('agent loop', () => {
     expect(runtimeContexts).toHaveLength(2)
     // The re-emitted snapshot is a mergeable notice: it rides inside the message
     // before it (its text intact, source = that head's), not as its own message.
-    expect(adapter.requests[1]?.messages.some(message =>
-      message.content.some(block => block.type === 'text' && block.text.includes('Mode: read-only.')))).toBe(true)
+    const carrier = adapter.requests[1]?.messages.find(message =>
+      message.content.some(block => block.type === 'text' && block.text.includes('Mode: read-only.')))
+    expect(carrier).toBeDefined()
+    expect(carrier?.content[0]).toEqual(anyStampBlock())
   })
 
   it('clears compacted runtime context after the active set becomes empty', async () => {

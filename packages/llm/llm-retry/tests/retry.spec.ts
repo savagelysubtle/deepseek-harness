@@ -715,11 +715,9 @@ describe('provider-routed retry policy', () => {
     await idle
 
     expect(adapter.requests).toHaveLength(2)
-    // Both requests' final message is the agent loop's unconditional clock
-    // tail (SWD-113) — freshly built (and freshly identified) on every
-    // dispatch, so its own id legitimately differs between the original
-    // request and its immediate retry; the context-isolation claim below is
-    // about everything BEFORE it.
+    // There is no trailing clock message any more (each user message carries a
+    // deterministic header stamp), so the dispatched arrays match; the
+    // context-isolation claim below is about everything but the last message.
     expect(adapter.requests[1]?.messages.slice(0, -1)).toEqual(adapter.requests[0]?.messages.slice(0, -1))
     const retriedContext = JSON.stringify(adapter.requests[1]?.messages)
     expect(retriedContext).not.toContain(diagnostic)
