@@ -164,7 +164,7 @@ interface TodoItem {
 
 ### 请求头事件：`request/header`
 
-请求信封（即 `EpochHeader`：调用配置 + 适配器所提供默认值的标记 + 渲染后的系统提示词 + 已组装的工具 schema）会作为会话状态写入日志，因此每个对话请求都是日志的纯函数（见可重建性 Agent Note）。带有 reason `'initial'` 或 `'resume'` 的完整 `request/header` 快照记录每个 agent loop 实例的边界；之后请求发生变化时，系统会以 reason `'change'` 记录另一份完整快照。`foldRequestHeader(events)` 通过选择最新快照重建请求头。该事件不是 `SurfaceEventType`，不产生 LLM 消息。当前日期与时间不属于 `header.system`（SWD-113）：`@deepseek-ai/dsh-agent-loop` 改为在请求重建边界之后，把它作为一条无条件、从不持久化的时钟尾部消息追加，因此 `header.system` 与 `headerEquals` 完全不需要任何感知时钟的特殊处理。
+请求信封（即 `EpochHeader`：调用配置 + 适配器所提供默认值的标记 + 渲染后的系统提示词 + 已组装的工具 schema）会作为会话状态写入日志，因此每个对话请求都是日志的纯函数（见可重建性 Agent Note）。带有 reason `'initial'` 或 `'resume'` 的完整 `request/header` 快照记录每个 agent loop 实例的边界；之后请求发生变化时，系统会以 reason `'change'` 记录另一份完整快照。`foldRequestHeader(events)` 通过选择最新快照重建请求头。该事件不是 `SurfaceEventType`，不产生 LLM 消息。当前日期与时间不属于 `header.system`（SWD-113）：`@deepseek-ai/dsh-agent-loop` 的 `renderDispatch` 改为在分发时把它渲染为逐消息的头部戳记（从不持久化），其时间取自每条消息自身已记录的事件时间，因此 `header.system` 与 `headerEquals` 完全不需要任何感知时钟的特殊处理。
 
 ```ts type-equiv
 /**
@@ -520,6 +520,16 @@ declare class Session {
    */
   deriveMessages(): Message[];
   /**
+   * {@link deriveMessages} with each message's own logged event time. The
+   * messages are exactly those `deriveMessages()` returns (same shared frozen
+   * objects, same order; a surface node deriving to null is skipped in both),
+   * paired with `event.time` of the surface node that produced them. Shares
+   * the derived cache, so it costs O(new nodes) and rebuilds on a surface
+   * rewrite exactly like `deriveMessages()`.
+   * @returns a fresh array of `{ message, time }` pairs, one per derived message.
+   */
+  deriveTimedMessages(): ReadonlyArray<{ readonly message: Message; readonly time: number }>;
+  /**
    * Instance face of the pure per-node `deriveEventMessage` export from
    * `surface.ts`.
    * @param event - the event to project.
@@ -759,7 +769,7 @@ fork(source: SessionForkSource, boundary?: number, childSessionId?: SessionId): 
 
 Types: [CreateSessionOptions](persistence.md) · [PrepareSessionOptions](persistence.md) · [SessionId](core.md)
 
-Source: [`packages/core/session/src/index.ts:792`](../../packages/core/session/src/index.ts)
+Source: [`packages/core/session/src/index.ts:823`](../../packages/core/session/src/index.ts)
 
 <a id="session-events"></a>
 

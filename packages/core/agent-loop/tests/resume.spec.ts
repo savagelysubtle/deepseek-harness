@@ -13,7 +13,7 @@ import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import { isClockMessage } from '../src/clock.ts'
+import { anyStampBlock } from './dispatch-fixtures.ts'
 import { TOOL_SNAPSHOT_SETTLE_MS } from '../src/constants.ts'
 import { MockAdapter, textResponse } from './mock-adapter.ts'
 
@@ -1054,15 +1054,12 @@ describe('a disposal-blocked recheck does not orphan a message into a later resu
     await waitForIdle(ctx2, resumedAgent)
 
     expect(adapter2.requests).toHaveLength(1)
-    // The dispatched request's very last message is the unconditional clock
-    // tail (SWD-113, see `../src/clock.ts`); the real user message sits just
-    // before it.
-    const clockTail = adapter2.requests[0]?.messages.at(-1)
-    expect(clockTail !== undefined && isClockMessage(clockTail)).toBe(true)
-    const lastMessage = adapter2.requests[0]?.messages.at(-2)
+    // The real user message is the very last dispatched message (no standalone
+    // clock after it) and carries its own header stamp.
+    const lastMessage = adapter2.requests[0]?.messages.at(-1)
     expect(lastMessage).toMatchObject({
       role: 'user',
-      content: [{ type: 'text', text: 'hello after resume' }],
+      content: [anyStampBlock(), { type: 'text', text: 'hello after resume' }],
     })
 
     await ctx2.fiber.dispose()

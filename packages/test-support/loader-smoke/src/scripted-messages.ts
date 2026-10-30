@@ -11,12 +11,10 @@ import type { Message } from '@deepseek-ai/dsh-llm'
  * tool-result content and return it joined as plain text.
  *
  * A scripted adapter must not assume the tool result sits at a fixed offset
- * from the end: since a8366ebb53 every assembled request ends with a
- * never-persisted clock plugin tail message (`{ kind: 'plugin', plugin:
- * '@deepseek-ai/dsh-agent-loop/clock' }`), so `messages.at(-1)` never sees the
- * tool result, and an offset tuned to the tail's current length (`.at(-2)`)
- * only holds until another tail message is added. Scanning from the end
- * keeps working regardless of what trails the tool result.
+ * from the end: a request may carry later steering or harness notices after
+ * the tool result, so `messages.at(-1)` is not guaranteed to be it, and a
+ * fixed offset only holds until another message is added. Scanning from the
+ * end keeps working regardless of what trails the tool result.
  * @param messages - the full message list from a `GenerateOptions` stream call.
  * @returns the joined text of the last tool-result block found, or `''` when none exists.
  */

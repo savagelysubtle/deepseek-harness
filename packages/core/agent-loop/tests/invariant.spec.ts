@@ -4,8 +4,16 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import * as AgentLoopInvariant from '@deepseek-ai/dsh-agent-loop/invariant'
 import { createUserMessage, markAgentLoopRequest, type GenerateOptions  } from '@deepseek-ai/dsh-llm'
-import { buildClockMessage } from '../src/clock.ts'
-import { FOUNDER_MARKER_TEXT, markFounderMessages } from '../src/founder-marker.ts'
+import type { Session } from '@deepseek-ai/dsh-session'
+import { FOUNDER_MARKER_TEXT } from '../src/founder-marker.ts'
+import { renderDispatch, resolveDispatchTimeZone } from '../src/render-dispatch.ts'
+
+const DIVERGES = /diverges from renderDispatch\(log\)/
+
+/** What a faithful dispatch of `session` looks like right now. */
+function rendered(session: Session) {
+  return renderDispatch(session.deriveTimedMessages(), { timeZone: resolveDispatchTimeZone() })
+}
 
 async function setup(): Promise<Context> {
   const ctx = new Context()
@@ -31,15 +39,10 @@ async function requestSetup() {
   session.append('user/message', createUserMessage({
     content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' },
   }), { surfaceOp: 'append' })
-  const boundary = session.deriveMessages()
+  const boundary = rendered(session)
   session.append('step/start', { turn: 1, step: 1 })
   session.append('request/header', { header: { config: { provider: 'mock', model: 'm' } }, reason: 'initial' })
   return { ctx, session, boundary }
-}
-
-/** A well-formed clock tail, fixed so tests stay deterministic. */
-function clockTail() {
-  return buildClockMessage(() => new Date('2026-09-29T16:13:00Z'))
 }
 
 /** Like {@link requestSetup}, but the logged `user/message` carries the founder stamp. */
@@ -50,106 +53,78 @@ async function founderRequestSetup() {
   session.append('user/message', createUserMessage({
     content: [{ type: 'text', text: 'hi' }], source: { kind: 'user', founder: true },
   }), { surfaceOp: 'append' })
-  const boundary = session.deriveMessages()
+  const boundary = rendered(session)
   session.append('step/start', { turn: 1, step: 1 })
   session.append('request/header', { header: { config: { provider: 'mock', model: 'm' } }, reason: 'initial' })
   return { ctx, session, boundary }
 }
 
 describe('request-reconstruction invariant', () => {
-  it('accepts a frozen request equal to the boundary derivation plus a trailing clock message and folded header', async () => {
+  it('accepts a frozen request equal to renderDispatch(log) and a folded header', async () => {
     const { ctx, session, boundary } = await requestSetup()
-    const options = loopRequest({
-      model: 'm',
-      messages: Object.freeze([...boundary, clockTail()]),
-      sessionId: session.id,
-    })
+    const options = loopRequest({ model: 'm', messages: Object.freeze([...boundary]), sessionId: session.id })
     expect(() => { dispatch(ctx, options) }).not.toThrow()
   })
 
-  it('includes context appended inside the open step before dispatch', async () => {
+  it('includes context appended inside the open step before dispatch (merged into the head)', async () => {
     const { ctx, session } = await requestSetup()
     session.append('user/message', createUserMessage({
-      content: [{ type: 'text', text: '[step context]' }], source: { kind: 'plugin', plugin: 'x' },
+      content: [{ type: 'text', text: '[step context]' }], source: { kind: 'plugin', plugin: 'context-pressure' },
     }), { surfaceOp: 'append' })
-    const options = loopRequest({
-      model: 'm',
-      messages: Object.freeze([...session.deriveMessages(), clockTail()]),
-      sessionId: session.id,
-    })
+    const options = loopRequest({ model: 'm', messages: Object.freeze(rendered(session)), sessionId: session.id })
+    expect(rendered(session)).toHaveLength(1)
     expect(() => { dispatch(ctx, options) }).not.toThrow()
   })
 
-  it('requires the messages to equal the boundary derivation exactly (no unlogged prefix), clock tail aside', async () => {
+  it('accepts the exact rendering and rejects extra, missing and standalone-clock messages', async () => {
     const { ctx, session, boundary } = await requestSetup()
     const extra = { role: 'user' as const, content: [{ type: 'text' as const, text: '<system-reminder>catalog</system-reminder>' }] }
-    expect(() => { dispatch(ctx, loopRequest({ model: 'm', messages: Object.freeze([...boundary, clockTail()]), sessionId: session.id })) })
+    expect(() => { dispatch(ctx, loopRequest({ model: 'm', messages: Object.freeze([...boundary]), sessionId: session.id })) })
       .not.toThrow()
-    expect(() => { dispatch(ctx, loopRequest({ model: 'm', messages: Object.freeze([extra, ...boundary, clockTail()]), sessionId: session.id })) })
-      .toThrow(/diverges from the dispatch-time durable derivation/)
-    expect(() => { dispatch(ctx, loopRequest({ model: 'm', messages: Object.freeze([...boundary, extra, clockTail()]), sessionId: session.id })) })
-      .toThrow(/diverges from the dispatch-time durable derivation/)
+    expect(() => { dispatch(ctx, loopRequest({ model: 'm', messages: Object.freeze([extra, ...boundary]), sessionId: session.id })) })
+      .toThrow(DIVERGES)
+    expect(() => { dispatch(ctx, loopRequest({ model: 'm', messages: Object.freeze([...boundary, extra]), sessionId: session.id })) })
+      .toThrow(DIVERGES)
+    expect(() => { dispatch(ctx, loopRequest({ model: 'm', messages: Object.freeze([]), sessionId: session.id })) })
+      .toThrow(DIVERGES)
   })
 
   it('rejects message and header divergence', async () => {
     const { ctx, session, boundary } = await requestSetup()
-    const divergent = [...boundary, { role: 'user', content: [{ type: 'text', text: 'phantom' }] }, clockTail()]
+    const divergent = [...boundary, { role: 'user', content: [{ type: 'text', text: 'phantom' }] }]
     expect(() => { dispatch(ctx, loopRequest({ model: 'm', messages: Object.freeze(divergent), sessionId: session.id })) })
-      .toThrow(/diverges from the dispatch-time durable derivation/)
-    expect(() => { dispatch(ctx, loopRequest({ model: 'other', messages: Object.freeze([...boundary, clockTail()]), sessionId: session.id })) })
+      .toThrow(DIVERGES)
+    expect(() => { dispatch(ctx, loopRequest({ model: 'other', messages: Object.freeze([...boundary]), sessionId: session.id })) })
       .toThrow(/diverges from the folded request header/)
   })
 
-  describe('the unconditional clock tail message (SWD-113)', () => {
-    it('accepts a dispatched request whose messages are the boundary plus one trailing clock message', async () => {
-      const { ctx, session, boundary } = await requestSetup()
-      const options = loopRequest({
-        model: 'm',
-        messages: Object.freeze([...boundary, buildClockMessage(() => new Date('2026-09-29T16:13:00Z'))]),
-        sessionId: session.id,
-      })
-      expect(() => { dispatch(ctx, options) }).not.toThrow()
-    })
-
-    it('still rejects a trailing message that is not the recognized clock message', async () => {
-      const { ctx, session, boundary } = await requestSetup()
-      const notTheClock = createUserMessage({
-        content: [{ type: 'text', text: 'Current date and time: not really' }],
-        source: { kind: 'plugin', plugin: 'someone-else' },
-      })
-      const options = loopRequest({
-        model: 'm',
-        messages: Object.freeze([...boundary, notTheClock]),
-        sessionId: session.id,
-      })
-      expect(() => { dispatch(ctx, options) }).toThrow(/missing its required unconditional clock tail message/)
-    })
-
-    it('rejects a request with no trailing message at all (the boundary array unchanged, no clock appended: '
-      + 'a code path that omitted the clock must not pass silently)', async () => {
-      const { ctx, session, boundary } = await requestSetup()
-      const options = loopRequest({ model: 'm', messages: Object.freeze(boundary), sessionId: session.id })
-      expect(() => { dispatch(ctx, options) }).toThrow(/missing its required unconditional clock tail message/)
-    })
-
-    it('rejects a loop request with an empty messages array (no clock tail to find at all)', async () => {
+  describe('the per-message stamp', () => {
+    it('rejects a user message dispatched WITHOUT its stamp (the raw logged derivation)', async () => {
       const { ctx, session } = await requestSetup()
-      const options = loopRequest({ model: 'm', messages: Object.freeze([]), sessionId: session.id })
-      expect(() => { dispatch(ctx, options) }).toThrow(/missing its required unconditional clock tail message/)
+      const options = loopRequest({ model: 'm', messages: Object.freeze(session.deriveMessages()), sessionId: session.id })
+      expect(() => { dispatch(ctx, options) }).toThrow(DIVERGES)
     })
 
-    it('still rejects two trailing clock-shaped messages (only the very last may be discounted)', async () => {
-      const { ctx, session, boundary } = await requestSetup()
-      const options = loopRequest({
-        model: 'm',
-        messages: Object.freeze([
-          ...boundary,
-          buildClockMessage(() => new Date('2026-09-29T16:12:00Z')),
-          buildClockMessage(() => new Date('2026-09-29T16:13:00Z')),
-        ]),
-        sessionId: session.id,
-      })
-      expect(() => { dispatch(ctx, options) }).toThrow(/diverges from the dispatch-time durable derivation/)
+    it('rejects a stamp built from the wrong time', async () => {
+      const { ctx, session } = await requestSetup()
+      const wrong = renderDispatch(
+        session.deriveTimedMessages().map(t => ({ ...t, time: t.time + 3 * 3_600_000 })),
+        { timeZone: resolveDispatchTimeZone() },
+      )
+      const options = loopRequest({ model: 'm', messages: Object.freeze(wrong), sessionId: session.id })
+      expect(() => { dispatch(ctx, options) }).toThrow(DIVERGES)
+    })
+
+    it('rejects a run that was wrongly merged (notice folded into a head that should not carry it)', async () => {
+      const { ctx, session } = await requestSetup()
+      session.append('user/message', createUserMessage({
+        content: [{ type: 'text', text: 'relayed' }],
+        source: { kind: 'mailbox', form: 'relay', address: 'a', from: 'b', messageId: 'm' } as never,
+      }), { surfaceOp: 'append' })
+      const [head, relayed] = rendered(session)
+      const merged = { ...head!, content: [...head!.content, ...relayed!.content] }
+      const options = loopRequest({ model: 'm', messages: Object.freeze([merged]), sessionId: session.id })
+      expect(() => { dispatch(ctx, options) }).toThrow(DIVERGES)
     })
   })
 
@@ -212,57 +187,46 @@ describe('request-reconstruction invariant', () => {
     session.append('request/header', { header: { config: { provider: 'mock', model: 'm' } }, reason: 'initial' })
     const divergent = loopRequest({
       model: 'm',
-      messages: Object.freeze([{ role: 'user', content: [{ type: 'text', text: 'phantom' }] }, clockTail()]),
+      messages: Object.freeze([{ role: 'user', content: [{ type: 'text', text: 'phantom' }] }]),
       sessionId: session.id,
     })
-    expect(() => { dispatch(ctx, divergent) }).toThrow(/diverges from the dispatch-time durable derivation/)
+    expect(() => { dispatch(ctx, divergent) }).toThrow(DIVERGES)
   })
 
-  describe('the per-message founder marker (SWD-156)', () => {
-    it('accepts a dispatched request whose founder-stamped message carries the marker', async () => {
+  describe('the founder marker on the header line', () => {
+    it('accepts a founder-stamped message rendered with the marker', async () => {
       const { ctx, session, boundary } = await founderRequestSetup()
-      const options = loopRequest({
-        model: 'm',
-        messages: Object.freeze([...markFounderMessages(boundary), clockTail()]),
-        sessionId: session.id,
-      })
+      expect(JSON.stringify(boundary)).toContain(FOUNDER_MARKER_TEXT)
+      const options = loopRequest({ model: 'm', messages: Object.freeze([...boundary]), sessionId: session.id })
       expect(() => { dispatch(ctx, options) }).not.toThrow()
     })
 
-    it('rejects a dispatched request that carries the marker on a message that was never founder-stamped', async () => {
+    it('rejects the marker on a message that was never founder-stamped', async () => {
       const { ctx, session, boundary } = await requestSetup()
       const wronglyMarked = boundary.map(message => ({
         ...message,
         content: [{ type: 'text' as const, text: `${FOUNDER_MARKER_TEXT}\n\n` }, ...message.content],
       }))
-      const options = loopRequest({
-        model: 'm',
-        messages: Object.freeze([...wronglyMarked, clockTail()]),
-        sessionId: session.id,
-      })
-      expect(() => { dispatch(ctx, options) }).toThrow(/diverges from the dispatch-time durable derivation/)
+      const options = loopRequest({ model: 'm', messages: Object.freeze(wronglyMarked), sessionId: session.id })
+      expect(() => { dispatch(ctx, options) }).toThrow(DIVERGES)
     })
 
-    it('rejects a dispatched request that dispatches a founder-stamped message WITHOUT its marker', async () => {
-      const { ctx, session, boundary } = await founderRequestSetup()
-      const options = loopRequest({
-        model: 'm',
-        // The boundary's raw (unmarked) founder-stamped message, dispatched as-is.
-        messages: Object.freeze([...boundary, clockTail()]),
-        sessionId: session.id,
-      })
-      expect(() => { dispatch(ctx, options) }).toThrow(/diverges from the dispatch-time durable derivation/)
+    it('rejects a founder-stamped message dispatched with a stamp but WITHOUT the marker (unmarked founder)', async () => {
+      const { ctx, session } = await founderRequestSetup()
+      const [founderMessage] = session.deriveTimedMessages()
+      const plainStamp = renderDispatch(
+        [{ ...founderMessage!, message: { ...founderMessage!.message, source: { kind: 'user' } } }],
+        { timeZone: resolveDispatchTimeZone() },
+      )
+      const options = loopRequest({ model: 'm', messages: Object.freeze(plainStamp), sessionId: session.id })
+      expect(() => { dispatch(ctx, options) }).toThrow(DIVERGES)
     })
 
-    it('still rejects unrelated divergence on a founder-stamped session (the marker transform does not mask real desync)', async () => {
+    it('still rejects unrelated divergence on a founder-stamped session', async () => {
       const { ctx, session, boundary } = await founderRequestSetup()
       const extra = { role: 'user' as const, content: [{ type: 'text' as const, text: 'phantom' }] }
-      const options = loopRequest({
-        model: 'm',
-        messages: Object.freeze([...markFounderMessages(boundary), extra, clockTail()]),
-        sessionId: session.id,
-      })
-      expect(() => { dispatch(ctx, options) }).toThrow(/diverges from the dispatch-time durable derivation/)
+      const options = loopRequest({ model: 'm', messages: Object.freeze([...boundary, extra]), sessionId: session.id })
+      expect(() => { dispatch(ctx, options) }).toThrow(DIVERGES)
     })
   })
 })

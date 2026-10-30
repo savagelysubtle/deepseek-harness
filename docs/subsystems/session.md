@@ -164,7 +164,7 @@ interface TodoItem {
 
 ### The request header event: `request/header`
 
-The request envelope — the `EpochHeader` (call config + markers for adapter-supplied defaults + rendered system prompt + assembled tool schemas) — is logged session state, so every conversation request is a pure function of the log (the reconstructability Agent Note). A full `request/header` snapshot with reason `'initial'` or `'resume'` records each loop-instance boundary; a later changed request records another full snapshot with reason `'change'`. `foldRequestHeader(events)` reconstructs the header by selecting the latest snapshot. The event is not a `SurfaceEventType`: it produces no LLM message. The current date and time is NOT part of `header.system` (SWD-113): `@deepseek-ai/dsh-agent-loop` appends it as an unconditional, never-persisted clock tail message after the request-reconstruction boundary instead, so `header.system` and `headerEquals` need no clock-aware handling at all.
+The request envelope — the `EpochHeader` (call config + markers for adapter-supplied defaults + rendered system prompt + assembled tool schemas) — is logged session state, so every conversation request is a pure function of the log (the reconstructability Agent Note). A full `request/header` snapshot with reason `'initial'` or `'resume'` records each loop-instance boundary; a later changed request records another full snapshot with reason `'change'`. `foldRequestHeader(events)` reconstructs the header by selecting the latest snapshot. The event is not a `SurfaceEventType`: it produces no LLM message. The current date and time is NOT part of `header.system` (SWD-113): `@deepseek-ai/dsh-agent-loop`'s `renderDispatch` instead renders it at dispatch as a per-message header stamp (never persisted), built from each message's own logged event time, so `header.system` and `headerEquals` need no clock-aware handling at all.
 
 ```ts type-equiv
 /**
@@ -520,6 +520,16 @@ declare class Session {
    */
   deriveMessages(): Message[];
   /**
+   * {@link deriveMessages} with each message's own logged event time. The
+   * messages are exactly those `deriveMessages()` returns (same shared frozen
+   * objects, same order; a surface node deriving to null is skipped in both),
+   * paired with `event.time` of the surface node that produced them. Shares
+   * the derived cache, so it costs O(new nodes) and rebuilds on a surface
+   * rewrite exactly like `deriveMessages()`.
+   * @returns a fresh array of `{ message, time }` pairs, one per derived message.
+   */
+  deriveTimedMessages(): ReadonlyArray<{ readonly message: Message; readonly time: number }>;
+  /**
    * Instance face of the pure per-node `deriveEventMessage` export from
    * `surface.ts`.
    * @param event - the event to project.
@@ -757,7 +767,7 @@ fork(source: SessionForkSource, boundary?: number, childSessionId?: SessionId): 
 
 Types: [CreateSessionOptions](persistence.md) · [PrepareSessionOptions](persistence.md) · [SessionId](core.md)
 
-Source: [`packages/core/session/src/index.ts:792`](../../packages/core/session/src/index.ts)
+Source: [`packages/core/session/src/index.ts:823`](../../packages/core/session/src/index.ts)
 
 <a id="session-events"></a>
 

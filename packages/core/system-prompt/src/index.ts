@@ -144,101 +144,58 @@ function pad2(value: number): string {
   return String(value).padStart(2, '0')
 }
 
-/**
- * One `en-US` `Intl.DateTimeFormat` reading of `date` in `timeZone`, keyed by
- * part type. `en-US` is used only to get stable, unambiguous part values
- * (e.g. a plain `"Monday"`, digits for the rest) — the output text is not a
- * localization, and `2-digit`/`h23` keep every numeric part zero-padded.
- */
-function dateTimeParts(date: Date, timeZone: string): Record<string, string> {
-  const formatter = new Intl.DateTimeFormat('en-US', {
-    timeZone,
-    hourCycle: 'h23',
-    weekday: 'long',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  })
-  const map: Record<string, string> = {}
-  for (const part of formatter.formatToParts(date)) {
-    if (part.type !== 'literal') map[part.type] = part.value
-  }
-  return map
-}
-
-/**
- * `timeZone`'s UTC offset for `date`, in minutes (positive when the zone
- * runs ahead of UTC). Computed by re-reading the zone's local wall-clock
- * digits for `date` as if they were themselves UTC, then diffing that
- * against the real instant — the standard `Intl`-only technique for an
- * offset, correct across a DST transition and for fractional-hour zones,
- * with no date library.
- */
-function offsetMinutes(date: Date, timeZone: string): number {
-  const p = dateTimeParts(date, timeZone)
-  const asUtc = Date.UTC(
-    Number(p.year), Number(p.month) - 1, Number(p.day),
-    Number(p.hour), Number(p.minute), Number(p.second),
-  )
-  return Math.round((asUtc - date.getTime()) / 60_000)
-}
-
-/** Format minutes-from-UTC as a signed `±HH:mm` offset (`0` renders `+00:00`). */
-function formatOffset(minutes: number): string {
-  const sign = minutes < 0 ? '-' : '+'
-  const abs = Math.abs(minutes)
-  return `${sign}${pad2(Math.floor(abs / 60))}:${pad2(abs % 60)}`
-}
-
 /** `date` as a whole-second UTC ISO-8601 string (`YYYY-MM-DDTHH:mm:ssZ`, no milliseconds). */
 function isoSeconds(date: Date): string {
   return `${date.getUTCFullYear()}-${pad2(date.getUTCMonth() + 1)}-${pad2(date.getUTCDate())}`
     + `T${pad2(date.getUTCHours())}:${pad2(date.getUTCMinutes())}:${pad2(date.getUTCSeconds())}Z`
 }
 
-/**
- * `date` as a whole-MINUTE UTC ISO-8601 string (`YYYY-MM-DDTHH:mmZ`, no
- * seconds). Used only by {@link formatDateTime}'s stamp line: minute
- * resolution keeps the clock line stable within a minute, so a multi-step
- * turn does not re-log its full `request/header` on every step merely
- * because a second rolled over (the `now` prompt variable stays
- * second-resolution via {@link isoSeconds} — it is opt-in template text, not
- * part of the always-on header-bloat path this trims).
- */
-function isoMinutes(date: Date): string {
-  return `${date.getUTCFullYear()}-${pad2(date.getUTCMonth() + 1)}-${pad2(date.getUTCDate())}`
-    + `T${pad2(date.getUTCHours())}:${pad2(date.getUTCMinutes())}Z`
-}
+/** Per-zone `en-US` stamp formatter, built once per zone and reused. */
+const stampFormatters = new Map<string, Intl.DateTimeFormat>()
+
+/** Most minute-keyed stamps {@link formatMessageStamp} memoizes before the memo resets. */
+const STAMP_MEMO_CAP = 4096
+const stampMemo = new Map<string, string>()
 
 /**
- * Fixed second paragraph of {@link formatDateTime}: why the timestamp is
- * there and how a reader should use it, rather than assuming from memory how
- * much time has passed.
+ * Format one message's own time as the per-message header stamp
+ * `[Thu 2026-10-30 11:54 PDT]`: short English weekday, ISO date, 24-hour
+ * `HH:MM`, short zone name, minute resolution. Fixed `en-US` locale and
+ * `formatToParts` keep it a pure function of `(date, timeZone)`; the zone
+ * abbreviation disambiguates the repeated hour of a DST fall-back. Non-US
+ * zones render `GMT+N`, UTC renders `UTC`. Results are memoized per
+ * `(zone, minute)` under a capped memo; formatters are cached per zone.
+ * @param date - the instant to stamp (a session event's own logged time).
+ * @param timeZone - an IANA zone name; the caller resolves it once.
+ * @returns the bracketed stamp, one physical line, no trailing newline.
  */
-const NOW_ADVISORY = 'This is the time this prompt was assembled — it advances between turns, so read elapsed time from here rather than assuming it.'
-
-/**
- * Format the unconditional per-request clock block (SWD-113,
- * `@deepseek-ai/dsh-agent-loop`'s clock tail message) for one instant in one
- * IANA zone: a plain-text timestamp line, then {@link NOW_ADVISORY} as a
- * second paragraph. Pure and zone-injectable by design — `process.env.TZ`
- * does not reliably update a long-running process, so neither this function
- * nor its caller reads it; the caller resolves a zone once (typically via
- * `Intl.DateTimeFormat().resolvedOptions().timeZone`) and passes it in,
- * which also makes the function directly unit-testable against any zone.
- * @param date - the instant to format (typically a request's freshly-read clock reading).
- * @param timeZone - an IANA zone name.
- * @returns two paragraphs separated by a blank line — the clock line, then
- *   the fixed advisory sentence — each one physical line.
- */
-export function formatDateTime(date: Date, timeZone: string): string {
-  const p = dateTimeParts(date, timeZone)
-  const offset = formatOffset(offsetMinutes(date, timeZone))
-  const stamp = `Current date and time: ${p.weekday} ${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute} ${timeZone} (UTC${offset}) — ${isoMinutes(date)}`
-  return `${stamp}\n\n${NOW_ADVISORY}`
+export function formatMessageStamp(date: Date, timeZone: string): string {
+  const key = `${timeZone}|${Math.floor(date.getTime() / 60_000)}`
+  const memoized = stampMemo.get(key)
+  if (memoized !== undefined) return memoized
+  let formatter = stampFormatters.get(timeZone)
+  if (formatter === undefined) {
+    formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      hourCycle: 'h23',
+      weekday: 'short',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZoneName: 'short',
+    })
+    stampFormatters.set(timeZone, formatter)
+  }
+  const p: Record<string, string> = {}
+  for (const part of formatter.formatToParts(date)) {
+    if (part.type !== 'literal') p[part.type] = part.value
+  }
+  const stamp = `[${p.weekday} ${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute} ${p.timeZoneName}]`
+  if (stampMemo.size >= STAMP_MEMO_CAP) stampMemo.clear()
+  stampMemo.set(key, stamp)
+  return stamp
 }
 
 /**
@@ -307,8 +264,7 @@ export interface Config {
    * depending on `process.env.TZ`, which does not reliably update a
    * long-running process. The zone is always the process's own resolved zone
    * (`Intl.DateTimeFormat().resolvedOptions().timeZone`) and is not
-   * configurable here — see {@link formatDateTime} to format an explicit
-   * zone directly.
+   * configurable here.
    */
   now?: () => Date
 }
@@ -496,12 +452,11 @@ export class SystemPrompt extends Service {
     // `selectFounderAuthorityMessage` are the authority surface, consulted
     // directly by `packages/goal` and `packages/plan` where the authority
     // decision actually happens — the system prompt never needs to know.
-    // The current-date-and-time block moved off the system prompt (SWD-113):
-    // it now rides as `@deepseek-ai/dsh-agent-loop`'s unconditional per-request
-    // clock tail message, built fresh with formatDateTime()/this module's own
-    // clock-injection story, so it never invalidates the provider's prefix
-    // cache on the (otherwise stable) system text. The `now` template
-    // variable stays — an unrelated, opt-in fact a persona can reference.
+    // The current date and time is not part of this assembly: each user
+    // message carries its own header stamp at dispatch time
+    // (`@deepseek-ai/dsh-agent-loop`'s renderDispatch, built with
+    // formatMessageStamp()). The `now` template variable stays — an
+    // unrelated, opt-in fact a persona can reference.
     this.variable('now', () => isoSeconds(this.now()))
     if (!(config.includeRuntimeContext ?? true)) this.suppressRuntimeContext()
   }

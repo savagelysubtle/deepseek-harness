@@ -203,11 +203,16 @@ export {
 } from './loop-guard.ts'
 
 /**
- * Per-message founder marker (SWD-156), re-exported so a consumer (e.g.
- * `compaction-basic`) can recognize it outside this package's own
- * request/invariant path.
+ * Founder marker sentence (SWD-156), re-exported so a consumer can recognize it
+ * outside this package's own request/invariant path.
  */
-export { FOUNDER_MARKER_TEXT, markFounderMessages } from './founder-marker.ts'
+export { FOUNDER_MARKER_TEXT } from './founder-marker.ts'
+/**
+ * Dispatch-time rendering (per-message time stamp, founder marker, notice
+ * merge) shared by the loop, the invariant and compaction's summarization input.
+ */
+export { renderDispatch, resolveDispatchTimeZone } from './render-dispatch.ts'
+export type { RenderDispatchOptions, TimedMessage } from './render-dispatch.ts'
 
 /**
  * One launcher-selected session identity for a configured agent. `resume`
@@ -287,15 +292,6 @@ export interface Config {
    * takes the detectors' own sane defaults — see {@link resolveLoopGuardConfig}.
    */
   loopGuard?: LoopGuardConfig
-  /**
-   * Clock the unconditional per-request clock tail message (SWD-113, see
-   * `./clock.ts`) reads from, called once per dispatched request (default
-   * `() => new Date()`). Overridable so tests can fix the instant instead of
-   * depending on `process.env.TZ`, which does not reliably update a
-   * long-running process. A code-only override — like {@link loopGuard}, not
-   * schema-validated, since a `cordis.yml` entry cannot express a function.
-   */
-  now?: () => Date
   /** Agents created or resumed at plugin startup. */
   agents: (AgentOptions & {
     /** Stable config label used in logs and as the fresh combined-id prefix. */
@@ -310,7 +306,7 @@ export interface Config {
 }
 
 /** Agent-loop configuration after defaults and load-time validation. */
-type ResolvedConfig = Config & { maxParallelToolCalls: number; loopGuard: ResolvedLoopGuardConfig; now: () => Date }
+type ResolvedConfig = Config & { maxParallelToolCalls: number; loopGuard: ResolvedLoopGuardConfig }
 
 /** Reject self-contained identity conflicts before any configured agent starts. */
 function validateConfiguredAgents(agents: Config['agents']): void {
@@ -372,9 +368,6 @@ export class AgentLoop extends Service implements AgentFactory {
       // Resolved once at startup (unlike maxParallelToolCalls, not live-patchable
       // settings): every agent's detectors read this at construction.
       loopGuard: resolveLoopGuardConfig(config.loopGuard),
-      // Same resolve-once story: every agent reads the clock function itself
-      // (not a captured value) at construction and calls it fresh per request.
-      now: config.now ?? (() => new Date()),
     }
     installSettingsSection(ctx, AGENT_LOOP_SETTINGS_NAMESPACE, AGENT_LOOP_SETTINGS_SCHEMA, entry, {
       // The schema admits any integer above zero; `resolveMaxParallelToolCalls`

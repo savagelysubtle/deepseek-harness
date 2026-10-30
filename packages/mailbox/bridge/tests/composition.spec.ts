@@ -485,8 +485,11 @@ describe('mailbox delivery over real compositions', () => {
       expect(mail.source).toMatchObject({
         form: 'relay', address: 'hook-target', from: 'sender', messageId: id,
       })
-      expect(mail.content?.[0]?.text).toMatch(/^\[.+ - from .+ \((?:seat|unverified)\)(?: · trace [0-9a-f-]+)?\]$/m)
-      expect(mail.content?.[0]?.text).toContain('\n\nwake up')
+      // The relay is its own stamped message: block 0 is the dispatch stamp,
+      // block 1 the relay text with the sender line and the body.
+      expect(mail.content?.[0]?.text).toMatch(/^\[[A-Z][a-z]{2} \d{4}-\d{2}-\d{2} \d{2}:\d{2} [^\]]+\]\n\n$/)
+      expect(mail.content?.[1]?.text).toMatch(/^\[.+ - from .+ \((?:seat|unverified)\)(?: · trace [0-9a-f-]+)?\]$/m)
+      expect(mail.content?.[1]?.text).toContain('\n\nwake up')
     },
   )
 
@@ -642,19 +645,23 @@ describe('mailbox delivery over real compositions', () => {
       })
       expect(run.code).toBe(0)
 
-      // Each request's very last message is the agent loop's unconditional
-      // clock tail (SWD-113); the real user/mailbox message sits just before it.
+      // Each request ends with the newest real message (nothing trails it): the
+      // user task first, then the steered mailbox relay.
       const kinds = heldAdapter.requests.map(request =>
-        ((request.messages.at(-2) as { source?: { kind?: string } }).source?.kind ?? 'user'))
+        ((request.messages.at(-1) as { source?: { kind?: string } }).source?.kind ?? 'user'))
       expect(kinds).toEqual(['user', 'mailbox'])
+      // The relay is never merged into the user task: the second request still
+      // carries the task untouched, then the held output, then the relay alone.
+      expect(heldAdapter.requests[1]?.messages.map(message => message.role)).toEqual(['user', 'assistant', 'user'])
 
       const mail = heldAdapter.requests
         .flatMap(request => request.messages)
         .find(message => (message as { source?: { kind?: string } }).source?.kind === 'mailbox') as {
           content?: ReadonlyArray<{ type: string; text?: string }>
         } | undefined
-      expect(mail?.content?.[0]?.text).toMatch(/^\[.+ - from .+ \((?:seat|unverified)\)(?: · trace [0-9a-f-]+)?\]$/m)
-      expect(mail?.content?.[0]?.text).toContain('\n\nwake up')
+      expect(mail?.content?.[0]?.text).toMatch(/^\[[A-Z][a-z]{2} \d{4}-\d{2}-\d{2} \d{2}:\d{2} [^\]]+\]\n\n$/)
+      expect(mail?.content?.[1]?.text).toMatch(/^\[.+ - from .+ \((?:seat|unverified)\)(?: · trace [0-9a-f-]+)?\]$/m)
+      expect(mail?.content?.[1]?.text).toContain('\n\nwake up')
 
       const db = new DatabaseSync(env.storePath)
       const bounces = db.prepare("SELECT COUNT(*) AS n FROM messages WHERE type = 'bounce'").get() as { n: number }
@@ -745,8 +752,11 @@ describe('mailbox delivery over real compositions', () => {
       expect(mail.source).toMatchObject({
         address: 'alfred', from: 'console', messageId: id,
       })
-      expect(mail.content?.[0]?.text).toMatch(/^\[.+ - from .+ \((?:seat|unverified)\)(?: · trace [0-9a-f-]+)?\]$/m)
-      expect(mail.content?.[0]?.text).toContain('\n\nwake up')
+      // The relay is its own stamped message: block 0 is the dispatch stamp,
+      // block 1 the relay text with the sender line and the body.
+      expect(mail.content?.[0]?.text).toMatch(/^\[[A-Z][a-z]{2} \d{4}-\d{2}-\d{2} \d{2}:\d{2} [^\]]+\]\n\n$/)
+      expect(mail.content?.[1]?.text).toMatch(/^\[.+ - from .+ \((?:seat|unverified)\)(?: · trace [0-9a-f-]+)?\]$/m)
+      expect(mail.content?.[1]?.text).toContain('\n\nwake up')
     },
   )
 })

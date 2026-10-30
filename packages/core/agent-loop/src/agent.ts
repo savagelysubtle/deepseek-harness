@@ -16,7 +16,7 @@ import type {
   RequestErrorAction,
 } from '@deepseek-ai/dsh-agent'
 import { Inbox, agentEvents, assembleContextFor } from '@deepseek-ai/dsh-agent'
-import type { GenerateOptions, LlmCallConfig, Message, PreparedLlmCall, ToolSchema } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmCallConfig, PreparedLlmCall, ToolSchema } from '@deepseek-ai/dsh-llm'
 import {
   BlockAssembler,
   LlmError,
@@ -33,9 +33,9 @@ import { canonicalHeader, headerEquals } from '@deepseek-ai/dsh-session'
 import { joinContextSections, renderContextSections, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import type { Context } from '@deepseek-ai/cordis'
-import { buildClockMessage } from './clock.ts'
 import { TOOL_SNAPSHOT_SETTLE_MS } from './constants.ts'
-import { markFounderMessages } from './founder-marker.ts'
+import { renderDispatch, resolveDispatchTimeZone } from './render-dispatch.ts'
+import type { TimedMessage } from './render-dispatch.ts'
 import { RuntimeContextProjection } from './runtime-context.ts'
 import { executeToolCalls } from './tool-calls.ts'
 import { ReasoningDriftDetector, ToolRepeatDetector, toolCallSignature } from './loop-guard.ts'
@@ -195,14 +195,6 @@ export class ReactLoopAgent implements Agent {
    */
   private readonly toolRepeatGuard: ToolRepeatDetector
 
-  /**
-   * Clock the unconditional per-request clock tail message (SWD-113, see
-   * `./clock.ts`) reads from — the function itself, captured once at
-   * construction; {@link buildRequest} calls it fresh for every dispatched
-   * request. Test-injectable via `AgentLoop.Config.now`.
-   */
-  private readonly now: () => Date
-
   constructor(
     private loopCtx: Context,
     public readonly id: SessionId,
@@ -235,7 +227,6 @@ export class ReactLoopAgent implements Agent {
       }
     }, 'agent.toolSnapshotRecheck()')
     this.toolRepeatGuard = new ToolRepeatDetector(loopCtx.agentLoop.config.loopGuard.toolRepeatThreshold)
-    this.now = loopCtx.agentLoop.config.now
   }
 
   get status(): AgentStatus {
@@ -655,7 +646,7 @@ export class ReactLoopAgent implements Agent {
 
     while (true) {
       const { request, preparedCall } = await this.buildRequest(
-        turn, step, assembly.tools, system, this.session.deriveMessages(), signal,
+        turn, step, assembly.tools, system, this.session.deriveTimedMessages(), signal,
       )
       const assembler = new BlockAssembler()
       const chunkSeqs: number[] = []
@@ -767,7 +758,7 @@ export class ReactLoopAgent implements Agent {
     step: number,
     tools: GenerateOptions['tools'] & object,
     system: string,
-    boundaryMessages: Message[],
+    boundaryMessages: readonly TimedMessage[],
     signal: AbortSignal,
   ): Promise<{ request: GenerateOptions; preparedCall?: PreparedLlmCall }> {
     const { session } = this
@@ -841,18 +832,14 @@ export class ReactLoopAgent implements Agent {
     }
     signal.throwIfAborted()
 
-    // Per-message founder marker (SWD-156, see `./founder-marker.ts`): applied
-    // here, to the outgoing array only — never through `session.append` — so
-    // it never enters the session log or perturbs `boundaryMessages`' own
-    // reconstructability from `session.deriveMessages()`.
-    //
-    // Unconditional per-request clock tail (SWD-113, see `./clock.ts`):
-    // appended here — never through `session.append` — so it is fresh on
-    // every dispatch without ever entering the session log or perturbing
-    // `boundaryMessages`' own reconstructability from `session.deriveMessages()`.
+    // Per-message time stamp and founder marker (see `./render-dispatch.ts`):
+    // rendered here, to the outgoing array only — never through
+    // `session.append` — so nothing enters the session log, and the result is
+    // a pure function of the logged bytes (each stamp comes from its own
+    // event time), so the cached prefix never changes as the log grows.
     const request = markAgentLoopRequest(deepFreeze({
       ...header.config,
-      messages: [...markFounderMessages(boundaryMessages), buildClockMessage(this.now)],
+      messages: renderDispatch(boundaryMessages, { timeZone: resolveDispatchTimeZone() }),
       ...header.system !== undefined ? { system: header.system } : {},
       ...header.tools !== undefined ? { tools: header.tools } : {},
       sessionId: this.session.id,

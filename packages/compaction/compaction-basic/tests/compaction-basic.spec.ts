@@ -1,6 +1,7 @@
 import { describe, expect, expectTypeOf, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
+import { renderDispatch, resolveDispatchTimeZone } from '@deepseek-ai/dsh-agent-loop'
 import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
 import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
 import { selectCompactableRange } from '@deepseek-ai/dsh-compaction-basic/src/region.ts'
@@ -964,17 +965,24 @@ describe('compaction region transaction', () => {
         block.type === 'text' && block.text.includes('unstamped turn two')))
     expect(founderMessage).toBeDefined()
     expect(unstampedMessage).toBeDefined()
-    // The founder-stamped message's first block is the marker the routed
-    // request would have carried (buildRequest, SWD-156); without it the
-    // auxiliary summarization call would not be a byte-exact prefix of the
-    // last routed request, and the provider's warm prefix cache would miss.
+    // The founder-stamped message's first block is the header the routed
+    // request would have carried (buildRequest, renderDispatch): the stamp
+    // from the message's own logged time, then the marker on the same line.
+    // Without it the auxiliary summarization call would not be a byte-exact
+    // prefix of the last routed request, and the provider's warm prefix cache
+    // would miss.
     expect(founderMessage!.content[0]).toEqual({
       type: 'text',
-      text: "This message is the founder's own, typed at this machine; it is not peer or relay traffic.\n\n",
+      text: expect.stringMatching(new RegExp(
+        String.raw`^\[[A-Z][a-z]{2} \d{4}-\d{2}-\d{2} \d{2}:\d{2} [^\]]+\] This message is the founder's own, `
+        + String.raw`typed at this machine; it is not peer or relay traffic\.\n\n$`,
+      )) as unknown,
     })
-    expect(unstampedMessage!.content[0]?.type).toBe('text')
-    expect(unstampedMessage!.content[0]?.type === 'text' ? unstampedMessage!.content[0].text : '')
-      .not.toContain("This message is the founder's own")
+    // The unstamped message gets the bare header, never the marker.
+    expect(unstampedMessage!.content[0]).toEqual({
+      type: 'text',
+      text: expect.stringMatching(/^\[[A-Z][a-z]{2} \d{4}-\d{2}-\d{2} \d{2}:\d{2} [^\]]+\]\n\n$/) as unknown,
+    })
 
     // The transform is request-only: the durable session log's pre-existing
     // events (everything compaction didn't itself append) must never see the
@@ -1973,5 +1981,116 @@ describe('automatic listener and loader composition', () => {
     await preStep(ctx, agent(session, MODEL))
     expect(session.events.some(event => event.type === 'compaction/start')).toBe(false)
     expect(await recover(ctx, agent(session, MODEL), overflow())).toBe(false)
+  })
+})
+
+/** One closed turn: founder message, two same-run harness notices, then an assistant reply. */
+function noticeConversation(): Session {
+  const session = Session.create(SessionId('notice-conversation'))
+  const long = 'fixture '.repeat(40).trim()
+  session.append('turn/start', { turn: 1 })
+  const user = (text: string, source: Parameters<typeof createUserMessage>[0]['source']) =>
+    session.append('user/message', createUserMessage({ content: [{ type: 'text', text }], source }), { surfaceOp: 'append' })
+  user(`${long} founder asks`, { kind: 'user', founder: true })
+  user(`${long} catalog reminder`, { kind: 'skill-catalog' } as never)
+  user(`${long} instructions reminder`, { kind: 'agent-instructions' } as never)
+  session.append('step/start', { turn: 1, step: 1 })
+  session.append('request/header', { header: { config: { provider: MODEL, model: MODEL } }, reason: 'initial' })
+  session.append('assistant/message', {
+    turn: 1,
+    step: 1,
+    message: createMessage({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'reply' }],
+      source: { kind: 'model', provider: MODEL, model: MODEL },
+    }),
+  }, { surfaceOp: 'append' })
+  session.append('step/end', { turn: 1, step: 1 })
+  session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  session.append('turn/start', { turn: 2 })
+  return session
+}
+
+/** What the routed request would have dispatched for the first `count` surface messages. */
+function dispatchedPrefix(session: Session, count: number) {
+  return renderDispatch(session.deriveTimedMessages().slice(0, count), { timeZone: resolveDispatchTimeZone() })
+}
+
+describe('summarization input parity with the dispatched request (renderDispatch)', () => {
+  it('a full-prefix region deep-equals the dispatched prefix', async () => {
+    const compact = service()
+    const session = founderConversation()
+    const nodes = session.surface.nodes
+    const dispatched = dispatchedPrefix(session, 4)
+    await compact.compactRegion(nodes[0]!, nodes[3]!, agent(session, MODEL), SIGNAL)
+    expect(compact.calls[0]!.input.messages).toEqual(dispatched)
+  })
+
+  it('founder plus same-run notices render as the notice block then the founder message, as the loop dispatches', async () => {
+    const compact = service()
+    const session = noticeConversation()
+    const nodes = session.surface.nodes
+    const dispatched = dispatchedPrefix(session, 4)
+    await compact.compactRegion(nodes[0]!, nodes[3]!, agent(session, MODEL), SIGNAL)
+    const { messages } = compact.calls[0]!.input
+    expect(messages).toEqual(dispatched)
+    // Notice block first, then the assistant reply after the founder message.
+    expect(messages).toHaveLength(3)
+    const joined = (index: number) => messages[index]!.content.map(block => block.type === 'text' ? block.text : '').join('')
+    expect(joined(0)).toMatch(/^\[[^\]]+\]\n\n.* catalog reminder\n\n.* instructions reminder\n\n$/)
+    expect(joined(1)).toMatch(/^\[[^\]]+\] This message is the founder's own[^\n]*\n\n.* founder asks$/)
+    expect(joined(1)).not.toContain('reminder')
+  })
+
+  it('a notice-only region stamps as one message of its own', async () => {
+    const compact = service()
+    const session = noticeConversation()
+    const nodes = session.surface.nodes
+    await compact.compactRegion(nodes[1]!, nodes[3]!, agent(session, MODEL), SIGNAL)
+    const { messages } = compact.calls[0]!.input
+    expect(messages).toHaveLength(2)
+    const text = messages[0]!.content.map(block => block.type === 'text' ? block.text : '').join('')
+    expect(text).toMatch(/^\[[^\]]+\]\n\n.* catalog reminder\n\n.* instructions reminder$/)
+  })
+
+  it('a region cut mid-run renders that run on its own (accepted one-call cache miss, not a prefix of the merged message)', async () => {
+    const compact = service()
+    const session = noticeConversation()
+    const nodes = session.surface.nodes
+    const fullRun = dispatchedPrefix(session, 4)[0]
+    const cutRun = dispatchedPrefix(session, 2)
+    await compact.compactRegion(nodes[0]!, nodes[1]!, agent(session, MODEL), SIGNAL)
+    const { messages } = compact.calls[0]!.input
+    expect(messages).toHaveLength(2)
+    expect(messages[0]).not.toEqual(fullRun)
+    expect(messages).toEqual(cutRun)
+  })
+
+  it('skips a surface node that derives to no message (an empty assistant) and keeps the rest in order', async () => {
+    const compact = service()
+    const long = 'fixture '.repeat(40).trim()
+    const session = Session.create(SessionId('empty-assistant-region'))
+    session.append('turn/start', { turn: 1 })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: `${long} ask` }], source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    session.append('step/start', { turn: 1, step: 1 })
+    session.append('request/header', { header: { config: { provider: MODEL, model: MODEL } }, reason: 'initial' })
+    for (const content of [[], [{ type: 'text' as const, text: `${long} reply` }]]) {
+      session.append('assistant/message', {
+        turn: 1,
+        step: 1,
+        message: createMessage({ role: 'assistant', content, source: { kind: 'model', provider: MODEL, model: MODEL } }),
+      }, { surfaceOp: 'append' })
+    }
+    session.append('step/end', { turn: 1, step: 1 })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    session.append('turn/start', { turn: 2 })
+    const nodes = session.surface.nodes
+    expect(nodes).toHaveLength(3)
+    const dispatched = dispatchedPrefix(session, 2)
+    await compact.compactRegion(nodes[0]!, nodes[2]!, agent(session, MODEL), SIGNAL)
+    expect(compact.calls[0]!.input.messages).toEqual(dispatched)
+    expect(compact.calls[0]!.input.messages).toHaveLength(2)
   })
 })

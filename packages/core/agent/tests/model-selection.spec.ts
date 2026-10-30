@@ -20,7 +20,7 @@ describe('installModelSelection()', () => {
     const signal = new AbortController().signal
 
     // The `now` template variable is always registered by the SystemPrompt plugin itself
-    // (the SWD-113 clock message lives at the request tail, not here).
+    // (the time is a per-message header stamp added at dispatch, not a prompt variable).
     expect((await ctx.systemPrompt.assemble()).variables).toEqual({ now: expect.any(String) as unknown })
     await expect(agentEvents(ctx, agent).waterfall(
       'agent/request', { turn: 1, step: 0, signal }, () => Promise.resolve(seed),

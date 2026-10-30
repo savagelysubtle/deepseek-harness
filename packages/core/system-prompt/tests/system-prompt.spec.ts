@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import SystemPrompt, { AssembleContext, PromptAssembly, formatDateTime, renderContextSnapshot, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
+import SystemPrompt, { AssembleContext, PromptAssembly, formatMessageStamp, renderContextSnapshot, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 
 /**
  * Every assembly carries the plugin's own built-ins — `harness:identity`
@@ -17,7 +17,7 @@ function contributed(assembly: PromptAssembly): PromptAssembly['sections'] {
 
 /**
  * `now` (the opt-in `{{now}}` template variable) reads the SAME configured
- * clock as `formatDateTime`'s own callers — fixed here so the one test that
+ * clock as the system prompt's other clock readers — fixed here so the one test that
  * asserts its exact rendered value stays deterministic.
  */
 const NOW_INSTANT = new Date('2026-03-15T18:34:56Z')
@@ -594,36 +594,45 @@ describe('SystemPrompt', () => {
     })
   })
 
-  // `formatDateTime` no longer backs a built-in section (SWD-113 moved the
-  // current-date-and-time block off the system prompt into
-  // `@deepseek-ai/dsh-agent-loop`'s per-request clock tail message — see that
-  // package's `clock.ts` and tests), but stays exported and covered here
-  // since it is still the shared formatter both that tail message and the
-  // opt-in `{{now}}` variable's callers can reach for.
-  describe('formatDateTime', () => {
-    it('renders the exact line for a fixed date and zone', () => {
-      // A deliberately "nice" instant (no seconds-rollover ambiguity) in a
-      // zone distinct from whatever the test runner's own zone is.
-      const date = new Date('2024-06-10T13:05:00Z')
-      const text = formatDateTime(date, 'America/New_York')
-      expect(text).toBe(
-        'Current date and time: Monday 2024-06-10 09:05 America/New_York (UTC-04:00) — 2024-06-10T13:05Z\n\n'
-        + 'This is the time this prompt was assembled — it advances between turns, so read elapsed time from here rather than assuming it.',
-      )
+  describe('formatMessageStamp', () => {
+    it('renders the exact stamp for a fixed date and zone', () => {
+      expect(formatMessageStamp(new Date('2024-06-10T13:05:00Z'), 'America/New_York'))
+        .toBe('[Mon 2024-06-10 09:05 EDT]')
+      expect(formatMessageStamp(new Date('2026-10-30T18:54:00Z'), 'America/Vancouver'))
+        .toBe('[Fri 2026-10-30 11:54 PDT]')
     })
 
     it('formats a DST-crossing date on each side of the transition', () => {
       // America/New_York switches to daylight time at 2024-03-10T07:00:00Z.
-      const before = formatDateTime(new Date('2024-03-10T06:59:00Z'), 'America/New_York')
-      const after = formatDateTime(new Date('2024-03-10T07:01:00Z'), 'America/New_York')
-      expect(before).toContain('(UTC-05:00)')
-      expect(after).toContain('(UTC-04:00)')
+      expect(formatMessageStamp(new Date('2024-03-10T06:59:00Z'), 'America/New_York'))
+        .toBe('[Sun 2024-03-10 01:59 EST]')
+      expect(formatMessageStamp(new Date('2024-03-10T07:01:00Z'), 'America/New_York'))
+        .toBe('[Sun 2024-03-10 03:01 EDT]')
     })
 
-    it('formats a half-hour-offset zone correctly', () => {
-      const text = formatDateTime(new Date('2024-06-10T13:05:00Z'), 'Asia/Kolkata')
-      expect(text).toContain('(UTC+05:30)')
-      expect(text).toContain('18:35 Asia/Kolkata')
+    it('distinguishes the repeated hour of a fall-back transition by abbreviation', () => {
+      // America/New_York falls back at 2024-11-03T06:00:00Z: 01:30 happens twice.
+      expect(formatMessageStamp(new Date('2024-11-03T05:30:00Z'), 'America/New_York'))
+        .toBe('[Sun 2024-11-03 01:30 EDT]')
+      expect(formatMessageStamp(new Date('2024-11-03T06:30:00Z'), 'America/New_York'))
+        .toBe('[Sun 2024-11-03 01:30 EST]')
+    })
+
+    it('formats a half-hour-offset zone, UTC, and midnight as 00', () => {
+      expect(formatMessageStamp(new Date('2024-06-10T13:05:00Z'), 'Asia/Kolkata'))
+        .toBe('[Mon 2024-06-10 18:35 GMT+5:30]')
+      expect(formatMessageStamp(new Date('2024-06-10T00:00:00Z'), 'UTC'))
+        .toBe('[Mon 2024-06-10 00:00 UTC]')
+    })
+
+    it('is minute-resolution and memoized, and the memo resets at its cap without changing results', () => {
+      const base = Date.parse('2025-01-01T00:00:00Z')
+      const first = formatMessageStamp(new Date(base + 5_000), 'UTC')
+      expect(formatMessageStamp(new Date(base + 55_000), 'UTC')).toBe(first)
+      for (let minute = 1; minute <= 4100; minute++) {
+        formatMessageStamp(new Date(base + minute * 60_000), 'UTC')
+      }
+      expect(formatMessageStamp(new Date(base + 5_000), 'UTC')).toBe(first)
     })
   })
 })
