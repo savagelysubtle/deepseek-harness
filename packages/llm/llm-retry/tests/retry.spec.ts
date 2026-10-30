@@ -715,10 +715,9 @@ describe('provider-routed retry policy', () => {
     await idle
 
     expect(adapter.requests).toHaveLength(2)
-    // There is no trailing clock message any more (each user message carries a
-    // deterministic header stamp), so the dispatched arrays match; the
-    // context-isolation claim below is about everything but the last message.
-    expect(adapter.requests[1]?.messages.slice(0, -1)).toEqual(adapter.requests[0]?.messages.slice(0, -1))
+    // There is no trailing clock message any more and each user message carries a
+    // deterministic header stamp, so the retry dispatches the full array byte-equal.
+    expect(adapter.requests[1]?.messages).toEqual(adapter.requests[0]?.messages)
     const retriedContext = JSON.stringify(adapter.requests[1]?.messages)
     expect(retriedContext).not.toContain(diagnostic)
     expect(retriedContext).not.toContain('discarded partial output')

@@ -520,6 +520,16 @@ declare class Session {
    */
   deriveMessages(): Message[];
   /**
+   * {@link deriveMessages} with each message's own logged event time. The
+   * messages are exactly those `deriveMessages()` returns (same shared frozen
+   * objects, same order; a surface node deriving to null is skipped in both),
+   * paired with `event.time` of the surface node that produced them. Shares
+   * the derived cache, so it costs O(new nodes) and rebuilds on a surface
+   * rewrite exactly like `deriveMessages()`.
+   * @returns a fresh array of `{ message, time }` pairs, one per derived message.
+   */
+  deriveTimedMessages(): ReadonlyArray<{ readonly message: Message; readonly time: number }>;
+  /**
    * Instance face of the pure per-node `deriveEventMessage` export from
    * `surface.ts`.
    * @param event - the event to project.

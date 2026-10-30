@@ -288,12 +288,16 @@ describe('renderDispatch — tool-jobs notices', () => {
     const out = renderDispatch([at(f), at(toolJobs('JOB-LABEL'), 500), at(agentInstructions('A-text'), 900)], opts)
     expect(out).toHaveLength(2)
     expect(textOf(out[0]!)).toBe(`${STAMP0}\n\nJOB-LABEL\n\nA-text\n\n`)
+    // Deliberate: the notice-only message takes its id/source from the FIRST notice
+    // (tool-jobs here), never the founder's, so it cannot inherit founder authority.
     expect(out[0]!.source).toEqual({ kind: 'plugin', plugin: 'tool-jobs' })
     expect(textOf(out[1]!)).toBe(`${STAMP0} ${FOUNDER_MARKER_TEXT}\n\nplease continue`)
     expect(out.at(-1)!.content.at(-1)).toBe(f.content[0])
   })
 
   it('accepted one-time change on a retried request: notices that arrive after the first render land in a block BEFORE the founder message, so render([founder]) is not a byte-prefix of render([founder, notice])', () => {
+    // Only occurs when the notice lands before any assistant/tool boundary: once the
+    // run is closed by an assistant or tool message, later notices start a new run.
     const f = founder('go')
     const before = renderDispatch([at(f)], opts)
     const after = renderDispatch([at(f), at(toolJobs('J'), 500)], opts)
@@ -301,6 +305,11 @@ describe('renderDispatch — tool-jobs notices', () => {
     expect(JSON.stringify(after[0])).not.toBe(JSON.stringify(before[0]))
     // The founder message itself renders identically; it just sits behind the notice block.
     expect(JSON.stringify(after[1])).toBe(JSON.stringify(before[0]))
+  })
+
+  it('[notice, founder, notice] renders the trailing notice in the block before the founder, out of log order (accepted by the ruling)', () => {
+    const out = renderDispatch([at(toolJobs('N1')), at(founder('F'), 100), at(toolJobs('N2'), 200)], opts)
+    expect(out.map(textOf)).toEqual([`${STAMP0}\n\nN1`, `${STAMP0}\n\nN2\n\n`, `${STAMP0} ${FOUNDER_MARKER_TEXT}\n\nF`])
   })
 
   it('stamps a lone tool-jobs notice block from its own time', () => {
@@ -423,15 +432,29 @@ describe('renderDispatch — purity and prefix stability', () => {
     }
   })
 
-  it('render(prefix) is a byte-prefix of render(longer) except the growing final run (at most two messages)', () => {
+  it('render(prefix) is a byte-prefix of render(longer) except the final run\'s own rendered output', () => {
     const timed = sequence()
+    const stampable = (m: Message) => m.role === 'user' && m.source.kind !== 'tool'
     for (let k = 1; k < timed.length; k++) {
       const shorter = renderDispatch(timed.slice(0, k), opts)
       const longer = renderDispatch(timed.slice(0, k + 1), opts)
-      // The growing final run is at most two messages (a notice block plus the founder message).
-      const settled = shorter.slice(0, -2)
+      // Walk back to the head of the final run, then exempt exactly what that run
+      // renders to (2 for a founder head that generated a notice block, else 1).
+      let head = k - 1
+      while (head > 0 && isMergeableNotice(timed[head]!.message) && stampable(timed[head - 1]!.message)) head--
+      const exempt = shorter.length - renderDispatch(timed.slice(0, head), opts).length
+      expect(exempt).toBeGreaterThanOrEqual(1)
+      expect(exempt).toBeLessThanOrEqual(2)
+      const settled = shorter.slice(0, shorter.length - exempt)
       expect(JSON.stringify(longer.slice(0, settled.length))).toBe(JSON.stringify(settled))
     }
+  })
+
+  it('pins the message before the final run byte-identical when the final run grows', () => {
+    const timed = [at(user('earlier')), at(createMessage({ role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } }), 1000), at(founder('go'), 2000)]
+    const shorter = renderDispatch(timed, opts)
+    const longer = renderDispatch([...timed, at(toolJobs('J'), 2500)], opts)
+    expect(JSON.stringify(longer.slice(0, 2))).toBe(JSON.stringify(shorter.slice(0, 2)))
   })
 
   it('resolveDispatchTimeZone returns the process zone', () => {
