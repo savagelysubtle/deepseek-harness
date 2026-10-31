@@ -1,15 +1,55 @@
 // @vitest-environment jsdom
 /** Trajectory ledger selection, details, status, and fold behavior. */
 
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { TrajectoryTable } from '../src/client/TrajectoryTable.tsx'
 import type { TrajectoryTurnModel } from '../src/client/layout.ts'
 
-afterEach(() => {
-  cleanup()
+/**
+ * Timers armed through the global `setTimeout` (only `setTimeout`/`clearTimeout` are tracked; the
+ * `requestAnimationFrame` TanStack also uses is not, and is not the OP-213 timer) and not yet fired or cleared. The TanStack virtualizer
+ * arms a 150 ms (default `isScrollingResetDelay`) debounce on every scroll; unmount does not clear it,
+ * so a test that ends sooner leaves it to fire after jsdom teardown (OP-213). Real timers are used on
+ * purpose: nothing here fakes the clock over real I/O (SWD-161).
+ */
+const armedTimers = new Set<ReturnType<typeof setTimeout>>()
+const realSetTimeout = globalThis.setTimeout
+const realClearTimeout = globalThis.clearTimeout
+
+beforeEach(() => {
+  armedTimers.clear()
+  globalThis.setTimeout = ((handler: TimerHandler, delay?: number, ...args: unknown[]) => {
+    const handle: ReturnType<typeof setTimeout> = realSetTimeout(() => {
+      armedTimers.delete(handle)
+      if (typeof handler === 'function') handler(...args)
+    }, delay)
+    armedTimers.add(handle)
+    return handle
+  }) as typeof setTimeout
+  globalThis.clearTimeout = ((handle?: ReturnType<typeof setTimeout>) => {
+    if (handle !== undefined) armedTimers.delete(handle)
+    realClearTimeout(handle)
+  }) as typeof clearTimeout
+})
+
+afterEach(async () => {
+  try {
+    cleanup()
+    // Let every still-armed timer (the virtualizer's scroll-end debounce) fire while jsdom is alive.
+    const deadline = Date.now() + 2_000
+    while (armedTimers.size > 0 && Date.now() < deadline) {
+      await new Promise<void>(resolve => realSetTimeout(resolve, 10))
+    }
+  } finally {
+    globalThis.setTimeout = realSetTimeout
+    globalThis.clearTimeout = realClearTimeout
+  }
+  const leaked = armedTimers.size
+  armedTimers.clear()
   vi.restoreAllMocks()
   Reflect.deleteProperty(HTMLElement.prototype, 'scrollTo')
+  expect(leaked).toBe(0)
 })
 
 const TURNS: readonly TrajectoryTurnModel[] = [{
