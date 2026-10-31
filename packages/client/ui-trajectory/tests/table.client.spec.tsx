@@ -19,10 +19,10 @@ const realClearTimeout = globalThis.clearTimeout
 
 beforeEach(() => {
   armedTimers.clear()
-  globalThis.setTimeout = ((handler: TimerHandler, delay?: number, ...args: unknown[]) => {
+  globalThis.setTimeout = ((handler: (...handlerArgs: unknown[]) => void, delay?: number, ...args: unknown[]) => {
     const handle: ReturnType<typeof setTimeout> = realSetTimeout(() => {
       armedTimers.delete(handle)
-      if (typeof handler === 'function') handler(...args)
+      handler(...args)
     }, delay)
     armedTimers.add(handle)
     return handle
