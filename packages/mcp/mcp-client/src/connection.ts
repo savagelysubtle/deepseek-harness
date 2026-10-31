@@ -26,7 +26,7 @@ import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { createTransport } from './transport.ts'
 import { syncTools } from './tools.ts'
 import type { ToolBridgeOptions, ToolDisposers } from './tools.ts'
-import { CredentialsOAuthProvider } from './oauth.ts'
+import { CredentialsOAuthProvider, sanitizeAuthError } from './oauth.ts'
 import { DEFAULT_OAUTH_REDIRECT_PORT } from './index.ts'
 import type { Config } from './index.ts'
 import type { McpServerState, McpServerStatus } from './status.ts'
@@ -104,6 +104,9 @@ function resolveAuthProvider(
     // the same fixed loopback URL so dynamic client registration matches
     // whichever process consents first.
     redirectUri: `http://127.0.0.1:${config.auth.redirectPort ?? DEFAULT_OAUTH_REDIRECT_PORT}/callback`,
+    onRegistrationReset(message) {
+      ctx.logger.info(`${label}: ${message}`)
+    },
     onAuthorizationUrl(authorizationUrl) {
       onNeedsAuthorization(authorizationUrl)
       if (AUTH_GUIDANCE_SHOWN.has(config.serverName)) return
@@ -602,14 +605,19 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
       }
       await enqueueSync(generation, startup ? startupOpts : opts)
     } catch (error) {
-      if (firstAttemptError === undefined) firstAttemptError = error
+      const sanitizing = config.transport === 'streamable-http' && config.auth !== undefined
+        && !(error instanceof UnauthorizedError)
+      const failure = sanitizing ? sanitizeAuthError(String(error)) : String(error)
+      // The first error is later attached as a `cause` that the host logs, so
+      // an auth-server failure is stored already sanitised (OP-203).
+      if (firstAttemptError === undefined) firstAttemptError = sanitizing ? new Error(failure) : error
       // Disposal clears current ownership before it closes the generation, so
       // only a live supervisor reports an attempt failure. An authorization
       // failure already logged its consent guidance through the provider's
       // onAuthorizationUrl hook — repeating it per attempt would only spam.
       if (isCurrent(generation) && !(error instanceof UnauthorizedError)) {
-        ctx.logger.warn(`${label}: connection attempt failed: ${String(error)}`)
-        recordError(String(error))
+        ctx.logger.warn(`${label}: connection attempt failed: ${failure}`)
+        recordError(failure)
       }
       try { await generation.close() } catch { /* transport already gone */ }
       const quiesced = hasClosed() || await waitForClose(closed.promise)

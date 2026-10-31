@@ -60,6 +60,10 @@ export interface OAuthFixtureOptions {
    * matching every existing caller.
    */
   omitScopesSupported?: boolean
+  /** Answer `/register` with this raw status and body instead of a valid registration. */
+  registrationResponse?: { status: number; body: string }
+  /** Rewrite the requested `redirect_uris` in the registration response (e.g. normalised or reordered). */
+  echoRedirectUris?: (requested: string[]) => string[]
 }
 
 /**
@@ -69,6 +73,8 @@ export interface OAuthFixtureOptions {
  */
 export function startOAuthFixture(options: OAuthFixtureOptions = {}): Promise<OAuthFixture> {
   const omitScopesSupported = options.omitScopesSupported ?? false
+  const registrationResponse = options.registrationResponse
+  const echoRedirectUris = options.echoRedirectUris ?? ((requested: string[]) => requested)
   // Start rejecting everything: a test that needs an initially-valid bearer
   // sets it explicitly via setValidToken.
   let validToken = ''
@@ -153,12 +159,17 @@ export function startOAuthFixture(options: OAuthFixtureOptions = {}): Promise<OA
       // ---- RFC 7591 dynamic client registration ----
       if (incoming.pathname === '/register' && request.method === 'POST') {
         registrationRequests.push(JSON.parse(await readBody(request)))
+        if (registrationResponse !== undefined) {
+          response.writeHead(registrationResponse.status, { 'content-type': 'text/plain' })
+          response.end(registrationResponse.body)
+          return
+        }
         sendJson(response, 201, {
           client_id: 'dyn-client-1',
           client_id_issued_at: Math.floor(Date.now() / 1000),
           grant_types: ['authorization_code', 'refresh_token'],
           response_types: ['code'],
-          redirect_uris: ['http://127.0.0.1/callback-placeholder'],
+          redirect_uris: echoRedirectUris((registrationRequests.at(-1) as { redirect_uris?: string[] }).redirect_uris ?? []),
           token_endpoint_auth_method: 'none',
           client_name: 'DeepSeek Harness',
         })

@@ -139,6 +139,61 @@ export function buildClientMetadata(redirectUri: string, scope?: string): OAuthC
   }
 }
 
+/** Longest auth-failure message allowed into `lastError`, the host log or the CLI terminal (OP-203). */
+const AUTH_ERROR_MAX_LENGTH = 200
+
+/** Fixed sentence that replaces an authorization server's echoed response payload (OP-203). */
+const AUTH_RAW_BODY_POINTER = 'authorization server returned an unexpected response; see the auth CLI for details'
+
+/**
+ * Bound and sanitise an OAuth failure message before it reaches a log, a
+ * status field or a terminal: the SDK echoes the authorization server's own
+ * response body ("Raw body: ...") and server-controlled text must not flow
+ * through unfiltered.
+ * @param text - the raw error text.
+ * @returns the text with any echoed payload replaced by a fixed pointer, control, bidi and
+ *   zero-width characters collapsed to spaces, and the length capped.
+ */
+export function sanitizeAuthError(text: string): string {
+  const withoutBody = text.replace(/(?:Invalid OAuth error response:|Raw body:)[\s\S]*$/, AUTH_RAW_BODY_POINTER)
+  // eslint-disable-next-line no-control-regex
+  const flat = withoutBody.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200d\u2028-\u202e\u2066-\u2069\ufeff]+/g, ' ')
+  return flat.length > AUTH_ERROR_MAX_LENGTH ? `${flat.slice(0, AUTH_ERROR_MAX_LENGTH)}...` : flat
+}
+
+/**
+ * Comparison key for a redirect URI: origin plus path without trailing slashes.
+ * @param uri - a redirect URI.
+ * @returns the key, or `undefined` when the text is not a URL.
+ */
+function redirectKey(uri: string): string | undefined {
+  try {
+    const url = new URL(uri)
+    return `${url.origin}${url.pathname.replace(/\/+$/, '')}`
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Port numbers of loopback-style redirect URIs, for a secret-free log line.
+ * @param uris - redirect URIs to describe.
+ * @returns a comma-separated port list, or `none` when no URI carries one.
+ */
+function describePorts(uris: string[]): string {
+  const ports = uris.flatMap((uri) => {
+    try {
+      const url = new URL(uri)
+      if (url.port !== '') return [url.port]
+      if (url.protocol === 'http:') return ['80']
+      return url.protocol === 'https:' ? ['443'] : []
+    } catch {
+      return []
+    }
+  })
+  return ports.length === 0 ? 'none' : ports.join(',')
+}
+
 /** Options for {@link CredentialsOAuthProvider}. */
 export interface CredentialsOAuthProviderOptions {
   /** Stable server namespace from the plugin config; names the credential reference. */
@@ -157,6 +212,11 @@ export interface CredentialsOAuthProviderOptions {
    * the consent CLI passes its loopback listener URL.
    */
   redirectUri: string
+  /**
+   * Invoked once with a secret-free line when a stored client registration is
+   * discarded because its redirect URI no longer matches {@link redirectUri}.
+   */
+  onRegistrationReset?: (message: string) => void
   /** Invoked when the flow needs human consent; hosts log guidance, the CLI prints the URL. */
   onAuthorizationUrl?: (authorizationUrl: URL) => void
 }
@@ -243,7 +303,30 @@ export class CredentialsOAuthProvider {
    */
   async clientInformation(): Promise<OAuthClientInformationMixed | undefined> {
     if (this.options.staticClientId !== undefined) return { client_id: this.options.staticClientId }
-    return (await this.load()).clientInformation
+    const stored = (await this.load()).clientInformation
+    if (stored === undefined) return undefined
+    // A registration made for a different redirect URI (e.g. another port) is
+    // rejected by the authorization server at consent time. The configured URI
+    // is the trusted side; stored entries match it by origin + path (trailing
+    // slash and entry order are ignored), so a server that echoes a normalised
+    // form never trips this mid-flow. Only a non-empty list with no match
+    // replaces the registration, and only then are client info and the PKCE
+    // verifier dropped; tokens are always kept. A missing or empty list cannot
+    // be proven stale and is reused.
+    const registered = (stored as { redirect_uris?: unknown }).redirect_uris
+    if (!Array.isArray(registered) || registered.length === 0) return stored
+    const uris = registered.map(String)
+    const wanted = redirectKey(this.options.redirectUri)
+    if (uris.some(uri => redirectKey(uri) === wanted)) return stored
+    await this.mutate((state) => {
+      delete state.clientInformation
+      delete state.codeVerifier
+      return state
+    })
+    this.options.onRegistrationReset?.(
+      `stored OAuth client registration used redirect port ${describePorts(uris)}, configured port is ${describePorts([this.options.redirectUri])}; re-registering`,
+    )
+    return undefined
   }
 
   /**
