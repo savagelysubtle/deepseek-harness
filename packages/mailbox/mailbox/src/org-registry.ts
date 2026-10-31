@@ -102,6 +102,20 @@ function expandTilde(path: string, home: string): string {
 }
 
 /**
+ * Reduce a YAML parse failure to its first message line. The `yaml` library's
+ * `YAMLParseError.message` carries a source code frame after the first newline
+ * that quotes the parsed file's own lines verbatim (a duplicate-key error
+ * quotes both colliding lines), so the full message must never reach an error
+ * string that can cross the RPC wire to the UI. The first line still carries
+ * "at line N, column M".
+ * @param error - the value the YAML parser threw.
+ * @returns the first line of its message, never the code frame.
+ */
+export function yamlErrorFirstLine(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).replace(/(?:\r\n|\r|\n)[\s\S]*$/, '')
+}
+
+/**
  * Parse and validate one org registry document. Structural mistakes — an
  * unknown edge endpoint, a seat name outside the address grammar, a missing
  * `baseDir` — fail here rather than at first use, naming the key at fault.
@@ -114,9 +128,9 @@ export function parseOrgRegistry(text: string, options: OrgRegistryParseOptions 
   const home = options.home ?? homedir()
   let document: unknown
   try {
-    document = parseYaml(text)
+    document = parseYaml(text, { logLevel: 'error' })
   } catch (error: unknown) {
-    throw new Error(`org registry is not valid YAML: ${error instanceof Error ? error.message : String(error)}`)
+    throw new Error(`org registry is not valid YAML: ${yamlErrorFirstLine(error)}`)
   }
   assertObject(document, 'the document')
   assertNonEmptyString(document.baseDir, 'baseDir')

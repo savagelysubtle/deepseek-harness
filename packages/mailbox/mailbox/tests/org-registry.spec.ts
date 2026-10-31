@@ -24,6 +24,7 @@ import {
   resolveSeatCwd,
   resolveSeatSessionId,
   writeOrgRegistry,
+  yamlErrorFirstLine,
 } from '../src/index.ts'
 
 // Controls for the node:fs/promises mock below, used only by the defect-fix
@@ -208,6 +209,44 @@ describe('parseOrgRegistry', () => {
     } finally {
       yamlControl.forceNonErrorParseThrow = false
     }
+  })
+})
+
+describe('YAML parse failures never leak the code frame (OP-212)', () => {
+  const DUPLICATE_KEY = 'baseDir: /projects\nseats:\n  a: { cwd: one }\napiToken: sk-SECRET-VALUE-1\napiToken: sk-SECRET-VALUE-2\n'
+
+  it('keeps only the first yaml message line when a duplicate key is parsed', () => {
+    let caught: unknown
+    try {
+      parseOrgRegistry(DUPLICATE_KEY)
+    } catch (error: unknown) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(Error)
+    const message = (caught as Error).message
+    expect(message).toContain('org registry is not valid YAML')
+    expect(message).toContain('line')
+    expect(message).not.toContain('\n')
+    expect(message).not.toContain('apiToken')
+    expect(message).not.toContain('sk-SECRET')
+  })
+
+  it('does not emit a yaml warning (with the source line) for an unknown tag', () => {
+    const warn = vi.spyOn(process, 'emitWarning').mockImplementation(() => undefined)
+    try {
+      const registry = parseOrgRegistry('baseDir: /projects\nseats:\n  a: { cwd: one }\napiToken: !sk-SECRET-TAG value\n')
+      expect(registry.baseDir).toBe('/projects')
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('yamlErrorFirstLine trims an Error message to its first line and stringifies a non-Error', () => {
+    expect(yamlErrorFirstLine(new Error('first\n  frame line\n  second'))).toBe('first')
+    expect(yamlErrorFirstLine('plain value')).toBe('plain value')
+    expect(yamlErrorFirstLine('first\rframe SECRET')).toBe('first')
+    expect(yamlErrorFirstLine(new Error('first\r\nframe SECRET'))).toBe('first')
   })
 })
 

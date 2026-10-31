@@ -29,7 +29,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { open, readFile, rename, rm } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
-import { diffRosters, parseMailboxAddress, type RosterDrift } from '@deepseek-ai/dsh-mailbox'
+import { diffRosters, parseMailboxAddress, yamlErrorFirstLine, type RosterDrift } from '@deepseek-ai/dsh-mailbox'
 import type { OrgRosterResult } from './api/index.ts'
 
 /**
@@ -111,11 +111,11 @@ export async function readOrgProfilePatchesWithToken(
   }
   let patches: unknown
   try {
-    patches = parseYaml(bytes.toString('utf8'))
+    patches = parseYaml(bytes.toString('utf8'), { logLevel: 'error' })
   } catch (error: unknown) {
     return {
       ok: false,
-      reason: `profile patch file "${path}" is not valid YAML: ${error instanceof Error ? error.message : String(error)}`,
+      reason: `profile patch file "${path}" is not valid YAML: ${yamlErrorFirstLine(error)}`,
     }
   }
   return { ok: true, patches, token: hashOrgServedRosterBytes(bytes) }
@@ -412,9 +412,12 @@ export async function writeOrgServedRoster(
   // Parse.
   let patches: unknown
   try {
-    patches = parseYaml(currentBytes.toString('utf8'))
+    patches = parseYaml(currentBytes.toString('utf8'), { logLevel: 'error' })
   } catch (error: unknown) {
-    throw new OrgServedRosterWriteError(patchPath, 'is not valid YAML', error)
+    // The cause is rebuilt from the first message line: the yaml error's own message
+    // carries a code frame quoting the file, and `cause` is reachable by anything
+    // that serialises the error.
+    throw new OrgServedRosterWriteError(patchPath, 'is not valid YAML', new Error(yamlErrorFirstLine(error)))
   }
 
   // 2. Locate both mounts; read their CURRENT addresses.
