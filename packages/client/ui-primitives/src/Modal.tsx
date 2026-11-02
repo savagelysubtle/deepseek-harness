@@ -91,6 +91,10 @@ function isOutside(root: HTMLElement, target: EventTarget | null): boolean {
  * is the topmost dialog, swallow outside pointer/focus activity while it is
  * topmost, and hand focus back to whatever had it on open once this dialog
  * closes.
+ * @param openerFocus - the element that held focus before this dialog's
+ * content rendered, captured by `Modal` in its render phase: a child's
+ * `autoFocus` fires during commit, before this setup runs, so reading
+ * `document.activeElement` here would name that child instead of the opener.
  * @param dialog - the mounted `role="dialog"` element (never `null`: this is
  * only ever invoked from the dialog's own callback ref, which React calls
  * with the real node on attach).
@@ -103,14 +107,13 @@ function isOutside(root: HTMLElement, target: EventTarget | null): boolean {
  * if one ever does, it would need its own root added to the stack (or a
  * dedicated exemption) to stay interactive.
  */
-function setupModalTrap(dialog: HTMLDivElement): () => void {
+function setupModalTrap(dialog: HTMLDivElement, openerFocus: Element | null): () => void {
   // Modal's own JSX (below) always renders `dialog` as the sole non-mask
   // child of the portal's root wrapper -- asserting that structural
   // invariant rather than branching on a parent that this file guarantees
   // is never absent.
   const root = dialog.parentElement as HTMLElement
   const entry: ModalStackEntry = { dialog, root }
-  const openerFocus = document.activeElement
 
   modalStack.push(entry)
   syncBackgroundInert()
@@ -223,7 +226,7 @@ export function Modal({
   description?: string
   children?: ReactNode
   footer?: ReactNode
-  className?: string
+  className?: string | undefined
   contentClassName?: string
   headless?: boolean
 }) {
@@ -237,6 +240,13 @@ export function Modal({
   // focus) on every keystroke inside the dialog instead of once per real
   // mount/unmount.
   const dialogNodeRef = useRef<HTMLDivElement | null>(null)
+  // Focus holder at the moment this Modal went from closed to open, read in
+  // the render phase -- the only point guaranteed to precede a child's
+  // `autoFocus` (applied during commit, ahead of any ref callback or effect).
+  // Cleared while closed so the next open captures afresh.
+  const openerRef = useRef<Element | null>(null)
+  if (!open) openerRef.current = null
+  else if (openerRef.current === null) openerRef.current = document.activeElement
   const dialogRef = useCallback((node: HTMLDivElement | null) => {
     dialogNodeRef.current = node
     if (node === null) {
@@ -244,7 +254,7 @@ export function Modal({
       trapCleanupRef.current = null
       return
     }
-    trapCleanupRef.current = setupModalTrap(node)
+    trapCleanupRef.current = setupModalTrap(node, openerRef.current)
   }, [])
 
   useEffect(() => {

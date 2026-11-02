@@ -27,7 +27,7 @@ function ModelsStandIn() {
     <div data-testid="section-models">
       <button type="button" onClick={() => { setConfirming(true) }}>Delete provider</button>
       <Modal open={confirming} onClose={() => { setConfirming(false) }} title="Delete Acme?">
-        <button type="button">Confirm delete</button>
+        <button type="button" autoFocus onClick={() => { setConfirming(false) }}>Confirm delete</button>
       </Modal>
     </div>
   )
