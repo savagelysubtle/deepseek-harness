@@ -62,7 +62,7 @@ function stubAgent(cwd: string): Agent {
   }
 }
 
-async function setup(globalBytes: number, projectBytes: number, maxBytes: number) {
+async function setup(globalBytes: number, projectBytes: number, maxBytes: number, sub = '') {
   const root = await mkdtemp(join(tmpdir(), 'dsh-budget-root-'))
   const home = await mkdtemp(join(tmpdir(), 'dsh-budget-home-'))
   await mkdir(join(root, '.git'), { recursive: true })
@@ -72,7 +72,8 @@ async function setup(globalBytes: number, projectBytes: number, maxBytes: number
   await ctx.plugin(LocalFileSystem, { cwd: '/' })
   await ctx.plugin(workspaceContext, { dshHome: home, maxBytes })
   const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => undefined)
-  const agent = stubAgent(root)
+  await mkdir(join(root, sub), { recursive: true })
+  const agent = stubAgent(join(root, sub))
   const enter = async (messages: UserMessage[], step = 1): Promise<UserMessage[]> => {
     const decision = await agentEvents(ctx, agent).waterfall(
       'agent/pre-step',
@@ -110,6 +111,114 @@ async function setup(globalBytes: number, projectBytes: number, maxBytes: number
 const prompt = (): UserMessage => createUserMessage({
   content: [{ type: 'text', text: 'go' }],
   source: { kind: 'user' },
+})
+
+async function mountSecond(home: string, maxBytes: number) {
+  const ctx = new Context()
+  await ctx.plugin(LocalFileSystem, { cwd: '/' })
+  await ctx.plugin(workspaceContext, { dshHome: home, maxBytes })
+  const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => undefined)
+  return { ctx, warn }
+}
+
+describe('overflow reporting edges', () => {
+  it('reports an identical overflow again after a fitting pass', async () => {
+    const t = await setup(200, 200, 3000)
+    try {
+      t.append(await t.enter([prompt()]))
+      await writeFile(join(t.root, 'AGENTS.md'), 'q'.repeat(6000))
+      t.append(await t.enter([], 2))
+      expect(t.warn).toHaveBeenCalledTimes(1)
+      await writeFile(join(t.root, 'AGENTS.md'), 'q'.repeat(300))
+      t.append(await t.enter([], 3))
+      await writeFile(join(t.root, 'AGENTS.md'), 'q'.repeat(6000))
+      const entered = await t.enter([], 4)
+      expect(t.warn).toHaveBeenCalledTimes(2)
+      expect(entered.some(m => m.source.kind === 'plugin')).toBe(true)
+    } finally {
+      await t.cleanup()
+    }
+  })
+
+  it('does not announce again on resume when the visible baseline already carries the marker', async () => {
+    const t = await setup(5000, 1000, 3000)
+    try {
+      t.append(await t.enter([prompt()]))
+      expect(t.warn).toHaveBeenCalledTimes(1)
+      const second = await mountSecond(t.home, 3000)
+      try {
+        const entered = await agentEvents(second.ctx, t.agent).waterfall(
+          'agent/pre-step',
+          { messages: [], turn: 2, step: 2, signal: AbortSignal.timeout(5000) },
+          () => Promise.resolve({ kind: 'enter' as const, messages: [] }),
+        )
+        expect(entered.kind === 'enter' ? entered.messages : []).toEqual([])
+        expect(second.warn).not.toHaveBeenCalled()
+      } finally {
+        await second.ctx.fiber.dispose()
+      }
+    } finally {
+      await t.cleanup()
+    }
+  })
+
+  it('delivers the notice at the batch end when a visible baseline now overflows after a resume', async () => {
+    const t = await setup(200, 200, 3000)
+    try {
+      t.append(await t.enter([prompt()]))
+      expect(t.warn).not.toHaveBeenCalled()
+      await writeFile(join(t.home, 'AGENTS.md'), 'g'.repeat(5000))
+      const second = await mountSecond(t.home, 3000)
+      try {
+        const decision = await agentEvents(second.ctx, t.agent).waterfall(
+          'agent/pre-step',
+          { messages: [], turn: 2, step: 2, signal: AbortSignal.timeout(5000) },
+          () => Promise.resolve({ kind: 'enter' as const, messages: [] }),
+        )
+        const entered = decision.kind === 'enter' ? decision.messages : []
+        expect(second.warn).toHaveBeenCalled()
+        expect(entered.at(-1)?.source).toMatchObject({ kind: 'plugin', form: 'notice' })
+      } finally {
+        await second.ctx.fiber.dispose()
+      }
+    } finally {
+      await t.cleanup()
+    }
+  })
+
+  it('drops a parked notice when the baseline later fits', async () => {
+    const t = await setup(5000, 1000, 3000)
+    try {
+      expect(await t.enter([])).toEqual([])
+      expect(t.warn).toHaveBeenCalledTimes(1)
+      expect(t.agent.inbox.claim('next-step', 1)).toHaveLength(1)
+      await writeFile(join(t.home, 'AGENTS.md'), 'small')
+      const entered = await t.enter([prompt()], 2)
+      expect(entered.map(m => m.source.kind)).toEqual(['user', 'agent-instructions'])
+    } finally {
+      await t.cleanup()
+    }
+  })
+
+  it('drops a parked baseline notice once the baseline identity changes', async () => {
+    const t = await setup(5000, 1000, 3000, 'sub')
+    try {
+      // Park the baseline notice: an empty first entry keeps the baseline pending.
+      expect(await t.enter([])).toEqual([])
+      expect(t.warn).toHaveBeenCalledTimes(1)
+      // Discard the queued baseline so the next pass composes from scratch, then
+      // move the project root to the cwd (a new baseline identity) with files that fit.
+      expect(t.agent.inbox.claim('next-step', 1)).toHaveLength(1)
+      await rm(join(t.root, '.git'), { recursive: true, force: true })
+      await mkdir(join(t.root, 'sub', '.git'), { recursive: true })
+      await writeFile(join(t.home, 'AGENTS.md'), 'small')
+      const entered = await t.enter([prompt()], 2)
+      expect(entered.map(m => m.source.kind)).toEqual(['user', 'agent-instructions'])
+      expect(t.warn).toHaveBeenCalledTimes(1)
+    } finally {
+      await t.cleanup()
+    }
+  })
 })
 
 describe('dynamic transition overflow reporting', () => {
