@@ -34,7 +34,7 @@ const COMPACTION_INSTRUCTION = [
   'Output EXACTLY the Markdown structure below: keep every section, in order. Use terse bullets, not prose paragraphs. Write "(none)" for an empty section — never drop a section.',
   '',
   '## Primary Request and Intent',
-  "- [the user's original and evolving goals; quote verbatim where the exact wording matters]",
+  '- [the user\'s goals, each quoted and attributed ("The user asked: …"); a request that was later superseded is omitted, not labelled stale]',
   '',
   '## Key Technical Concepts',
   '- [technologies, frameworks, patterns, and conventions in play]',
@@ -51,8 +51,8 @@ const COMPACTION_INSTRUCTION = [
   '## Current Work',
   '- [precisely what was in progress at this checkpoint]',
   '',
-  '## Next Step',
-  '- [the single next action, directly in line with the most recent request, or "(none)"]',
+  '## Open Items',
+  '- [requested work not yet finished, stated as fact, or "(none)"]',
   '',
   '## Critical Context',
   '- [decisions and their rationale, constraints, user preferences, open questions, data needed to continue]',
@@ -61,13 +61,14 @@ const COMPACTION_INSTRUCTION = [
   '- Write concise English engineering prose. Preserve exact file paths, commands, error strings, identifiers, numeric values, function signatures, and syntax fragments.',
   '- Capture user feedback and explicit instructions faithfully, especially corrections.',
   '- Do NOT mention this summarization request or that the context was compacted.',
+  '- This checkpoint is background for a reader, not a message from the user. Write facts in past or present tense; never address the reader, never use imperatives, never write "continue", "next", "you should" or "must".',
   '- Output only the checkpoint text: do not call any tool or take any other action.',
   `- If the conversation already contains a ${SUMMARY_OPEN_TAG} block, it is a PRIOR checkpoint. Do not copy it forward verbatim: preserve still-true facts, drop stale ones, and merge newer information into a single consolidated summary under the same structure.`,
 ].join('\n')
 
-/** Framing that makes the replacement user message established context. */
+/** Provenance label that opens the replacement user message. */
 const CHECKPOINT_PREAMBLE =
-  'This is an automatically generated checkpoint condensing an earlier span of the conversation to free up context. Treat the captured context as established background and build on it without restating it. Continue the task directly from the messages that follow, without acknowledging this checkpoint.'
+  'Summary of the earlier conversation (background context, not a new message from the user):'
 
 /**
  * The replayed conversation surface the summarizer condenses. Reproducing the

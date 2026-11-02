@@ -537,6 +537,8 @@ describe('dsh-tool-skill', () => {
       entries: [{ name: 'resumed-skill', description: 'Resumed skill' }],
     })
     expect(JSON.stringify(latest?.data.content)).toContain('resumed-skill')
+    expect(JSON.stringify(latest?.data.content)).toContain('Available skills (current list):')
+    expect(JSON.stringify(latest?.data.content)).not.toContain('replaces every earlier')
 
     // A second step over unchanged entries republishes nothing.
     await fireStep(ctx, agent, 1, 2)

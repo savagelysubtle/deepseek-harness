@@ -744,7 +744,7 @@ describe('pressure measurement and retention', () => {
       thresholdRatio: 0.3,
       retainTokens: 180,
     })
-    compact.summary = Array.from({ length: 7 }, (_, index) => ({
+    compact.summary = Array.from({ length: 16 }, (_, index) => ({
       type: 'text',
       text: `summary ${index}`,
     }))
@@ -925,6 +925,9 @@ describe('compaction region transaction', () => {
     const head = session.deriveMessages()[0]!
     expect(head.content[0]?.type).toBe('text')
     expect(head.content[0]?.type === 'text' ? head.content[0].text : '').toContain('<compacted-summary>')
+    expect(head.content[0]?.type === 'text' ? head.content[0].text : '').toMatch(
+      /^Summary of the earlier conversation \(background context, not a new message from the user\):\n\n<compacted-summary>$/,
+    )
     expect(head.content.at(-1)).toEqual({ type: 'text', text: '</compacted-summary>' })
 
     const replay = Session.create(SessionId('replay'), [...session.events])
@@ -1322,6 +1325,11 @@ describe('default one-shot summarizer', () => {
     })
     const instruction = adapter.lastOptions?.messages.at(-1)?.content[0]
     expect(instruction?.type === 'text' ? instruction.text : '').toContain('## Primary Request and Intent')
+    const text = instruction?.type === 'text' ? instruction.text : ''
+    expect(text).toContain('## Open Items')
+    expect(text).toContain('never use imperatives')
+    expect(text).not.toContain('Next Step')
+    expect(text).not.toContain('without acknowledging')
   })
 
   it('replays the conversation prefix and appends the instruction as the final message', async () => {

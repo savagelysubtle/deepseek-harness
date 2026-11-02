@@ -354,6 +354,17 @@ describe('instruction budget overflow reporting', () => {
     expect(describeBudgetOverflow(renderWorkspaceContext([only], { maxBytes: 131072 }), [only], 131072)).toBeUndefined()
   })
 
+  it('pins the exact notice source shape the transcript-only dispatch filter keys on', () => {
+    const only = file('AGENTS.md', 5000)
+    const overflow = describeBudgetOverflow(renderWorkspaceContext([only], { maxBytes: 2000 }), [only], 2000)!
+    expect(overflow.notice.source).toEqual({
+      kind: 'plugin',
+      plugin: 'agent-instructions',
+      form: 'notice',
+      summary: 'Instruction budget exceeded: 1 file dropped or truncated',
+    })
+  })
+
   it('reports a size of 0 for an omitted file that was not observed', () => {
     const rendered = renderWorkspaceContext([file('a.md', 4000), file('b.md', 4000)], { maxBytes: 1500 })
     const overflow = describeBudgetOverflow(rendered, [], 1500)!

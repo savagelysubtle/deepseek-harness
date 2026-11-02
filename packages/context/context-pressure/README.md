@@ -27,9 +27,17 @@ When the routed target has no resolvable context window (the adapter advertises 
 
 #### What the model sees
 
-One sourced user message per crossing, appended after the claimed input when the step enters; `<threshold>` is the crossed fraction rendered as a percent, and the totals reflect the meter's measurement taken before this warning joined the request.
+One sourced user message per crossing, appended after the claimed input when the step enters. Its body is a fixed, number-free instruction, so the same text is sent at every threshold; the usage figures are bookkeeping for the operator and are not sent to the model.
 
 ##### Warning
+
+```markdown
+Context pressure: the conversation is using a growing share of the context window; finish the current step concisely, avoid large tool outputs, and call the compact tool to compact it yourself before automatic compaction forces it.
+```
+
+##### Recorded facts (transcript and UI only)
+
+The message's single snapshot source section records the canonical facts below (`<threshold>` is the crossed fraction rendered as a percent; totals reflect the meter's measurement taken before the warning joined the request). The dedup fold and the invariant parse this section, never the message body, and dispatch does not send it to the model. The invariant accepts two forms: the current one (body equals the number-free instruction) and the legacy one from older session logs (body identical to the parseable facts section text); any other body fails.
 
 ```markdown
 Context pressure notice: usage passed the <threshold>% threshold of this model's context window: <total> of <window> tokens in use (<used>%); <remaining> tokens remain.
@@ -38,7 +46,7 @@ Before rising pressure forces automatic compaction, you can request compaction y
 
 #### Token effect
 
-About 60 tokens per warning, added at most once per threshold per compaction generation; between crossings later steps add nothing.
+About 45 tokens per warning, added at most once per threshold per compaction generation; between crossings later steps add nothing.
 
 #### KV Cache effect
 

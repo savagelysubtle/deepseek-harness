@@ -279,11 +279,11 @@ function renderCatalogMessage(entries: SkillCatalogSource['entries']): UserMessa
 function renderCatalogUpdate(entries: SkillCatalogSource['entries']): UserMessage {
   const availability = entries.length === 0
     ? [
-      'No skills are currently available through the `skill` tool. Do not use names from earlier skill catalogs.',
+      'No skills are currently available through the `skill` tool.',
       'A user may still invoke a skill directly; its <skill_content> block then appears in this conversation. Follow it, and do not call the `skill` tool for it.',
     ]
     : [
-      'Use only names in this replacement catalog. If the user names a listed skill, or the task clearly matches its description, call the `skill` tool with the exact name before acting.',
+      'Use only names in this list. If the user names a listed skill, or the task clearly matches its description, call the `skill` tool with the exact name before acting.',
       'A user may also invoke a skill directly; its <skill_content> block then appears in this conversation. Follow it, and do not call the `skill` tool again for that skill.',
     ]
   return createUserMessage({
@@ -291,7 +291,7 @@ function renderCatalogUpdate(entries: SkillCatalogSource['entries']): UserMessag
       type: 'text',
       text: [
         '<system-reminder>',
-        'The available skill catalog changed. This complete catalog replaces every earlier available-skills list in this session:',
+        'Available skills (current list):',
         '',
         '<available_skills>',
         ...renderCatalogEntries(entries),

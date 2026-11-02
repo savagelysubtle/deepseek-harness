@@ -11,6 +11,15 @@ import { formatPercent } from './config.ts'
 /** Plugin-attributed message source name; also the Cordis plugin name. */
 export const PLUGIN_SOURCE_NAME = 'context-pressure'
 
+/**
+ * The only pressure text the model receives: a plain, number-free instruction. The usage
+ * facts live in the source section ({@link renderWarningText}), which the transcript and UI
+ * show but dispatch never sends to the model.
+ */
+export const MODEL_WARNING_TEXT = 'Context pressure: the conversation is using a growing share of the context '
+  + 'window; finish the current step concisely, avoid large tool outputs, and call the compact tool '
+  + 'to compact it yourself before automatic compaction forces it.'
+
 /** Inputs rendered into one warning. */
 export interface WarningFacts {
   /** The crossed threshold's fraction. */
@@ -21,7 +30,7 @@ export interface WarningFacts {
   readonly contextWindow: number
 }
 
-/** Exact shape of the two-line warning text after parsing. */
+/** Exact shape of the two-line facts text after parsing. */
 export interface ParsedWarning {
   /** Canonical crossed-threshold percent; the dedup key within a generation. */
   readonly thresholdPercent: string
@@ -42,9 +51,9 @@ const WARNING_PATTERN = new RegExp(
 )
 
 /**
- * Render the exact durable warning text for one crossing.
+ * Render the exact durable facts text for one crossing (the source section, not the message body).
  * @param input - the crossed threshold, measured total, and model window.
- * @returns the two-line model-facing text embedded in the message body and source section.
+ * @returns the two-line operator-facing facts text recorded in the source section.
  */
 export function renderWarningText(input: WarningFacts): string {
   const remainingTokens = Math.max(0, input.contextWindow - input.totalTokens)

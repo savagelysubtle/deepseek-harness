@@ -3,7 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import { CompactionId } from '@deepseek-ai/dsh-compaction'
 import * as ContextPressureInvariant from '@deepseek-ai/dsh-context-pressure/invariant'
-import { renderWarningText } from '@deepseek-ai/dsh-context-pressure/src/warning.ts'
+import { MODEL_WARNING_TEXT, renderWarningText } from '@deepseek-ai/dsh-context-pressure/src/warning.ts'
 import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, UserMessage } from '@deepseek-ai/dsh-llm'
@@ -49,7 +49,7 @@ function appendWarning(
   contextWindow: number,
 ): SessionEvent<'user/message'> {
   const text = renderWarningText({ thresholdRatio, totalTokens, contextWindow })
-  return session.append('user/message', warningMessage([{ type: 'text', text }], sourceFor(text)), { surfaceOp: 'append' })
+  return session.append('user/message', warningMessage([{ type: 'text', text: MODEL_WARNING_TEXT }], sourceFor(text)), { surfaceOp: 'append' })
 }
 
 describe('validatePosition (through validateWarning)', () => {
@@ -128,13 +128,44 @@ describe('validateWarning content shape', () => {
       .toThrow(/exactly one text block/)
   })
 
-  it('rejects text that does not match the durable warning format', async () => {
+  it('accepts a legacy warning whose body equals its facts section text', async () => {
     const ctx = await mount()
-    const session = Session.create(SessionId('parse-fail'))
-    const text = 'not a real warning'
+    const session = Session.create(SessionId('legacy-valid'))
+    session.append('turn/start', { turn: 1 })
+    session.append('step/start', { turn: 1, step: 1 })
+    const text = renderWarningText({ thresholdRatio: 0.25, totalTokens: 1, contextWindow: 1_000_000 })
     const event = session.append(
       'user/message',
       warningMessage([{ type: 'text', text }], sourceFor(text)),
+      { surfaceOp: 'append' },
+    )
+    expect(() => { ctx.emit('session/event', session, event) }).not.toThrow()
+  })
+
+  it('rejects a body matching neither the current nor the legacy form', async () => {
+    const ctx = await mount()
+    const session = Session.create(SessionId('neither-form'))
+    session.append('turn/start', { turn: 1 })
+    session.append('step/start', { turn: 1, step: 1 })
+    const text = renderWarningText({ thresholdRatio: 0.25, totalTokens: 1, contextWindow: 1_000_000 })
+    const event = session.append(
+      'user/message',
+      warningMessage([{ type: 'text', text: 'Context pressure: something else' }], sourceFor(text)),
+      { surfaceOp: 'append' },
+    )
+    expect(() => { ctx.emit('session/event', session, event) })
+      .toThrow(/number-free warning text or the legacy facts text/)
+  })
+
+  it('rejects a facts section that does not match the durable warning format', async () => {
+    const ctx = await mount()
+    const session = Session.create(SessionId('parse-fail'))
+    session.append('turn/start', { turn: 1 })
+    session.append('step/start', { turn: 1, step: 1 })
+    const text = 'not a real warning'
+    const event = session.append(
+      'user/message',
+      warningMessage([{ type: 'text', text: MODEL_WARNING_TEXT }], sourceFor(text)),
       { surfaceOp: 'append' },
     )
     expect(() => { ctx.emit('session/event', session, event) })
@@ -149,9 +180,6 @@ describe('validateWarning source shape', () => {
   it.each([
     ['missing form and sections', { kind: 'plugin', plugin: PLUGIN }],
     ['an extra top-level key', { ...wellFormed, authority: {} }],
-    ['a mismatched section text', {
-      kind: 'plugin', plugin: PLUGIN, form: 'snapshot', sections: [{ name: PLUGIN, text: 'different text' }],
-    }],
     ['non-array sections', {
       kind: 'plugin', plugin: PLUGIN, form: 'snapshot', sections: { 0: { name: PLUGIN, text }, length: 1 },
     }],
@@ -165,11 +193,11 @@ describe('validateWarning source shape', () => {
     session.append('step/start', { turn: 1, step: 1 })
     const event = session.append(
       'user/message',
-      warningMessage([{ type: 'text', text }], source),
+      warningMessage([{ type: 'text', text: MODEL_WARNING_TEXT }], source),
       { surfaceOp: 'append' },
     )
     expect(() => { ctx.emit('session/event', session, event) })
-      .toThrow(/must carry only the exact snapshot text, not request authority/)
+      .toThrow(/must carry only the exact facts snapshot, not request authority/)
   })
 })
 
@@ -186,7 +214,7 @@ describe('validateWarning recorded-fact consistency', () => {
       + 'with the compact tool.'
     const event = session.append(
       'user/message',
-      warningMessage([{ type: 'text', text }], sourceFor(text)),
+      warningMessage([{ type: 'text', text: MODEL_WARNING_TEXT }], sourceFor(text)),
       { surfaceOp: 'append' },
     )
     expect(() => { ctx.emit('session/event', session, event) })
@@ -205,7 +233,7 @@ describe('validateWarning recorded-fact consistency', () => {
       + 'with the compact tool.'
     const event = session.append(
       'user/message',
-      warningMessage([{ type: 'text', text }], sourceFor(text)),
+      warningMessage([{ type: 'text', text: MODEL_WARNING_TEXT }], sourceFor(text)),
       { surfaceOp: 'append' },
     )
     expect(() => { ctx.emit('session/event', session, event) })
@@ -224,7 +252,7 @@ describe('validateWarning recorded-fact consistency', () => {
       + 'with the compact tool.'
     const event = session.append(
       'user/message',
-      warningMessage([{ type: 'text', text }], sourceFor(text)),
+      warningMessage([{ type: 'text', text: MODEL_WARNING_TEXT }], sourceFor(text)),
       { surfaceOp: 'append' },
     )
     expect(() => { ctx.emit('session/event', session, event) })
@@ -348,7 +376,7 @@ describe('install-time validation', () => {
             type: 'user/message',
             seq: 0,
             time: Date.now(),
-            data: warningMessage([{ type: 'text', text }], sourceFor(text)),
+            data: warningMessage([{ type: 'text', text: MODEL_WARNING_TEXT }], sourceFor(text)),
             surfaceOp: 'append',
           } as unknown as SessionEvent<'user/message'>,
         ],
@@ -368,7 +396,7 @@ describe('install-time validation', () => {
             type: 'user/message',
             seq: 2,
             time: Date.now(),
-            data: warningMessage([{ type: 'text', text }], sourceFor(text)),
+            data: warningMessage([{ type: 'text', text: MODEL_WARNING_TEXT }], sourceFor(text)),
             surfaceOp: 'append',
           } as unknown as SessionEvent<'user/message'>,
         ],

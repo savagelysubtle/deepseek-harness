@@ -259,12 +259,14 @@ export interface Config {
    */
   toolOrder?: string[]
   /**
-   * Clock the `now` variable reads from, called once per assembly (default
-   * `() => new Date()`). Overridable so tests can fix the instant without
-   * depending on `process.env.TZ`, which does not reliably update a
-   * long-running process. The zone is always the process's own resolved zone
-   * (`Intl.DateTimeFormat().resolvedOptions().timeZone`) and is not
-   * configurable here.
+   * Deprecated: clock the `now` variable reads from, called once per assembly
+   * (default `() => new Date()`). The variable resolves into the system prompt,
+   * the provider's cache prefix, so a template referencing it makes the prefix
+   * time-dependent; rely on the per-message dispatch stamp instead (each user
+   * message already carries its own). Behaviour is unchanged. Overridable
+   * so tests can fix the instant without depending on `process.env.TZ`. The
+   * zone is always the process's own resolved zone and is not configurable here.
+   * @deprecated Resolved into the cache prefix; rely on the per-message dispatch stamp instead.
    */
   now?: () => Date
 }
@@ -304,7 +306,7 @@ export function renderContextSnapshot(assembly: PromptAssembly): string {
 export function joinContextSections(sections: readonly ContextSnapshotSection[]): string {
   const body = sections.map(section => section.text).join('\n\n')
   if (body.length === 0) return ''
-  return `Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\n${body}`
+  return `Current runtime context:\n\n${body}`
 }
 
 /**
@@ -424,6 +426,8 @@ export class SystemPrompt extends Service {
   constructor(ctx: Context, config: Config) {
     super(ctx, 'systemPrompt')
     this.toolOrder = validateToolOrder(config.toolOrder)
+    // Internal read of the deprecated clock; behaviour is kept deliberately.
+    // oxlint-disable-next-line typescript/no-deprecated
     this.now = config.now ?? (() => new Date())
     // Keep harness-owned openers independent of the selected loop plugin.
     if (config.includeHarnessIdentity ?? true) {

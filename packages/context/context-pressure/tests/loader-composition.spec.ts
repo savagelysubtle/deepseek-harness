@@ -9,7 +9,7 @@ import { Context } from '@deepseek-ai/cordis'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import * as contextPressure from '../src/index.ts'
-import { parseWarningText } from '../src/warning.ts'
+import { MODEL_WARNING_TEXT, parseWarningText } from '../src/warning.ts'
 import LlmRuntime, { createUserMessage, LlmAdapter } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmResolvedModelInfo, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
@@ -106,7 +106,8 @@ function warningEvents(session: Session): SessionEvent<'user/message'>[] {
 }
 
 function warningText(event: SessionEvent<'user/message'>): string {
-  return event.data.content.find(block => block.type === 'text')?.text ?? ''
+  const source = event.data.source
+  return 'sections' in source ? source.sections[0]?.text ?? '' : ''
 }
 
 function followUp(agent: ReturnType<AgentLoop['create']>, text: string): void {
@@ -152,6 +153,7 @@ describe('context-pressure real Loader composition through cordis.yml', () => {
       + 'Before rising pressure forces automatic compaction, you can request compaction yourself '
       + 'with the compact tool.',
     )
+    expect(warning.data.content).toEqual([{ type: 'text', text: MODEL_WARNING_TEXT }])
     expect(parseWarningText(text)).toEqual({
       thresholdPercent: '25',
       usedPercent: '32.01',
@@ -180,7 +182,7 @@ describe('context-pressure real Loader composition through cordis.yml', () => {
     )).toBe(true)
     // Model-visible: the projected history carries the warning into the request.
     expect(agent.session.deriveMessages().some(message => message.role === 'user'
-      && message.content.some(block => block.type === 'text' && block.text === text))).toBe(true)
+      && message.content.some(block => block.type === 'text' && block.text === MODEL_WARNING_TEXT))).toBe(true)
 
     // Turn 3: the warned threshold stays deduplicated for the generation.
     followUp(agent, 'turn three')

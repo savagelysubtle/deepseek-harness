@@ -379,7 +379,7 @@ describe('agent loop', () => {
     expect(contextEvents()).toHaveLength(1)
     expect(contextEvents()[0]?.data.content).toEqual([{
       type: 'text',
-      text: 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nMode: read-only.',
+      text: 'Current runtime context:\n\nMode: read-only.',
     }])
 
     send(agent, 'unchanged')
@@ -401,7 +401,7 @@ describe('agent loop', () => {
     expect(contextEvents()).toHaveLength(3)
     expect(contextEvents()[2]?.data.content).toEqual([{
       type: 'text',
-      text: 'Current runtime context: none. Earlier runtime-context snapshots no longer apply.',
+      text: 'Current runtime context: none.',
     }])
 
     send(agent, 'still clear')
@@ -477,7 +477,7 @@ describe('agent loop', () => {
     // preceding message with its logged text intact.
     const clearing = adapter.requests[1]?.messages.find(message =>
       message.content.some(block => block.type === 'text'
-        && block.text === 'Current runtime context: none. Earlier runtime-context snapshots no longer apply.'))
+        && block.text === 'Current runtime context: none.'))
     expect(clearing).toBeDefined()
   })
 
@@ -525,7 +525,7 @@ describe('agent loop', () => {
     expect(runtimeContexts).toHaveLength(2)
     expect(runtimeContexts[1]?.data.content).toEqual([{
       type: 'text',
-      text: 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nMode: read-only.',
+      text: 'Current runtime context:\n\nMode: read-only.',
     }])
   })
 
