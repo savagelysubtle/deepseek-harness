@@ -20,6 +20,8 @@ import type { WorkerInit, WorkerLimits } from './types.ts'
 export { validateMeta } from './meta.ts'
 export { WorkerRun } from './host.ts'
 export type { HostRunExtras } from './host.ts'
+export { CHILD_TOOL_END_EVENT, CHILD_TOOL_START_EVENT, createWorkflowChildSupervisor } from './supervisor.ts'
+export type { ChildAppendEvent, ChildAppendFeed, WorkflowChildSupervisorOptions } from './supervisor.ts'
 export { materializeFromRealm, MaterializeError } from './realm.ts'
 export type {
   ChildHandle,

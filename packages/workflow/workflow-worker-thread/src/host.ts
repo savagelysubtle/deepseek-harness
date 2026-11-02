@@ -58,6 +58,7 @@ import type {
   WorkflowSupervisedChild,
 } from '@deepseek-ai/dsh-workflow'
 import { renderThrown } from './realm.ts'
+import { createWorkflowChildSupervisor } from './supervisor.ts'
 import type { ExecutionObserver } from './runtime.ts'
 import { HostToWorkerType, WorkerToHostType } from './protocol.ts'
 import type { HostToWorkerPayloads, WorkerToHostMessage } from './protocol.ts'
@@ -266,7 +267,20 @@ export class WorkerRun implements WorkflowRun {
   ) {
     this.bashEnabled = init.bashEnabled === true
     this.bashExecutor = extras.bashExecutor ?? createLocalBashExecutor()
-    this.supervisor = extras.supervisor
+    // Default supervision: the child's session appends feed the stall watchdog through the host's
+    // `session/event` listener (one per bound child, removed on release). A caller-supplied
+    // supervisor replaces it entirely.
+    this.supervisor = extras.supervisor ?? createWorkflowChildSupervisor({
+      observe: (childId, listener) => {
+        // Only a local run's appends reach this process; a remote run is deadline-only.
+        const local = [...this.children.values()].some(record => record.run.id === childId && record.run.localAgent !== undefined)
+        if (!local) return undefined
+        return ctx.on('session/event', (session, event) => {
+          if (session.id === childId) listener({ type: event.type, data: event.data })
+        })
+      },
+      onWarning: (message) => { ctx.logger.warn(`workflow-worker-thread: ${message}`) },
+    })
     this.maxTotalAgents = init.limits.maxTotalAgents
     for (const { nodeId, gateKind } of extras.gateManifest ?? []) {
       this.pendingGates.set(gateKey(nodeId, gateKind), { nodeId, gateKind })
@@ -603,7 +617,7 @@ export class WorkerRun implements WorkflowRun {
       iteration: 0,
       ...request.nodeId !== undefined ? { nodeId: request.nodeId } : {},
       ...request.tier !== undefined ? { tier: request.tier } : {},
-      ...request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {},
+      timeoutMs: Math.min(request.timeoutMs ?? DEFAULT_CHILD_DEADLINE_MS, MAX_CHILD_DEADLINE_MS),
       ...request.idleTimeoutMs !== undefined ? { idleTimeoutMs: request.idleTimeoutMs } : {},
       ...request.doneWhen !== undefined ? { doneWhen: request.doneWhen } : {},
     }
@@ -714,7 +728,16 @@ export class WorkerRun implements WorkflowRun {
           })
         } catch (error: unknown) {
           this.ctx.logger.warn(`workflow-worker-thread: supervisor evaluate failed: ${renderThrown(error)}`)
-          raw = undefined
+          // A check that could not run is a FAILED check, never "no opinion": accepting it would let unfinished work
+          // through silently. The normal continuation/cap path applies and exhaustion fails the node with this tail.
+          raw = {
+            iteration: iterations,
+            maxContinuations: cap,
+            command: doneWhen.command,
+            exitCode: null,
+            tail: `done_when check could not run: ${error instanceof Error ? error.message : String(error)}`,
+            truncated: false,
+          }
         }
         if (raw === undefined || this.childAdmissionFailure() !== undefined) {
           return projectChildResult(result, { iterations, exhausted: false })
@@ -1151,7 +1174,16 @@ export class WorkerRun implements WorkflowRun {
   private runSupervisorBash(command: string, options?: { workdir?: string; timeoutMs?: number }): Promise<WorkflowBashResult> {
     return (async () => {
       if (!this.bashEnabled) throw new Error('bash is not enabled for this run')
-      return await this.executeBash(validateBashCall(command, options))
+      // A done-when check counts against the same budget and concurrency limit as a script's bash().
+      if (this.bashCalls >= MAX_BASH_CALLS_PER_RUN) throw new Error(`bash() call budget exhausted (${MAX_BASH_CALLS_PER_RUN} per run)`)
+      if (this.activeBash >= MAX_CONCURRENT_BASH) throw new Error(`too many concurrent bash() commands (limit ${MAX_CONCURRENT_BASH})`)
+      this.bashCalls += 1
+      this.activeBash += 1
+      try {
+        return await this.executeBash(validateBashCall(command, options))
+      } finally {
+        this.activeBash -= 1
+      }
     })()
   }
 
@@ -1344,6 +1376,8 @@ function stoppedResult(reason: 'timeout' | 'stalled'): ChildResult {
 
 const MAX_PROMPT_CHARS = 1_000_000
 const MAX_CHILD_DEADLINE_MS = 86_400_000
+/** Absolute deadline applied to a child whose script gave no `timeoutMs`: nothing runs unbounded. */
+const DEFAULT_CHILD_DEADLINE_MS = 3_600_000
 
 /** Re-validate a worker-supplied child request host-side; returns the refusal text, or `undefined` when sound. */
 function invalidChildRequest(request: ChildStartRequest): string | undefined {

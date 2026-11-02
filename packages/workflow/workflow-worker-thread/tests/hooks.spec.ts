@@ -442,6 +442,15 @@ describe('done_when continuation seam', () => {
     ])
   })
 
+  it('a child with no timeoutMs gets the default one-hour deadline', async () => {
+    const { ctx } = await setup()
+    const seen: (number | undefined)[] = []
+    const supervisor: WorkflowChildSupervisor = { register: (child) => { seen.push(child.timeoutMs) } }
+    await finish(start(ctx, "return await agent('p')", { supervisor }))
+    await finish(start(ctx, "return await agent('p', { timeoutMs: 5000 })", { supervisor }))
+    expect(seen).toEqual([3_600_000, 5000])
+  })
+
   it('stops at the explicit cap and fails the node with the last evidence', async () => {
     const seen: SubagentStartRequest[] = []
     const { ctx } = await setup(['t1', 't2', 't3'], seen)
@@ -466,28 +475,76 @@ describe('done_when continuation seam', () => {
     expect(seen).toHaveLength(9)
   })
 
-  it('fails loud when doneWhen has no evaluating supervisor, or bash is off', async () => {
+  it('fails loud when an installed supervisor cannot evaluate doneWhen, or bash is off', async () => {
     const { ctx } = await setup()
-    const noSupervisor = await finish(start(ctx, "return await agent('p', { doneWhen: { command: 'true' } })", { bashEnabled: true }))
+    const noSupervisor = await finish(start(ctx, "return await agent('p', { doneWhen: { command: 'true' } })", { bashEnabled: true, supervisor: {} }))
     expect(noSupervisor.stopReason).toBe('error')
     expect(noSupervisor.error).toContain('needs a child supervisor')
     const off = await finish(start(ctx, "return await agent('p', { doneWhen: { command: 'true' } })", { supervisor: { evaluate: () => Promise.resolve(undefined) } }))
     expect(off.error).toContain('is not enabled for this run')
   })
 
-  it('gives the evaluator a run-linked bash and contains a throwing evaluator', async () => {
+  it('gives the evaluator a run-linked bash', async () => {
     const { ctx } = await setup(['done'])
     let ran: string | undefined
     const supervisor: WorkflowChildSupervisor = {
       evaluate: async (_child, _outcome, tools) => {
         const check = await tools.runBash('echo checked; exit 0')
         ran = check.stdout
-        throw new Error('evaluator bug')
+        return undefined
       },
     }
     const result = await finish(start(ctx, "return await agent('p', { doneWhen: { command: 'echo checked' } })", { bashEnabled: true, supervisor }))
     expect(result.value).toBe('done')
     expect(ran).toBe('checked\n')
+  })
+
+  it('a throwing evaluator counts as a failed check: the tail says so and the continuation proceeds', async () => {
+    const seen: SubagentStartRequest[] = []
+    const { ctx } = await setup(['first try', 'second try'], seen)
+    let calls = 0
+    const supervisor: WorkflowChildSupervisor = {
+      evaluate: () => {
+        calls += 1
+        return calls === 1 ? Promise.reject(new Error('evaluator bug')) : Promise.resolve(undefined)
+      },
+    }
+    const result = await finish(start(ctx, "return await agent('p', { doneWhen: { command: 'true' } })", { bashEnabled: true, supervisor }))
+    expect(result.value).toBe('second try')
+    expect(seen).toHaveLength(2)
+    expect((seen[1]!.prompt[0] as { text: string }).text).toContain('done_when check could not run: ')
+    expect((seen[1]!.prompt[0] as { text: string }).text).toContain('evaluator bug')
+  })
+
+  it('a throwing evaluator that never recovers exhausts the cap and fails the node with that evidence', async () => {
+    const { ctx } = await setup(['a', 'b', 'c'])
+    const supervisor: WorkflowChildSupervisor = { evaluate: () => Promise.reject(new Error('always broken')) }
+    const result = await finish(start(ctx, `
+      const out = await agent('p', { nodeId: 'n', doneWhen: { command: 'true', maxContinuations: 1 } })
+      return { out, evidence: evidence('n') }
+    `, { bashEnabled: true, supervisor }))
+    const value = result.value as { out: unknown; evidence: { tail: string; exitCode: number | null } }
+    expect(value.out).toBeNull()
+    expect(value.evidence.tail).toContain('done_when check could not run: always broken')
+    expect(value.evidence.exitCode).toBeNull()
+  })
+
+  it('a done-when check refused by the bash budget counts as a failed check, not an accepted result', async () => {
+    const seen: SubagentStartRequest[] = []
+    const { ctx } = await setup(['a', 'b', 'c', 'd'], seen)
+    const handle = start(ctx, `
+      const out = await agent('p', { nodeId: 'n', doneWhen: { command: 'true' } })
+      return { out, evidence: evidence('n') }
+    `, { bashEnabled: true })
+    // The default supervisor's check is refused by the exhausted budget on every iteration.
+    ;(handle as unknown as { bashCalls: number }).bashCalls = 1000
+    const settled = await finish(handle)
+    expect(seen).toHaveLength(4)
+    expect((seen[1]!.prompt[0] as { text: string }).text).toContain('done_when check could not run: ')
+    expect((seen[1]!.prompt[0] as { text: string }).text).toContain('budget exhausted')
+    const value = settled.value as { out: unknown; evidence: { tail: string } }
+    expect(value.out).toBeNull()
+    expect(value.evidence.tail).toContain('budget exhausted')
   })
 
   it('a throwing register/bind/release never fails the run', async () => {

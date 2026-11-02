@@ -70,7 +70,9 @@ worker 仍提供实用的隔离：
 - `onBashOutput` 接收运行的每个命令输出数据块，供运行存储转存；
 - `approver` 是由存储支撑的审批代理的接入点；`WorkerRun.pendingApprovals()` 与 `decideApproval()` 服务于在 approver 之外作答的 UI。
 
-监督器成员抛出的异常会被记录并忽略。设置了 `doneWhen` 却没有可评估的监督器时会被明确拒绝（`child-start-error`），绝不会被悄悄接受。本包不会在 agent 的 turn 停止事件上注册任何监听器；有一项测试会扫描源码以保证这一点。
+`register`/`bind`/`release` 抛出的异常会被记录并忽略。`evaluate` 抛出或被拒绝（包括 done-when 检查被 bash 预算或并发上限拒绝）会被视为失败的检查，尾部为 `done_when check could not run: <原因>`，因此走正常的续跑与上限路径，耗尽时节点带着该证据失败；绝不会被当作“无意见”而接受。设置了 `doneWhen` 却没有可评估的监督器（仅在调用方安装了不含 `evaluate` 的监督器时）时会被明确拒绝（`child-start-error`），绝不会被悄悄接受。本包不会在 agent 的 turn 停止事件上注册任何监听器；有一项测试会扫描源码以保证这一点。
+
+`createWorkflowChildSupervisor(options)` 是默认监督器（`WorkflowStartRequest.supervisor` 会将其替换）。它把 `timeoutMs` 作为绝对截止时间（`handle.stop('timeout')`），把 `idleTimeoutMs` 作为停滞看门狗（`handle.stop('stalled')`）：看门狗是普通的 `setTimeout`，每当子 agent 的会话日志有新追加就重新计时（宿主会转发已绑定子 agent id 的 `session/event`），并在工具调用进行期间暂停（`tool/call` 开始、`tool/result` 结束，按 `callId` 配对）。它不复用绑定迭代器的 `idleWatchdog`。`evaluate` 通过 `tools.runBash` 运行 `doneWhen` 命令，并把非零退出、超时或被中止的检查作为失败证据返回（尾部为 stdout 加 stderr）；上限由引擎循环负责。未先 `register` 就 `bind` 会抛出明确的错误（宿主会记录它，该子 agent 随后不受监督）；`release` 幂等，并清除两个定时器与订阅。没有 `observe` 数据源时只有截止时间生效。 脚本未给出 `timeoutMs` 的子 agent 会获得默认一小时的绝对截止时间（上限 24 小时），因此没有任何东西会无限期运行。子 agent 的结果到手后，`evaluate` 会在 done-when 检查运行前停止两个定时器。done-when 检查与脚本的 `bash()` 共用同一组上限（并发 8、每次运行 1000）。远程运行的追加事件不会到达本进程，因此只启用截止时间（停滞看门狗关闭）。
 
 ## 值边界
 
