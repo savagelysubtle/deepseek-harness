@@ -19,13 +19,14 @@
 
 ## 应用
 
-只应用到 dshTest 一次性 profile，绝不要用于在线席位或稳定宿主：
+只应用到 dshTest 一次性 profile，绝不要用于在线席位或稳定宿主。先把设置文件安装到 overlay 查找的位置（它刻意不从启动目录读取路径，否则在不受信任的检出目录中启动的宿主会执行该检出目录里的钩子命令）：
 
 ```sh
+cp examples/hooks/gate-hooks.settings.json ~/.agents/hooks/gate-hooks.settings.json
 dsh web --patch examples/hooks/gate-hooks.cordis.yml
 ```
 
-`configPath` 是进程级的，相对于启动目录解析，因此请在仓库根目录运行，或将 `DSH_GATE_HOOKS_SETTINGS` 设为设置文件的绝对路径。文件缺失或无法读取时只会记录警告且不注册任何钩子，因此请在会话日志中查找 `hook/invoked` 和 `hook/result` 事件，确认门禁已触发。
+若要把文件放在别处，请将 `DSH_GATE_HOOKS_SETTINGS` 设为其绝对路径。`configPath` 是进程级的，对宿主中的所有会话生效。文件缺失或无法读取时只会记录警告且不注册任何钩子，因此请在会话日志中查找 `hook/invoked` 和 `hook/result` 事件，确认门禁已触发。
 
 ## 桥发送的内容
 

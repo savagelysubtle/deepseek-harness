@@ -3,14 +3,17 @@
 # is bound by the same plan / screenshot / done-evidence gates as a Claude Code
 # session. Apply to a throwaway profile only:
 #   dsh web --patch examples/hooks/gate-hooks.cordis.yml
-# `configPath` is process-level and resolves from the launch cwd; the expression
-# below defaults to this folder's settings file under the launch cwd (run from the
-# repository root) and honours DSH_GATE_HOOKS_SETTINGS for any other location. The
-# settings file expands `$HOME` in its commands (hook commands run through a shell).
-# See README.md for what each gate does and its limits.
+# `configPath` is process-level and its hook commands run with the user's rights, so
+# it must never come from the launch directory (a host started inside an untrusted
+# checkout would otherwise execute that checkout's settings file). `!!js` expressions
+# see only the loader scope, not this overlay's own path, so the fallback is an
+# absolute file under the user's home: copy gate-hooks.settings.json to
+# ~/.agents/hooks/ (README install step), or set DSH_GATE_HOOKS_SETTINGS to another
+# absolute path. The settings file expands `$HOME` in its commands (hook commands run
+# through a shell). See README.md for what each gate does and its limits.
 - insert:
     - id: gate-hooks
       name: '@deepseek-ai/dsh-hooks-claude-code'
       config:
         configPath: !!js >-
-          process.env.DSH_GATE_HOOKS_SETTINGS?.trim() || process.getBuiltinModule('node:path').join(process.cwd(), 'examples/hooks/gate-hooks.settings.json')
+          process.env.DSH_GATE_HOOKS_SETTINGS?.trim() || process.getBuiltinModule('node:path').join(process.getBuiltinModule('node:os').homedir(), '.agents/hooks/gate-hooks.settings.json')

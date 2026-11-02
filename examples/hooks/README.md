@@ -19,13 +19,14 @@ Files:
 
 ## Apply
 
-Apply it to a dshTest throwaway profile only, never to a live seat or the stable host:
+Apply it to a dshTest throwaway profile only, never to a live seat or the stable host. First install the settings file where the overlay looks for it (it deliberately does not read a path from the launch directory, because a host started inside an untrusted checkout would otherwise run that checkout's hook commands):
 
 ```sh
+cp examples/hooks/gate-hooks.settings.json ~/.agents/hooks/gate-hooks.settings.json
 dsh web --patch examples/hooks/gate-hooks.cordis.yml
 ```
 
-`configPath` is process-level and resolves from the launch directory, so run from the repository root, or set `DSH_GATE_HOOKS_SETTINGS` to an absolute path of a settings file. A missing or unreadable file logs a warning and registers no hooks, so confirm the gates fired by looking for `hook/invoked` and `hook/result` events in the session log.
+To keep the file elsewhere, set `DSH_GATE_HOOKS_SETTINGS` to its absolute path. `configPath` is process-level, so it applies to every session in the host. A missing or unreadable file logs a warning and registers no hooks, so confirm the gates fired by looking for `hook/invoked` and `hook/result` events in the session log.
 
 ## What the bridge sends
 
