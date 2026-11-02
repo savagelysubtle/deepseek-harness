@@ -86,7 +86,9 @@ llm-pi-ai:
 - **订阅（原生登录）。** 可选的 Claude Code 子 agent 运行你已安装并用自己账户登录的 `claude`，模型通过工具 `subagent_claude_code` 调用它，消耗你套餐的额度。生产 `dsh` 默认不挂载它；Profile 通过 `examples/acp-agent/product-subagent-claude-code.cordis.yml` 中的覆盖文件选择启用（详见 `packages/subagent/subagent-claude-code/README.zh.md`）。先用 `claude` 登录一次；无人值守的宿主请运行 `claude setup-token`，并把 `CLAUDE_CODE_OAUTH_TOKEN` 设置在该子 agent 的 `config.env` 中，因为环境中具有凭证特征的变量会被清除。
 - **API 密钥。** 在**设置 → 模型**下添加 Anthropic 提供方（`llm-pi-ai` 提供方，使用 `apiKeyEnv`）。请求由 dsh 自己的 agent 发出，按 token 向该密钥计费。
 
-在子 agent 的 `config.env` 中设置 `ANTHROPIC_API_KEY` 会让该后端由订阅改为 API 计费。登录过期时会报错，绝不会回退到 API 密钥。
+请仅在 dshTest Profile 中使用此覆盖文件，切勿用于 base 或在线席位的组装：目前 `subagent_claude_code` 没有按会话的调用上限或审批，每次调用都是一个全新的 Claude Code 会话并消耗套餐额度，被提示注入或陷入循环的模型可能反复调用（调用上限属于单独的后续工作）。
+
+在子 agent 的 `config.env` 中设置 `ANTHROPIC_API_KEY` 会让该后端由订阅改为 API 计费。提供方自身绝不提供 API 密钥，并会清除环境中的凭证变量，但子进程仍会读取你自己的 `~/.claude/settings.json`（所有设置来源都会加载），其中可能带有 `env` 块或 `apiKeyHelper`，并继承 `ANTHROPIC_BASE_URL`、`CLAUDE_CODE_USE_BEDROCK`、`CLAUDE_CODE_USE_VERTEX` 等非凭证变量；这些都可能改变计费或路由（`ANTHROPIC_BASE_URL` 被改动会把 OAuth bearer 发送到该地址）。登录过期预期会报错而不是改用 API 密钥（预期行为，未经验证）。
 
 政策提示（未经核实）：Anthropic 的 Agent SDK 条款可能限制第三方产品提供 claude.ai 登录。依赖订阅方式之前，请查阅 https://code.claude.com/docs/en/agent-sdk/overview 。
 

@@ -62,7 +62,9 @@ Sign in once with `claude` in a terminal as the same OS user that runs the host.
 
 - **Unattended hosts.** Run `claude setup-token` once to mint a long-lived OAuth token, then place it in the provider's `config.env` as `CLAUDE_CODE_OAUTH_TOKEN`. It must be set there: the shared credential scrub removes every `*KEY*`, `*SECRET*`, `*PASSWORD*` and `*TOKEN*` variable from the ambient environment, so exporting it in the host's shell does not reach the child. This token still bills the subscription.
 - **Your own Claude configuration runs.** The SDK reads the user's `~/.claude` settings, hooks, and MCP servers (see Native settings above), so those hooks and servers execute inside dsh-spawned sessions.
-- **An expired login fails loud.** The run ends in `error` with the product's message; the provider never falls back to an API key.
+- **dshTest profiles only; no call cap.** Use this composition only in dshTest profiles; never add it to a base or live-seat composition. There is no per-session call cap or approval on `subagent_claude_code` today: each call is a fresh Claude Code session billed to the plan, and a prompt-injected or looping model could call it repeatedly. A cap is a separate follow-up. Each run logs a start and a completion line at info level in the host log.
+- **What the provider guarantees.** The provider itself never supplies an API key, and ambient credential variables are stripped. It does not control what the child reads on its own: the SDK loads all setting sources, so the user's `~/.claude/settings.json` can carry an `env` block or an `apiKeyHelper`, and non-credential variables such as `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`, or `CLAUDE_CODE_USE_VERTEX` are inherited. Any of these can change billing or routing (a changed `ANTHROPIC_BASE_URL` would send the OAuth bearer to that address), so check them if a run should be on the subscription.
+- **An expired login should fail with an error.** Expected behaviour (not verified here): the run ends in `error` with the product's message and the provider does not retry with an API key.
 
 ### API-key billing (opt-in)
 

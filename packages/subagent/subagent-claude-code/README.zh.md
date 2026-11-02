@@ -62,7 +62,9 @@ SDK 接收由文本块原样拼接成的任务。提供方会完整迭代 SDK �
 
 - **无人值守的宿主。** 运行一次 `claude setup-token` 生成长期 OAuth token，再把它作为 `CLAUDE_CODE_OAUTH_TOKEN` 放入该提供方的 `config.env`。必须在这里设置：共享的凭证清除会从环境中移除所有包含 `KEY`、`SECRET`、`PASSWORD`、`TOKEN` 的变量，因此在宿主 shell 中导出它不会到达子进程。该 token 仍然消耗订阅额度。
 - **你自己的 Claude 配置会运行。** SDK 会读取用户的 `~/.claude` 设置、hooks 和 MCP 服务器（见上文原生设置），因此这些 hooks 与服务器会在 dsh 启动的会话中执行。
-- **登录过期会明确失败。** 运行以 `error` 结束并带有产品的错误信息；提供方绝不会回退到 API 密钥。
+- **仅限 dshTest Profile；没有调用上限。** 仅在 dshTest Profile 中使用此组装，切勿加入 base 或在线席位的组装。目前 `subagent_claude_code` 没有按会话的调用上限或审批：每次调用都是一个全新的 Claude Code 会话并消耗套餐额度，被提示注入或陷入循环的模型可能反复调用。调用上限属于单独的后续工作。每次运行都会在宿主日志中以 info 级别记录一条开始和一条完成日志。
+- **提供方保证的范围。** 提供方自身绝不提供 API 密钥，环境中的凭证变量会被清除。但它无法控制子进程自己读取的内容：SDK 会加载所有设置来源，因此用户的 `~/.claude/settings.json` 可能带有 `env` 块或 `apiKeyHelper`，且 `ANTHROPIC_BASE_URL`、`CLAUDE_CODE_USE_BEDROCK`、`CLAUDE_CODE_USE_VERTEX` 等非凭证变量会被继承。这些都可能改变计费或路由（`ANTHROPIC_BASE_URL` 被改动会把 OAuth bearer 发送到该地址），因此若运行应当使用订阅，请检查它们。
+- **登录过期应当以错误失败。** 预期行为（此处未经验证）：运行以 `error` 结束并带有产品的错误信息，提供方不会改用 API 密钥重试。
 
 ### API 密钥计费（可选启用）
 

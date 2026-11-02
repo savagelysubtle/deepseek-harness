@@ -6,6 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
+import { SENSITIVE_ENV_PATTERN } from '@deepseek-ai/dsh-subprocess'
 import type { SubprocessHandle, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import * as claudeCode from '../src/index.ts'
@@ -24,7 +25,12 @@ afterEach(async () => {
 })
 
 describe.skipIf(!LIVE)('Claude Code provider with the native subscription login', () => {
-  it('answers one nonce with no API credential in the child environment', async () => {
+  it('answers one nonce with no API credential in the child environment', {
+    // retry: 0 overrides the shared e2e config's retry: 2 so a failed live run
+    // cannot re-spend plan quota.
+    timeout: 180_000,
+    retry: 0,
+  }, async () => {
     const root = mkdtempSync(join(tmpdir(), 'dsh-claude-subscription-e2e-'))
     roots.push(root)
     const workspace = join(root, 'workspace')
@@ -61,8 +67,7 @@ describe.skipIf(!LIVE)('Claude Code provider with the native subscription login'
     for (const spec of specs) {
       for (const [name, value] of Object.entries(spec.env ?? {})) {
         if (value === undefined) continue
-        expect(name, `child env must not carry ${name}`).not.toMatch(/^ANTHROPIC_/)
-        expect(name, `child env must not carry ${name}`).not.toMatch(/TOKEN|KEY/i)
+        expect(name, `child env must not carry ${name}`).not.toMatch(SENSITIVE_ENV_PATTERN)
       }
     }
 
@@ -78,5 +83,5 @@ describe.skipIf(!LIVE)('Claude Code provider with the native subscription login'
     for (const handle of handles) {
       await expect(handle.waitForExit()).resolves.toBe(true)
     }
-  }, 180_000)
+  })
 })
