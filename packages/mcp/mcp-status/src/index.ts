@@ -61,6 +61,7 @@ import {
   parsePatchFile,
   readMcpPatchEntries,
   redactAbsolutePaths,
+  sanitizeAuthError,
   registerMcpHandle,
   subscribeMcpHandles,
   RECONNECT_DEFAULTS,
@@ -673,7 +674,14 @@ export class McpStatusRegistryService extends TypertRemoteService {
       } catch (error) {
         throw new Error(`mcp authorize-start: server "${serverName}" is not reachable: ${redactAbsolutePaths(String(error))}`)
       }
-      const result = await sdkAuth(handle.authProvider, { serverUrl: config.url })
+      let result: Awaited<ReturnType<typeof sdkAuth>>
+      try {
+        result = await sdkAuth(handle.authProvider, { serverUrl: config.url })
+      } catch (error) {
+        // The SDK echoes the authorization server's own response body; it
+        // must not become the RPC error shown in Settings > Tools (OP-203).
+        throw new Error(`mcp authorize-start: server "${serverName}" authorization failed: ${sanitizeAuthError(redactAbsolutePaths(String(error)))}`)
+      }
       if (result === 'AUTHORIZED') {
         throw new Error(`mcp authorize-start: server "${serverName}" is already authorized — try Reconnect instead of Authorize`)
       }
@@ -761,7 +769,7 @@ export class McpStatusRegistryService extends TypertRemoteService {
       }
       handle.forceReconnectAfterAuthorization()
     } catch (error) {
-      this.ctx.logger.error(`mcp authorize-start(${serverName}): consent flow failed: ${redactAbsolutePaths(String(error))}`)
+      this.ctx.logger.error(`mcp authorize-start(${serverName}): consent flow failed: ${sanitizeAuthError(redactAbsolutePaths(String(error)))}`)
       // `authorize-start` already returned the consent URL by the time any
       // of this runs, so the only way the user ever learns the flow did not
       // finish is through the row itself (SWD-164 pilot finding: previously
@@ -771,7 +779,7 @@ export class McpStatusRegistryService extends TypertRemoteService {
       // real error, same as every other connection failure's `lastError`.
       const message = error instanceof ConsentTimeoutError
         ? 'Authorization timed out after 5 minutes — try again'
-        : redactAbsolutePaths(String(error))
+        : sanitizeAuthError(redactAbsolutePaths(String(error)))
       handle.reportAuthorizationFailure(message)
     } finally {
       // Release the provider back to the automatic reconnect loop: on

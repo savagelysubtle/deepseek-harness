@@ -60,6 +60,10 @@ export interface OAuthFixtureOptions {
    * matching every existing caller.
    */
   omitScopesSupported?: boolean
+  /** Answer `/register` with this raw status and body instead of a valid registration. */
+  registrationResponse?: { status: number; body: string }
+  /** Answer `/token` with this raw status and body instead of issuing tokens. */
+  tokenResponse?: { status: number; body: string }
 }
 
 /**
@@ -69,6 +73,8 @@ export interface OAuthFixtureOptions {
  */
 export function startOAuthFixture(options: OAuthFixtureOptions = {}): Promise<OAuthFixture> {
   const omitScopesSupported = options.omitScopesSupported ?? false
+  const registrationResponse = options.registrationResponse
+  const tokenResponse = options.tokenResponse
   // Start rejecting everything: a test that needs an initially-valid bearer
   // sets it explicitly via setValidToken.
   let validToken = ''
@@ -153,6 +159,11 @@ export function startOAuthFixture(options: OAuthFixtureOptions = {}): Promise<OA
       // ---- RFC 7591 dynamic client registration ----
       if (incoming.pathname === '/register' && request.method === 'POST') {
         registrationRequests.push(JSON.parse(await readBody(request)))
+        if (registrationResponse !== undefined) {
+          response.writeHead(registrationResponse.status, { 'content-type': 'text/plain' })
+          response.end(registrationResponse.body)
+          return
+        }
         sendJson(response, 201, {
           client_id: 'dyn-client-1',
           client_id_issued_at: Math.floor(Date.now() / 1000),
@@ -181,6 +192,11 @@ export function startOAuthFixture(options: OAuthFixtureOptions = {}): Promise<OA
       if (incoming.pathname === '/token' && request.method === 'POST') {
         const form = parseForm(await readBody(request))
         tokenRequests.push(form)
+        if (tokenResponse !== undefined) {
+          response.writeHead(tokenResponse.status, { 'content-type': 'text/plain' })
+          response.end(tokenResponse.body)
+          return
+        }
         if (form.grant_type === 'authorization_code') {
           sendJson(response, 200, {
             access_token: 'at-cli', refresh_token: 'rt-1', token_type: 'Bearer', expires_in: 3600,

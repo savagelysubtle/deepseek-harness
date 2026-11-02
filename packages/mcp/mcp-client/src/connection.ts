@@ -26,7 +26,7 @@ import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { createTransport } from './transport.ts'
 import { syncTools } from './tools.ts'
 import type { ToolBridgeOptions, ToolDisposers } from './tools.ts'
-import { CredentialsOAuthProvider } from './oauth.ts'
+import { CredentialsOAuthProvider, flattenAndCap, sanitizeAuthError } from './oauth.ts'
 import { DEFAULT_OAUTH_REDIRECT_PORT } from './index.ts'
 import type { Config } from './index.ts'
 import type { McpServerState, McpServerStatus } from './status.ts'
@@ -59,6 +59,20 @@ function redactAbsolutePaths(text: string): string {
     .replace(QUOTED_DOUBLE_PATH_RE, '"<path>"')
     .replace(QUOTED_SINGLE_PATH_RE, '\'<path>\'')
     .replace(BARE_ABSOLUTE_PATH_RE, '<path>')
+}
+
+/**
+ * Render a connection or sync failure for the host log and `lastError`.
+ * @param config - the server config; only streamable-http text is server-controlled.
+ * @param error - the thrown value.
+ * @param verbatim - skip all filtering (the caller already knows the text is local).
+ * @returns the raw text for stdio; capped and flattened for streamable-http; with an echoed
+ *   OAuth payload also replaced when OAuth is configured.
+ */
+export function describeConnectionFailure(config: Config, error: unknown, verbatim = false): string {
+  const text = String(error)
+  if (verbatim || config.transport !== 'streamable-http') return text
+  return config.auth === undefined ? flattenAndCap(text) : sanitizeAuthError(text)
 }
 
 /**
@@ -104,6 +118,9 @@ function resolveAuthProvider(
     // the same fixed loopback URL so dynamic client registration matches
     // whichever process consents first.
     redirectUri: `http://127.0.0.1:${config.auth.redirectPort ?? DEFAULT_OAUTH_REDIRECT_PORT}/callback`,
+    onRegistrationReset(message) {
+      ctx.logger.info(`${label}: ${message}`)
+    },
     onAuthorizationUrl(authorizationUrl) {
       onNeedsAuthorization(authorizationUrl)
       if (AUTH_GUIDANCE_SHOWN.has(config.serverName)) return
@@ -589,7 +606,7 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
         } catch (error) {
           // Fetch-phase failure: the previous generation is still registered
           // and `disposers` still owns it — keep serving the last good list.
-          if (!disposed) ctx.logger.error(`${label}: tool re-sync failed: ${String(error)}`)
+          if (!disposed) ctx.logger.error(`${label}: tool re-sync failed: ${describeConnectionFailure(config, error)}`)
         }
       },
     )
@@ -602,14 +619,20 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
       }
       await enqueueSync(generation, startup ? startupOpts : opts)
     } catch (error) {
-      if (firstAttemptError === undefined) firstAttemptError = error
+      // Every streamable-http failure is bounded (a transport error can embed a
+      // whole response body); the marker strip applies when OAuth is in play.
+      const sanitizing = config.transport === 'streamable-http' && !(error instanceof UnauthorizedError)
+      const failure = describeConnectionFailure(config, error, !sanitizing)
+      // The first error is later attached as a `cause` that the host logs, so
+      // an auth-server failure is stored already sanitised (OP-203).
+      if (firstAttemptError === undefined) firstAttemptError = sanitizing ? new Error(failure) : error
       // Disposal clears current ownership before it closes the generation, so
       // only a live supervisor reports an attempt failure. An authorization
       // failure already logged its consent guidance through the provider's
       // onAuthorizationUrl hook — repeating it per attempt would only spam.
       if (isCurrent(generation) && !(error instanceof UnauthorizedError)) {
-        ctx.logger.warn(`${label}: connection attempt failed: ${String(error)}`)
-        recordError(String(error))
+        ctx.logger.warn(`${label}: connection attempt failed: ${failure}`)
+        recordError(failure)
       }
       try { await generation.close() } catch { /* transport already gone */ }
       const quiesced = hasClosed() || await waitForClose(closed.promise)

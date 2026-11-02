@@ -13,7 +13,7 @@ import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
-import type { Config } from '@deepseek-ai/dsh-mcp-client'
+import type { Config, StreamableHttpConfig } from '@deepseek-ai/dsh-mcp-client'
 
 import { startOAuthFixture, type OAuthFixture } from './oauth-fixture.ts'
 import { oauthCredentialRef, CredentialsOAuthProvider }
@@ -39,7 +39,7 @@ async function mountRegistry(credentialsPath?: string): Promise<Context> {
   return ctx
 }
 
-function httpConfig(fixture: OAuthFixture, serverName: string): Config {
+function httpConfig(fixture: OAuthFixture, serverName: string): StreamableHttpConfig {
   return {
     transport: 'streamable-http',
     serverName,
@@ -665,4 +665,390 @@ describe('resolveAuthProvider (connection.ts) direct wiring', () => {
       }
     },
   )
+})
+
+/** Build the shared teardown for a test that owns a context, a temp dir and a fixture. */
+function disposeAll(ctx: Context, dir: string, fixture: OAuthFixture): () => Promise<void> {
+  return async () => {
+    await ctx.fiber.dispose()
+    await rm(dir, { recursive: true, force: true })
+    await fixture.close()
+  }
+}
+
+describe('OP-203 auth failure text is bounded and sanitised', () => {
+  it('a malformed oversized registration response reaches neither the logger nor lastError', async () => {
+    const secret = 'FAKE-SECRET-sk_test_0000000000'
+    const fixture = await startOAuthFixture({
+      registrationResponse: { status: 500, body: `${secret}\nline2\u0007\u001b[31m\u202e\u200b\ufeff${'x'.repeat(5000)}` },
+    })
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
+    const credPath = join(dir, 'creds.yaml')
+    try {
+      const ctx = await mountRegistry(credPath)
+      const lines: string[] = []
+      for (const level of ['debug', 'info', 'warn', 'error'] as const) {
+        vi.spyOn(ctx.logger, level).mockImplementation(((message: unknown) => {
+          lines.push(String(message))
+        }) as never)
+      }
+      const config = httpConfig(fixture, 'op203')
+      const handle = startConnection(ctx, config, resolveReconnectPolicy(config.reconnect, 'reconnect'))
+      await handle.ready
+      const lastError = handle.status().lastError
+      expect(lastError).toBeDefined()
+      expect(lastError).toContain('authorization server returned an unexpected response; see the auth CLI for details')
+      expect(lastError!.length).toBeLessThanOrEqual(203)
+      expect(lastError).not.toMatch(/[\u0000-\u001f\u200b-\u200d\u202a-\u202e\u2066-\u2069\ufeff]/)
+      expect(lastError).not.toContain(secret)
+      expect(lines.some(line => line.includes('connection attempt failed'))).toBe(true)
+      expect(lines.join('\n')).not.toContain(secret)
+      expect(lines.join('\n')).not.toContain('xxxxx')
+      expect(lines.join('\n')).not.toContain('FAKE-SECRE')
+      expect(lastError).not.toContain('FAKE-SECRE')
+      await handle.dispose()
+      await ctx.fiber.dispose()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+      await fixture.close()
+    }
+  })
+
+  it('failOnStartupError: neither the thrown error nor its cause carries the server body', async () => {
+    const secret = 'FAKE-SECRET-sk_test_1111111111'
+    const fixture = await startOAuthFixture({ registrationResponse: { status: 500, body: `${secret} not json` } })
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
+    try {
+      const ctx = await mountRegistry(join(dir, 'creds.yaml'))
+      const config: Config = { ...httpConfig(fixture, 'op203-fail'), failOnStartupError: true }
+      const thrown = await mcpApply(ctx, config).then(() => undefined, (error: unknown) => error)
+      expect(thrown).toBeInstanceOf(Error)
+      const cause = (thrown as Error).cause as Error
+      expect(cause).toBeInstanceOf(Error)
+      expect((thrown as Error).message).not.toContain(secret)
+      expect(cause.message).not.toContain(secret)
+      expect(cause.message).toContain('authorization server returned an unexpected response')
+      await ctx.fiber.dispose()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+      await fixture.close()
+    }
+  })
+
+  it('caps a long message that has no raw-body marker', async () => {
+    const fixture = await startOAuthFixture({
+      registrationResponse: { status: 500, body: JSON.stringify({ error: 'server_error', error_description: 'y'.repeat(5000) }) },
+    })
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
+    try {
+      const ctx = await mountRegistry(join(dir, 'creds.yaml'))
+      const config = httpConfig(fixture, 'op203-cap')
+      // A well-formed OAuth error with an oversized description has no raw-body marker to replace.
+      const handle = startConnection(ctx, config, resolveReconnectPolicy(config.reconnect, 'reconnect'))
+      await handle.ready
+      expect(handle.status().lastError!.length).toBe(203)
+      expect(handle.status().lastError!.endsWith('...')).toBe(true)
+      await handle.dispose()
+      await ctx.fiber.dispose()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+      await fixture.close()
+    }
+  })
+})
+
+describe('OP-211 stored client registration redirect check', () => {
+  async function seeded(
+    clientInformation: Record<string, unknown>,
+    redirectUri: string,
+    onRegistrationReset?: (message: string) => void,
+  ) {
+    const fixture = await startOAuthFixture()
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
+    const ctx = await mountRegistry(join(dir, 'creds.yaml'))
+    const ref = oauthCredentialRef('op211')
+    await ctx.credentials.set(ref, JSON.stringify({
+      version: 1,
+      tokens: { access_token: 'at-keep', refresh_token: 'rt-keep', token_type: 'Bearer' },
+      clientInformation,
+      codeVerifier: 'verifier-fake',
+    }))
+    const provider = CredentialsOAuthProvider.create({
+      serverName: 'op211',
+      serverUrl: new URL(fixture.url),
+      store: ctx.credentials,
+      redirectUri,
+      ...(onRegistrationReset === undefined ? {} : { onRegistrationReset }),
+    })
+    const cleanup = disposeAll(ctx, dir, fixture)
+    return { provider, cleanup }
+  }
+
+  it('a redirect port mismatch drops client info and verifier, keeps tokens, logs one line', async () => {
+    const lines: string[] = []
+    const { provider, cleanup } = await seeded(
+      { client_id: 'c-old', redirect_uris: ['http://127.0.0.1:14507/callback'] },
+      'http://127.0.0.1:14506/callback',
+      line => lines.push(line),
+    )
+    try {
+      expect(await provider.clientInformation()).toBeUndefined()
+      expect(await provider.clientInformation()).toBeUndefined()
+      expect(await provider.tokens()).toMatchObject({ access_token: 'at-keep' })
+      await expect(provider.codeVerifier()).rejects.toThrow()
+      expect(lines).toEqual([
+        'stored OAuth client registration used redirect port 14507, configured port is 14506; re-registering',
+      ])
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('unparseable entries are skipped and a default http port reports 80', async () => {
+    const lines: string[] = []
+    const { provider, cleanup } = await seeded(
+      { client_id: 'c-old', redirect_uris: ['not a url', 'http://localhost/callback'] },
+      'http://127.0.0.1:14506/callback',
+      line => lines.push(line),
+    )
+    try {
+      expect(await provider.clientInformation()).toBeUndefined()
+      expect(lines).toEqual([
+        'stored OAuth client registration used redirect port 80, configured port is 14506; re-registering',
+      ])
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('a running host logs the reset through its logger and re-registers on the configured port', async () => {
+    const fixture = await startOAuthFixture()
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
+    try {
+      const ctx = await mountRegistry(join(dir, 'creds.yaml'))
+      const infos: string[] = []
+      vi.spyOn(ctx.logger, 'info').mockImplementation(((message: unknown) => {
+        infos.push(String(message))
+      }) as never)
+      await ctx.credentials.set(oauthCredentialRef('op211-host'), JSON.stringify({
+        version: 1,
+        clientInformation: { client_id: 'c-old', redirect_uris: ['http://127.0.0.1:14507/callback'] },
+      }))
+      const config: StreamableHttpConfig = {
+        ...httpConfig(fixture, 'op211-host'),
+        auth: { mode: 'oauth', redirectPort: 14506 },
+      }
+      const handle = startConnection(ctx, config, resolveReconnectPolicy(config.reconnect, 'reconnect'))
+      await handle.ready
+      expect(infos.filter(line => line.includes('re-registering'))).toEqual([
+        'mcp-client(op211-host): stored OAuth client registration used redirect port 14507, configured port is 14506; re-registering',
+      ])
+      expect(fixture.registrationRequests).toHaveLength(1)
+      await handle.dispose()
+      await ctx.fiber.dispose()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+      await fixture.close()
+    }
+  })
+
+  it('default ports resolve by scheme, an empty list is reused', async () => {
+    const lines: string[] = []
+    const { provider, cleanup } = await seeded(
+      { client_id: 'c-old', redirect_uris: ['http://a.example/cb', 'https://a.example/cb', 'ftp://a.example/cb'] },
+      'http://127.0.0.1:14506/callback',
+      line => lines.push(line),
+    )
+    try {
+      expect(await provider.clientInformation()).toBeUndefined()
+      expect(lines[0]).toContain('redirect port 80,443,')
+    } finally {
+      await cleanup()
+    }
+    const bad: string[] = []
+    const junk = await seeded({ client_id: 'c-junk', redirect_uris: ['not a url'] }, 'http://127.0.0.1:14506/callback', line => bad.push(line))
+    try {
+      expect(await junk.provider.clientInformation()).toBeUndefined()
+      expect(bad[0]).toContain('redirect port none,')
+    } finally {
+      await junk.cleanup()
+    }
+    const empty = await seeded({ client_id: 'c-empty', redirect_uris: [] }, 'http://127.0.0.1:14506/callback')
+    try {
+      expect(await empty.provider.clientInformation()).toMatchObject({ client_id: 'c-empty' })
+    } finally {
+      await empty.cleanup()
+    }
+  })
+
+  it('a server echoing a normalised redirect form completes the flow without re-registration', async () => {
+    const fixture = await startOAuthFixture({
+      echoRedirectUris: requested => ['http://127.0.0.1:14599/other', ...requested.map(uri => `${uri}/`)],
+    })
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
+    try {
+      const ctx = await mountRegistry(join(dir, 'creds.yaml'))
+      const lines: string[] = []
+      const provider = CredentialsOAuthProvider.create({
+        serverName: 'op211-norm',
+        serverUrl: new URL(fixture.url),
+        store: ctx.credentials,
+        redirectUri: 'http://127.0.0.1:14506/callback',
+        onRegistrationReset: line => lines.push(line),
+      })
+      expect(await sdkAuth(provider, { serverUrl: new URL(fixture.url) })).toBe('REDIRECT')
+      // A later read (finishAuth path) keeps both the registration and the verifier.
+      expect(await provider.clientInformation()).toMatchObject({ client_id: 'dyn-client-1' })
+      expect(await provider.codeVerifier()).toBeTypeOf('string')
+      expect(await sdkAuth(provider, { serverUrl: new URL(fixture.url) })).toBe('REDIRECT')
+      expect(fixture.registrationRequests).toHaveLength(1)
+      expect(lines).toEqual([])
+      await ctx.fiber.dispose()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+      await fixture.close()
+    }
+  })
+
+  it('a server rewriting 127.0.0.1 to localhost completes the flow with one registration', async () => {
+    const fixture = await startOAuthFixture({
+      echoRedirectUris: requested => requested.map(uri => uri.replace('127.0.0.1', 'localhost')),
+    })
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
+    try {
+      const ctx = await mountRegistry(join(dir, 'creds.yaml'))
+      const lines: string[] = []
+      const provider = CredentialsOAuthProvider.create({
+        serverName: 'op211-loopback',
+        serverUrl: new URL(fixture.url),
+        store: ctx.credentials,
+        redirectUri: 'http://127.0.0.1:14506/callback',
+        onRegistrationReset: line => lines.push(line),
+      })
+      expect(await sdkAuth(provider, { serverUrl: new URL(fixture.url) })).toBe('REDIRECT')
+      expect(await provider.clientInformation()).toMatchObject({ redirect_uris: ['http://localhost:14506/callback'] })
+      expect(await provider.codeVerifier()).toBeTypeOf('string')
+      expect(await sdkAuth(provider, { serverUrl: new URL(fixture.url) })).toBe('REDIRECT')
+      expect(fixture.registrationRequests).toHaveLength(1)
+      expect(lines).toEqual([])
+      await ctx.fiber.dispose()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+      await fixture.close()
+    }
+  })
+
+  it('a matching redirect URI reuses the stored registration', async () => {
+    const lines: string[] = []
+    const { provider, cleanup } = await seeded(
+      { client_id: 'c-ok', redirect_uris: ['http://127.0.0.1:14506/callback'] },
+      'http://127.0.0.1:14506/callback',
+      line => lines.push(line),
+    )
+    try {
+      expect(await provider.clientInformation()).toMatchObject({ client_id: 'c-ok' })
+      expect(await provider.codeVerifier()).toBe('verifier-fake')
+      expect(lines).toEqual([])
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('a registration without redirect_uris is reused unchanged', async () => {
+    const { provider, cleanup } = await seeded({ client_id: 'c-bare' }, 'http://127.0.0.1:14506/callback')
+    try {
+      expect(await provider.clientInformation()).toMatchObject({ client_id: 'c-bare' })
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+describe('describeConnectionFailure (OP-203 F2)', () => {
+  const body = `FAKE-SECRET\nRaw body: ${'z'.repeat(400)}`
+  it('leaves stdio and verbatim text untouched, bounds streamable-http, strips payload when OAuth is set', async () => {
+    const { describeConnectionFailure } = await import('@deepseek-ai/dsh-mcp-client/src/connection.ts')
+    const base = { serverName: 's', toolCallTimeoutMs: 1, failOnStartupError: false } as const
+    const stdio = { ...base, transport: 'stdio', command: 'x' } as unknown as Config
+    const plain = { ...base, transport: 'streamable-http', url: 'http://x/mcp', headers: {} } as unknown as Config
+    const oauth = { ...plain, auth: { mode: 'oauth' } } as unknown as Config
+    expect(describeConnectionFailure(stdio, new Error(body))).toContain('FAKE-SECRET\n')
+    expect(describeConnectionFailure(oauth, new Error(body), true)).toContain('FAKE-SECRET\n')
+    const bounded = describeConnectionFailure(plain, new Error(body))
+    expect(bounded).not.toMatch(/\n/)
+    expect(bounded.length).toBe(203)
+    const stripped = describeConnectionFailure(oauth, new Error(body))
+    expect(stripped).toContain('authorization server returned an unexpected response')
+    expect(stripped).not.toContain('zzzz')
+  })
+})
+
+describe('OP-211 F3 requested redirect URI is persisted and the echo ignored', () => {
+  async function mounted(echo: (requested: string[]) => string[]) {
+    const fixture = await startOAuthFixture({ echoRedirectUris: echo })
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-oauth-'))
+    const ctx = await mountRegistry(join(dir, 'creds.yaml'))
+    const lines: string[] = []
+    const make = (redirectUri: string) => CredentialsOAuthProvider.create({
+      serverName: 'op211-f3',
+      serverUrl: new URL(fixture.url),
+      store: ctx.credentials,
+      redirectUri,
+      onRegistrationReset: line => lines.push(line),
+    })
+    const cleanup = disposeAll(ctx, dir, fixture)
+    return { fixture, make, lines, cleanup, ctx }
+  }
+
+  it.each([
+    ['localhost', (r: string[]) => r.map(u => u.replace('127.0.0.1', 'localhost'))],
+    ['stripped port', (r: string[]) => r.map(u => u.replace(':14506', ''))],
+    ['added slash', (r: string[]) => r.map(u => `${u}/`)],
+  ])('server echo with %s does not reset', async (_name, echo) => {
+    const { fixture, make, lines, cleanup } = await mounted(echo)
+    try {
+      const provider = make('http://127.0.0.1:14506/callback')
+      expect(await sdkAuth(provider, { serverUrl: new URL(fixture.url) })).toBe('REDIRECT')
+      expect(await provider.clientInformation()).toMatchObject({ client_id: 'dyn-client-1' })
+      expect(await provider.codeVerifier()).toBeTypeOf('string')
+      expect(await sdkAuth(provider, { serverUrl: new URL(fixture.url) })).toBe('REDIRECT')
+      expect(fixture.registrationRequests).toHaveLength(1)
+      expect(lines).toEqual([])
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('a persisted requested URI that differs from the configured one resets, then re-registers', async () => {
+    const { fixture, make, lines, cleanup } = await mounted(r => r)
+    try {
+      const first = make('http://127.0.0.1:14507/callback')
+      await sdkAuth(first, { serverUrl: new URL(fixture.url) })
+      const second = make('http://127.0.0.1:14506/callback')
+      expect(await second.clientInformation()).toBeUndefined()
+      expect(lines).toEqual([
+        'stored OAuth client registration used redirect port 14507, configured port is 14506; re-registering',
+      ])
+      await sdkAuth(second, { serverUrl: new URL(fixture.url) })
+      expect(fixture.registrationRequests).toHaveLength(2)
+      await second.invalidateCredentials('client')
+      expect(await second.clientInformation()).toBeUndefined()
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('caps the reported ports to five distinct values', async () => {
+    const { make, lines, cleanup, ctx } = await mounted(r => r)
+    try {
+      const uris = [1, 2, 3, 4, 5, 6, 6].map(n => `http://127.0.0.1:1450${n}/cb`)
+      await ctx.credentials.set(oauthCredentialRef('op211-f3'), JSON.stringify({
+        version: 1, clientInformation: { client_id: 'c', redirect_uris: uris },
+      }))
+      expect(await make('http://127.0.0.1:14599/callback').clientInformation()).toBeUndefined()
+      expect(lines[0]).toContain('redirect port 14501,14502,14503,14504,14505, configured')
+    } finally {
+      await cleanup()
+    }
+  })
 })

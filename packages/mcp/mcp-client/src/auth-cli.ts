@@ -19,7 +19,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { LocalCredentialProvider, resolveSpec } from '@deepseek-ai/dsh-credentials-local'
 import { auth as sdkAuth } from '@modelcontextprotocol/sdk/client/auth.js'
 import type { OAuthCredentialStore } from './oauth.ts'
-import { CredentialsOAuthProvider } from './oauth.ts'
+import { CredentialsOAuthProvider, sanitizeAuthError } from './oauth.ts'
 import { DEFAULT_OAUTH_REDIRECT_PORT } from './index.ts'
 import { captureAuthorizationCode } from './oauth-callback.ts'
 
@@ -186,7 +186,7 @@ if (invoked) {
   runAuthCli(process.argv.slice(2)).catch((error: unknown) => {
     /* v8 ignore next -- every throw site reachable from runAuthCli (parseArgs, the credential fiber's init, URL parsing,
        the SDK auth flow, captureAuthorizationCode) throws Error instances */
-    console.error(String(error instanceof Error ? error.message : error))
+    console.error(sanitizeAuthError(String(error instanceof Error ? error.message : error)))
     process.exitCode = 1
   })
 }
