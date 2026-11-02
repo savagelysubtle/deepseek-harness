@@ -73,7 +73,9 @@ The user-global file is always `$DSH_HOME/AGENTS.md` with no local overlay; both
 
 ## Budgeting And Bounded Reads
 
-Rendering preserves the most specific instruction files first. It drops whole broader files before truncating the most-specific file and emits a visible `Workspace instruction budget ...` notice naming omitted and truncated paths. The rendered bytes never exceed `maxBytes`.
+Rendering preserves the most specific instruction files first. It drops whole broader files before truncating the most-specific file and emits a visible `Workspace instruction budget ...` notice naming omitted and truncated paths. The rendered bytes never exceed `maxBytes`. The base bundle sets `maxBytes: 131072` (128 KiB) so a large user-global `$DSH_HOME/AGENTS.md` and a project `AGENTS.md` fit together; a pair that overflows `65536` loses the broader file whole.
+
+When a baseline drops or truncates any file, the plugin also logs a host warning naming each affected file, its byte size, the budget and the rendered size, and enters one session `notice` message (`form: 'notice'`) right after the baseline so the operator sees it in the transcript. It is reported once per session and budget outcome; a baseline that fits emits neither.
 
 Instruction content is read through `streamText()` under `maxSourceBytes`, even when provider metadata omits size or a file grows after its metadata probe. An oversized file is ignored; during dynamic reconciliation it is temporarily unavailable rather than removed. The plugin keeps no process-wide cache and never caches instruction prose. Its session-local scope cache uses provider versions only as a fast invalidation signal; after invalidation, SHA-1 over the bounded read remains the cross-provider content identity stored in the structured message source.
 

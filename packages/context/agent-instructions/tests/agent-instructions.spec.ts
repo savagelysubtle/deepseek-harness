@@ -1951,9 +1951,13 @@ describe('workspace context request injection', () => {
       await composeBaselinePrefix(ctx, agent)
 
       const contexts = agent.session.events.filter(event =>
-        event.type === 'user/message' && event.data.source.kind !== 'user',
+        event.type === 'user/message' && event.data.source.kind === 'agent-instructions',
       )
       expect(contexts).toHaveLength(1)
+      // The overflow is also announced once, as a separate session notice.
+      expect(agent.session.events.filter(event =>
+        event.type === 'user/message' && event.data.source.kind === 'plugin',
+      )).toHaveLength(1)
       const source = contexts[0]?.type === 'user/message' ? contexts[0].data.source : undefined
       expect(source?.kind === 'agent-instructions' ? source.changes : undefined).toEqual([])
       if (maxBytes === 120) {
