@@ -1,0 +1,20 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(Edit|Write|MultiEdit|NotebookEdit|edit|write|str_replace_editor)$",
+        "hooks": [
+          { "type": "command", "command": "\"$HOME/.agents/hooks/plan-gate.sh\"" },
+          { "type": "command", "command": "\"$HOME/.agents/hooks/screenshot-gate.sh\"" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "\"$HOME/.agents/hooks/done-evidence.sh\"" }
+        ]
+      }
+    ]
+  }
+}

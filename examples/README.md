@@ -24,6 +24,10 @@ A self-referential agent that can inspect and change its in-memory Cordis plugin
 
 An opt-in Web overlay for durable, Session-local reminders. It supports positive whole-second `after_seconds` delays and absolute `at` targets through `schedule_create`, `schedule_list`, and `schedule_delete`; active reminders persist in the original Session, resume when that Session becomes live again, and do not run while it is cold. Run `dsh web --patch examples/web-schedule/cordis.yml`; see [web-schedule/README.md](web-schedule/README.md) for absolute-time authority, delivery, and recovery boundaries.
 
+## hooks
+
+An opt-in overlay that mounts the Claude hook bridge with the plan, screenshot, and done-evidence gate scripts, so a model running inside dsh is held to the same rules as a Claude Code session. Apply it to a throwaway profile with `dsh web --patch examples/hooks/gate-hooks.cordis.yml`; see the [gate hooks reference](hooks/README.md).
+
 ## acp-agent
 
 An Agent Client Protocol automation server for programmatic clients, with session, permission, and cancellation support. See the [ACP example reference](acp-agent/README.md).

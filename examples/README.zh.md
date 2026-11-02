@@ -24,6 +24,10 @@
 
 用于持久、仅限 Session 内提醒的可选 Web overlay。它通过 `schedule_create`、`schedule_list` 和 `schedule_delete` 支持正整数秒的 `after_seconds` 延时与绝对 `at` 目标；活动提醒保存在原 Session 中，该 Session 再次 live 时恢复，而 cold 期间不会运行。使用 `dsh web --patch examples/web-schedule/cordis.yml` 启动；绝对时间 authority 以及交付与恢复边界详见 [web-schedule/README.md](web-schedule/README.md)。
 
+## hooks
+
+可选 overlay，挂载 Claude 钩子桥以及方案、截图和完成证据三个门禁脚本，使在 dsh 内运行的模型与 Claude Code 会话受同样规则约束。使用 `dsh web --patch examples/hooks/gate-hooks.cordis.yml` 应用到一次性 profile；详见[门禁钩子参考](hooks/README.md)。
+
 ## acp-agent
 
 面向程序化客户端的 ACP（Agent Client Protocol）自动化服务器，支持会话、权限和取消操作。详见 [ACP 示例参考](acp-agent/README.md)。
