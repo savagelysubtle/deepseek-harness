@@ -1,0 +1,28 @@
+# FOR dshTest PROFILES ONLY: never add this overlay to a base or live-seat
+# composition. There is no per-session call cap or approval on
+# subagent_claude_code today: every call is a fresh Claude Code session billed
+# to the plan, and a prompt-injected or looping model could call it repeatedly
+# (a cap is a separate follow-up). The child also inherits non-credential
+# variables such as ANTHROPIC_BASE_URL, so a changed base URL would send the
+# OAuth bearer there.
+#
+# Add the native Claude Code product provider and its one-shot tool row to the
+# real ACP composition. The provider config carries NO API key: the spawned
+# `claude` uses the user's own native login (the subscription). Setting
+# ANTHROPIC_API_KEY under the provider's `config.env` would switch this backend
+# to API billing; ambient credential-shaped variables never reach the child.
+- id: base
+  name: '@deepseek-ai/cordis-plugin-include'
+  config:
+    path: ./cordis.yml
+    patches:
+      - insert:
+          - id: subagent-claude-code
+            name: '@deepseek-ai/dsh-subagent-claude-code'
+          - id: tool-subagent-claude-code
+            name: '@deepseek-ai/dsh-tool-subagent'
+            config:
+              provider: claude-code
+              toolName: subagent_claude_code
+              backgroundMode: one-shot
+              maxDepth: provider-managed

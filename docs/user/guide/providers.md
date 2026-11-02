@@ -16,7 +16,7 @@ Keys are write-only. The page receives a redacted descriptor after saving, never
 
 Choose **Add provider**, select a provider such as Anthropic or OpenAI, enter its API key, and save. The installed catalog supplies the endpoint, protocol, and model list.
 
-Providers with native authentication need their native credentials instead. Bedrock, Vertex, Azure, and Codex use AWS credentials and a region, an ADC project, an `api-version`, and OAuth respectively; filling only the API-key field does not configure them.
+Providers with native authentication need their native credentials instead. Bedrock, Vertex, Azure, and Codex use AWS credentials and a region, an ADC project, an `api-version`, and OAuth respectively; filling only the API-key field does not configure them. Claude Code reaches your own Claude login through a subagent tool instead of the Models page; see the section "Claude: subscription vs API key" below.
 
 ## Add a custom provider
 
@@ -78,6 +78,19 @@ llm-pi-ai:
 Every list must name at least one modality except a model's own, where an empty list means the same as omitting it. An unknown modality is refused wherever it is written.
 
 Both fields state a claim about your endpoint rather than checking it. A model that declares images its endpoint does not serve is not caught here; the provider rejects the request instead.
+
+## Claude: subscription vs API key
+
+There are two separate ways to use Claude, and they bill differently.
+
+- **Subscription (native login).** The optional Claude Code subagent runs your installed `claude`, signed in with your own Claude account, and is reached by the model as the tool `subagent_claude_code`. It bills your plan's quota. Production `dsh` does not mount it by default; a Profile opts in with the overlay in `examples/acp-agent/product-subagent-claude-code.cordis.yml` (details in `packages/subagent/subagent-claude-code/README.md`). Sign in once with `claude`; for an unattended host run `claude setup-token` and set `CLAUDE_CODE_OAUTH_TOKEN` in the subagent's `config.env`, because the ambient environment is scrubbed of credential-shaped variables.
+- **API key.** Add the Anthropic provider under **Settings → Models** (the `llm-pi-ai` provider with `apiKeyEnv`). Requests are made by dsh's own agent and bill per token to the key.
+
+Use this overlay only in dshTest profiles, never in a base or live-seat composition: there is no per-session call cap or approval on `subagent_claude_code` today, each call is a fresh Claude Code session billed to the plan, and a prompt-injected or looping model could call it repeatedly (a cap is a separate follow-up).
+
+Setting `ANTHROPIC_API_KEY` in the subagent's `config.env` switches that backend from the subscription to API billing. The provider itself never supplies an API key and strips ambient credential variables, but the child still reads your own `~/.claude/settings.json` (all setting sources load), which can carry an `env` block or `apiKeyHelper`, and inherits non-credential variables such as `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`, and `CLAUDE_CODE_USE_VERTEX`; any of these can change billing or routing (a changed `ANTHROPIC_BASE_URL` would send the OAuth bearer there). An expired login is expected to fail with an error rather than switch to an API key (expected behaviour, not verified).
+
+Policy caveat (unverified): Anthropic's Agent SDK terms may restrict third-party products from offering claude.ai login. Check https://code.claude.com/docs/en/agent-sdk/overview before relying on the subscription route.
 
 ## Select a model
 

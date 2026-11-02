@@ -88,7 +88,27 @@ class ClaudeCodeProvider implements SubagentProvider {
         )
       },
     }
-    return startClaudeCodeRun(request, spec)
+    const startedAt = Date.now()
+    const run = await startClaudeCodeRun(request, spec)
+    // Every run is a separate billed Claude Code session: leave a host-log trace.
+    const taskLength = request.prompt.reduce(
+      (total, block) => total + (block.type === 'text' ? block.text.length : 0),
+      0,
+    )
+    this.ctx.logger.info(
+      `subagent-claude-code: run started (provider=${this.name}, run=${run.id}, taskChars=${taskLength})`,
+    )
+    void run.result.then(
+      (result) => {
+        this.ctx.logger.info(
+          `subagent-claude-code: run completed (run=${run.id}, stopReason=${result.stopReason}, durationMs=${Date.now() - startedAt})`,
+        )
+      },
+      () => {
+        // The shared result contract settles rather than rejects; nothing to log.
+      },
+    )
+    return run
   }
 }
 

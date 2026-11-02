@@ -335,6 +335,7 @@ describe('task admission and package contracts', () => {
     const resolveExecutable = vi.spyOn(ctx.subprocess, 'resolveExecutable')
       .mockResolvedValue('/native/claude')
     const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    const info = vi.spyOn(ctx.logger, 'info').mockImplementation(() => {})
     await ctx.plugin(claudeCode, {
       env: {
         ANTHROPIC_API_KEY: 'provider-fake-key',
@@ -369,6 +370,12 @@ describe('task admission and package contracts', () => {
     })
     expect(warn).toHaveBeenCalledWith(expect.stringContaining(
       'subagent-claude-code: child run failed (error):',
+    ))
+    expect(info).toHaveBeenCalledWith(expect.stringMatching(
+      /subagent-claude-code: run started \(provider=claude-code, run=\S+, taskChars=\d+\)/,
+    ))
+    expect(info).toHaveBeenCalledWith(expect.stringMatching(
+      /subagent-claude-code: run completed \(run=\S+, stopReason=error, durationMs=\d+\)/,
     ))
     expect(resolveExecutable).toHaveBeenCalledWith(
       'claude',
@@ -583,6 +590,50 @@ describe('query options and result mapping', () => {
       cwd: '/workspace',
       graceMs: 17,
     }))
+  })
+
+  it('keeps ambient API credentials out of the child so the native login is used', () => {
+    const credentials = [
+      'ANTHROPIC_API_KEY',
+      'CLAUDE_CODE_OAUTH_TOKEN',
+      'ANTHROPIC_AUTH_TOKEN',
+    ]
+    for (const name of credentials) vi.stubEnv(name, 'test-not-a-real-key')
+    vi.stubEnv('FOO_OK', 'visible')
+    const child = fakeChild()
+    const spawn = vi.fn(() => child.handle)
+    const spec: ClaudeCodeRunSpec = {
+      cwd: '/workspace',
+      executable: '/native/claude',
+      env: {},
+      disposeGraceMs: 17,
+      spawn,
+    }
+    const options = claudeQueryOptions(spec, new AbortController(), () => {})
+    // Positive control: a non-credential ambient value does pass, so removing
+    // the scrub would fail the negative assertions below.
+    expect(options.env).toHaveProperty('FOO_OK', 'visible')
+    for (const name of credentials) expect(options.env).not.toHaveProperty(name)
+
+    // The SDK hands the composed options.env to the spawn hook; the shared
+    // subprocess spec derived from it must not carry a credential value either.
+    options.spawnClaudeCodeProcess!(sdkSpawnOptions({ env: { ...options.env } }))
+    const spawnSpec = (spawn.mock.calls as unknown as [SubprocessSpawnSpec][])[0]![0]
+    expect(spawnSpec.env?.FOO_OK).toBe('visible')
+    for (const name of credentials) expect(spawnSpec.env?.[name]).toBeUndefined()
+  })
+
+  it('lets an explicit config.env API key through while ambient ones stay out', () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'ambient-not-a-real-key')
+    const spec: ClaudeCodeRunSpec = {
+      cwd: '/workspace',
+      executable: '/native/claude',
+      env: { ANTHROPIC_API_KEY: 'explicit-not-a-real-key' },
+      disposeGraceMs: 17,
+      spawn: vi.fn(() => fakeChild().handle),
+    }
+    const options = claudeQueryOptions(spec, new AbortController(), () => {})
+    expect(options.env).toHaveProperty('ANTHROPIC_API_KEY', 'explicit-not-a-real-key')
   })
 
   it('accepts only a non-error success with a non-blank final result', () => {

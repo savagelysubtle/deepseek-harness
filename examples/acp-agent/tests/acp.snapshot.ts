@@ -65,6 +65,9 @@ const BACKGROUND_TASK_ADMISSION_CONFIG = fileURLToPath(
   new URL('../background-job-admission.cordis.yml', import.meta.url),
 )
 const PRODUCT_SUBAGENT_CODEX_CONFIG = fileURLToPath(new URL('../product-subagent-codex.cordis.yml', import.meta.url))
+const PRODUCT_SUBAGENT_CLAUDE_CODE_CONFIG = fileURLToPath(
+  new URL('../product-subagent-claude-code.cordis.yml', import.meta.url),
+)
 const PRODUCT_SUBAGENT_BOTH_CONFIG = fileURLToPath(new URL('../product-subagent-both.cordis.yml', import.meta.url))
 const FS_DIFF_BOUND_CONFIG = fileURLToPath(new URL('./fs-diff-bound.cordis.yml', import.meta.url))
 const SNAPSHOTS_DIR = join(dirname(fileURLToPath(import.meta.url)), 'snapshots')
@@ -148,6 +151,15 @@ const SCENARIOS: Scenario[] = [
     pinsHeader: true,
     headerClass: 'product-subagent-codex',
     configPath: PRODUCT_SUBAGENT_CODEX_CONFIG,
+  },
+  {
+    name: 'product-subagent-claude-code',
+    hasModelTurn: true,
+    recorded: false,
+    pinsHeader: true,
+    headerClass: 'product-subagent-claude-code',
+    systemPromptSource: 'product-subagent-codex',
+    configPath: PRODUCT_SUBAGENT_CLAUDE_CODE_CONFIG,
   },
   {
     name: 'product-subagent-both',
