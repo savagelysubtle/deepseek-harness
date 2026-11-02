@@ -585,6 +585,32 @@ describe('query options and result mapping', () => {
     }))
   })
 
+  it('keeps ambient API credentials out of the child so the native login is used', () => {
+    const credentials = [
+      'ANTHROPIC_API_KEY',
+      'CLAUDE_CODE_OAUTH_TOKEN',
+      'ANTHROPIC_AUTH_TOKEN',
+    ]
+    for (const name of credentials) vi.stubEnv(name, 'test-not-a-real-key')
+    const child = fakeChild()
+    const spawn = vi.fn(() => child.handle)
+    const spec: ClaudeCodeRunSpec = {
+      cwd: '/workspace',
+      executable: '/native/claude',
+      env: {},
+      disposeGraceMs: 17,
+      spawn,
+    }
+    const options = claudeQueryOptions(spec, new AbortController(), () => {})
+    for (const name of credentials) expect(options.env).not.toHaveProperty(name)
+
+    // Replay the SDK's own composition (inherited process.env) through the
+    // spawn hook: the shared subprocess spec must not carry a credential value.
+    options.spawnClaudeCodeProcess!(sdkSpawnOptions({ env: { ...options.env } }))
+    const spawnSpec = (spawn.mock.calls as unknown as [SubprocessSpawnSpec][])[0]![0]
+    for (const name of credentials) expect(spawnSpec.env?.[name]).toBeUndefined()
+  })
+
   it('accepts only a non-error success with a non-blank final result', () => {
     expect(successfulResult(success('exact final'))).toBe('exact final')
     expect(() => successfulResult(success('answer', true)))

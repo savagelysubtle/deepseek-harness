@@ -16,7 +16,7 @@
 
 选择**添加提供方**，选取 Anthropic 或 OpenAI 等提供方，输入其 API 密钥并保存。已安装目录会提供端点、协议和模型列表。
 
-使用原生认证的提供方需要各自的原生凭据。Bedrock、Vertex、Azure 和 Codex 分别使用 AWS 凭据与区域、ADC 项目、`api-version` 和 OAuth；只填写 API 密钥字段无法完成配置。
+使用原生认证的提供方需要各自的原生凭据。Bedrock、Vertex、Azure 和 Codex 分别使用 AWS 凭据与区域、ADC 项目、`api-version` 和 OAuth；只填写 API 密钥字段无法完成配置。Claude Code 通过子 agent 工具而非模型页面使用你自己的 Claude 登录，参见下文“Claude：订阅与 API 密钥”一节。
 
 ## 添加自定义提供方
 
@@ -78,6 +78,17 @@ llm-pi-ai:
 除模型自身的列表外，每个列表都至少要写一项模态；模型自身的空列表与省略它同义。未知模态在任何位置写入都会被拒绝。
 
 这两个字段都是对你端点的断言，而不是对它的检查。声明了端点并不提供的图片能力的模型不会在这里被拦下，改由提供方拒绝该请求。
+
+## Claude：订阅与 API 密钥
+
+使用 Claude 有两种相互独立的方式，计费方式也不同。
+
+- **订阅（原生登录）。** 可选的 Claude Code 子 agent 运行你已安装并用自己账户登录的 `claude`，模型通过工具 `subagent_claude_code` 调用它，消耗你套餐的额度。生产 `dsh` 默认不挂载它；Profile 通过 `examples/acp-agent/product-subagent-claude-code.cordis.yml` 中的覆盖文件选择启用（详见 `packages/subagent/subagent-claude-code/README.zh.md`）。先用 `claude` 登录一次；无人值守的宿主请运行 `claude setup-token`，并把 `CLAUDE_CODE_OAUTH_TOKEN` 设置在该子 agent 的 `config.env` 中，因为环境中具有凭证特征的变量会被清除。
+- **API 密钥。** 在**设置 → 模型**下添加 Anthropic 提供方（`llm-pi-ai` 提供方，使用 `apiKeyEnv`）。请求由 dsh 自己的 agent 发出，按 token 向该密钥计费。
+
+在子 agent 的 `config.env` 中设置 `ANTHROPIC_API_KEY` 会让该后端由订阅改为 API 计费。登录过期时会报错，绝不会回退到 API 密钥。
+
+政策提示（未经核实）：Anthropic 的 Agent SDK 条款可能限制第三方产品提供 claude.ai 登录。依赖订阅方式之前，请查阅 https://code.claude.com/docs/en/agent-sdk/overview 。
 
 ## 选择模型
 

@@ -1,0 +1,20 @@
+# Add the native Claude Code product provider and its one-shot tool row to the
+# real ACP composition. The provider config carries NO API key: the spawned
+# `claude` uses the user's own native login (the subscription). Setting
+# ANTHROPIC_API_KEY under the provider's `config.env` would switch this backend
+# to API billing; ambient credential-shaped variables never reach the child.
+- id: base
+  name: '@deepseek-ai/cordis-plugin-include'
+  config:
+    path: ./cordis.yml
+    patches:
+      - insert:
+          - id: subagent-claude-code
+            name: '@deepseek-ai/dsh-subagent-claude-code'
+          - id: tool-subagent-claude-code
+            name: '@deepseek-ai/dsh-tool-subagent'
+            config:
+              provider: claude-code
+              toolName: subagent_claude_code
+              backgroundMode: one-shot
+              maxDepth: provider-managed

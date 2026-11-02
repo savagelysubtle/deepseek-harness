@@ -33,14 +33,15 @@ SDK 接收由文本块原样拼接成的任务。提供方会完整迭代 SDK �
 
 生产 `dsh` 不会安装或挂载这个可选提供方。选择启用它的 Profile 必须安装 `@deepseek-ai/dsh-subagent-claude-code`，并在 host plane（宿主平面）挂载一次；加载提供方本身不会在工具调用前启动 Claude 进程。完整 Agent Preset 携带对应的产品工具行并设置 `disabled: true`；复制一个 preset 后删除该字段，即可只向由该副本组装的 agent 暴露 `subagent_claude_code`。其 `one-shot` 策略会让省略 `run_in_background` 或传入 `false` 的调用继续在前台等待，而显式传入 `true` 会返回由父 agent 拥有的 Job ID，供 `job_output` 或 `job_kill` 使用。base host（基础宿主）与完整 preset 已提供通用作业注册表和控制工具。
 
-下列独立组装展示完整的显式能力。基于 `@deepseek-ai/dsh-base` 的 Profile 保留已有 Job 行，只新增产品提供方行并启用 preset 工具行，禁止重复挂载 Job 服务。
+下列独立组装展示完整的显式能力。基于 `@deepseek-ai/dsh-base` 的 Profile 保留已有 Job 行，只新增产品提供方行并启用 preset 工具行，禁止重复挂载 Job 服务。这两条产品行的现成覆盖文件是 `examples/acp-agent/product-subagent-claude-code.cordis.yml`。
+
+### 订阅（原生登录，默认）
+
+`env` 为空时，子进程只能通过用户自己的 `claude` 登录完成认证，因此运行消耗用户 Claude 套餐的额度。任何地方都不配置密钥：
 
 ```yaml
 - id: subagent-claude-code
   name: '@deepseek-ai/dsh-subagent-claude-code'
-  config:
-    env:
-      ANTHROPIC_API_KEY: !!js process.env.ANTHROPIC_API_KEY
 
 - id: jobs
   name: '@deepseek-ai/dsh-jobs-local'
@@ -56,6 +57,26 @@ SDK 接收由文本块原样拼接成的任务。提供方会完整迭代 SDK �
     backgroundMode: one-shot
     maxDepth: provider-managed
 ```
+
+请以运行宿主的同一操作系统用户，在终端中用 `claude` 登录一次。说明：
+
+- **无人值守的宿主。** 运行一次 `claude setup-token` 生成长期 OAuth token，再把它作为 `CLAUDE_CODE_OAUTH_TOKEN` 放入该提供方的 `config.env`。必须在这里设置：共享的凭证清除会从环境中移除所有包含 `KEY`、`SECRET`、`PASSWORD`、`TOKEN` 的变量，因此在宿主 shell 中导出它不会到达子进程。该 token 仍然消耗订阅额度。
+- **你自己的 Claude 配置会运行。** SDK 会读取用户的 `~/.claude` 设置、hooks 和 MCP 服务器（见上文原生设置），因此这些 hooks 与服务器会在 dsh 启动的会话中执行。
+- **登录过期会明确失败。** 运行以 `error` 结束并带有产品的错误信息；提供方绝不会回退到 API 密钥。
+
+### API 密钥计费（可选启用）
+
+在 `config.env` 中设置 `ANTHROPIC_API_KEY` 会让该后端改为按 token 的 API 计费，而不是消耗订阅：
+
+```yaml
+- id: subagent-claude-code
+  name: '@deepseek-ai/dsh-subagent-claude-code'
+  config:
+    env:
+      ANTHROPIC_API_KEY: !!js process.env.ANTHROPIC_API_KEY
+```
+
+Job 行与 `tool-subagent-claude-code` 行与上文相同。
 
 ## 产品兼容性与证据
 

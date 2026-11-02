@@ -33,14 +33,15 @@ Production resolves `claude` from the subprocess execution world's credential-sc
 
 Production `dsh` does not install or mount this optional provider. A Profile that opts in must install `@deepseek-ai/dsh-subagent-claude-code` and mount it once on the host plane; loading the provider starts no Claude process until a tool call. Full Agent Presets carry a matching product tool row with `disabled: true`; copy a preset and remove that field to expose `subagent_claude_code` only to agents composed from the copy. Its `one-shot` policy keeps omitted or `false` `run_in_background` calls in the foreground, while explicit `true` returns a parent-owned Job id for `job_output` or `job_kill`. The base host and full presets already provide the generic Job registry and controls.
 
-The standalone composition below shows the complete explicit capability. A Profile based on `@deepseek-ai/dsh-base` keeps its existing Job rows, adds the product provider row, and enables the preset tool row instead of mounting duplicate Job services.
+The standalone compositions below show the complete explicit capability. A Profile based on `@deepseek-ai/dsh-base` keeps its existing Job rows, adds the product provider row, and enables the preset tool row instead of mounting duplicate Job services. A ready-made overlay for the two product rows is `examples/acp-agent/product-subagent-claude-code.cordis.yml`.
+
+### Subscription (native login, default)
+
+With `env` empty the child can authenticate only through the user's own `claude` login, so runs bill against the user's Claude plan quota. No key is configured anywhere:
 
 ```yaml
 - id: subagent-claude-code
   name: '@deepseek-ai/dsh-subagent-claude-code'
-  config:
-    env:
-      ANTHROPIC_API_KEY: !!js process.env.ANTHROPIC_API_KEY
 
 - id: jobs
   name: '@deepseek-ai/dsh-jobs-local'
@@ -56,6 +57,26 @@ The standalone composition below shows the complete explicit capability. A Profi
     backgroundMode: one-shot
     maxDepth: provider-managed
 ```
+
+Sign in once with `claude` in a terminal as the same OS user that runs the host. Notes:
+
+- **Unattended hosts.** Run `claude setup-token` once to mint a long-lived OAuth token, then place it in the provider's `config.env` as `CLAUDE_CODE_OAUTH_TOKEN`. It must be set there: the shared credential scrub removes every `*KEY*`, `*SECRET*`, `*PASSWORD*` and `*TOKEN*` variable from the ambient environment, so exporting it in the host's shell does not reach the child. This token still bills the subscription.
+- **Your own Claude configuration runs.** The SDK reads the user's `~/.claude` settings, hooks, and MCP servers (see Native settings above), so those hooks and servers execute inside dsh-spawned sessions.
+- **An expired login fails loud.** The run ends in `error` with the product's message; the provider never falls back to an API key.
+
+### API-key billing (opt-in)
+
+Setting `ANTHROPIC_API_KEY` in `config.env` switches this backend to per-token API billing instead of the subscription:
+
+```yaml
+- id: subagent-claude-code
+  name: '@deepseek-ai/dsh-subagent-claude-code'
+  config:
+    env:
+      ANTHROPIC_API_KEY: !!js process.env.ANTHROPIC_API_KEY
+```
+
+The Job rows and the `tool-subagent-claude-code` row are the same as above.
 
 ## Product compatibility and evidence
 
