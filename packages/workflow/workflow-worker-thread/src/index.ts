@@ -18,12 +18,15 @@ import { validateMeta } from './meta.ts'
 import type { WorkerInit, WorkerLimits } from './types.ts'
 
 export { validateMeta } from './meta.ts'
+export { WorkerRun } from './host.ts'
+export type { HostRunExtras } from './host.ts'
 export { materializeFromRealm, MaterializeError } from './realm.ts'
 export type {
   ChildHandle,
   ChildPort,
   ChildResult,
   ChildStartRequest,
+  HookPort,
   WorkerInit,
   WorkerLimits,
 } from './types.ts'
@@ -160,6 +163,7 @@ class WorkerThreadWorkflowEngine extends WorkflowEngine {
       body: request.script,
       ...request.args !== undefined ? { args: request.args } : {},
       limits,
+      ...request.bashEnabled === true ? { bashEnabled: true } : {},
     }
     // Capture the dependency while this service call is still traced through
     // the start() holder. Cordis strips the engine-provider shadow when it
@@ -183,8 +187,20 @@ class WorkerThreadWorkflowEngine extends WorkflowEngine {
         log: (message) => { this.emitWorkflowEvent('workflow/log', info, message) },
         agentStart: (agent) => { this.emitWorkflowEvent('workflow/agent-start', info, agent) },
         agentEnd: (agent) => { this.emitWorkflowEvent('workflow/agent-end', info, agent) },
+        nodeStart: (node) => { this.emitWorkflowEvent('workflow/node-start', info, node) },
+        nodeEnd: (node) => { this.emitWorkflowEvent('workflow/node-end', info, node) },
+        gate: (gate) => { this.emitWorkflowEvent('workflow/gate', info, gate) },
       },
       request.signal,
+      {
+        ...request.cwd !== undefined ? { cwd: request.cwd } : {},
+        ...request.approver !== undefined ? { approver: request.approver } : {},
+        ...request.bashExecutor !== undefined ? { bashExecutor: request.bashExecutor } : {},
+        ...request.onBashOutput !== undefined ? { onBashOutput: request.onBashOutput } : {},
+        ...request.supervisor !== undefined ? { supervisor: request.supervisor } : {},
+        ...request.tierModels !== undefined ? { tierModels: request.tierModels } : {},
+        ...request.gateManifest !== undefined ? { gateManifest: request.gateManifest } : {},
+      },
     )
 
     this.emitWorkflowEvent('workflow/start', info)

@@ -610,6 +610,9 @@ export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
   SubagentRunInfo: 'event payload contract is owned by packages/subagent/subagent/src/types.ts',
   WorkflowAgentEndInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
   WorkflowAgentInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
+  WorkflowGateInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
+  WorkflowNodeEndInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
+  WorkflowNodeInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
   WorkflowResultInfo: 'event-local snapshot is owned by packages/workflow/workflow/src/index.ts',
   WorktreeEventPayload: 'event payload contract is owned by packages/worktree/worktree/src/types.ts',
 }

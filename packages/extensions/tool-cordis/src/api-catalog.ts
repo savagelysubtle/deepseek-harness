@@ -2824,12 +2824,36 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'info', description: 'the run\'s identity snapshot.' }, { name: 'result', description: 'the outcome data (stop reason, error, agent count) — deliberately WITHOUT the result value (see {@link WorkflowResultInfo}).' }],
   },
   {
+    name: 'workflow/gate',
+    mode: 'emit',
+    signature: '\'workflow/gate\'(info: WorkflowRunInfo, gate: WorkflowGateInfo): void',
+    summary: 'A declared gate was evaluated.',
+    description: 'A declared gate was evaluated. Exactly one per gate-declaring node on every terminal path: the script\'s own, or host-synthesized (`not-reached` for a stranded node, `never-evaluated` for one that ended without evaluating its gate).',
+    parameters: [{ name: 'info', description: 'the run\'s identity snapshot.' }, { name: 'gate', description: 'the node, gate kind and outcome.' }],
+  },
+  {
     name: 'workflow/log',
     mode: 'emit',
     signature: '\'workflow/log\'(info: WorkflowRunInfo, message: string): void',
     summary: 'The script emitted a narration line (a `log(message)` call).',
     description: 'The script emitted a narration line (a `log(message)` call).',
     parameters: [{ name: 'info', description: 'the run\'s identity snapshot.' }, { name: 'message', description: 'the logged message, verbatim.' }],
+  },
+  {
+    name: 'workflow/node-end',
+    mode: 'emit',
+    signature: '\'workflow/node-end\'(info: WorkflowRunInfo, node: WorkflowNodeEndInfo): void',
+    summary: 'A workflow node settled.',
+    description: 'A workflow node settled. Exactly one end per started node on every terminal path: the script\'s own, or a host-synthesized one (`synthesized: true`, status `cancelled` after cancel else `interrupted`).',
+    parameters: [{ name: 'info', description: 'the run\'s identity snapshot.' }, { name: 'node', description: 'the node identity plus its status.' }],
+  },
+  {
+    name: 'workflow/node-start',
+    mode: 'emit',
+    signature: '\'workflow/node-start\'(info: WorkflowRunInfo, node: WorkflowNodeInfo): void',
+    summary: 'A workflow node started (the script\'s `nodeStart` hook).',
+    description: 'A workflow node started (the script\'s `nodeStart` hook). Paired with Events[\'workflow/node-end\'] by `node.nodeId`.',
+    parameters: [{ name: 'info', description: 'the run\'s identity snapshot.' }, { name: 'node', description: 'the node id, kind and declared gate kind.' }],
   },
   {
     name: 'workflow/phase',
@@ -3960,14 +3984,6 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type ProviderRequestId = Branded<\'ProviderRequestId\'>;',
   },
   {
-    name: 'PrunedEntry',
-    declaration: 'export interface PrunedEntry {\n    readonly originalSeq: number;\n    readonly replacementSeq: number;\n    readonly callId: CallId;\n    readonly charsBefore: number;\n    readonly charsAfter: number;\n}',
-  },
-  {
-    name: 'PruneResult',
-    declaration: 'export interface PruneResult {\n    readonly pruned: readonly PrunedEntry[];\n    readonly charsRemoved: number;\n}',
-  },
-  {
     name: 'ReadFileLine',
     declaration: 'export interface ReadFileLine {\n    number: number;\n    text: string;\n}',
   },
@@ -5044,8 +5060,68 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type WorkflowAgentOutcome = \'completed\' | \'failed\' | \'cancelled\';',
   },
   {
+    name: 'WorkflowApprovalDecision',
+    declaration: 'export type WorkflowApprovalDecision = \'decided\' | \'already-decided\' | \'unknown\';',
+  },
+  {
+    name: 'WorkflowApprovalOutcome',
+    declaration: 'export type WorkflowApprovalOutcome = \'allowed-once\' | \'rejected\' | \'cancelled\' | \'unavailable\';',
+  },
+  {
+    name: 'WorkflowApprovalRequest',
+    declaration: 'export interface WorkflowApprovalRequest {\n    readonly approvalId: string;\n    readonly nodeId: string;\n    readonly message: string;\n    readonly signal: AbortSignal;\n}',
+  },
+  {
+    name: 'WorkflowApprover',
+    declaration: 'export type WorkflowApprover = (request: WorkflowApprovalRequest) => Promise<WorkflowApprovalOutcome>;',
+  },
+  {
+    name: 'WorkflowBashExecRequest',
+    declaration: 'export interface WorkflowBashExecRequest {\n    readonly command: string;\n    readonly cwd: string;\n    readonly env: Readonly<Record<string, string>>;\n    readonly timeoutMs: number;\n    readonly maxOutputBytes: number;\n    readonly signal: AbortSignal;\n    readonly onOutput?: (stream: \'stdout\' | \'stderr\', chunk: Uint8Array) => void;\n}',
+  },
+  {
+    name: 'WorkflowBashExecutor',
+    declaration: 'export interface WorkflowBashExecutor {\n    run(request: WorkflowBashExecRequest): Promise<WorkflowBashResult>;\n}',
+  },
+  {
+    name: 'WorkflowBashResult',
+    declaration: 'export interface WorkflowBashResult {\n    exitCode: number | null;\n    signal: string | null;\n    timedOut: boolean;\n    aborted: boolean;\n    stdout: string;\n    stderr: string;\n    truncated: boolean;\n    stdoutBytes: number;\n    stderrBytes: number;\n    durationMs: number;\n}',
+  },
+  {
+    name: 'WorkflowChildHandle',
+    declaration: 'export interface WorkflowChildHandle {\n    stop(reason: \'timeout\' | \'stalled\'): void;\n}',
+  },
+  {
+    name: 'WorkflowChildSupervisor',
+    declaration: 'export interface WorkflowChildSupervisor {\n    register?(child: WorkflowSupervisedChild): void;\n    bind?(child: WorkflowSupervisedChild, childId: string, handle: WorkflowChildHandle): void;\n    evaluate?(child: WorkflowSupervisedChild, outcome: WorkflowSupervisedOutcome, tools: WorkflowSupervisorTools): Promise<WorkflowContinuationEvidence | undefined>;\n    release?(child: WorkflowSupervisedChild, childId: string | undefined): void;\n}',
+  },
+  {
+    name: 'WorkflowContinuationEvidence',
+    declaration: 'export interface WorkflowContinuationEvidence {\n    iteration: number;\n    maxContinuations: number;\n    command: string;\n    exitCode: number | null;\n    tail: string;\n    truncated: boolean;\n}',
+  },
+  {
+    name: 'WorkflowDoneWhen',
+    declaration: 'export interface WorkflowDoneWhen {\n    command: string;\n    workdir?: string;\n    timeoutMs?: number;\n    maxContinuations?: number;\n}',
+  },
+  {
+    name: 'WorkflowGateInfo',
+    declaration: 'export interface WorkflowGateInfo {\n    nodeId: string;\n    gateKind: string;\n    outcome: WorkflowGateOutcome;\n    synthesized?: boolean;\n}',
+  },
+  {
     name: 'WorkflowMeta',
     declaration: 'export interface WorkflowMeta {\n    name: string;\n    description: string;\n    whenToUse?: string;\n    phases?: WorkflowPhase[];\n}',
+  },
+  {
+    name: 'WorkflowNodeEndInfo',
+    declaration: 'export interface WorkflowNodeEndInfo extends WorkflowNodeInfo {\n    status: WorkflowNodeStatus;\n    exitCode?: number;\n    durationMs?: number;\n    truncated?: boolean;\n    error?: string;\n    synthesized?: boolean;\n}',
+  },
+  {
+    name: 'WorkflowNodeInfo',
+    declaration: 'export interface WorkflowNodeInfo {\n    nodeId: string;\n    kind: string;\n    gateKind?: string;\n}',
+  },
+  {
+    name: 'WorkflowPendingApproval',
+    declaration: 'export interface WorkflowPendingApproval {\n    readonly approvalId: string;\n    readonly nodeId: string;\n    readonly message: string;\n}',
   },
   {
     name: 'WorkflowPhase',
@@ -5061,7 +5137,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'WorkflowRun',
-    declaration: 'export interface WorkflowRun {\n    readonly id: WorkflowRunId;\n    readonly meta: WorkflowMeta;\n    readonly result: Promise<WorkflowResult>;\n    cancel(reason?: string): void;\n    dispose(): Promise<void>;\n}',
+    declaration: 'export interface WorkflowRun {\n    readonly id: WorkflowRunId;\n    readonly meta: WorkflowMeta;\n    readonly result: Promise<WorkflowResult>;\n    cancel(reason?: string): void;\n    pendingApprovals?(): readonly WorkflowPendingApproval[];\n    decideApproval?(approvalId: string, outcome: WorkflowApprovalOutcome): WorkflowApprovalDecision;\n    dispose(): Promise<void>;\n}',
   },
   {
     name: 'WorkflowRunId',
@@ -5073,11 +5149,23 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'WorkflowStartRequest',
-    declaration: 'export interface WorkflowStartRequest {\n    script: string;\n    meta: WorkflowMeta;\n    args?: unknown;\n    subagentProvider?: string;\n    maxTotalAgents?: number;\n    parent: Agent;\n    signal?: AbortSignal;\n}',
+    declaration: 'export interface WorkflowStartRequest {\n    script: string;\n    meta: WorkflowMeta;\n    args?: unknown;\n    subagentProvider?: string;\n    maxTotalAgents?: number;\n    parent: Agent;\n    signal?: AbortSignal;\n    cwd?: string;\n    approver?: WorkflowApprover;\n    bashEnabled?: boolean;\n    bashExecutor?: WorkflowBashExecutor;\n    onBashOutput?: (info: {\n        nodeId?: string;\n    }, stream: \'stdout\' | \'stderr\', chunk: Uint8Array) => void;\n    tierModels?: Readonly<Record<string, string>>;\n    gateManifest?: readonly {\n        nodeId: string;\n        gateKind: string;\n    }[];\n    supervisor?: WorkflowChildSupervisor;\n}',
   },
   {
     name: 'WorkflowStopReason',
     declaration: 'export type WorkflowStopReason = \'completed\' | \'cancelled\' | \'error\';',
+  },
+  {
+    name: 'WorkflowSupervisedChild',
+    declaration: 'export interface WorkflowSupervisedChild {\n    readonly callId: number;\n    readonly nodeId?: string;\n    readonly prompt: string;\n    readonly timeoutMs?: number;\n    readonly idleTimeoutMs?: number;\n    readonly tier?: string;\n    readonly doneWhen?: WorkflowDoneWhen;\n    readonly iteration: number;\n}',
+  },
+  {
+    name: 'WorkflowSupervisedOutcome',
+    declaration: 'export interface WorkflowSupervisedOutcome {\n    readonly stopReason: string;\n    readonly text: string;\n}',
+  },
+  {
+    name: 'WorkflowSupervisorTools',
+    declaration: 'export interface WorkflowSupervisorTools {\n    runBash(command: string, options?: {\n        workdir?: string;\n        timeoutMs?: number;\n    }): Promise<WorkflowBashResult>;\n    readonly signal: AbortSignal;\n}',
   },
   {
     name: 'WorktreeAddSpec',
