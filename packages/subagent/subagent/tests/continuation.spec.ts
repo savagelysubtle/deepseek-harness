@@ -25,6 +25,8 @@ import SubagentRuntime, {
 } from '../src/index.ts'
 import type { SubagentAwaitSettlementResult, SubagentRunEndInfo, SubagentRunInfo } from '../src/index.ts'
 import * as SubagentInvariant from '../src/invariant.ts'
+import { settlementNoticeContent } from '../src/continuation.ts'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 
 type Script = ConstructorParameters<typeof MockAdapter>[0]
 
@@ -610,7 +612,7 @@ describe('SubagentRuntime.followup residency routing', () => {
     // This child is itself a parent, so its grandchild's settlement notice is
     // an ordinary later user message in its log.
     expect(userTexts(loaded.events).slice(0, 2)).toEqual(['child task', 'while waiting'])
-    expect(userTexts(loaded.events).slice(2).join('\n')).toContain('finished and will do no further work')
+    expect(userTexts(loaded.events).slice(2).join('\n')).toContain(`Report from background subagent ${grandchild.childId} (completed):`)
   })
 
   it('rejects a parent that is not the durable direct parent', async () => {
@@ -1588,6 +1590,22 @@ function settlementNotices(agent: Agent): { sender: string; text: string; summar
   })
 }
 
+/** The model-facing text of a settlement notice: provenance label, blank line, report. */
+const STATUS_FACTS: Record<string, string> = {
+  'aborted': 'The subagent was stopped before it finished.',
+  'max-tokens': 'The subagent ran out of room before it finished.',
+  'refusal': 'The subagent declined the task.',
+  'error': 'The subagent failed before it finished.',
+}
+const IDLE_NOTE = 'The subagent is idle and continues only if it is sent another message.'
+
+function reportNotice(childId: string, status: string, report: string | undefined): string {
+  const fact = STATUS_FACTS[status]
+  return `Report from background subagent ${childId} (${status}):${fact === undefined ? '' : `\n${fact}`}\n\n`
+    + (report ?? `(no final report; the subagent ended with status ${status})`)
+    + `\n\n${IDLE_NOTE}`
+}
+
 /** The durable `subagent/settlement` record persisted for one child, if any. */
 async function loadSettlement(ctx: Context, childId: SessionId) {
   const loaded = await ctx.sessionPersistence.load(childId)
@@ -1604,8 +1622,7 @@ describe('continuable settlement delivery', () => {
     const notice = settlementNotices(parent)[0]!
     expect(notice.sender).toBe(started.childId)
     expect(notice.text).toBe(
-      `Background subagent ${started.childId} finished and will do no further work unless you send it more.`
-      + '\nIts closing message:\nthe answer',
+      reportNotice(started.childId, 'completed', 'the answer'),
     )
     // The collapsed row states the outcome without the child's content.
     expect(notice.summary).toBe(
@@ -1712,9 +1729,77 @@ describe('continuable settlement delivery', () => {
 
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} ran out of room before it finished.`
-      + '\nIts closing message:\nhalf an ans',
+      reportNotice(started.childId, 'max-tokens', 'half an ans'),
     )
+  })
+
+  it('relays only the final report, never reasoning or tool-call blocks', async () => {
+    // A tool-only max-tokens step appends an empty usage-only message, so the
+    // epoch's final output is the earlier message: reasoning, text and a call.
+    const { ctx, parent } = await setup([
+      [
+        { type: 'block-start', index: 0, blockType: 'reasoning' },
+        { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'SECRET_REASONING' } },
+        { type: 'block-start', index: 1, blockType: 'text' },
+        { type: 'block-end', index: 1, block: { type: 'text', text: 'visible report' } },
+        { type: 'block-start', index: 2, blockType: 'tool-call' },
+        { type: 'tool-call-delta', index: 2, id: CallId('t9'), name: 'noop', argumentsDelta: '{}' },
+        { type: 'block-end', index: 2, block: { type: 'tool-call', id: CallId('t9'), name: 'noop', arguments: '{"k":"TOOLCALL_ARGS"}' } },
+        { type: 'usage', usage: { inputTokens: 20, outputTokens: 5 } },
+        { type: 'finish', reason: { kind: 'tool-calls' } },
+      ],
+      [
+        { type: 'usage', usage: { inputTokens: 20, outputTokens: 5 } },
+        { type: 'finish', reason: { kind: 'max-tokens' } },
+      ],
+      textResponse('parent ack'),
+    ])
+    ctx.tools.register(defineTool({
+      name: 'noop',
+      description: 'does nothing',
+      parameters: {},
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: {} },
+        render: () => [{ type: 'text', text: 'TOOLRESULT_TEXT' }],
+      },
+      execute: () => Promise.resolve({}),
+    }))
+    const ends: SubagentRunEndInfo[] = []
+    ctx.on('subagent/end', (info) => { ends.push(info) })
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    const { text } = settlementNotices(parent)[0]!
+    expect(text).toBe(reportNotice(started.childId, 'max-tokens', 'visible report'))
+    for (const leaked of ['SECRET_REASONING', 'TOOLCALL_ARGS', 'TOOLRESULT_TEXT', '[reasoning]', '[toolcall]']) {
+      expect(text).not.toContain(leaked)
+    }
+    // Harness-side payloads keep the child's full output.
+    const kept = ends[0]!.lastAssistantMessage ?? []
+    expect(kept.some(block => block.type === 'reasoning')).toBe(true)
+    expect(kept.some(block => block.type === 'tool-call')).toBe(true)
+  })
+
+  it('states there is no final report when the child produced only reasoning', async () => {
+    const { ctx, parent } = await setup([
+      [
+        { type: 'block-start', index: 0, blockType: 'reasoning' },
+        { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'ONLY_REASONING' } },
+        { type: 'usage', usage: { inputTokens: 20, outputTokens: 5 } },
+        { type: 'finish', reason: { kind: 'max-tokens' } },
+      ],
+      textResponse('parent ack'),
+    ])
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    const { text } = settlementNotices(parent)[0]!
+    expect(text).toBe(
+      reportNotice(started.childId, 'max-tokens', undefined),
+    )
+    expect(text).not.toContain('ONLY_REASONING')
   })
 
   it('tells the parent a policy-rejected delivery was declined, not finished', async () => {
@@ -1731,8 +1816,7 @@ describe('continuable settlement delivery', () => {
 
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} declined the task.`
-      + '\nIt left no closing message.',
+      reportNotice(started.childId, 'refusal', undefined),
     )
   })
 
@@ -1762,8 +1846,7 @@ describe('continuable settlement delivery', () => {
     const child = await ctx.sessionPersistence.load(started.childId)
     expect(hasUserText(child.events, 'second task')).toBe(false)
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} failed before it finished.`
-      + '\nIts closing message:\nthe answer',
+      reportNotice(started.childId, 'error', 'the answer'),
     )
   })
 
@@ -1798,8 +1881,7 @@ describe('continuable settlement delivery', () => {
     // task had finished.
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} was stopped before it finished.`
-      + '\nIts closing message:\nthe answer',
+      reportNotice(started.childId, 'aborted', 'the answer'),
     )
   })
 
@@ -1825,8 +1907,7 @@ describe('continuable settlement delivery', () => {
     // that genuinely finished with no output.
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} was stopped before it finished.`
-      + '\nIt left no closing message.',
+      reportNotice(started.childId, 'aborted', undefined),
     )
   })
 
@@ -1852,8 +1933,7 @@ describe('continuable settlement delivery', () => {
 
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} was stopped before it finished.`
-      + '\nIt left no closing message.',
+      reportNotice(started.childId, 'aborted', undefined),
     )
     // `interrupt()` is covered by the same path as any other stop: the
     // durable record reuses `epochStopReason()`'s own 'aborted' mapping,
@@ -1901,8 +1981,7 @@ describe('continuable settlement delivery', () => {
     expect(hasUserText(child.session.events, 'never runs')).toBe(false)
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} was stopped before it finished.`
-      + '\nIts closing message:\nthe answer',
+      reportNotice(started.childId, 'aborted', 'the answer'),
     )
   })
 
@@ -1926,7 +2005,7 @@ describe('continuable settlement delivery', () => {
     await waitNoActivation(ctx, started.childId)
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} failed before it finished.\nIt left no closing message.`,
+      reportNotice(started.childId, 'error', undefined),
     )
   })
 
@@ -2072,8 +2151,7 @@ describe('continuable settlement delivery', () => {
     // message when that parent is disposed next is pinned by the test below.
     expect(settlementNotices(parent)).toHaveLength(1)
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} was stopped before it finished.`
-      + '\nIt left no closing message.',
+      reportNotice(started.childId, 'aborted', undefined),
     )
     expect(parent.session.events.some(event => event.type === 'agent/inbox/spliced')).toBe(true)
     expect(parent.session.events.some(event => event.type === 'turn/start')).toBe(false)
@@ -2447,8 +2525,7 @@ describe('SubagentRuntime pre-step settlement recheck', () => {
     // The durable record carries outcome and timing only, never the child's
     // final output, so a redelivered notice always reports no closing message.
     expect(settlementNotices(resumed.agent)[0]!.text).toBe(
-      `Background subagent ${started.childId} was stopped before it finished.`
-      + '\nIt left no closing message.',
+      reportNotice(started.childId, 'aborted', undefined),
     )
 
     // A second step must not synthesize a second notice: the redelivered one
@@ -3622,5 +3699,49 @@ describe('SubagentContinuationManager.hasLiveDescendants', () => {
 
     hold.resolve(undefined)
     await waitNoActivation(ctx, started.childId)
+  })
+})
+
+describe('settlementNoticeContent', () => {
+  const id = SessionId('child-1')
+  const text = (value: string): ContentBlock => ({ type: 'text', text: value })
+  const image = {
+    type: 'image',
+    attachment: { attachmentId: 'att-1', mediaType: 'image/png', bytes: 1, width: 1, height: 1 },
+  } as unknown as ContentBlock
+
+  it('pins one fact line per non-completed status and none for completed', () => {
+    for (const status of ['completed', 'aborted', 'max-tokens', 'refusal', 'error'] as const) {
+      expect(settlementNoticeContent(id, status, [text('body')])).toEqual([
+        { type: 'text', text: reportNotice(id, status, 'body') },
+      ])
+    }
+    expect(reportNotice(id, 'completed', 'body')).not.toContain('before it finished')
+  })
+
+  it('treats empty and whitespace-only text as no final report', () => {
+    for (const output of [[text('')], [text('  \n ')], [text(''), text(' ')], undefined]) {
+      expect(settlementNoticeContent(id, 'completed', output)).toEqual([
+        { type: 'text', text: reportNotice(id, 'completed', undefined) },
+      ])
+    }
+  })
+
+  it('keeps an image report with a header block and a trailing note block', () => {
+    expect(settlementNoticeContent(id, 'completed', [image])).toEqual([
+      { type: 'text', text: `Report from background subagent ${id} (completed):\n` },
+      image,
+      { type: 'text', text: `\n${IDLE_NOTE}` },
+    ])
+  })
+
+  it('joins a multi-text-block report with the header in the first block and the note in the last', () => {
+    expect(settlementNoticeContent(id, 'aborted', [text('one'), text('two')])).toEqual([
+      {
+        type: 'text',
+        text: `Report from background subagent ${id} (aborted):\n${STATUS_FACTS.aborted}\n\none`,
+      },
+      { type: 'text', text: `two\n\n${IDLE_NOTE}` },
+    ])
   })
 })

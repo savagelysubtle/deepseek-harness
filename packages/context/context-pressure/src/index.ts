@@ -11,12 +11,12 @@ import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
 // Type-only: loads the plugin-merged `compaction/end` session event folded below.
 import type {} from '@deepseek-ai/dsh-compaction/types'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, LlmCallConfig } from '@deepseek-ai/dsh-llm'
+import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, UserMessage } from '@deepseek-ai/dsh-session'
 // Type-only: resolves the tokenMeter service declaration read through `ctx`.
 import type {} from '@deepseek-ai/dsh-token-meter'
 import { Config, resolveSpec, resolveWindowThresholds } from './config.ts'
-import { PLUGIN_SOURCE_NAME, parseWarningText, renderWarningText } from './warning.ts'
+import { MODEL_WARNING_TEXT, PLUGIN_SOURCE_NAME, parseWarningText, renderWarningText } from './warning.ts'
 
 /**
  * Plugin configuration contract and its Schemastery validation, both declared
@@ -56,12 +56,11 @@ function isPluginWarning(event: SessionEvent): event is SessionEvent<'user/messa
     && event.data.source.plugin === PLUGIN_SOURCE_NAME
 }
 
-/** First text block of a plugin-attributed message, or empty when it has none. */
+/** Facts text recorded in the first snapshot section of a plugin-attributed message, or empty. */
 function warningText(message: UserMessage): string {
-  const blocks = message.content.filter((block): block is Extract<ContentBlock, { type: 'text' }> => (
-    block.type === 'text'
-  ))
-  return blocks[0]?.text ?? ''
+  const source = message.source
+  const section = 'sections' in source ? source.sections[0] : undefined
+  return section?.text ?? ''
 }
 
 /**
@@ -159,7 +158,7 @@ export function apply(ctx: Context, config: Config): void {
       messages: [
         ...decision.messages,
         createUserMessage({
-          content: [{ type: 'text', text }],
+          content: [{ type: 'text', text: MODEL_WARNING_TEXT }],
           source: {
             kind: 'plugin',
             plugin: name,

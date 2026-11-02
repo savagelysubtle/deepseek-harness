@@ -461,3 +461,34 @@ describe('renderDispatch — purity and prefix stability', () => {
     expect(resolveDispatchTimeZone()).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone)
   })
 })
+
+describe('renderDispatch — post-checkpoint harness sources and transcript-only notices', () => {
+  it('baseline, runtime snapshot and skill catalog after a checkpoint dispatch as exactly one user message', () => {
+    const out = renderDispatch(
+      [at(checkpoint('summary')), at(agentInstructions('baseline'), 1000), at(runtimeContext('snap'), 2000), at(skillCatalog('catalog'), 3000)],
+      opts,
+    )
+    expect(out).toHaveLength(1)
+    expect(out[0]!.role).toBe('user')
+    const text = textOf(out[0]!)
+    for (const part of ['summary', 'baseline', 'snap', 'catalog']) expect(text).toContain(part)
+  })
+
+  const budgetNotice = (plugin = 'agent-instructions') =>
+    user('Workspace instruction budget exceeded', { kind: 'plugin', plugin, form: 'notice', summary: 's' })
+
+  it('keeps the agent-instructions budget notice in the transcript but never dispatches it', () => {
+    const notice = budgetNotice()
+    const transcript = [at(user('hello')), at(notice, 1000), at(runtimeContext('snap'), 2000)]
+    expect(transcript.map(entry => entry.message.id)).toContain(notice.id)
+    const out = renderDispatch(transcript, opts)
+    expect(out.map(message => textOf(message)).join('\n')).not.toContain('Workspace instruction budget')
+    expect(out.some(message => message.id === notice.id)).toBe(false)
+  })
+
+  it('leaves other plugin notices untouched', () => {
+    const other = budgetNotice('some-other-plugin')
+    const out = renderDispatch([at(user('hello')), at(other, 1000)], opts)
+    expect(out.map(message => textOf(message)).join('\n')).toContain('Workspace instruction budget')
+  })
+})

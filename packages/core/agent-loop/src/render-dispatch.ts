@@ -52,6 +52,8 @@ export function resolveDispatchTimeZone(): string {
 const TOOL_JOBS_PLUGIN = 'tool-jobs'
 /** Plugin id of the context-pressure warning (fixed numeric template). */
 const CONTEXT_PRESSURE_PLUGIN = 'context-pressure'
+/** Plugin id of the agent-instructions budget notice (transcript-only). */
+const AGENT_INSTRUCTIONS_PLUGIN = 'agent-instructions'
 /** A line shaped like a dispatch stamp; a notice carrying one could forge a message boundary. */
 const STAMP_SHAPED_LINE = /^\[[A-Z][a-z]{2} \d{4}-\d{2}-\d{2} \d{2}:\d{2} /m
 
@@ -80,6 +82,17 @@ export function isMergeableNotice(message: Message): boolean {
   // marker or stamp line split across blocks is still one string on the wire.
   const joined = message.content.map(block => (block.type === 'text' ? block.text : '')).join('')
   return !joined.includes(FOUNDER_MARKER_TEXT) && !STAMP_SHAPED_LINE.test(joined)
+}
+
+/**
+ * Transcript-only sources: logged and shown to the founder, never dispatched to
+ * the model. Currently only the agent-instructions budget-overflow notice
+ * (founder ruling: loud on screen, but the model gains nothing from it).
+ */
+function isTranscriptOnly(source: MessageSource): boolean {
+  return source.kind === 'plugin'
+    && source.plugin === AGENT_INSTRUCTIONS_PLUGIN
+    && source.form === 'notice'
 }
 
 /** Whether a message receives a header: user role, not tool-sourced, carrying no tool-result block. */
@@ -124,15 +137,17 @@ function withSeparator(content: readonly ContentBlock[]): ContentBlock[] {
  * file-sourced or model-labelled notice text never sits beneath the founder
  * marker. A lone message is just stamped; a merged message keeps the head's id
  * and source and its header uses the head's own time.
- * @param timed - `session.deriveTimedMessages()` (or an equivalent region).
+ * Transcript-only notices (`agent-instructions` `form: 'notice'`) are dropped here.
+ * @param allTimed - `session.deriveTimedMessages()` (or an equivalent region).
  * @param options - the stamp zone.
  * @returns the messages to dispatch; non-stampable elements are the SAME references.
  */
 export function renderDispatch(
-  timed: readonly TimedMessage[],
+  allTimed: readonly TimedMessage[],
   options: RenderDispatchOptions,
 ): Message[] {
   const { timeZone } = options
+  const timed = allTimed.filter(entry => !isTranscriptOnly(entry.message.source))
   const out: Message[] = []
   let i = 0
   while (i < timed.length) {

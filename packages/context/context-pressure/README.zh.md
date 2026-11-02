@@ -21,24 +21,32 @@
 
 当路由目标没有可解析的上下文窗口（适配器未通告或查询失败）时，插件对每个目标记录一条警告并跳过注入，不会阻塞步骤。日志中尚无 `request/header` 的会话没有路由目标，会被静默跳过。
 
-## 模型体验
+## 记录的事实（仅对话记录与界面）
 
-### 准备阶段的上下文窗口压力
-
-#### 模型看到什么
-
-步骤进入时，在已认领输入之后追加的一条带来源的 user 消息；`<threshold>` 是以百分数渲染的被跨越阈值，总量反映的是本警告加入该请求之前计量器测得的结果。
-
-##### 警告文本
+消息唯一的快照来源分段记录下面的规范事实（`<threshold>` 是以百分数渲染的被跨越阈值；总量反映的是本警告加入请求之前计量器测得的结果）。去重折叠与不变式解析的是该分段而不是消息正文，调度也不会把它发送给模型。不变式接受两种形式：当前形式（正文等于不含数字的指令）和旧会话日志中的遗留形式（正文与可解析的事实分段文本完全相同）；其他正文均判为失败。
 
 ```markdown
 Context pressure notice: usage passed the <threshold>% threshold of this model's context window: <total> of <window> tokens in use (<used>%); <remaining> tokens remain.
 Before rising pressure forces automatic compaction, you can request compaction yourself with the compact tool.
 ```
 
+## 模型体验
+
+### 准备阶段的上下文窗口压力
+
+#### 模型看到什么
+
+步骤进入时，在已认领输入之后追加的一条带来源的 user 消息。其正文是固定且不含数字的指令，因此每个阈值发送的文本都相同；用量数字是给操作者看的记录，不会发送给模型。
+
+##### 警告文本
+
+```markdown
+Context pressure: the conversation is using a growing share of the context window; finish the current step concisely, avoid large tool outputs, and call the compact tool to compact it yourself before automatic compaction forces it.
+```
+
 #### Token 影响
 
-每条警告约 60 个 token，每个压缩代内每个阈值最多添加一次；两次跨越之间的后续步骤不增加任何内容。
+每条警告约 45 个 token，每个压缩代内每个阈值最多添加一次；两次跨越之间的后续步骤不增加任何内容。
 
 #### KV Cache 影响
 

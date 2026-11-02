@@ -6,7 +6,7 @@ import { CompactionId } from '@deepseek-ai/dsh-compaction'
 import * as contextPressure from '@deepseek-ai/dsh-context-pressure'
 import type { Config } from '@deepseek-ai/dsh-context-pressure'
 import { formatPercent, resolveSpec, resolveWindowThresholds } from '@deepseek-ai/dsh-context-pressure/src/config.ts'
-import { parseWarningText, renderWarningText } from '@deepseek-ai/dsh-context-pressure/src/warning.ts'
+import { MODEL_WARNING_TEXT, parseWarningText, renderWarningText } from '@deepseek-ai/dsh-context-pressure/src/warning.ts'
 import {
   createAssistantMessage,
   createUserMessage,
@@ -162,7 +162,8 @@ function warningTexts(session: Session): string[] {
     if (event.type === 'user/message'
       && event.data.source.kind === 'plugin'
       && event.data.source.plugin === 'context-pressure') {
-      texts.push(event.data.content.find(block => block.type === 'text')?.text ?? '')
+      const source = event.data.source
+      texts.push('sections' in source ? source.sections[0]?.text ?? '' : '')
     }
   }
   return texts
@@ -198,6 +199,9 @@ describe('threshold crossing and dedup', () => {
       sections: [{ name: 'context-pressure', text: warningTexts(session)[0] }],
     })
     expect(warningTexts(session)[0]).toContain('51000 of 100000 tokens in use (51%); 49000 tokens remain.')
+    // The model-facing body is the number-free instruction; the numbers stay in the source section only.
+    expect(source.data.content).toEqual([{ type: 'text', text: MODEL_WARNING_TEXT }])
+    expect(MODEL_WARNING_TEXT).not.toMatch(/\d/)
   })
 
   it('does not warn below the smallest threshold', async () => {

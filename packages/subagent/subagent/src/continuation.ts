@@ -342,6 +342,64 @@ function isLiveDescendantOf(activation: Activation, root: Agent): boolean {
   return activation.handle.agent !== root && activation.ancestry.has(root)
 }
 
+/** Declarative resumability fact appended to every settlement notice. */
+const SETTLEMENT_RESUMABLE_NOTE = 'The subagent is idle and continues only if it is sent another message.'
+
+/**
+ * The parent-facing body of a settlement notice: a plain provenance label, a
+ * blank line, then only the child's final report. Reasoning and tool-call or
+ * tool-result blocks never reach the parent model; the harness-side event
+ * payloads keep the child's full output for logs and UI.
+ * @param childId - the durable child the parent knows by id.
+ * @param stopReason - how the child's last ordinary turn ended.
+ * @param output - the child's final assistant content, if it produced any.
+ * @returns the content blocks dispatched to the parent model.
+ */
+export function settlementNoticeContent(
+  childId: SessionId,
+  stopReason: SubagentResult['stopReason'],
+  output: ContentBlock[] | undefined,
+): ContentBlock[] {
+  const fact = settlementFact(stopReason)
+  const header = `Report from background subagent ${childId} (${stopReason}):`
+    + (fact === undefined ? '' : `\n${fact}`)
+  // Cold resume is not gated on the stop reason, so every status stays resumable.
+  const report = (output ?? []).filter(block => block.type === 'image'
+    || (block.type === 'text' && block.text.trim().length > 0))
+  const body: ContentBlock[] = report.length === 0
+    ? [{ type: 'text' as const, text: `(no final report; the subagent ended with status ${stopReason})` }]
+    : report
+  const [first, ...rest] = body
+  const blocks: ContentBlock[] = first !== undefined && first.type === 'text'
+    ? [{ type: 'text' as const, text: `${header}\n\n${first.text}` }, ...rest]
+    : [{ type: 'text' as const, text: `${header}\n` }, ...body]
+  const last = blocks.at(-1)
+  if (last?.type === 'text') {
+    blocks[blocks.length - 1] = { ...last, text: `${last.text}\n\n${SETTLEMENT_RESUMABLE_NOTE}` }
+  } else {
+    blocks.push({ type: 'text' as const, text: `\n${SETTLEMENT_RESUMABLE_NOTE}` })
+  }
+  return blocks
+}
+
+/**
+ * The declarative fact that keeps a parent from mistaking partial output for a
+ * finished result; absent for a child that completed.
+ * @param stopReason - how the child's last ordinary turn ended.
+ * @returns one sentence, or `undefined` for `completed`.
+ */
+function settlementFact(stopReason: SubagentResult['stopReason']): string | undefined {
+  switch (stopReason) {
+    case 'completed': return undefined
+    case 'aborted': return 'The subagent was stopped before it finished.'
+    case 'max-tokens': return 'The subagent ran out of room before it finished.'
+    case 'refusal': return 'The subagent declined the task.'
+    case 'error': return 'The subagent failed before it finished.'
+    /* v8 ignore next 2 -- merge-extensible stop reason; see settlementSummary. */
+    default: return `The subagent ended abnormally (${String(stopReason)}) before it finished.`
+  }
+}
+
 /**
  * One line telling a parent that a background child is finished and why, in
  * the parent's own task vocabulary.
@@ -1678,12 +1736,7 @@ export class SubagentContinuationManager {
       if (parent === undefined) return
       const summary = settlementSummary(activation.childId, terminal.stopReason)
       const message = createUserMessage({
-        content: [
-          { type: 'text' as const, text: summary },
-          ...terminal.output === undefined
-            ? [{ type: 'text' as const, text: 'It left no closing message.' }]
-            : [{ type: 'text' as const, text: 'Its closing message:' }, ...terminal.output],
-        ],
+        content: settlementNoticeContent(activation.childId, terminal.stopReason, terminal.output),
         source: {
           kind: 'subagent-settled' as const,
           form: 'notice' as const,
@@ -1726,8 +1779,8 @@ export class SubagentContinuationManager {
    * Redeliver one durable settlement as the parent-facing notice
    * {@link notifySettlement} would have sent, for a caller that has already
    * confirmed — via the durable projection, outside this method — that the
-   * push never reached the parent's own log. The notice always reports no
-   * closing message: the durable settlement record this redelivers carries
+   * push never reached the parent's own log. The notice always says there is
+   * no final report: the durable settlement record this redelivers carries
    * outcome and timing only, never the child's final assistant output, so
    * there is nothing to restate. Trusts the caller's own idempotence scan and
    * parent/child pairing; this method performs neither.
@@ -1738,10 +1791,7 @@ export class SubagentContinuationManager {
   synthesizeSettlementNotice(parent: Agent, childId: SessionId, outcome: SubagentResult['stopReason']): void {
     const summary = settlementSummary(childId, outcome)
     const message = createUserMessage({
-      content: [
-        { type: 'text' as const, text: summary },
-        { type: 'text' as const, text: 'It left no closing message.' },
-      ],
+      content: settlementNoticeContent(childId, outcome, undefined),
       source: {
         kind: 'subagent-settled' as const,
         form: 'notice' as const,

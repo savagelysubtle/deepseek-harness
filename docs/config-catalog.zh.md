@@ -2538,12 +2538,14 @@ export interface Config {
    */
   toolOrder?: string[]
   /**
-   * Clock the `now` variable reads from, called once per assembly (default
-   * `() => new Date()`). Overridable so tests can fix the instant without
-   * depending on `process.env.TZ`, which does not reliably update a
-   * long-running process. The zone is always the process's own resolved zone
-   * (`Intl.DateTimeFormat().resolvedOptions().timeZone`) and is not
-   * configurable here.
+   * Deprecated: clock the `now` variable reads from, called once per assembly
+   * (default `() => new Date()`). The variable resolves into the system prompt,
+   * the provider's cache prefix, so a template referencing it makes the prefix
+   * time-dependent; rely on the per-message dispatch stamp instead (each user
+   * message already carries its own). Behaviour is unchanged. Overridable
+   * so tests can fix the instant without depending on `process.env.TZ`. The
+   * zone is always the process's own resolved zone and is not configurable here.
+   * @deprecated Resolved into the cache prefix; rely on the per-message dispatch stamp instead.
    */
   now?: () => Date
 }

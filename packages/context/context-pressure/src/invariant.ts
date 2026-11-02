@@ -9,7 +9,7 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-token-meter'
 import type { TokenMeter } from '@deepseek-ai/dsh-token-meter'
 import { formatPercent } from './config.ts'
-import { PLUGIN_SOURCE_NAME, parseWarningText } from './warning.ts'
+import { MODEL_WARNING_TEXT, PLUGIN_SOURCE_NAME, parseWarningText } from './warning.ts'
 import type { ParsedWarning } from './warning.ts'
 
 const PACKAGE_NAME = '@deepseek-ai/dsh-context-pressure'
@@ -81,8 +81,6 @@ function validateWarning(
     fail('context-pressure warnings must contain exactly one text block')
   }
   const text = block.text
-  const parsed = parseWarningText(text)
-  if (parsed === undefined) fail('context-pressure warning does not match the durable warning format')
   validatePosition(history, fail)
   const source = event.data.source
   /* v8 ignore next 2 -- replay and dispatch callers select this exact package-owned source before validation. */
@@ -101,8 +99,15 @@ function validateWarning(
     || section === undefined
     || Object.keys(section).length !== 2
     || section.name !== PLUGIN_SOURCE_NAME
-    || section.text !== text) {
-    fail('context-pressure source must carry only the exact snapshot text, not request authority')
+    || typeof section.text !== 'string') {
+    fail('context-pressure source must carry only the exact facts snapshot, not request authority')
+  }
+  const parsed = parseWarningText(section.text)
+  if (parsed === undefined) fail('context-pressure facts section does not match the durable warning format')
+  // Two accepted forms: current (number-free body, facts only in the section) and legacy logs
+  // written before OP-220 (body identical to the facts section text).
+  if (text !== MODEL_WARNING_TEXT && text !== section.text) {
+    fail('context-pressure message body must be the exact number-free warning text or the legacy facts text')
   }
   if (parsed.remainingTokens !== Math.max(0, parsed.contextWindow - parsed.totalTokens)) {
     fail('context-pressure remaining tokens disagree with its recorded usage and window')
@@ -120,14 +125,15 @@ function collectWarnings(events: readonly SessionEvent[]): DurableWarning[] {
   const warnings: DurableWarning[] = []
   for (const event of events) {
     if (!isPluginWarning(event)) continue
-    const block = event.data.content[0]
+    const source = event.data.source
+    const section = 'sections' in source ? source.sections[0] : undefined
     /* v8 ignore next 3 -- validateSession validates every plugin-warning event via validateWarning
      * (which fails loudly) before ever calling validateGenerations, so collectWarnings never sees
-     * a non-text block. */
-    if (block?.type !== 'text') {
+     * a missing facts section. */
+    if (section === undefined) {
       continue
     }
-    const parsed = parseWarningText(block.text)
+    const parsed = parseWarningText(section.text)
     // Unparseable text under this package's name is foreign content; the
     // per-warning format check reports it only where that event validates.
     /* v8 ignore next -- same reason: validateWarning already rejects unparseable text before collectWarnings can run. */

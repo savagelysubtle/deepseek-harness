@@ -97,7 +97,7 @@ subagent seam 允许一个 agent（智能体）通过具名提供方把工作委
 
 - **`listChildren()`／`listDescendants()`** 把它折叠进每个 `child` 条目的可选字段 `settlement: { outcome, settledAt }`，与既有的身份折叠一样是附加式的；`list_agents` 会把它渲染为追加在既有输出之后的 ` settled=<outcome>@<ISO-timestamp>`。冷路径的投影缓存阶梯对"已结算"给出权威答案，但对"未结算"只给出**临时性**答案——若缓存行记录于结算事件到达上一次 checkpoint 之前，即便完整日志此时已经有了结算记录，它仍会报告没有，这是一个被接受的假阴性，会在下一次 checkpoint 自我修复，绝不会是假阳性。
 - **`awaitSettlement(childId, parent, deadlineMs, signal?)`**——面向模型的 `await_subagent` 工具背后的操作——让限定作用域的 `subagent/end` 事件与一个有上限的 deadline 赛跑；deadline 触发后（只触发一次，没有重试、没有轮询），它会直接从持久化存储读取并据此折叠投影，而绝不使用那个只能给出临时答案的缓存阶梯。这正是把 08-31 创始人裁定的等待模式（一次 deadline、一次权威重读，绝不使用 watcher 或 cron）应用到结算场景。`deadlineMs` 会被限制到 `MAX_AWAIT_SETTLEMENT_DEADLINE_MS`（10 分钟，定义于 `continuation.ts`），无论调用方请求什么；`await_subagent` 工具还会进一步限制到它自己的 `MAX_AWAIT_DEADLINE_MS`（60 秒，默认 `DEFAULT_AWAIT_DEADLINE_MS` 10 秒，定义于 `tool-subagent-control/src/await-subagent.ts`）——真正约束模型调用方的是工具这道更紧的上限。鉴权要求 `parent` 是确切在线的注册表条目，并且在 deadline 路径上还必须是该子级自己持久化的直接父级——这比 `interrupt()` 的在线 ancestor 作用域更窄：`interrupt()` 还接受更上层的 ancestor，而 `awaitSettlement` 不接受。
-- **一次 pre-step 重检**，挂载在 `agent/pre-step` 上：对于本进程曾见其建立过可继续子级的父级，在该父级自己的下一个 step 上，服务会读取 `listChildren()`；对每一个 Activation 已经消失、且已有结算记录但尚未出现在父级自己的日志与 inbox 中的子级，会合成且仅合成一条补投通知（始终报告没有 closing message，因为持久化记录只携带结局与时间）。这条路径覆盖了推送和 `await_subagent` 都覆盖不到的情形：子级结算时父级自身恰好已被拆卸或处于冷态。
+- **一次 pre-step 重检**，挂载在 `agent/pre-step` 上：对于本进程曾见其建立过可继续子级的父级，在该父级自己的下一个 step 上，服务会读取 `listChildren()`；对每一个 Activation 已经消失、且已有结算记录但尚未出现在父级自己的日志与 inbox 中的子级，会合成且仅合成一条补投通知（始终报告没有最终报告，因为持久化记录只携带结局与时间）。这条路径覆盖了推送和 `await_subagent` 都覆盖不到的情形：子级结算时父级自身恰好已被拆卸或处于冷态。
 
 该事件不携带已投递/已确认标志；幂等性是在补投的那一刻强制执行的，不是在写入那一刻。pre-step 重检会在合成之前，先扫描父级自己的会话日志、待处理 inbox 与当前 step 已认领的批次，查找一条来源于该子级的 `subagent-settled`／`subagent-report` 消息，另外还有一个进程内备忘用于补上那条窄窗口——刚被 inject 的通知尚未在日志或 inbox 中可见的那一刻；`list_agents` 从不 inject 任何内容，因此在结构上就不存在幂等性风险。这一切都建立在一条被明确陈述、而非刻意规避的限制之上：同一时刻每个子级至多只有一条尚未排空的结算，这源于子级绝不会在没有中间 `followup()` 调用的情况下被冷恢复进入新的 epoch，而调用方只会在已经认为该子级有了说法之后才发送 followup。
 
@@ -131,7 +131,7 @@ subagent seam 允许一个 agent（智能体）通过具名提供方把工作委
 
 #### 模型看到的内容
 
-一条用户角色的父级消息，开头是结果本身——`Background subagent <child-id> finished and will do no further work unless you send it more.`，或子级被停止、耗尽额度、拒绝任务或失败时的对应句子——随后是 `Its closing message:` 与子级的最终 assistant 内容；若子级没有产出内容，则是 `It left no closing message.`。这是本服务面向父级的唯一直接贡献；委派 schema、父级延续与发现以及子级作用域的 `report` 分别归 `dsh-tool-subagent`、`dsh-tool-subagent-control` 和 `dsh-tool-subagent-report` 所有。
+一条用户角色的父级消息，首行是来源标签 `Report from background subagent <child-id> (<status>):`（`<status>` 为停止原因：`completed`、`aborted`、`max-tokens`、`refusal` 或 `error`），对于除 `completed` 之外的每种状态，紧接一行陈述句（`The subagent was stopped before it finished.`、`The subagent ran out of room before it finished.`、`The subagent declined the task.` 或 `The subagent failed before it finished.`），随后是一个空行，再是子级最终的 assistant 文本——推理块与工具调用/工具结果块不会出现在父级模型看到的内容中（`subagent/end` 载荷与日志保留完整输出）。空文本或仅含空白的文本视为不存在。若子级没有产出最终文本，则为 `(no final report; the subagent ended with status <status>)`。每条通知末尾都有一个空行和 `The subagent is idle and continues only if it is sent another message.`（冷恢复不取决于停止原因，因此对所有状态都成立）。这是本服务面向父级的唯一直接贡献；委派 schema、父级延续与发现以及子级作用域的 `report` 分别归 `dsh-tool-subagent`、`dsh-tool-subagent-control` 和 `dsh-tool-subagent-report` 所有。
 
 #### Token 影响
 
