@@ -192,7 +192,7 @@ function changedSectionText(item: ChangeRenderItem): string {
 export function renderInstructionChanges(
   items: ChangeRenderItem[],
   maxBytes: number,
-): { text: string; changes: AgentInstructionChange[] } {
+): { text: string; changes: AgentInstructionChange[]; omitted: InstructionFile[]; truncated: TruncatedInstruction[] } {
   const byAbsolutePath = new Map(items.map(item => [item.file.absolutePath, item]))
   const style: RenderStyle = {
     intro: '',
@@ -206,6 +206,8 @@ export function renderInstructionChanges(
   const represented = new Set(rendered.represented.map(file => file.absolutePath))
   return {
     text: rendered.text,
+    omitted: rendered.omitted,
+    truncated: rendered.truncated,
     changes: items
       .filter(item => represented.has(item.file.absolutePath))
       .map(item => item.change),

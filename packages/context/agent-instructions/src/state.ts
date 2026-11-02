@@ -10,6 +10,7 @@ import type { Message } from '@deepseek-ai/dsh-llm'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import type { FileSystem, FsVersion } from '@deepseek-ai/dsh-fs'
 import type { ResolvedConfig } from './config.ts'
+import { describeBudgetOverflow, type BudgetOverflow } from './overflow.ts'
 import { instructionContentSha1, trimmedInstructionDigest } from './digest.ts'
 import {
   ancestorChain,
@@ -256,6 +257,8 @@ export async function reconcileInstructionContext(
     excludedBaselineScopes?: ReadonlySet<string>
     projectRoot?: string
     signal?: AbortSignal
+    /** Per rendered batch: the overflow when a file was dropped or truncated (even if nothing is emitted), else undefined. */
+    onOverflow?: (overflow: BudgetOverflow | undefined) => void
   },
 ): Promise<ReconciledInstructionContext | undefined> {
   const session = agent.session
@@ -422,6 +425,8 @@ export async function reconcileInstructionContext(
   }
   if (items.length === 0) return undefined
   const rendered = renderInstructionChanges(items, resolved.maxBytes)
+  const overflow = describeBudgetOverflow(rendered, items.map(item => item.file), resolved.maxBytes)
+  options.onOverflow?.(overflow)
   // When no transition survived rendering (tiny budgets render notice-only
   // text), emit nothing and commit nothing — the uncommitted versions make the
   // next pass retry instead of spamming notice-only contexts.

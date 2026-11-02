@@ -27,6 +27,7 @@ import {
   type AgentInstructionSource,
 } from './state.ts'
 import type { AgentInstructionChange } from './render.ts'
+import { describeBudgetOverflow, type BudgetOverflow } from './overflow.ts'
 
 export { Config, name }
 export {
@@ -40,22 +41,32 @@ export type {
 export { renderWorkspaceContext } from './render.ts'
 export type { RenderedWorkspaceContext, TruncatedInstruction } from './render.ts'
 
-function visibleBaselineSource(
+function visibleBaselineMessage(
   agent: Agent,
   authorityMessages: readonly UserMessage[],
-): AgentInstructionSource | undefined {
+): UserMessage | undefined {
   for (const message of authorityMessages.toReversed()) {
-    if (message.source.kind === 'agent-instructions' && message.source.baseline === true) {
-      return message.source
-    }
+    if (message.source.kind === 'agent-instructions' && message.source.baseline === true) return message
   }
   for (const seq of agent.session.surface.nodes.toReversed()) {
     const event = agent.session.events[seq]
     if (event?.type === 'user/message'
       && event.data.source.kind === 'agent-instructions'
-      && event.data.source.baseline === true) return event.data.source
+      && event.data.source.baseline === true) return event.data
   }
   return undefined
+}
+
+function visibleBaselineSource(
+  agent: Agent,
+  authorityMessages: readonly UserMessage[],
+): AgentInstructionSource | undefined {
+  const source = visibleBaselineMessage(agent, authorityMessages)?.source
+  return source?.kind === 'agent-instructions' ? source : undefined
+}
+
+function carriesBudgetMarker(message: UserMessage, maxBytes: number): boolean {
+  return JSON.stringify(message.content).includes(`Workspace instruction budget ${maxBytes} bytes:`)
 }
 
 function isWorkspaceContext(message: UserMessage): boolean {
@@ -77,6 +88,8 @@ function filePathFromExecution(exec: ToolExecution): string | undefined {
   return filePath.length > 0 ? filePath : undefined
 }
 
+const DYNAMIC_OVERFLOW_KEY = 'dynamic-transition'
+
 export function apply(ctx: Context, config: Config): void {
   const resolved: ResolvedConfig = resolveConfig(config)
   const instructionVersions: InstructionVersionCache = new WeakMap()
@@ -84,6 +97,42 @@ export function apply(ctx: Context, config: Config): void {
     identity: string
     excludedScopes: ReadonlySet<string>
   }>()
+  // Overflow reporting is once per session, per source and outcome: the baseline
+  // recomposes every pre-step until visible, and a pass that fits clears the
+  // source so a recurrence is reported again. `pendingNotices` holds the notice
+  // owed by a source (baseline identity or dynamic transitions) until it enters.
+  const reportedOverflow = new WeakMap<Session, Map<string, string>>()
+  const pendingNotices = new WeakMap<Session, Map<string, UserMessage>>()
+  const reportOverflow = (
+    session: Session,
+    key: string,
+    overflow: BudgetOverflow | undefined,
+  ): void => {
+    const seen = reportedOverflow.get(session) ?? new Map<string, string>()
+    reportedOverflow.set(session, seen)
+    if (overflow === undefined) {
+      // A pass that fits ends the outcome, so the same overflow later is news
+      // again, and a notice still parked for it would describe a stale overflow.
+      seen.delete(key)
+      pendingNotices.get(session)?.delete(key)
+      return
+    }
+    if (seen.get(key) === overflow.logLine) return
+    seen.set(key, overflow.logLine)
+    ctx.logger.warn('%s', overflow.logLine)
+    const notices = pendingNotices.get(session) ?? new Map<string, UserMessage>()
+    notices.set(key, overflow.notice)
+    pendingNotices.set(session, notices)
+  }
+  // A parked baseline notice belongs to one baseline identity; a cwd or config
+  // change makes it unreachable, so drop it instead of leaking it.
+  const purgeStaleNotices = (session: Session, identity: string): void => {
+    const notices = pendingNotices.get(session)
+    if (notices === undefined) return
+    for (const key of notices.keys()) {
+      if (key !== DYNAMIC_OVERFLOW_KEY && key !== identity) notices.delete(key)
+    }
+  }
   const projectionLifecycle = new AbortController()
   type ProjectionTouch = { agent: Agent; path: string }
   const executionTouches = new Map<ToolExecutionToken, ProjectionTouch[]>()
@@ -127,6 +176,7 @@ export function apply(ctx: Context, config: Config): void {
     const visibleBaseline = visibleBaselineSource(agent, authorityMessages)
     const baselinePresent = visibleBaseline !== undefined
     const keepVisibleBaseline = visibleBaseline?.baselineIdentity === identity
+    purgeStaleNotices(agent.session, identity)
     const prepared = baselinePreparations.get(agent.session)
     let excludedBaselineScopes = keepVisibleBaseline && prepared?.identity === identity
       ? prepared.excludedScopes
@@ -146,6 +196,18 @@ export function apply(ctx: Context, config: Config): void {
         replacePreviousBaseline,
         signal,
       }, fileSystem)
+      const overflow = instructions === undefined
+        ? undefined
+        : describeBudgetOverflow(instructions.rendered, instructions.observed, resolved.maxBytes)
+      // A resumed visible baseline whose own in-text marker already records an
+      // overflow was announced when it first entered (log and notice); announcing
+      // it again from a fresh process would repeat that outcome.
+      const visibleMessage = keepVisibleBaseline
+        ? visibleBaselineMessage(agent, authorityMessages)
+        : undefined
+      const alreadyAnnounced = visibleMessage !== undefined
+        && carriesBudgetMarker(visibleMessage, resolved.maxBytes)
+      reportOverflow(agent.session, identity, alreadyAnnounced ? undefined : overflow)
       const baseline = baselineInstructionState(instructions?.included ?? [])
       const observedBaseline = baselineInstructionState(instructions?.observed ?? [])
       const excludedScopes = new Set(observedBaseline.changes.keys())
@@ -197,6 +259,7 @@ export function apply(ctx: Context, config: Config): void {
         touchedPaths,
         projectRoot,
         signal,
+        onOverflow: (overflow) => { reportOverflow(agent.session, DYNAMIC_OVERFLOW_KEY, overflow) },
       },
     )
     if (update !== undefined) {
@@ -319,6 +382,25 @@ export function apply(ctx: Context, config: Config): void {
     for (const touch of pending) queueProjection(touch.agent, touch.path)
   })
 
+  // Place each pending overflow notice right after the context message it
+  // describes: a baseline notice matches by baseline identity, a dynamic
+  // transition notice by any agent-instructions message, or by the batch end when none is entering.
+  const withOverflowNotice = (agent: Agent, messages: readonly UserMessage[]): readonly UserMessage[] => {
+    const notices = pendingNotices.get(agent.session)
+    if (notices === undefined) return messages
+    let placed = messages
+    for (const [key, notice] of notices) {
+      const index = placed.findIndex(message => message.source.kind === 'agent-instructions'
+        && (key === DYNAMIC_OVERFLOW_KEY
+          || (message.source.baseline === true && message.source.baselineIdentity === key)))
+      // A notice with no entering anchor (dynamic transitions all dropped, or a
+      // baseline that was already visible) is still owed; it rides the batch end.
+      notices.delete(key)
+      placed = placed.toSpliced(index < 0 ? placed.length : index + 1, 0, notice)
+    }
+    return placed
+  }
+
   ctx.on('agent/pre-step', async (
     { agent, messages, step, signal },
     next,
@@ -337,14 +419,15 @@ export function apply(ctx: Context, config: Config): void {
     // A proceeding step settles the pending context: it either enters below as
     // `desired`, or its payload is already covered by the batch, so nothing stays pending.
     for (const message of pending) agent.inbox.remove(message.id)
-    if (desired === undefined || decision.messages.some(message => sameContextPayload(message, desired))) {
-      return decision
-    }
-    // Fold the context right after the claimed batch, so the direct prompt
-    // precedes it and the driver-appended runtime context follows it.
-    const lastClaimedIndex = decision.messages.findLastIndex(message => messages.includes(message))
-    const entered = decision.messages.toSpliced(lastClaimedIndex + 1, 0, desired)
-    return { kind: 'enter', messages: entered }
+    // Fold new context right after the claimed batch, so the direct prompt
+    // precedes it and the driver-appended runtime context follows it. A
+    // baseline queued by an earlier step may arrive already covered, but its
+    // overflow notice can still be owed.
+    const folded = desired === undefined || decision.messages.some(message => sameContextPayload(message, desired))
+      ? decision.messages
+      : decision.messages.toSpliced(decision.messages.findLastIndex(message => messages.includes(message)) + 1, 0, desired)
+    const noticed = withOverflowNotice(agent, folded)
+    return noticed === decision.messages ? decision : { kind: 'enter', messages: [...noticed] }
   })
 
   ctx.on('tools/result', (exec: ToolExecution, result: ToolExecutionResult) => {
