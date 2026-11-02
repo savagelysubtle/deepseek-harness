@@ -28,6 +28,8 @@ export type { WorkflowsFace } from './store.ts'
 export type { WorkflowsControlProps } from './WorkflowsControl.tsx'
 export type { WorkflowsOverlayProps } from './WorkflowsOverlay.tsx'
 export { NS } from './locales.ts'
+export { VALIDATE_DEBOUNCE_MS, WorkflowEditor } from './editor/WorkflowEditor.tsx'
+export type { WorkflowEditorLabels, WorkflowEditorProps } from './editor/WorkflowEditor.tsx'
 
 /** Required services: slots, locale, and the `workflow` Remote namespace (waits specifically on it, not any `remote` mount). */
 export const inject = ['slots', 'locale', 'remote', 'remote.workflow']
