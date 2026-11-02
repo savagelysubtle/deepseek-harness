@@ -9,6 +9,7 @@ import { posix } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { FileType, Sandbox, SandboxNotFoundError } from 'e2b'
+import { guardConfigSchema } from '@deepseek-ai/dsh-config-guard'
 
 export {
   CommandExitError,
@@ -72,11 +73,11 @@ declare module '@deepseek-ai/cordis' {
  * {@link getSandbox} before their first operation.
  */
 export class E2BRuntime extends Service {
-  static Config: z<Config> = z.object({
+  static Config: z<Config> = guardConfigSchema(z.object({
     apiKey: z.string(),
     cwd: z.string().default('/home/user/workspace'),
     timeoutMs: z.number().default(300_000),
-  })
+  }))
 
   /** Validated remote working directory shared by provider adapters. */
   readonly cwd: string

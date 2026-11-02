@@ -9,6 +9,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
+import { guardConfigSchema } from '@deepseek-ai/dsh-config-guard'
 import {
   assertPositiveFinite,
   NO_START_CAPABILITIES,
@@ -37,10 +38,10 @@ export interface Config {
   disposeGraceMs?: number
 }
 
-export const Config: z<Config> = z.object({
+export const Config: z<Config> = guardConfigSchema(z.object({
   env: z.dict(z.string()).default({}),
   disposeGraceMs: z.number().default(DEFAULT_DISPOSE_GRACE_MS),
-})
+}))
 
 type ResolvedConfig = Required<Config>
 

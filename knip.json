@@ -384,6 +384,15 @@
         "tests/**/*.ts"
       ]
     },
+    "packages/util/config-guard": {
+      "entry": [
+        "tests/**/*.spec.ts"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "tests/**/*.ts"
+      ]
+    },
     "packages/util/output-retention": {
       "entry": [
         "tests/**/*.spec.ts"

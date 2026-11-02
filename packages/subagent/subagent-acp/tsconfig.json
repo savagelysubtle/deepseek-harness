@@ -33,6 +33,9 @@
       "path": "../../util/timeout"
     },
     {
+      "path": "../../util/config-guard"
+    },
+    {
       "path": "../../test-support/loader-smoke"
     },
     {

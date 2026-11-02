@@ -24,6 +24,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AgUiConfig } from './types.ts'
 import { AgUiServer } from './server.ts'
 import type { ResolvedAgUiOptions } from './server.ts'
+import { guardConfigSchema } from '@deepseek-ai/dsh-config-guard'
 export type { AgUiEvent, BracketState } from './types.ts'
 export {
   APPROVAL_CUSTOM_EVENT,
@@ -51,13 +52,13 @@ export type Config = AgUiConfig
  * a missing or short token fails schema validation at plugin load, before any
  * socket exists (misconfiguration fails loud).
  */
-export const Config: Schema<Config> = Schema.object({
+export const Config: Schema<Config> = guardConfigSchema(Schema.object({
   host: Schema.string().default('127.0.0.1'),
   port: Schema.number().min(0).max(65_535).required(),
   bearerToken: Schema.string().min(8).required(),
   keepAliveMs: Schema.number().min(1).default(15_000),
   maxBufferedEvents: Schema.number().min(1).default(256),
-})
+}))
 
 /**
  * Explicit resolve step from wire config to listener options. Loader mounts

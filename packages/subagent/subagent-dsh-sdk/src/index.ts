@@ -21,6 +21,7 @@ import {
   startSdkRun,
   type SdkRunSpec,
 } from './run.ts'
+import { guardConfigSchema } from '@deepseek-ai/dsh-config-guard'
 
 export const name = 'subagent-dsh-sdk'
 export const inject = ['subagents']
@@ -68,7 +69,7 @@ export interface Config {
   disposeGraceMs?: number
 }
 
-export const Config: z<Config> = z.object({
+export const Config: z<Config> = guardConfigSchema(z.object({
   providerName: z.string().default('dsh-sdk'),
   command: z.string().required(),
   args: z.array(z.string()).default([]),
@@ -80,7 +81,7 @@ export const Config: z<Config> = z.object({
   shutdownTimeoutMs: z.number().default(DEFAULT_SHUTDOWN_TIMEOUT_MS),
   disposeEofGraceMs: z.number().default(DEFAULT_DISPOSE_EOF_GRACE_MS),
   disposeGraceMs: z.number().default(DEFAULT_DISPOSE_GRACE_MS),
-})
+}))
 
 /** The shape after schemastery applied the defaults (`cwd` and `maxTokens` have none). */
 type ResolvedConfig = Required<Omit<Config, 'cwd' | 'maxTokens'>> & Pick<Config, 'cwd' | 'maxTokens'>

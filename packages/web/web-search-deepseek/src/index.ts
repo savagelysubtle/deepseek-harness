@@ -22,6 +22,7 @@ import {
   DEEPSEEK_DEFAULT_MODEL,
 } from './provider.ts'
 import type { DeepSeekSearchProviderOptions } from './provider.ts'
+import { guardConfigSchema } from '@deepseek-ai/dsh-config-guard'
 
 export {
   DeepSeekSearchProvider,
@@ -60,7 +61,7 @@ export interface Config {
   maxUses?: number
 }
 
-export const Config: z<Config> = z.object({
+export const Config: z<Config> = guardConfigSchema(z.object({
   apiKey: z.string().role('secret'),
   apiKeyEnv: z.string().role('credential-ref').default(DEFAULT_API_KEY_ENV),
   // Declared here rather than only at the use site: a configuration surface
@@ -71,7 +72,7 @@ export const Config: z<Config> = z.object({
   apiVersion: z.string().default(DEEPSEEK_DEFAULT_API_VERSION),
   maxTokens: z.number().step(1).min(1).default(DEEPSEEK_DEFAULT_MAX_TOKENS),
   maxUses: z.number().step(1).min(1).default(DEEPSEEK_DEFAULT_MAX_USES),
-})
+}))
 
 /**
  * Environment variable naming this provider's endpoint. Deliberately distinct

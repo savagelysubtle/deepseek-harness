@@ -16,6 +16,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
+import { redactReceivedValue } from '@deepseek-ai/dsh-config-guard'
 import { RECONNECT_DEFAULTS, resolveReconnectPolicy, startConnection } from './connection.ts'
 import type { ReconnectConfig } from './connection.ts'
 // `./handle-store.ts` imports `SERVER_NAME_PATTERN`/`Config` back from THIS
@@ -237,48 +238,24 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Matches the ` but got <value>` tail Schemastery's 'object', 'dict',
- * 'string', 'const', 'array', and 'tuple' resolvers (vendor/schemastery/src
- * /index.ts ~609-753) append to a type-mismatch message, interpolating the
- * raw received value — to the end of the string (`[\s\S]*`, not `.*`), so a
- * multi-line value is stripped along with the rest. A message with no such
- * tail (e.g. "missing required value", or the serverName pattern message,
- * which never embeds the value at all) does not match and is left alone.
+ * Rethrow ANY error from resolving one Config branch with the raw value
+ * Schemastery interpolated into its type-mismatch message withheld, for every
+ * field rather than a field-name allowlist (SWD-167 round 4: `url`, `args`,
+ * and even `auth` can carry a live credential). The message goes through the
+ * shared `redactReceivedValue` helper (OP-205); it is rewritten in place on
+ * the SAME error object, so `.options.path` (the `$.url`/`$.args[1]` prefix
+ * naming the bad field) and the `ValidationError` class survive unchanged.
+ * This Config redacts at throw time here, rather than wrapping with
+ * `guardConfigSchema`, because its custom type resolver already owns every
+ * throw site.
+ * @param error - the value caught resolving one Config branch; always a
+ *   Schemastery `ValidationError` in practice (this Config defines no custom
+ *   validator that could throw anything else).
+ * @returns never: this always throws the same error with its message redacted.
  */
-const BUT_GOT_TAIL_RE = / but got [\s\S]*$/
-
-/**
- * Rewrite ANY error thrown resolving one Config branch so the raw value a
- * Schemastery resolver interpolated into a type-mismatch message can never
- * reach a caller or a log line — for every field, not a field-name
- * allowlist (SWD-167 round 4, sentinel finding: a field allowlist — round
- * 3's `headers`/`env` — chases a generic Schemastery behavior; `url`,
- * `args`, and even `auth` itself can carry a live credential too, e.g. an
- * operator pasting a token straight into `auth` instead of `headers`).
- * Mutates `.message` on the SAME error object rather than constructing a
- * replacement, so `.options.path` (what cordis's `resolveConfig` reports as
- * the issue's `path` — the `$.url`/`$.args[1]`-style prefix that names which
- * field is wrong), the `ValidationError` class, and its `~standard`
- * -recognized prototype all survive completely unchanged; this also makes
- * the rewrite correct no matter what `options.path` looks like, including
- * missing or non-array, since nothing here ever reads it. The expectation
- * text ("expected string", "missing required value", the serverName
- * pattern, …) is untouched — only the interpolated value, when present, is
- * dropped.
- * @param error - the value caught resolving one Config branch. Always a
- *   real `Error` with a string `.message` in practice: every throw inside
- *   the 'object'/'dict'/'string'/'const'/'array'/'tuple' resolvers — the
- *   only ones either branch ever reaches, both only ever handed a data
- *   value this file has already confirmed is a plain record — is a
- *   Schemastery `ValidationError`, and this Config defines no custom
- *   validator that could throw anything else.
- * @returns never: this always throws (the same error, message rewritten in place when there was a value to drop).
- */
-function redactReceivedValue(error: unknown): never {
+function rethrowRedacted(error: unknown): never {
   const thrown = error as Error
-  if (BUT_GOT_TAIL_RE.test(thrown.message)) {
-    thrown.message = thrown.message.replace(BUT_GOT_TAIL_RE, ' (received value withheld)')
-  }
+  thrown.message = redactReceivedValue(thrown.message)
   throw thrown
 }
 
@@ -309,7 +286,7 @@ z.extend(CONFIG_TYPE, (data, _schema, options, strict) => {
     try {
       return z.resolve(data, StdioBranch, options, strict)
     } catch (error) {
-      redactReceivedValue(error)
+      rethrowRedacted(error)
     }
   }
   if (transport === 'streamable-http') {
@@ -326,7 +303,7 @@ z.extend(CONFIG_TYPE, (data, _schema, options, strict) => {
       if (resolved[0].auth === null) delete resolved[0].auth
       return resolved
     } catch (error) {
-      redactReceivedValue(error)
+      rethrowRedacted(error)
     }
   }
   // SWD-167 round 3 (sentinel finding C): never echo the raw `transport`
