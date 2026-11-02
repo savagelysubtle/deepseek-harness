@@ -158,6 +158,9 @@ const packageFileExtras: Readonly<Record<string, readonly string[]>> = {
   // (McpAuthorizeStartResult, the mcp/status-changed Events augmentation) —
   // SWD-164 round 5, defect 2.
   '@deepseek-ai/dsh-mcp-status': ['lib/status.js'],
+  // The wire contract subpath ships as its own bundle for the same Typert-generator
+  // rationale (WorkflowListEntry), resolved through the package's ./wire export.
+  '@deepseek-ai/dsh-workflow-remote': ['lib/wire.js'],
 }
 
 function sameStringList(actual: readonly string[] | undefined, expected: readonly string[]): boolean {

@@ -3420,6 +3420,7 @@ export interface Config {
 - `@deepseek-ai/dsh-client-ui-trajectory`（[`packages/client/ui-trajectory/src/index.ts`](../packages/client/ui-trajectory/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-user-questions`（[`packages/client/ui-user-questions/src/index.ts`](../packages/client/ui-user-questions/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-workflow-run`（[`packages/client/ui-workflow-run/src/index.ts`](../packages/client/ui-workflow-run/src/index.ts)）
+- `@deepseek-ai/dsh-client-ui-workflows`（[`packages/client/ui-workflows/src/index.ts`](../packages/client/ui-workflows/src/index.ts)）
 - `@deepseek-ai/dsh-client-ui-workspace`（[`packages/client/ui-workspace/src/index.ts`](../packages/client/ui-workspace/src/index.ts)）
 - `@deepseek-ai/dsh-command-compact` — 需要 `commands` · `compaction`（[`packages/compaction/command-compact/src/index.ts`](../packages/compaction/command-compact/src/index.ts)）
 - `@deepseek-ai/dsh-command-feedback` — 需要 `commands`（[`packages/feedback/command-feedback/src/index.ts`](../packages/feedback/command-feedback/src/index.ts)）
@@ -3451,7 +3452,9 @@ export interface Config {
 - `@deepseek-ai/dsh-tool-compact` — 需要 `tools` · `compaction`（[`packages/compaction/tool-compact/src/index.ts`](../packages/compaction/tool-compact/src/index.ts)）
 - `@deepseek-ai/dsh-tool-cordis` — 需要 `tools` · `systemPrompt` · `dynamicCordisRunner` · `cordisInspect`（[`packages/extensions/tool-cordis/src/index.ts`](../packages/extensions/tool-cordis/src/index.ts)）
 - `@deepseek-ai/dsh-tool-subagent-control` — 需要 `tools` · `subagents`（[`packages/subagent/tool-subagent-control/src/index.ts`](../packages/subagent/tool-subagent-control/src/index.ts)）
+- `@deepseek-ai/dsh-tool-workflow-run` — 需要 `tools` · `workflowEngine`（[`packages/workflow/tool-workflow-run/src/index.ts`](../packages/workflow/tool-workflow-run/src/index.ts)）
 - `@deepseek-ai/dsh-user-questions`（[`packages/interaction/user-questions/src/index.ts`](../packages/interaction/user-questions/src/index.ts)）
+- `@deepseek-ai/dsh-workflow-remote`（[`packages/workflow/workflow-remote/src/index.ts`](../packages/workflow/workflow-remote/src/index.ts)）
 - `@deepseek-ai/dsh-workspace` — 需要 `storageDomain` · `sessionPersistence`（[`packages/workspace/workspace/src/index.ts`](../packages/workspace/workspace/src/index.ts)）
 
 ## Seam 包（不可直接加载）
@@ -3516,4 +3519,6 @@ export interface Config {
 - `@deepseek-ai/dsh-typert-generator`（[`packages/typert/generator/src/index.ts`](../packages/typert/generator/src/index.ts)）
 - `@deepseek-ai/dsh-typert-protocol`（[`packages/typert/protocol/src/index.ts`](../packages/typert/protocol/src/index.ts)）
 - `@deepseek-ai/dsh-typert-registry`（[`packages/typert/registry/src/index.ts`](../packages/typert/registry/src/index.ts)）
+- `@deepseek-ai/dsh-workflow-run-store`（[`packages/workflow/workflow-run-store/src/index.ts`](../packages/workflow/workflow-run-store/src/index.ts)）
+- `@deepseek-ai/dsh-workflow-yaml`（[`packages/workflow/workflow-yaml/src/index.ts`](../packages/workflow/workflow-yaml/src/index.ts)）
 - `@deepseek-ai/dsh-worktree`（[`packages/worktree/worktree/src/index.ts`](../packages/worktree/worktree/src/index.ts)）

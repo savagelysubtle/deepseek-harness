@@ -376,6 +376,11 @@
     - id: tool-workflow
       name: '@deepseek-ai/dsh-tool-workflow'
 
+    # YAML workflow definitions (OP-240): the workflow_run tool and the
+    # workflowRuns service, beside the script-based workflow tool.
+    - id: tool-workflow-run
+      name: '@deepseek-ai/dsh-tool-workflow-run'
+
     - id: timeout-policy
       name: '@deepseek-ai/dsh-tool-call-timeout-policy'
 

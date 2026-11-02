@@ -1,0 +1,46 @@
+/* Workflows header trigger and overlay panel. Trigger chrome mirrors the org-board
+ * header action; every color resolves through a `--dsw-alias-*` token. */
+
+.root {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+}
+
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.trigger:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.label {
+  white-space: nowrap;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 320px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
+}
+
+.placeholder {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+}

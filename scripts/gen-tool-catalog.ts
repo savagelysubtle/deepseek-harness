@@ -686,6 +686,13 @@ function hasToolExportSubpath(manifestPath: string): boolean {
 }
 
 /**
+ * `tool-*` leaves that exist on disk as scaffolds and register no tool yet, so booting them
+ * harvests nothing. OP-240 slice C4 adds `tool-workflow-run` to {@link TOOL_PACKAGES} together
+ * with its tool and deletes it from this set; the completeness guard then covers it again.
+ */
+const SCAFFOLD_TOOL_PACKAGE_DIRS: ReadonlySet<string> = new Set(['tool-workflow-run'])
+
+/**
  * Discover every on-disk tool-package boot target, by owning package
  * directory leaf name: the UNION of (a) every `tool-*` leaf directory under
  * `packages/<group>/` (back-compat — a tool package named for its own kind)
@@ -700,7 +707,9 @@ function hasToolExportSubpath(manifestPath: string): boolean {
  * @param scanRoot - repo root (or a fixture tree root) to scan from.
  */
 function discoverToolPackageDirs(scanRoot: string): string[] {
-  const dirGlob = globSync('packages/*/tool-*', { cwd: scanRoot }).map(p => basename(p))
+  const dirGlob = globSync('packages/*/tool-*', { cwd: scanRoot })
+    .map(p => basename(p))
+    .filter(dir => !SCAFFOLD_TOOL_PACKAGE_DIRS.has(dir))
   const subpathDirs = globSync('packages/*/*/package.json', { cwd: scanRoot })
     .filter(manifestPath => hasToolExportSubpath(resolve(scanRoot, manifestPath)))
     .map(manifestPath => basename(dirname(manifestPath)))
