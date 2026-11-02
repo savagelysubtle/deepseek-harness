@@ -16,8 +16,9 @@ import { guardConfigSchema, redactReceivedValue, RECEIVED_VALUE_WITHHELD } from 
 
 | Export | Role |
 |---|---|
-| `guardConfigSchema(schema)` | Wrap a fully built plugin `Config` schema so every validation issue passes through `redactReceivedValue`. Returns the same instance; call it LAST (a chained refinement after it would clone the schema and drop the guard). |
+| `guardConfigSchema(schema)` | Wrap a fully built plugin `Config` schema so its validation errors are redacted on BOTH paths: the Standard Schema path (`~standard.validate`, what cordis `resolveConfig` calls) and the direct-call path (`schema(data)`, what the settings service uses). A callable schema is returned as a pass-through Proxy whose `apply` trap redacts a thrown error's message and stack and rethrows the same object. Call it LAST (a chained refinement or clone made after it builds a fresh schema and loses the guard). |
 | `redactReceivedValue(message)` | Replace the ` but got <value>` tail (multi-line values included) with a fixed marker. A message that never embeds the value is returned unchanged. |
+| `redactThrown(error)` | Redact a thrown validation error in place: its message and its `stack` (V8 bakes the message into the stack header, so `.message` alone is not enough). Used by the `apply` trap and by mcp-client. |
 | `RECEIVED_VALUE_WITHHELD` | The marker text, ` (received value withheld)`. |
 
 ## Usage shape
@@ -32,7 +33,7 @@ export const Config: z<Config> = guardConfigSchema(z.object({
 }))
 ```
 
-The guard overrides the schema's `~standard` accessor (the surface cordis's `resolveConfig` calls) on the instance, non-enumerably; the schema's resolvers, defaults, and shape are untouched, and `scripts/gen-config-catalog.ts` sees through the call to its argument.
+The guard overrides the schema's `~standard` accessor (the surface cordis's `resolveConfig` calls) on the instance, non-enumerably, and wraps the callable schema in a pass-through Proxy for direct calls; the schema's resolvers, defaults, and shape are untouched, and `scripts/gen-config-catalog.ts` sees through the call to its argument.
 
 ## Model Experience
 
@@ -47,5 +48,5 @@ None; this package neither assembles nor sends a provider request.
 - **Depends on Schemastery's wording** — the strip keys on ` but got `. Each guarded package carries a leak test through the real vendored Schemastery with a canary, so a wording change fails loudly.
 - **Config validation only** — errors thrown from plugin code after validation are not covered.
 - **`path` is not redacted** — dict key names and other path segments are kept as-is.
-- **mcp-client uses only the message helper** — it calls `redactReceivedValue` inside its `rethrowRedacted` rather than `guardConfigSchema`, because its custom type resolver already redacts at throw time.
+- **mcp-client uses only the message helper** — it calls `redactThrown` inside its `rethrowRedacted` rather than `guardConfigSchema`, because its custom type resolver already redacts at throw time.
 - **Per-package opt-in** — a plugin must wrap its own `Config`; the durable fix is schema-declared secret roles handled in the vendored resolver (founder sign-off required).

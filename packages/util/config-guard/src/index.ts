@@ -29,6 +29,29 @@ export function redactReceivedValue(message: string): string {
   return message.replace(BUT_GOT_TAIL_RE, RECEIVED_VALUE_WITHHELD)
 }
 
+/**
+ * Redact a thrown validation error IN PLACE: its message and its captured
+ * `stack` (V8 bakes the message into the stack header at construction, so
+ * rewriting only `.message` would leave the received value in the stack and in
+ * any logger that prints it). The error keeps its identity, class, and
+ * `options.path`. A non-Error, or a message that never embedded a value, is
+ * left alone.
+ * @param error - whatever a schema call threw.
+ * @returns nothing; the error object is mutated.
+ */
+export function redactThrown(error: unknown): void {
+  if (!(error instanceof Error)) return
+  const original = error.message
+  const redacted = redactReceivedValue(original)
+  if (redacted === original) return
+  error.message = redacted
+  const stack = error.stack
+  const at = typeof stack === 'string' ? stack.indexOf(original) : -1
+  error.stack = typeof stack === 'string' && at >= 0
+    ? stack.slice(0, at) + redacted + stack.slice(at + original.length)
+    : `${error.name}: ${redacted}`
+}
+
 /** One Standard Schema validation issue, as far as this guard needs to see it. */
 interface GuardIssue {
   readonly message: string
@@ -40,16 +63,24 @@ interface GuardStandard {
 }
 
 /**
- * Make a plugin `Config` schema withhold the received value from its
- * validation issues. Overrides the instance's `~standard` accessor (the
- * surface cordis calls in `resolveConfig`) so every issue message passes
- * through {@link redactReceivedValue}; the schema's own resolvers, defaults,
- * and catalog shape are untouched, and the override is non-enumerable so it is
- * invisible to schema serialization. Apply it as the LAST step of the Config
- * expression: a chained refinement after it would clone the schema and drop
- * the override.
+ * Make a plugin `Config` schema withhold the received value on BOTH ways it is
+ * validated. (1) The Standard Schema path: the instance's `~standard` accessor
+ * (what cordis `resolveConfig` calls) is overridden so every issue message
+ * passes through {@link redactReceivedValue}. (2) The direct-call path
+ * (`schema(data)`, what the settings service uses): a callable schema is
+ * returned as a Proxy whose `apply` trap redacts a thrown error's message and
+ * stack with {@link redactThrown} and rethrows the same error object. Every
+ * other operation passes through, so property reads, `instanceof`, and
+ * spreading behave as on the raw schema; the schema's resolvers, defaults, and
+ * catalog shape are untouched, and the override is non-enumerable. Apply it as
+ * the LAST step of the Config expression: a chained refinement after it (or any
+ * clone made after wrapping) builds a fresh schema and loses the guard.
+ *
+ * Out of scope: a Promise result from `validate` (cordis rejects async config
+ * validation), and a non-Error thrown value, which propagates unredacted.
  * @param schema - the fully built Config schema.
- * @returns the same schema instance, now redacting its validation issues.
+ * @returns the schema (a pass-through Proxy when it is callable, the same
+ *   instance otherwise), now redacting its validation errors.
  */
 export function guardConfigSchema<S extends object>(schema: S): S {
   let holder = Object.getPrototypeOf(schema) as object | null
@@ -67,9 +98,7 @@ export function guardConfigSchema<S extends object>(schema: S): S {
       const standard = Reflect.get(owner, '~standard', this) as GuardStandard
       return {
         ...standard,
-        // Out of scope: a Promise result (cordis rejects async config validation
-        // outright), and a non-ValidationError thrown by a custom validator,
-        // which propagates unredacted. `issue.path` (dict key names) is kept.
+        // `issue.path` (dict key names) is kept; see the function doc for scope.
         validate: (value: unknown) => {
           const result = standard.validate(value) as { issues?: readonly GuardIssue[] }
           if (result.issues === undefined) return result
@@ -81,5 +110,16 @@ export function guardConfigSchema<S extends object>(schema: S): S {
       }
     },
   })
-  return schema
+  if (typeof schema !== 'function') return schema
+  return new Proxy(schema, {
+    apply(target, thisArg, args: unknown[]) {
+      try {
+        const result: unknown = Reflect.apply(target, thisArg, args)
+        return result
+      } catch (error) {
+        redactThrown(error)
+        throw error
+      }
+    },
+  })
 }

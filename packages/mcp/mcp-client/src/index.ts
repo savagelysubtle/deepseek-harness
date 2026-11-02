@@ -16,7 +16,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
-import { redactReceivedValue } from '@deepseek-ai/dsh-config-guard'
+import { redactThrown } from '@deepseek-ai/dsh-config-guard'
 import { RECONNECT_DEFAULTS, resolveReconnectPolicy, startConnection } from './connection.ts'
 import type { ReconnectConfig } from './connection.ts'
 // `./handle-store.ts` imports `SERVER_NAME_PATTERN`/`Config` back from THIS
@@ -242,8 +242,8 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
  * Schemastery interpolated into its type-mismatch message withheld, for every
  * field rather than a field-name allowlist (SWD-167 round 4: `url`, `args`,
  * and even `auth` can carry a live credential). The message goes through the
- * shared `redactReceivedValue` helper (OP-205); it is rewritten in place on
- * the SAME error object, so `.options.path` (the `$.url`/`$.args[1]` prefix
+ * shared `redactThrown` helper (OP-205), which rewrites the message and the
+ * stack in place on the SAME error object, so `.options.path` (the `$.url`/`$.args[1]` prefix
  * naming the bad field) and the `ValidationError` class survive unchanged.
  * This Config redacts at throw time here, rather than wrapping with
  * `guardConfigSchema`, because its custom type resolver already owns every
@@ -254,9 +254,8 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
  * @returns never: this always throws the same error with its message redacted.
  */
 function rethrowRedacted(error: unknown): never {
-  const thrown = error as Error
-  thrown.message = redactReceivedValue(thrown.message)
-  throw thrown
+  redactThrown(error)
+  throw error
 }
 
 /**

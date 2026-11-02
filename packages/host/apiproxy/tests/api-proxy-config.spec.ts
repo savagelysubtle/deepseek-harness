@@ -15,6 +15,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import LlmRuntime, { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { guardConfigSchema } from '@deepseek-ai/dsh-config-guard'
 import { SettingsProvider, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import { CredentialProvider } from '@deepseek-ai/dsh-credentials'
@@ -549,6 +550,20 @@ describe('settings domain', () => {
     const error = expectErr(await api.settings.update(request({ ns, patch })))
     expect(error.code).toBe('settings-rejected')
     expect(error.details).toEqual({ ns })
+  })
+
+  it('settings-rejected never echoes a credential pasted into a wrongly shaped slot (OP-205)', async () => {
+    const secret = 'sk-FAKE-0123456789abcdef'
+    const ctx = await harness()
+    ctx.settings.register(NS, guardConfigSchema(z.object({ baseURL: z.string(), models: z.array(z.string()) })))
+    const api = createApiProxy(ctx, DEFAULTS)
+    const update = expectErr(await api.settings.update(request({ ns: 'llm-deepseek', patch: { models: secret } })))
+    const replace = expectErr(await api.settings.replace(request({ ns: 'llm-deepseek', section: { models: { k: [secret] } } })))
+    for (const error of [update, replace]) {
+      expect(error.code).toBe('settings-rejected')
+      expect(error.message).toMatch(/expected \w+ \(received value withheld\)/)
+      expect(JSON.stringify(error)).not.toContain(secret)
+    }
   })
 
   it('answers an unregistered namespace as the seam does, and a malformed one alike', async () => {

@@ -36,5 +36,17 @@ describe('Config validation errors withhold the received value', () => {
     expect(error.message).not.toContain(SECRET)
     expect(JSON.stringify(error)).not.toContain(SECRET)
     expect(String(error.stack)).not.toContain(SECRET)
+
+    // The direct-call path (what the settings service uses) is guarded too.
+    let direct: unknown
+    try {
+      ;(Config as unknown as (data: unknown) => unknown)(config)
+    } catch (thrown) {
+      direct = thrown
+    }
+    expect(direct).toBeInstanceOf(Error)
+    expect((direct as Error).message).toMatch(/\(received value withheld\)/)
+    expect((direct as Error).message).not.toContain(SECRET)
+    expect(String((direct as Error).stack)).not.toContain(SECRET)
   })
 })
