@@ -461,6 +461,34 @@ describe('readOrgProfilePatchesWithToken', () => {
     expect(read.reason).toContain('is not valid YAML')
   })
 
+  it('does not emit a yaml warning (with the source line) for an unknown tag on read', async () => {
+    const dir = tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    writeFileSync(path, '- id: a\n  apiToken: !sk-SECRET-TAG value\n')
+    const warn = vi.spyOn(process, 'emitWarning').mockImplementation(() => undefined)
+    try {
+      const read = await readOrgProfilePatchesWithToken(path)
+      expect(read.ok).toBe(true)
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('keeps the yaml code frame and the offending value out of the read failure reason (OP-212)', async () => {
+    const dir = tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    writeFileSync(path, '- id: a\n  apiToken: sk-SECRET-VALUE-1\n  apiToken: sk-SECRET-VALUE-2\n')
+    const read = await readOrgProfilePatchesWithToken(path)
+    expect(read.ok).toBe(false)
+    if (read.ok) throw new Error('unreachable')
+    expect(read.reason).toContain('is not valid YAML')
+    expect(read.reason).toContain('line')
+    expect(read.reason).not.toContain('\n')
+    expect(read.reason).not.toContain('apiToken')
+    expect(read.reason).not.toContain('sk-SECRET')
+  })
+
   it('folds a non-Error thrown by the filesystem into String(error), not `.message`', async () => {
     const dir = tempDir()
     const path = writeProfile(dir, ['seat-a'])
@@ -850,6 +878,29 @@ describe('writeOrgServedRoster', () => {
     expect(caught).toBeInstanceOf(OrgServedRosterWriteError)
     expect((caught as Error).message).toContain('is not valid YAML')
     expect(readFileSync(path, 'utf8')).toBe(malformedYaml)
+  })
+
+  it('keeps the yaml code frame and the offending value out of the write error and its cause (OP-212)', async () => {
+    const dir = tempDir()
+    const path = join(dir, 'cordis.patch.yml')
+    const duplicate = '- id: a\n  apiToken: sk-SECRET-VALUE-1\n  apiToken: sk-SECRET-VALUE-2\n'
+    writeFileSync(path, duplicate)
+    const token = hashOrgServedRosterBytes(readFileSync(path))
+    let caught: unknown
+    try {
+      await writeOrgServedRoster(path, MOUNT_IDS, ['a'], token)
+    } catch (error: unknown) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(OrgServedRosterWriteError)
+    const error = caught as Error
+    for (const text of [error.message, (error.cause as Error).message]) {
+      expect(text).not.toContain('\n')
+      expect(text).not.toContain('apiToken')
+      expect(text).not.toContain('sk-SECRET')
+    }
+    expect(error.message).toContain('is not valid YAML')
+    expect(readFileSync(path, 'utf8')).toBe(duplicate)
   })
 
   it('refuses OrgServedRosterWriteError naming tool-mailbox when THAT mount (not the bridge) is malformed', async () => {

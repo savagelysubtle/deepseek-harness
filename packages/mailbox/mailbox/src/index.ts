@@ -24,7 +24,7 @@ export type { MailboxMessageSource, MailboxRelaySource, MailboxRefusalSource } f
 export {
   findOrgRegistryRoute, hashOrgRegistryBytes, isSeatIdentityPinned, loadOrgRegistry,
   loadOrgRegistryWithToken, OrgRegistryConflictError, OrgRegistryWriteError, orgRegistryAllows,
-  parseOrgRegistry, resolveSeatCwd, resolveSeatSessionId, writeOrgRegistry,
+  parseOrgRegistry, resolveSeatCwd, resolveSeatSessionId, writeOrgRegistry, yamlErrorFirstLine,
 } from './org-registry.ts'
 export type { OrgRegistry, OrgRegistryEdge, OrgRegistryParseOptions, OrgRegistrySeat } from './org-registry.ts'
 export {
