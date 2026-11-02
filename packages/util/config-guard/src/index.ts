@@ -35,7 +35,8 @@ export function redactReceivedValue(message: string): string {
  * rewriting only `.message` would leave the received value in the stack and in
  * any logger that prints it). The error keeps its identity, class, and
  * `options.path`. A non-Error, or a message that never embedded a value, is
- * left alone.
+ * left alone. If the stack no longer contains the message, the fallback
+ * `${name}: ${redacted}` DROPS the stack frames.
  * @param error - whatever a schema call threw.
  * @returns nothing; the error object is mutated.
  */
@@ -47,9 +48,12 @@ export function redactThrown(error: unknown): void {
   error.message = redacted
   const stack = error.stack
   const at = typeof stack === 'string' ? stack.indexOf(original) : -1
-  error.stack = typeof stack === 'string' && at >= 0
+  // Only the FIRST occurrence (the header) is replaced; a copy inside a nested
+  // cause or pasted text would stay.
+  const nextStack = typeof stack === 'string' && at >= 0
     ? stack.slice(0, at) + redacted + stack.slice(at + original.length)
     : `${error.name}: ${redacted}`
+  error.stack = nextStack
 }
 
 /** One Standard Schema validation issue, as far as this guard needs to see it. */
@@ -114,6 +118,7 @@ export function guardConfigSchema<S extends object>(schema: S): S {
   return new Proxy(schema, {
     apply(target, thisArg, args: unknown[]) {
       try {
+        // Typed local: oxlint rejects returning Reflect.apply's `any` directly.
         const result: unknown = Reflect.apply(target, thisArg, args)
         return result
       } catch (error) {
