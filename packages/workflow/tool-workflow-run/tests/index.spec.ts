@@ -1,17 +1,28 @@
-// Type-only: the engine package the later drill tests run against.
-import type {} from '@deepseek-ai/dsh-workflow-worker-thread'
 import { Context } from '@deepseek-ai/cordis'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import * as ToolWorkflowRun from '../src/index.ts'
+import { setup } from './harness.ts'
+import type { Harness } from './harness.ts'
 
-describe('tool-workflow-run scaffold', () => {
+let h: Harness | undefined
+afterEach(async () => { await h?.cleanup(); h = undefined })
+
+describe('tool-workflow-run plugin', () => {
   it('declares its plugin identity and required services', () => {
     expect(ToolWorkflowRun.name).toBe('tool-workflow-run')
     expect(ToolWorkflowRun.inject).toEqual(['tools', 'workflowEngine'])
   })
 
-  it('applies as a no-op on a real Context', () => {
+  it('does not start without the engine services', async () => {
     const ctx = new Context()
-    expect(() => { ToolWorkflowRun.apply(ctx) }).not.toThrow()
+    await expect(ctx.plugin(ToolWorkflowRun)).resolves.toBeDefined()
+    expect((ctx as unknown as { workflowRuns?: unknown }).workflowRuns).toBeUndefined()
+  })
+
+  it('mounts the host runner and registers the tool', async () => {
+    h = await setup()
+    expect(h.ctx.workflowRuns).toBeDefined()
+    const result = await h.execute({})
+    expect((result.content[0] as { text: string }).text).toContain('exactly one of name')
   })
 })

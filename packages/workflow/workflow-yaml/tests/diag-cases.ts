@@ -53,6 +53,8 @@ export const DIAG_CASES: DiagCase[] = [
     message: "'bash'" },
   { title: 'bad node id', text: node('  - id: Bad Id\n    kind: bash\n    bash: echo\n'), code: 'node-id-invalid', line: 5, column: 9,
     message: '[a-z0-9_-]' },
+  { title: 'prototype node id', text: node('  - id: __proto__\n    kind: bash\n    bash: echo\n'), code: 'node-id-invalid', line: 5,
+    column: 9, message: 'reserved' },
   { title: 'reserved node id', text: node('  - id: inputs\n    kind: bash\n    bash: echo\n'), code: 'node-id-invalid', line: 5,
     column: 9, message: 'reserved' },
   { title: 'duplicate node id', text: node('  - id: a\n    kind: bash\n    bash: echo\n  - id: a\n    kind: bash\n    bash: echo\n'),

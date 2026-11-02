@@ -57,6 +57,7 @@ import type {
   WorkflowRunId,
   WorkflowSupervisedChild,
 } from '@deepseek-ai/dsh-workflow'
+import { namesDeniedModel } from './model-guard.ts'
 import { renderThrown } from './realm.ts'
 import { createWorkflowChildSupervisor } from './supervisor.ts'
 import type { ExecutionObserver } from './runtime.ts'
@@ -551,10 +552,38 @@ export class WorkerRun implements WorkflowRun {
     return typeof model === 'string' && model.length > 0 ? model : undefined
   }
 
+  /**
+   * Refuse a child whose final model names the denied family. The final id is the explicit model,
+   * else the tier's model, else the parent's own; the model catalog's id and name for it are
+   * checked too, so a catalog alias cannot carry the family past the static checks.
+   */
+  private async assertModelAllowed(request: ChildStartRequest, model: string | undefined): Promise<void> {
+    const final = model ?? this.parent.options.model
+    if (final === undefined) {
+      throw new Error('the model for this node cannot be determined (no explicit, tier or parent model), so the Fable check cannot run; set a model on the node or the parent agent')
+    }
+    const candidates = [final]
+    const provider = request.provider ?? this.parent.options.provider
+    const llm = this.ctx.get('llm')
+    if (llm !== undefined && provider !== undefined) {
+      try {
+        const info = await llm.resolveModelInfo(provider, final, this.controller.signal)
+        candidates.push(info.id, info.name)
+      } catch (error: unknown) {
+        this.ctx.logger.warn(`workflow-worker-thread: model catalog lookup failed: ${renderThrown(error)}`)
+        throw new Error(`model "${final}" could not be checked against the model catalog, so the node was not started`)
+      }
+    }
+    if (candidates.some(namesDeniedModel)) {
+      throw new Error(`model "${final}" resolves to a denied model family (Fable is not allowed in workflows)`)
+    }
+  }
+
   /** Provider start for one child (or continuation iteration); the caller handles failure and admission. */
-  private launchChild(request: ChildStartRequest, prompt: string): Promise<SubagentRun> {
+  private async launchChild(request: ChildStartRequest, prompt: string): Promise<SubagentRun> {
     // A tier names a model only when the call gave none; an unmapped tier leaves the default model.
     const model = request.model ?? (request.tier !== undefined ? this.tierModel(request.tier) : undefined)
+    await this.assertModelAllowed(request, model)
     return this.subagents.start(this.provider, {
       prompt: [{ type: 'text', text: prompt }],
       parent: this.parent,

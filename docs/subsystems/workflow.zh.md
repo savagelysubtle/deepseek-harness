@@ -33,6 +33,35 @@ interface WorkflowStartRequest {
   parent: Agent
   /** Cancels the run when aborted. */
   signal?: AbortSignal
+  /**
+   * Workspace root: `bash()` working directories resolve (realpath) and must
+   * stay under it. Defaults to the host process cwd.
+   */
+  cwd?: string
+  /**
+   * Decides `approve()` questions. Absent means every `approve()` answers
+   * `'unavailable'` (fail closed); the engine never prompts by itself.
+   */
+  approver?: WorkflowApprover
+  /**
+   * Turns on the `bash()` hook and the `agent()` `doneWhen` option for this run. Off by default:
+   * both run host-side commands, so only an owner that vouches for the script (a compiled,
+   * trusted workflow) enables them.
+   */
+  bashEnabled?: boolean
+  /** Overrides the built-in local bash executor (e.g. a sandboxed one). */
+  bashExecutor?: WorkflowBashExecutor
+  /** Receives every `bash()` output chunk (the full streams) so the caller can spill what the in-memory cap dropped. */
+  onBashOutput?: (info: { nodeId?: string }, stream: 'stdout' | 'stderr', chunk: Uint8Array) => void
+  /** Tier label to model id, used for an `agent()` call that gives a `tier` but no `model`. */
+  tierModels?: Readonly<Record<string, string>>
+  /**
+   * The compiled workflow's declared gates. The engine owes one `workflow/gate` per entry on every
+   * terminal path: a node that never started reports `not-reached`.
+   */
+  gateManifest?: readonly { nodeId: string; gateKind: string }[]
+  /** Supervises `agent()` children: stall watchdog and done-when continuation (see {@link WorkflowChildSupervisor}). */
+  supervisor?: WorkflowChildSupervisor
 }
 ```
 
@@ -106,6 +135,14 @@ interface WorkflowRun {
   readonly result: Promise<WorkflowResult>
   /** Cancel the run and its children. */
   cancel(reason?: string): void
+  /** Approvals currently awaiting a decision (engines without `approve()` support omit this). */
+  pendingApprovals?(): readonly WorkflowPendingApproval[]
+  /**
+   * Decide a pending approval from outside the injected approver (a UI path).
+   * First decision wins by a single synchronous compare-and-set; the id is
+   * compared in constant time. A second call answers `already-decided`.
+   */
+  decideApproval?(approvalId: string, outcome: WorkflowApprovalOutcome): WorkflowApprovalDecision
   /** Cancel if needed and await bounded settlement and cleanup. */
   dispose(): Promise<void>
 }
@@ -152,6 +189,92 @@ abstract start(request: WorkflowStartRequest): WorkflowRun
 ```
 
 Source: [`packages/workflow/workflow/src/index.ts:170`](../../packages/workflow/workflow/src/index.ts)
+
+<a id="ctxworkflowruns--workflowrunsservice"></a>
+
+### `ctx.workflowRuns` — `WorkflowRunsService`
+
+The workflow runner service. See the module comment.
+
+```ts cordis-catalog
+/**
+ * Subscribe to run and approval changes.
+ * @param listener - called synchronously with each event; a throw is contained.
+ * @returns the unsubscribe function.
+ */
+subscribe(listener: (event: WorkflowRunsEvent) => void): () => void
+
+/**
+ * The run store of a workspace: one handle per workspace per process.
+ * @param workspace - a workspace path; resolved through `realpath`.
+ * @returns the shared store handle, narrowed to its read methods (writes go through this service).
+ */
+async storeFor(workspace: string): Promise<WorkflowStoreReader>
+
+/**
+ * Workflows present in a workspace's workflows directory.
+ * @param workspace - the workspace path.
+ * @returns the sorted names.
+ */
+async listWorkflows(workspace: string): Promise<string[]>
+
+/**
+ * One run's stored detail with its pin facts.
+ * @param workspace - the workspace path.
+ * @param runId - the run.
+ * @returns the detail, the pinned hash and whether the live file changed.
+ */
+async getRunView(workspace: string, runId: string): Promise<RunView>
+
+/**
+ * Approvals waiting for an answer in this process.
+ * @param runId - restrict to one run.
+ * @returns the waiting approvals.
+ */
+pendingApprovals(runId?: string): PendingApprovalView[]
+
+/**
+ * Answer a waiting approval (the UI path).
+ * @param runId - the run.
+ * @param approvalId - the store approval id.
+ * @param answer - allow or reject.
+ * @param reason - optional human reason, recorded.
+ * @returns the winning state, or undefined when nothing is waiting under that id here.
+ */
+async answerApproval(runId: string, approvalId: string, answer: BrokerAnswer, reason?: string): Promise<string | undefined>
+
+/**
+ * The runs this process is executing now.
+ * @returns run id, name and hash of each.
+ */
+activeRuns(): { runId: string; name: string; hash: string }[]
+
+/**
+ * Cancel a run owned by this process.
+ * @param runId - the run.
+ * @param reason - why, recorded on the run.
+ * @returns whether this process owns the run, with its eventual outcome.
+ */
+async cancel(runId: string, reason: string = 'cancelled by request'): Promise<{ found: boolean; outcome?: RunOutcome }>
+
+/**
+ * Describe a workflow without running anything: the DAG, the gate manifest and the trust facts.
+ * No store is opened and no process or agent is started.
+ * @param workspace - the workspace path.
+ * @param options - which workflow.
+ * @returns the plan, or why none could be made.
+ */
+async dryRun(workspace: string, options: Pick<StartOptions, 'name' | 'path' | 'inputs'>): Promise<DryRunPlan | StartRefused>
+
+/**
+ * Start (or resume) a workflow run.
+ * @param options - which workflow, its inputs, the parent agent and the trust confirmation.
+ * @returns a started run whose `done` settles when the record is closed, or why the start was refused.
+ */
+async start(options: StartOptions): Promise<StartResult>
+```
+
+Source: [`packages/workflow/tool-workflow-run/src/runner.ts:179`](../../packages/workflow/tool-workflow-run/src/runner.ts)
 
 <a id="workflow-events"></a>
 

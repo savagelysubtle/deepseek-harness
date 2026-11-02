@@ -2,7 +2,7 @@
 import * as vm from 'node:vm'
 import type { CompiledWorkflow } from '../src/index.ts'
 
-export interface BashCall { nodeId: string; command: string; opts: Record<string, unknown> }
+interface BashCall { nodeId: string; command: string; opts: Record<string, unknown> }
 export interface Harness {
   agentCalls: { prompt: string; opts: Record<string, unknown> }[]
   bashCalls: BashCall[]

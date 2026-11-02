@@ -21,7 +21,7 @@ import WorkerThreadWorkflowEngine from '../src/index.ts'
 
 vi.setConfig({ testTimeout: 30_000 })
 
-const parent = { id: SessionId('hooks-parent'), options: {} } as unknown as Agent
+const parent = { id: SessionId('hooks-parent'), options: { model: 'test-model' } } as unknown as Agent
 const META = { name: 'hooks-flow', description: 'hooks under test' }
 
 function waitFor(assertion: () => void, timeout = 10_000): Promise<void> {

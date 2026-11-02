@@ -16,7 +16,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 
 /** A minimal parent stand-in: the engine only threads it through to the provider. */
 function fakeParent(): Agent {
-  return { id: SessionId('workflow-parent'), options: {} } as unknown as Agent
+  return { id: SessionId('workflow-parent'), options: { model: 'test-model' } } as unknown as Agent
 }
 
 // Allow cold worker startup on contended CI runners.

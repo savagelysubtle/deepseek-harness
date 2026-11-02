@@ -16,6 +16,8 @@ import type {
 } from './types.ts'
 
 const NODE_ID = /^[a-z0-9_-]{1,64}$/
+/** Ids that are plain-object keys with special meaning; a node keyed by one would corrupt id-indexed maps. */
+const PROTOTYPE_IDS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype'])
 const KEBAB = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const INPUT_NAME = /^[a-z][a-z0-9_]{0,63}$/
 const TIERS: readonly WorkflowTier[] = ['cheap', 'standard', 'premium']
@@ -351,6 +353,8 @@ function validateNodes(v: Validator, raw: unknown[], defaults: WorkflowDefaults)
       v.err('missing-field', "node is missing required field 'id'", path)
     } else if (typeof rawId !== 'string' || !NODE_ID.test(rawId)) {
       v.err('node-id-invalid', 'node id must match [a-z0-9_-]{1,64}', [...path, 'id'])
+    } else if (PROTOTYPE_IDS.has(rawId)) {
+      v.err('node-id-invalid', `'${rawId}' is reserved and cannot be a node id`, [...path, 'id'])
     } else if (rawId === 'inputs') {
       v.err('node-id-invalid', "'inputs' is reserved and cannot be a node id", [...path, 'id'])
     } else if (seen.has(rawId)) {

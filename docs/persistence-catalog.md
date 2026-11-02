@@ -874,7 +874,7 @@ Source: [`packages/core/session/src/types.ts:303`](../packages/core/session/src/
 'tool-workflow/agent-end': ToolWorkflowAgentEndData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:57`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:85`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowagent-start--log-only"></a>
 
@@ -888,7 +888,35 @@ Source: [`packages/workflow/tool-workflow/src/types.ts:57`](../packages/workflow
 'tool-workflow/agent-start': ToolWorkflowAgentStartData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:52`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:80`](../packages/workflow/tool-workflow/src/types.ts)
+
+<a id="tool-workflowgate-report--log-only"></a>
+
+#### `tool-workflow/gate-report` — log-only
+
+```ts persistence-catalog
+/**
+ * The gate report of a YAML workflow run, one row per declared gate.
+ * @param data - run identity and the report rows.
+ */
+'tool-workflow/gate-report': ToolWorkflowGateReportData
+```
+
+Source: [`packages/workflow/tool-workflow/src/types.ts:95`](../packages/workflow/tool-workflow/src/types.ts)
+
+<a id="tool-workflownode-end--log-only"></a>
+
+#### `tool-workflow/node-end` — log-only
+
+```ts persistence-catalog
+/**
+ * Settles one YAML workflow node.
+ * @param data - run identity, node id and kind, status, and optional exit code and duration.
+ */
+'tool-workflow/node-end': ToolWorkflowNodeEndData
+```
+
+Source: [`packages/workflow/tool-workflow/src/types.ts:90`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowrun-end--log-only"></a>
 
@@ -902,7 +930,7 @@ Source: [`packages/workflow/tool-workflow/src/types.ts:52`](../packages/workflow
 'tool-workflow/run-end': ToolWorkflowRunEndData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:62`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:100`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowrun-start--log-only"></a>
 
@@ -916,7 +944,7 @@ Source: [`packages/workflow/tool-workflow/src/types.ts:62`](../packages/workflow
 'tool-workflow/run-start': ToolWorkflowRunStartData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:47`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:75`](../packages/workflow/tool-workflow/src/types.ts)
 
 ### `turn/*`
 

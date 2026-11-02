@@ -82,7 +82,7 @@ async function setup(config?: { toolName?: string; maxResultChars?: number }) {
   await ctx.plugin(toolWorkflow, config ?? {})
   const engine = ctx.workflowEngine as StubEngine
   const session = Session.create(SessionId('caller'))
-  const parent = { id: session.id, options: {}, session } as unknown as Agent
+  const parent = { id: session.id, options: { model: 'test-model' }, session } as unknown as Agent
   return { ctx, engine, parent, session }
 }
 
@@ -430,7 +430,7 @@ describe('dsh-tool-workflow', () => {
       await ctx.plugin(WorkerThreadWorkflowEngine, { disposeGraceMs: 30 })
       await ctx.plugin(toolWorkflow, {})
       const session = Session.create(SessionId('caller'))
-      const parent = { id: session.id, options: {}, session } as unknown as Agent
+      const parent = { id: session.id, options: { model: 'test-model' }, session } as unknown as Agent
       const controller = new AbortController()
       const pending = execute(ctx, {
         script: 'await new Promise(() => {})\nreturn 1',

@@ -216,7 +216,7 @@ export class WorkflowRunStore {
 
   // ---- index --------------------------------------------------------------------------------
 
-  private async loadSummaries(force = false): Promise<{ logBytes: number; runs: RunSummary[]; skipped: number }> {
+  private async loadSummaries(force: boolean = false): Promise<{ logBytes: number; runs: RunSummary[]; skipped: number }> {
     const size = await stat(this.logPath).then(s => s.size, (e: unknown) => {
       if ((e as NodeJS.ErrnoException).code === 'ENOENT') return 0
       throw e
@@ -662,7 +662,7 @@ export class WorkflowRunStore {
    * @param limit - Maximum bytes to return (capped at 256 KiB).
    * @returns The text slice, the next offset when more remains, and the total size.
    */
-  async readOutput(runId: string, nodeId: string, offset = 0, limit: number = LIMITS.readOutputMaxLimit): Promise<OutputSlice> {
+  async readOutput(runId: string, nodeId: string, offset: number = 0, limit: number = LIMITS.readOutputMaxLimit): Promise<OutputSlice> {
     assertNodeId(nodeId)
     const detail = await this.getRun(runId)
     const rec = [...detail.nodes].reverse().find(n => n.nodeId === nodeId && n.status !== 'running') ??

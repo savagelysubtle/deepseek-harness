@@ -109,21 +109,12 @@ nodes:
     for (const call of harness.bashCalls) expect(call.command).not.toContain('pwned')
   })
 
-  it('treats node ids and input names as data, not identifiers', async () => {
-    const compiled = compile(docOf(`${HEAD}nodes:
-  - id: __proto__
-    kind: bash
-    bash: echo a
-  - id: constructor
-    kind: bash
-    depends_on: [__proto__]
-    when: $__proto__.output == 'ok'
-    bash: echo "$__proto__.output"
-`))
-    const { value, harness } = await runScript(compiled, {})
-    expect(harness.bashCalls).toHaveLength(2)
-    expect((value as { nodes: { id: string }[] }).nodes.map(n => n.id)).toEqual(['__proto__', 'constructor'])
-    expect(Object.prototype).not.toHaveProperty('status')
+  it('rejects node ids that are plain-object keys, so id-indexed maps stay sound', () => {
+    for (const id of ['__proto__', 'constructor', 'prototype']) {
+      const result = analyze(`${HEAD}nodes:\n  - id: ${id}\n    kind: bash\n    bash: echo a\n`)
+      expect(result.ok).toBe(false)
+      expect(result.diagnostics.some(d => d.code === 'node-id-invalid' && d.message.includes('reserved'))).toBe(true)
+    }
   })
 
   it('rejects a NUL byte in a value passed to bash and a missing required input', async () => {

@@ -551,8 +551,16 @@ const SERVICE_ROLES: ServiceRole[] = [
     title: 'Workflow script engine',
     mode: 'seam',
     implementations: ['workflow-worker-thread'],
-    consumers: ['tool-workflow', 'tool-ralph'],
+    consumers: ['tool-workflow', 'tool-workflow-run', 'tool-ralph'],
     note: 'One engine per context, as in bash, with no named-provider registry; the general workflow and fixed Ralph consumers start runs whose agent() calls fan out through ctx.subagents.',
+  },
+  {
+    key: 'workflowRuns',
+    pkg: 'tool-workflow-run',
+    title: 'YAML workflow host runner',
+    mode: 'core',
+    consumers: [],
+    note: 'Host runner behind the workflow_run tool: discovery, compile, trust and hash pin, the sandboxed bash executor, the approval broker, resume, and the run store; remote and UI callers use this service rather than the tool.',
   },
   {
     key: 'lsp',

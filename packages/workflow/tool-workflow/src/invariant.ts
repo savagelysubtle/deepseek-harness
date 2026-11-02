@@ -110,6 +110,25 @@ function applyEvent(trace: WorkflowTrace, event: SessionEvent, fail: InvariantFa
       run.members.set(seq, true)
       return
     }
+    case 'tool-workflow/node-end': {
+      openRun(trace, runId, event.type, fail)
+      stringId(data.nodeId, 'tool-workflow/node-end nodeId', fail)
+      stringId(data.kind, 'tool-workflow/node-end kind', fail)
+      stringId(data.status, 'tool-workflow/node-end status', fail)
+      return
+    }
+    case 'tool-workflow/gate-report': {
+      openRun(trace, runId, event.type, fail)
+      if (!Array.isArray(data.rows)) fail('tool-workflow/gate-report rows must be an array')
+      for (const row of data.rows as unknown[]) {
+        if (row === null || typeof row !== 'object' || Array.isArray(row)) fail('tool-workflow/gate-report rows must be objects')
+        const fields = row as Record<string, unknown>
+        stringId(fields.nodeId, 'tool-workflow/gate-report nodeId', fail)
+        stringId(fields.gateKind, 'tool-workflow/gate-report gateKind', fail)
+        stringId(fields.outcome, 'tool-workflow/gate-report outcome', fail)
+      }
+      return
+    }
     case 'tool-workflow/run-end': {
       const run = openRun(trace, runId, event.type, fail)
       if (data.stopReason !== 'completed' && data.stopReason !== 'cancelled' && data.stopReason !== 'error') {

@@ -151,6 +151,7 @@ Append-only; newly visible content follows the reusable request prefix and does 
 - **A script `cancel()` sweeps as `interrupted`**, not `cancelled`.
 - **Host volume caps** — 8 concurrent and 1000 total `bash()` calls, 16 pending and 1000 total approvals, 1000 nodes, 10000 node/gate events and 200000 worker messages per run; a flood ends the run with an error. `supervisor.bind` receives a handle whose `stop('timeout'|'stalled')` settles the child so engine `retry` can fire.
 - **The worker/vm is not a security boundary** — model-written code can escape `node:vm` and reach the worker's process authority; a hostile-code deployment needs a separate-process or container engine.
+- **The Fable model check is a cost guard, not a security boundary** — before a child agent starts, the host refuses the node when its final model (explicit, tier-mapped or inherited) or the catalog name that id resolves to names the Fable family; a provider that hides the family behind an unrelated name is not caught.
 - **One worker thread is paid per run** — there is no pool, warm runtime, or cross-run script cache.
 - **No ambient timers, filesystem, or network are injected, but escaped code can still reach Node** — the missing globals are portability API, not containment.
 - **Bash children that start their own session survive** — the process group is tree-killed, but a descendant that calls `setsid` or double-forks out of the group is not tracked, and a host crash can orphan children (the run store's interrupted-run sweep must say "may be orphaned", not "killed").
