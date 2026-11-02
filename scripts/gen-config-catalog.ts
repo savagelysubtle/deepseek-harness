@@ -594,6 +594,17 @@ function walkSchemaExpr(
   }
   const visit = (e: ts.Expression): void => {
     const call = unwrapExpr(e)
+    // `guardConfigSchema(<schema>)` (OP-205) only swaps the schema's validation
+    // issues for redacted ones; the shape lives in its argument.
+    if (
+      ts.isCallExpression(call)
+      && ts.isIdentifier(call.expression)
+      && call.expression.text === 'guardConfigSchema'
+      && call.arguments[0]
+    ) {
+      visit(call.arguments[0])
+      return
+    }
     const bareCallArg0 = ts.isCallExpression(call) && ts.isIdentifier(call.expression) ? call.arguments[0] : undefined
     if (bareCallArg0 && ts.isObjectLiteralExpression(bareCallArg0)) {
       const typeName = customSchemaTypeName(ctx, bareCallArg0)

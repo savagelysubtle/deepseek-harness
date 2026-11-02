@@ -40,6 +40,7 @@
     "@deepseek-ai/dsh-llm": "workspace:^",
     "@deepseek-ai/dsh-session": "workspace:^",
     "@deepseek-ai/dsh-user-approval": "workspace:^",
+    "@deepseek-ai/dsh-config-guard": "workspace:^",
     "@deepseek-ai/cordis": "workspace:^"
   },
   "devDependencies": {
@@ -48,6 +49,7 @@
     "@deepseek-ai/dsh-llm": "workspace:^",
     "@deepseek-ai/dsh-session": "workspace:^",
     "@deepseek-ai/dsh-user-approval": "workspace:^",
+    "@deepseek-ai/dsh-config-guard": "workspace:^",
     "@deepseek-ai/cordis": "workspace:^"
   }
 }

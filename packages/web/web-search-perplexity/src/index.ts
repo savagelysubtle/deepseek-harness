@@ -12,6 +12,7 @@ import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-web'
 import { PerplexitySearchProvider, PERPLEXITY_DEFAULT_BASE_URL, PERPLEXITY_DEFAULT_MAX_TOKENS, PERPLEXITY_DEFAULT_MODEL } from './provider.ts'
+import { guardConfigSchema } from '@deepseek-ai/dsh-config-guard'
 
 export {
   PERPLEXITY_DEFAULT_BASE_URL,
@@ -42,13 +43,13 @@ export interface Config {
   searchRecency?: 'day' | 'week' | 'month' | 'year'
 }
 
-export const Config: z<Config> = z.object({
+export const Config: z<Config> = guardConfigSchema(z.object({
   apiKey: z.string(),
   baseURL: z.string(),
   model: z.string(),
   maxTokens: z.number().step(1).min(1),
   searchRecency: z.union(['day', 'week', 'month', 'year'] as const),
-})
+}))
 
 /** Register the Perplexity search provider with `ctx.web`. */
 export function apply(ctx: Context, config: Config): void {

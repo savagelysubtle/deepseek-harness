@@ -39,6 +39,7 @@
     "@deepseek-ai/dsh-session": "workspace:^",
     "@deepseek-ai/dsh-subagent": "workspace:^",
     "@deepseek-ai/dsh-subprocess": "workspace:^",
+    "@deepseek-ai/dsh-config-guard": "workspace:^",
     "@deepseek-ai/cordis": "workspace:^"
   },
   "dependencies": {
@@ -55,6 +56,7 @@
     "@deepseek-ai/dsh-session": "workspace:^",
     "@deepseek-ai/dsh-subagent": "workspace:^",
     "@deepseek-ai/dsh-subprocess": "workspace:^",
+    "@deepseek-ai/dsh-config-guard": "workspace:^",
     "@deepseek-ai/cordis": "workspace:^"
   }
 }

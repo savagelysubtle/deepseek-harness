@@ -20,6 +20,7 @@ import type {
   LspQueryResult,
 } from '@deepseek-ai/dsh-lsp'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
+import { guardConfigSchema } from '@deepseek-ai/dsh-config-guard'
 import { abortable, abortError } from './abort.ts'
 import { canonicalizeWorkspace, readHostSource } from './host.ts'
 import type { HostWorkspace } from './host.ts'
@@ -102,9 +103,9 @@ const LspLocalServerConfig: z<LspLocalServerConfig> = z.object({
   killGraceMs: z.number().max(MAX_TIMER_DELAY_MS).default(DEFAULT_KILL_GRACE_MS),
 })
 
-export const Config: z<Config> = z.object({
+export const Config: z<Config> = guardConfigSchema(z.object({
   servers: z.dict(LspLocalServerConfig).required(),
-})
+}))
 
 /** Propagate teardown failures only after every sibling has settled. */
 function throwTeardownFailures(results: readonly PromiseSettledResult<void>[], message: string): void {

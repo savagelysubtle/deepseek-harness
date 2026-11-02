@@ -19,6 +19,7 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { launchEnvironmentOf, type LaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
+import { guardConfigSchema } from '@deepseek-ai/dsh-config-guard'
 import { getOrCreateAnonymousUserId, type AnonymousUserId } from '@deepseek-ai/dsh-anonymous-user-id'
 import {
   DEFAULT_CONTEXT_WINDOW,
@@ -88,7 +89,7 @@ const catalogModel: z<DeepSeekCatalogModel> = z.object({
   maxTokens: z.number().step(1).min(1),
 })
 
-export const Config: z<Config> = z.object({
+export const Config: z<Config> = guardConfigSchema(z.object({
   apiKeyEnv: z.string().role('credential-ref').default(DEFAULT_API_KEY_ENV),
   baseURL: z.string(),
   thinking: z.union(['enabled', 'disabled']),
@@ -98,7 +99,7 @@ export const Config: z<Config> = z.object({
   models: z.array(catalogModel).default(DEFAULT_MODELS),
   streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   retryPolicy: RetryPolicySchema,
-})
+}))
 
 /** Public API default; the internal endpoint comes from $DEEPSEEK_BASE_URL. */
 export const PUBLIC_BASE_URL = 'https://api.deepseek.com'

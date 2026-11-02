@@ -18,6 +18,7 @@ import type {
   SubagentStartRequest,
 } from '@deepseek-ai/dsh-subagent'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
+import { guardConfigSchema } from '@deepseek-ai/dsh-config-guard'
 import { type AcpRunSpec, DEFAULT_DISPOSE_EOF_GRACE_MS, DEFAULT_DISPOSE_GRACE_MS, type PermissionPolicy, startAcpRun } from './run.ts'
 
 export const name = 'subagent-acp'
@@ -63,7 +64,7 @@ export interface Config {
   disposeGraceMs?: number
 }
 
-export const Config: z<Config> = z.object({
+export const Config: z<Config> = guardConfigSchema(z.object({
   providerName: z.string().default('acp'),
   command: z.string().required(),
   args: z.array(z.string()).default([]),
@@ -72,7 +73,7 @@ export const Config: z<Config> = z.object({
   env: z.dict(z.string()).default({}),
   disposeEofGraceMs: z.number().default(DEFAULT_DISPOSE_EOF_GRACE_MS),
   disposeGraceMs: z.number().default(DEFAULT_DISPOSE_GRACE_MS),
-})
+}))
 
 /** A dispose grace must fit the single Node timer that owns its teardown tier. */
 function assertPositiveFinite(name: string, value: number): void {

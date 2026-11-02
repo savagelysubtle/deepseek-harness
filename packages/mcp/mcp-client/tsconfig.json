@@ -37,6 +37,9 @@
       "path": "../../util/timeout"
     },
     {
+      "path": "../../util/config-guard"
+    },
+    {
       "path": "../../util/home-paths"
     },
     {

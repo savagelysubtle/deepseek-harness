@@ -18,6 +18,7 @@ import {
   EXA_DEFAULT_HIGHLIGHTS_PER_RESULT,
   EXA_DEFAULT_SEARCH_TYPE,
 } from './provider.ts'
+import { guardConfigSchema } from '@deepseek-ai/dsh-config-guard'
 
 export {
   EXA_DEFAULT_BASE_URL,
@@ -48,13 +49,13 @@ export interface Config {
   highlightsPerResult?: number
 }
 
-export const Config: z<Config> = z.object({
+export const Config: z<Config> = guardConfigSchema(z.object({
   apiKey: z.string(),
   baseURL: z.string(),
   searchType: z.union(['auto', 'keyword', 'neural'] as const),
   numResults: z.number().step(1).min(1),
   highlightsPerResult: z.number().step(1).min(1),
-})
+}))
 
 /** Register the Exa search provider with `ctx.web`. */
 export function apply(ctx: Context, config: Config): void {
