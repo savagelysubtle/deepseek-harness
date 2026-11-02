@@ -1573,7 +1573,7 @@ export interface McpStatusRegistryOptions {
 }
 ```
 
-Source: [`packages/mcp/mcp-status/src/index.ts:501`](../packages/mcp/mcp-status/src/index.ts)
+Source: [`packages/mcp/mcp-status/src/index.ts:502`](../packages/mcp/mcp-status/src/index.ts)
 
 <a id="deepseek-aidsh-message-feedback"></a>
 
