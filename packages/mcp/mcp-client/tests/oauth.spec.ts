@@ -13,7 +13,7 @@ import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
-import type { Config } from '@deepseek-ai/dsh-mcp-client'
+import type { Config, StreamableHttpConfig } from '@deepseek-ai/dsh-mcp-client'
 
 import { startOAuthFixture, type OAuthFixture } from './oauth-fixture.ts'
 import { oauthCredentialRef, CredentialsOAuthProvider }
@@ -39,7 +39,7 @@ async function mountRegistry(credentialsPath?: string): Promise<Context> {
   return ctx
 }
 
-function httpConfig(fixture: OAuthFixture, serverName: string): Config {
+function httpConfig(fixture: OAuthFixture, serverName: string): StreamableHttpConfig {
   return {
     transport: 'streamable-http',
     serverName,
@@ -744,7 +744,7 @@ describe('OP-203 auth failure text is bounded and sanitised', () => {
       const ctx = await mountRegistry(join(dir, 'creds.yaml'))
       const config = httpConfig(fixture, 'op203-cap')
       // A well-formed OAuth error with an oversized description has no raw-body marker to replace.
-      const handle = startConnection(ctx, { ...config, url: fixture.url }, resolveReconnectPolicy(config.reconnect, 'reconnect'))
+      const handle = startConnection(ctx, config, resolveReconnectPolicy(config.reconnect, 'reconnect'))
       await handle.ready
       expect(handle.status().lastError!.length).toBe(203)
       expect(handle.status().lastError!.endsWith('...')).toBe(true)
@@ -834,7 +834,7 @@ describe('OP-211 stored client registration redirect check', () => {
         version: 1,
         clientInformation: { client_id: 'c-old', redirect_uris: ['http://127.0.0.1:14507/callback'] },
       }))
-      const config: Config = {
+      const config: StreamableHttpConfig = {
         ...httpConfig(fixture, 'op211-host'),
         auth: { mode: 'oauth', redirectPort: 14506 },
       }
