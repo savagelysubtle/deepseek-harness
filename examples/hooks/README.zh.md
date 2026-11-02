@@ -36,4 +36,5 @@ dsh web --patch examples/hooks/gate-hooks.cordis.yml
 - 仅为提醒强度。这些门禁只检查产物是否存在，不是安全围栏：拥有 shell 的模型仍可绕过它们写文件。真正的隔离见工单 #166。
 - 配置在加载时读取一次，并作用于进程内的所有会话；不支持按会话配置钩子。
 - Codex 方言桥（`dsh-hooks-codex`）对工具调用只发送 shell `command`，因此 `screenshot-gate.sh` 在那里拿不到文件路径，无法匹配 UI glob。请像本 overlay 一样使用 Claude 方言桥。
+- 缺失或不可执行的门禁脚本会以 126 或 127 退出，而这不会拒绝，因此该门禁会静默失效；桥会记录以 "this gate is NOT enforcing" 结尾的警告，并指明事件与命令，应用 overlay 后请在宿主日志中查找。
 - 每次拒绝都会作为工具错误或下一步引导文本展示给模型。`Stop` 钩子最多连续强制继续 8 次，之后允许智能体停止。

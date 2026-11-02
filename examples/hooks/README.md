@@ -36,4 +36,5 @@ Each `PreToolUse` payload carries `tool_name` (the harness tool name, for exampl
 - Reminder strength. These gates check that an artifact exists and are not a security fence: a model with a shell can still write files around them. Real containment is ticket #166.
 - The config is read once at load and applies to every session in the process; there is no per-session hook config.
 - The Codex-dialect bridge (`dsh-hooks-codex`) sends only the shell `command` for tool calls, so `screenshot-gate.sh` has no file path there and cannot match UI globs. Use the Claude-dialect bridge, as this overlay does.
+- A missing or non-executable gate script exits 126 or 127, which does not deny, so that gate silently stops enforcing; the bridge logs a warning ending "this gate is NOT enforcing" naming the event and command, so look for it in the host log after applying the overlay.
 - Each refusal is shown to the model as the tool error or the next-step steering text. The `Stop` hook is capped at 8 consecutive forced continuations, after which the agent may stop.

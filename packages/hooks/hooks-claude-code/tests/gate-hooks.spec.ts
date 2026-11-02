@@ -1,8 +1,9 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
@@ -12,6 +13,7 @@ import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-test
 import { LocalBashExecutor } from '@deepseek-ai/dsh-bash-local'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import * as HooksClaude from '@deepseek-ai/dsh-hooks-claude-code'
+import { matchesMatcher } from '@deepseek-ai/dsh-hook-protocol'
 import { MockAdapter, textResponse, toolCallResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
 
 /**
@@ -51,15 +53,16 @@ async function harness(configPath: string, adapter: MockAdapter): Promise<Contex
 function events(agent: Agent): SessionEvent[] { return [...agent.session.events] }
 
 /** Register a recording stand-in for a harness file tool; `ran` flips when it executes. */
-function registerFileTool(ctx: Context, name: string, pathKey: 'file_path' | 'path'): { ran: () => boolean } {
+function registerFileTool(ctx: Context, name: string, pathKey: 'file_path' | 'path'): { ran: () => boolean; args: () => Record<string, unknown> | undefined } {
   let ran = false
+  let received: Record<string, unknown> | undefined
   ctx.tools.register(defineContentToolFixture({
     name,
     description: 'file tool stand-in',
     parameters: { [pathKey]: { type: 'string', required: true, description: 'target' } },
-    async execute() { ran = true; return [{ type: 'text', text: 'wrote' }] },
+    async execute(args: Record<string, unknown>) { ran = true; received = { ...args }; return [{ type: 'text', text: 'wrote' }] },
   }))
-  return { ran: () => ran }
+  return { ran: () => ran, args: () => received }
 }
 
 function prompt(agent: Agent, text = 'go'): void {
@@ -112,10 +115,14 @@ describe('gate hooks — PreToolUse payload for harness file tools', () => {
       textResponse('done'),
     ])
     const ctx = await harness(path, adapter)
-    registerFileTool(ctx, 'str_replace_editor', 'path')
+    const tool = registerFileTool(ctx, 'str_replace_editor', 'path')
     const agent = ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
     prompt(agent)
     await agent.whenIdle()
+
+    // The alias is payload-only: the tool itself still receives just `path`.
+    expect(tool.args()).toEqual({ path: '/repo/src/app.css' })
+    expect(tool.args()?.file_path).toBeUndefined()
 
     const payload = JSON.parse(readFileSync(cap, 'utf8')) as { tool_name: string; tool_input: Record<string, unknown> }
     expect(payload.tool_name).toBe('str_replace_editor')
@@ -214,5 +221,57 @@ exit 2
     const steer = events(agent).find(e => e.type === 'user/message' && e.data.source.kind === 'plugin')
     expect(steer?.type === 'user/message'
       && steer.data.content.some(b => b.type === 'text' && b.text.includes('DONE-EVIDENCE: no gate result in your claim'))).toBe(true)
+  })
+})
+
+describe('gate hooks — PostToolUse alias, shipped settings, broken gate path', () => {
+  it('PostToolUse also carries the file_path alias', async () => {
+    const d = dir()
+    const cap = join(d, 'payload')
+    const s = sh(d, 'post.sh', `#!/usr/bin/env bash\n${captureCmd(cap)}\n`)
+    const path = hooksFile(d, { PostToolUse: [{ hooks: [{ type: 'command', command: s }] }] })
+    const adapter = new MockAdapter([toolCallResponse('c1', 'str_replace_editor', { path: '/repo/a.css' }), textResponse('done')])
+    const ctx = await harness(path, adapter)
+    registerFileTool(ctx, 'str_replace_editor', 'path')
+    const agent = ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
+    prompt(agent)
+    await agent.whenIdle()
+
+    const payload = JSON.parse(readFileSync(cap, 'utf8')) as { tool_input: Record<string, unknown> }
+    expect(payload.tool_input.file_path).toBe('/repo/a.css')
+    expect(payload.tool_input.path).toBe('/repo/a.css')
+  })
+
+  it('the shipped gate-hooks.settings.json matcher selects the file-edit tools and not Bash', () => {
+    const file = fileURLToPath(new URL('../../../../examples/hooks/gate-hooks.settings.json', import.meta.url))
+    const settings = JSON.parse(readFileSync(file, 'utf8')) as {
+      hooks: { PreToolUse: { matcher: string; hooks: { command: string }[] }[]; Stop: { hooks: { command: string }[] }[] }
+    }
+    const group = settings.hooks.PreToolUse[0]!
+    for (const tool of ['edit', 'write', 'str_replace_editor', 'Edit']) {
+      expect(matchesMatcher(group.matcher, tool, 'claude-code'), tool).toBe(true)
+    }
+    expect(matchesMatcher(group.matcher, 'Bash', 'claude-code')).toBe(false)
+    expect(group.hooks.map(h => h.command)).toEqual([
+      '"$HOME/.agents/hooks/plan-gate.sh"',
+      '"$HOME/.agents/hooks/screenshot-gate.sh"',
+    ])
+    expect(settings.hooks.Stop[0]!.hooks.map(h => h.command)).toEqual(['"$HOME/.agents/hooks/done-evidence.sh"'])
+  })
+
+  it('warns loudly when a gate command is missing (exit 127) and still does not deny', async () => {
+    const d = dir()
+    const path = hooksFile(d, { PreToolUse: [{ matcher: EDIT_MATCHER, hooks: [{ type: 'command', command: join(d, 'no-such-gate.sh') }] }] })
+    const adapter = new MockAdapter([toolCallResponse('c1', 'edit', { file_path: '/repo/x.ts' }), textResponse('done')])
+    const ctx = await harness(path, adapter)
+    const warn = vi.fn()
+    ctx.logger.warn = warn as never
+    const tool = registerFileTool(ctx, 'edit', 'file_path')
+    const agent = ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
+    prompt(agent)
+    await agent.whenIdle()
+
+    expect(tool.ran()).toBe(true)
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/PreToolUse.*no-such-gate\.sh.*this gate is NOT enforcing/))
   })
 })

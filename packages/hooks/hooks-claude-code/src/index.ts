@@ -186,6 +186,11 @@ export function apply(ctx: Context, config: Config): void {
           expectedEventName: point,
         }, () => performance.now())
         outputs.push(output)
+        // bash exits 127 (not found) / 126 (not executable) for a broken gate path; neither
+        // denies, so without this the gate would silently stop enforcing.
+        if (output.exitCode === 126 || output.exitCode === 127) {
+          ctx.logger.warn(`hooks-claude-code: ${point} hook (matcher ${JSON.stringify(group.matcher ?? '')}) command ${JSON.stringify(hook.command)} exited ${output.exitCode}: hook command not found or not executable; this gate is NOT enforcing`)
+        }
         if (output.updatedInput !== undefined) {
           ctx.logger.warn(`hooks-claude-code: ${point} hook requested updatedInput, which is not yet honored (ignored)`)
         }
