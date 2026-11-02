@@ -16,7 +16,12 @@ import { validate } from './validate.ts'
 /** Default size cap: 256 KiB of UTF-8. */
 export const DEFAULT_MAX_BYTES = 262_144
 
-/** Analyze workflow YAML text. */
+/**
+ * Analyze workflow YAML text.
+ * @param text - workflow YAML source text
+ * @param options - size cap, expected name, and resolved-model hook
+ * @returns the parse, validation, graph, manifest, and hash result
+ */
 export function analyze(text: string, options: AnalyzeOptions = {}): AnalyzeResult {
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES
   const byteLength = new TextEncoder().encode(text).length

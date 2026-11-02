@@ -24,7 +24,12 @@ export interface LogContents {
 
 const KINDS = new Set(['run', 'node', 'gate', 'approval', 'end'])
 
-/** Throw unless `value` carries a supported schema version. */
+/**
+ * Throw unless `value` carries a supported schema version.
+ * @param value - Parsed object whose `v` field is checked.
+ * @param where - Description of the source, used in the message.
+ * @throws WorkflowStoreError `UNSUPPORTED_VERSION` for any other version.
+ */
 export function assertSupportedVersion(value: { v?: unknown }, where: string): void {
   if (value.v !== WORKFLOW_RUN_RECORD_VERSION)
     throw new WorkflowStoreError(
@@ -34,7 +39,12 @@ export function assertSupportedVersion(value: { v?: unknown }, where: string): v
     )
 }
 
-/** Read and validate the whole log. A missing file is an empty log. */
+/**
+ * Read and validate the whole log. A missing file is an empty log.
+ * @param path - Path of `runs.jsonl`.
+ * @returns The records, byte size and count of damaged lines.
+ * @throws WorkflowStoreError `UNSUPPORTED_VERSION` when a record has another version.
+ */
 export async function readLog(path: string): Promise<LogContents> {
   let text: string
   let bytes: number
@@ -76,7 +86,11 @@ export async function readLog(path: string): Promise<LogContents> {
   return { records, bytes, skipped }
 }
 
-/** Fold records into run summaries, oldest first. */
+/**
+ * Fold records into run summaries, oldest first.
+ * @param records - Records in log order.
+ * @returns One summary per run.
+ */
 export function foldSummaries(records: readonly StoreRecord[]): RunSummary[] {
   const byId = new Map<string, RunSummary>()
   for (const rec of records) {
@@ -89,7 +103,11 @@ export function foldSummaries(records: readonly StoreRecord[]): RunSummary[] {
   return [...byId.values()]
 }
 
-/** Summary for a fresh run header. */
+/**
+ * Summary for a fresh run header.
+ * @param header - The run header record.
+ * @returns A `running` summary.
+ */
 export function summaryOf(header: RunHeaderRecord): RunSummary {
   return {
     runId: header.runId,
@@ -102,19 +120,34 @@ export function summaryOf(header: RunHeaderRecord): RunSummary {
   }
 }
 
-/** Summary after an end record. */
+/**
+ * Summary after an end record.
+ * @param summary - The running summary.
+ * @param end - The run end record.
+ * @returns The summary with terminal status and end time.
+ */
 export function applyEnd(summary: RunSummary, end: EndRecord): RunSummary {
   return { ...summary, status: end.status, endedAt: end.endedAt }
 }
 
-/** Latest approval record per approval id for one run. */
+/**
+ * Latest approval record per approval id for one run.
+ * @param records - Records in log order.
+ * @param runId - Run to filter on.
+ * @returns The current state of each approval.
+ */
 export function latestApprovals(records: readonly StoreRecord[], runId: string): ApprovalRecord[] {
   const byId = new Map<string, ApprovalRecord>()
   for (const rec of records) if (rec.kind === 'approval' && rec.runId === runId) byId.set(rec.approvalId, rec)
   return [...byId.values()]
 }
 
-/** Gate report: manifest gates (latest outcome or `not-reached`) plus any undeclared gate rows. */
+/**
+ * Gate report: manifest gates (latest outcome or `not-reached`) plus any undeclared gate rows.
+ * @param records - Records in log order.
+ * @param header - Header of the run being reported.
+ * @returns One row per gate.
+ */
 export function computeReport(records: readonly StoreRecord[], header: RunHeaderRecord): WorkflowGateRow[] {
   const seen = new Map<string, WorkflowGateRow>()
   const key = (nodeId: string, gateKind: string): string => `${nodeId}\u0000${gateKind}`
@@ -132,7 +165,12 @@ export function computeReport(records: readonly StoreRecord[], header: RunHeader
   return rows
 }
 
-/** Latest node record per nodeId and attempt, in first-seen order. */
+/**
+ * Latest node record per nodeId and attempt, in first-seen order.
+ * @param records - Records in log order.
+ * @param runId - Run to filter on.
+ * @returns The folded node states.
+ */
 export function foldNodeStates(records: readonly StoreRecord[], runId: string): NodeState[] {
   const states = new Map<string, NodeState>()
   for (const rec of records) {

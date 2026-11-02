@@ -47,7 +47,12 @@ export class WhenSyntaxError extends Error {
 
 const REF_AT = /\$([a-z0-9_-]+)((?:\.[A-Za-z0-9_-]+)*)/y
 
-/** Read a `$ref` at `offset`; throws a {@link WhenSyntaxError} on a malformed reference. */
+/**
+ * Read a `$ref` at `offset`; throws a {@link WhenSyntaxError} on a malformed reference.
+ * @param text - text containing the reference
+ * @param offset - offset of the dollar sign
+ * @returns the parsed reference
+ */
 export function readRef(text: string, offset: number): Ref {
   REF_AT.lastIndex = offset
   const match = REF_AT.exec(text)
@@ -152,7 +157,11 @@ function tokenize(text: string): Token[] {
   return tokens
 }
 
-/** Parse a `when` expression. @throws WhenSyntaxError with the offending offset */
+/**
+ * Parse a `when` expression. @throws WhenSyntaxError with the offending offset
+ * @param text - when expression text
+ * @returns the parsed expression
+ */
 export function parseWhen(text: string): Expr {
   const tokens = tokenize(text)
   let p = 0
@@ -194,7 +203,11 @@ export function parseWhen(text: string): Expr {
   return expr
 }
 
-/** Every reference in an expression, in source order. */
+/**
+ * Every reference in an expression, in source order.
+ * @param expr - parsed expression
+ * @returns every reference in source order
+ */
 export function whenRefs(expr: Expr): Ref[] {
   if (expr.t === 'or' || expr.t === 'and') return expr.items.flatMap(whenRefs)
   const operands = expr.t === 'cmp' ? [expr.l, expr.r] : [expr.v]
@@ -210,6 +223,8 @@ const TEMPLATE_REF = /\$(?:inputs\.[a-z][a-z0-9_]*|[a-z0-9_-]+\.(?:output|exit_c
  * Split text into literal and reference parts. Only `$inputs.<name>` and
  * `$<id>.(output|exit_code|status)[.field...]` are references; everything else (including shell
  * variables like `$HOME`) stays literal.
+ * @param text - template text
+ * @returns literal and reference parts in order
  */
 export function scanTemplate(text: string): TemplatePart[] {
   const parts: TemplatePart[] = []
@@ -224,7 +239,11 @@ export function scanTemplate(text: string): TemplatePart[] {
   return parts
 }
 
-/** The env-var name a reference is exposed under in bash: `WF_<ID>_OUTPUT[_FIELD]`, `WF_INPUT_<NAME>`. */
+/**
+ * The env-var name a reference is exposed under in bash: `WF_<ID>_OUTPUT[_FIELD]`, `WF_INPUT_<NAME>`.
+ * @param ref - parsed reference
+ * @returns the WF_ environment variable name
+ */
 export function refEnvName(ref: Ref): string {
   const up = (s: string): string => s.toUpperCase().replace(/[^A-Z0-9]/g, '_')
   if (ref.kind === 'input') return `WF_INPUT_${up(ref.id)}`
@@ -232,7 +251,11 @@ export function refEnvName(ref: Ref): string {
   return ref.path.length === 0 ? base : `${base}_${ref.path.map(up).join('_')}`
 }
 
-/** JS expression reading a reference at runtime through the prelude helpers. */
+/**
+ * JS expression reading a reference at runtime through the prelude helpers.
+ * @param ref - parsed reference
+ * @returns a JavaScript expression reading the reference at runtime
+ */
 export function emitRef(ref: Ref): string {
   if (ref.kind === 'input') return `I(${JSON.stringify(ref.id)})`
   return `R(${JSON.stringify(ref.id)},${JSON.stringify(ref.kind)},${JSON.stringify(ref.path)})`
@@ -243,7 +266,11 @@ function emitOperand(o: Operand): string {
   return JSON.stringify(o.v)
 }
 
-/** Emit a boolean JS expression; only JSON literals and fixed tokens appear in the output. */
+/**
+ * Emit a boolean JS expression; only JSON literals and fixed tokens appear in the output.
+ * @param expr - parsed expression
+ * @returns a boolean JavaScript expression
+ */
 export function emitWhen(expr: Expr): string {
   switch (expr.t) {
     case 'or': return `(${expr.items.map(emitWhen).join(' || ')})`

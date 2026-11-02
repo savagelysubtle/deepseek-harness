@@ -371,6 +371,9 @@ function gateKindsOf(manifest: ManifestEntry[], id: string): string[] {
  * Compile a document (the `doc` from a successful {@link analyze}) to a script, `meta`, and gate
  * manifest. Deterministic: the same document and prompt files always produce the same text.
  * @throws WorkflowCompileError when a `prompt_file` was not supplied or a template cannot resolve
+ * @param doc - validated document from analyze()
+ * @param options - prompt file contents supplied by the caller
+ * @returns the script, meta, manifest, and prompt file list
  */
 export function compile(doc: WorkflowDoc, options: CompileOptions = {}): CompiledWorkflow {
   const manifest = buildManifest(doc)

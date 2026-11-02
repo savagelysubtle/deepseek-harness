@@ -18,7 +18,11 @@ const K = new Uint32Array([
 const g = (a: ArrayLike<number>, i: number): number => a[i] ?? 0
 const rotr = (x: number, n: number): number => (x >>> n) | (x << (32 - n))
 
-/** SHA-256 of raw bytes, lowercase hex. */
+/**
+ * SHA-256 of raw bytes, lowercase hex.
+ * @param bytes - raw bytes
+ * @returns lowercase hex digest
+ */
 export function sha256Bytes(bytes: Uint8Array): string {
   const length = bytes.length
   const padded = new Uint8Array(((length + 9 + 63) >> 6) << 6)
@@ -54,7 +58,11 @@ export function sha256Bytes(bytes: Uint8Array): string {
   return Array.from(h, value => (value >>> 0).toString(16).padStart(8, '0')).join('')
 }
 
-/** SHA-256 of the UTF-8 encoding of `text`, lowercase hex. */
+/**
+ * SHA-256 of the UTF-8 encoding of `text`, lowercase hex.
+ * @param text - text to hash as UTF-8
+ * @returns lowercase hex digest
+ */
 export function sha256Hex(text: string): string {
   return sha256Bytes(new TextEncoder().encode(text))
 }

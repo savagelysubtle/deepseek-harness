@@ -210,7 +210,13 @@ class Validator {
   }
 }
 
-/** Validate a parsed document value into the normalized model. */
+/**
+ * Validate a parsed document value into the normalized model.
+ * @param root - parsed document value
+ * @param loc - position resolver
+ * @param opts - analyze options
+ * @returns diagnostics, locations, and the normalized document when valid
+ */
 export function validate(root: unknown, loc: Locator, opts: AnalyzeOptions): { diags: Diagnostic[] } & ValidationOutput {
   const v = new Validator(loc, opts)
   const doc = validateRoot(v, root, opts)
@@ -544,7 +550,11 @@ function validateAgentFields(
   return out as unknown as AgentFields
 }
 
-/** Text fields of a node that may contain `$ref` templates, with their YAML keys. */
+/**
+ * Text fields of a node that may contain `$ref` templates, with their YAML keys.
+ * @param node - validated node
+ * @returns the node fields that may contain references
+ */
 export function templateFields(node: WorkflowNode): { key: string; text: string; env: boolean }[] {
   switch (node.kind) {
     case 'bash': return [{ key: 'bash', text: node.bash, env: true }]

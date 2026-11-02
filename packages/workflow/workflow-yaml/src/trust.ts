@@ -15,7 +15,11 @@ export interface TrustFacts {
   approvalNodes: number
 }
 
-/** Derive the trust facts from a validated document. */
+/**
+ * Derive the trust facts from a validated document.
+ * @param doc - validated document
+ * @returns what the workflow will run
+ */
 export function describeTrustFacts(doc: WorkflowDoc): TrustFacts {
   const facts: TrustFacts = { name: doc.name, bashCommands: [], promptFiles: [], agents: [], approvalNodes: 0 }
   for (const node of doc.nodes) {

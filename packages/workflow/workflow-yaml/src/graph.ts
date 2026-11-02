@@ -6,7 +6,11 @@
 
 import type { GraphEdge, GraphNode, ManifestEntry, WorkflowDoc, WorkflowGraph } from './types.ts'
 
-/** The gates a document declares, in node order. */
+/**
+ * The gates a document declares, in node order.
+ * @param doc - validated document
+ * @returns the declared gates in node order
+ */
 export function buildManifest(doc: WorkflowDoc): ManifestEntry[] {
   const out: ManifestEntry[] = []
   for (const node of doc.nodes) {
@@ -21,7 +25,11 @@ export function buildManifest(doc: WorkflowDoc): ManifestEntry[] {
   return out
 }
 
-/** Describe a validated document as a layered graph. */
+/**
+ * Describe a validated document as a layered graph.
+ * @param doc - validated document
+ * @returns the layered display graph
+ */
 export function describeGraph(doc: WorkflowDoc): WorkflowGraph {
   const layerOf = new Map<string, number>()
   const byId = new Map(doc.nodes.map(n => [n.id, n] as const))
@@ -82,6 +90,9 @@ export interface LayoutResult {
  * Layered layout: layers from the topological sort run left to right (x); within a layer, nodes
  * are ordered by the barycenter of their neighbours over alternating sweeps to reduce edge
  * crossings (y). Ties break on the previous order, then the id, so output is deterministic.
+ * @param graph - graph from describeGraph()
+ * @param options - gaps and node size
+ * @returns node positions and the bounding box
  */
 export function layout(graph: WorkflowGraph, options: LayoutOptions): LayoutResult {
   const xGap = Math.max(0, options.xGap)

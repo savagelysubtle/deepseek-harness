@@ -13,19 +13,33 @@ export const FILE_MODE = 0o600
 const RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
 const NODE_ID_RE = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/
 
-/** Validate a run id (also used as a directory name). */
+/**
+ * Validate a run id (also used as a directory name).
+ * @param runId - Candidate run id.
+ * @throws WorkflowStoreError `INVALID_ID` when the id is not allowed.
+ */
 export function assertRunId(runId: string): void {
   if (!RUN_ID_RE.test(runId))
     throw new WorkflowStoreError('INVALID_ID', `Run id '${runId}' is not allowed: use 1-64 letters, digits, '_' or '-'.`)
 }
 
-/** Validate a node id (also used as a spill file stem). */
+/**
+ * Validate a node id (also used as a spill file stem).
+ * @param nodeId - Candidate node id.
+ * @throws WorkflowStoreError `INVALID_ID` when the id is not allowed.
+ */
 export function assertNodeId(nodeId: string): void {
   if (!NODE_ID_RE.test(nodeId) || nodeId.includes('..'))
     throw new WorkflowStoreError('INVALID_ID', `Node id '${nodeId}' is not allowed: use 1-64 letters, digits, '_', '-' or '.', without '..'.`)
 }
 
-/** Join `segments` under `base` and refuse any result that escapes it. */
+/**
+ * Join `segments` under `base` and refuse any result that escapes it.
+ * @param base - Directory the result must stay inside.
+ * @param segments - Path segments to append.
+ * @returns The resolved absolute path.
+ * @throws WorkflowStoreError `INVALID_ID` when the path escapes `base`.
+ */
 export function joinUnder(base: string, ...segments: string[]): string {
   const root = resolve(base)
   const full = resolve(root, ...segments)
@@ -34,7 +48,10 @@ export function joinUnder(base: string, ...segments: string[]): string {
   return full
 }
 
-/** Create `dir` (and parents) and force mode 0700 on `dir` itself, whatever the umask or prior mode. */
+/**
+ * Create `dir` (and parents) and force mode 0700 on `dir` itself, whatever the umask or prior mode.
+ * @param dir - Directory to create or tighten.
+ */
 export async function ensurePrivateDir(dir: string): Promise<void> {
   await mkdir(dir, { recursive: true, mode: DIR_MODE })
   await chmod(dir, DIR_MODE)
@@ -54,7 +71,12 @@ async function syncDir(dir: string): Promise<void> {
   }
 }
 
-/** Write `data` to a fresh temp file beside `path` (mode 0600, fsynced); returns the temp path. */
+/**
+ * Write `data` to a fresh temp file beside `path` (mode 0600, fsynced).
+ * @param path - Final destination; the temp file is created in its directory.
+ * @param data - Content to write.
+ * @returns The temp file path; the caller must publish or remove it.
+ */
 export async function writeTempFile(path: string, data: string | Uint8Array): Promise<string> {
   const tmp = join(dirname(path), `.${randomBytes(8).toString('hex')}.tmp`)
   const handle = await open(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, FILE_MODE)
@@ -73,9 +95,12 @@ export async function writeTempFile(path: string, data: string | Uint8Array): Pr
 }
 
 /**
- * Atomically publish `data` at `path`. A crash at any point leaves either the old file, no file,
- * or the complete new file, never a torn one. With `createIfAbsent` an existing file wins and the
- * call returns false (temp file then `link()`); otherwise the file is replaced via `rename()`.
+ * Atomically publish `data` at `path`. A crash leaves the old file, no file, or the complete new file, never a torn one.
+ * With `createIfAbsent` an existing file wins (temp file then `link()`); otherwise the file is replaced via `rename()`.
+ * @param path - Destination file.
+ * @param data - Content to write.
+ * @param options - `createIfAbsent` keeps an existing file instead of replacing it.
+ * @returns True when the file was published, false when `createIfAbsent` found one already there.
  */
 export async function writeFileAtomic(
   path: string,

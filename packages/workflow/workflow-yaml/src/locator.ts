@@ -30,7 +30,12 @@ export class Locator {
     private readonly text: string,
   ) {}
 
-  /** Position of an absolute character offset. */
+  /**
+   * Position of an absolute character offset.
+   * @param offset - absolute character offset
+   * @param end - optional absolute end offset
+   * @returns the 1-based position
+   */
   at(offset: number, end?: number): Position {
     const start = this.lines.linePos(offset)
     if (end === undefined) return { line: start.line, column: start.col }
@@ -57,7 +62,12 @@ export class Locator {
     return { node: (cur ?? null) as Node | null, key }
   }
 
-  /** Position of the key (`'key'`) or value (`'value'`) at `path`. */
+  /**
+   * Position of the key (`'key'`) or value (`'value'`) at `path`.
+   * @param path - path from the document root
+   * @param anchor - whether to point at the key or the value
+   * @returns the 1-based position
+   */
   pos(path: Path, anchor: Anchor): Position {
     const { node, key } = this.resolve(path)
     const target = anchor === 'key' ? (key ?? node) : (node ?? key)
@@ -65,7 +75,13 @@ export class Locator {
     return this.at(target.range[0], target.range[1])
   }
 
-  /** Position of character `offset` inside the scalar at `path` (best effort for escapes). */
+  /**
+   * Position of character `offset` inside the scalar at `path` (best effort for escapes).
+   * @param path - path to a string scalar
+   * @param offset - character offset inside the scalar value
+   * @param length - span length in characters
+   * @returns the 1-based position
+   */
   inScalar(path: Path, offset: number, length = 1): Position {
     const { node } = this.resolve(path)
     if (node == null || !isScalar(node) || node.range == null) return this.pos(path, 'value')
@@ -100,7 +116,16 @@ export class Locator {
     return this.pos(path, 'value')
   }
 
-  /** Build a diagnostic anchored at a path. */
+  /**
+   * Build a diagnostic anchored at a path.
+   * @param severity - error or warning
+   * @param code - stable machine code
+   * @param message - human-readable text
+   * @param path - path from the document root
+   * @param anchor - key or value
+   * @param nodeId - owning node id, if any
+   * @returns the located diagnostic
+   */
   diag(
     severity: Diagnostic['severity'],
     code: string,

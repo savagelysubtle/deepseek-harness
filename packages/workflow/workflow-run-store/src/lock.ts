@@ -46,7 +46,10 @@ export interface WriterInfo {
 
 let cachedBootId: string | null | undefined
 
-/** Read this machine's boot id (null off Linux). */
+/**
+ * Read this machine's boot id.
+ * @returns The boot id, or null off Linux.
+ */
 export async function readBootId(): Promise<string | null> {
   if (cachedBootId !== undefined) return cachedBootId
   try {
@@ -92,7 +95,11 @@ function startTimeReader(procRoot: string): (pid: number) => string | null {
   }
 }
 
-/** Build the real probe for the current process. */
+/**
+ * Build the real process probe for the current process.
+ * @param options - Optional proc filesystem location (tests only).
+ * @returns A probe for this process.
+ */
 export async function createProcessProbe(options: ProbeOptions = {}): Promise<ProcessProbe> {
   return {
     pid: process.pid,
@@ -102,7 +109,12 @@ export async function createProcessProbe(options: ProbeOptions = {}): Promise<Pr
   }
 }
 
-/** True only when the lock's recorded triple proves its holder no longer exists. */
+/**
+ * True only when the lock's recorded pid, start time and boot id prove its holder no longer exists.
+ * @param holder - Identity recorded by the lock holder.
+ * @param probe - Facts about the current machine and processes.
+ * @returns True when the holder is provably dead; false when alive or unprovable.
+ */
 export function holderIsDead(
   holder: Pick<LockFile, 'pid' | 'hostname' | 'startTime' | 'bootId'>,
   probe: ProcessProbe,
@@ -266,7 +278,14 @@ async function reclaimStale(path: string, expected: string): Promise<void> {
     )
 }
 
-/** Try to take the writer lock; throws `WRITER_BUSY` naming the holder when it is alive or unknown. */
+/**
+ * Try to take the writer lock; throws `WRITER_BUSY` naming the holder when it is alive or unknown.
+ * @param dir - Store directory holding `writer.lock`.
+ * @param info - Run and workflow names to publish in the lock, and the current time.
+ * @param probe - Facts about the current machine and processes.
+ * @returns A lease proving ownership.
+ * @throws WorkflowStoreError `WRITER_BUSY` when another holder is alive, unknown or on another host.
+ */
 export async function acquireLock(dir: string, info: WriterInfo, probe: ProcessProbe): Promise<WriterLease> {
   const path = join(dir, 'writer.lock')
   const content = lockContent(info, probe)
@@ -302,12 +321,19 @@ async function confirmOwner(path: string, nonce: string): Promise<boolean> {
   return parseLock(text)?.nonce === nonce
 }
 
-/** Release the lock if (and only if) this lease still owns it. */
+/**
+ * Release the lock if (and only if) this lease still owns it.
+ * @param lease - The lease returned by {@link acquireLock}.
+ */
 export async function releaseLock(lease: WriterLease): Promise<void> {
   if (await confirmOwner(lease.path, lease.nonce)) await unlink(lease.path).catch(() => undefined)
 }
 
-/** True while `lease` still owns the lock file (detects takeover by another process). */
+/**
+ * Check whether `lease` still owns the lock file (detects takeover by another process).
+ * @param lease - The lease to check.
+ * @returns True while the lock file still carries this lease's nonce.
+ */
 export function leaseStillHeld(lease: WriterLease): Promise<boolean> {
   return confirmOwner(lease.path, lease.nonce)
 }

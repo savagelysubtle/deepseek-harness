@@ -50,9 +50,13 @@ import {
 
 /** Options for {@link openStore}. */
 export interface OpenStoreOptions {
-  /** Store directory, normally from {@link workflowStoreDir}. */
+  /**
+   * Store directory, normally from {@link workflowStoreDir}.
+   */
   readonly dir: string
-  /** Full workspace realpath; `index.json` records it and a mismatch refuses the store. */
+  /**
+   * Full workspace realpath; `index.json` records it and a mismatch refuses the store.
+   */
   readonly workspace: string
   /** Newest runs kept per workspace (default 200). */
   readonly retention?: number
@@ -66,7 +70,12 @@ export interface OpenStoreOptions {
   readonly now?: () => number
 }
 
-/** Resolve the store directory for a workspace: `<dshHome>/workflow-runs/<sha256(realpath)[0:16]>`. */
+/**
+ * Resolve the store directory for a workspace: `<dshHome>/workflow-runs/<sha256(realpath)[0:16]>`.
+ * @param dshHome - The dsh home directory.
+ * @param workspace - Workspace path (symlinks are resolved).
+ * @returns The store directory and the workspace realpath.
+ */
 export async function workflowStoreDir(
   dshHome: string,
   workspace: string,
@@ -76,7 +85,12 @@ export async function workflowStoreDir(
   return { dir: join(dshHome, 'workflow-runs', hash), workspace: real }
 }
 
-/** Open (creating if needed) the run store for one workspace. */
+/**
+ * Open (creating if needed) the run store for one workspace and sweep crashed runs.
+ * @param options - Directory, workspace realpath and tuning options.
+ * @returns A handle on the store.
+ * @throws WorkflowStoreError `WORKSPACE_MISMATCH` or `UNSUPPORTED_VERSION` for a foreign or newer index.
+ */
 export async function openStore(options: OpenStoreOptions): Promise<WorkflowRunStore> {
   await ensurePrivateDir(dirname(options.dir))
   await ensurePrivateDir(options.dir)
@@ -112,7 +126,9 @@ function trimIncompleteTail(buf: Buffer): Buffer {
 
 /** Handle on one workspace's run store. */
 export class WorkflowRunStore {
+  /** Store directory. */
   readonly dir: string
+  /** Full workspace realpath this store belongs to. */
   readonly workspace: string
   private readonly retention: number
   private readonly spillBudget: number
@@ -153,7 +169,9 @@ export class WorkflowRunStore {
     return next
   }
 
-  /** @internal Validate the existing index (version, workspace) and prime the cache. */
+  /**
+   * Validate the existing index (version, workspace), tighten file modes and prime the cache. Internal; use {@link openStore}.
+   */
   async init(): Promise<void> {
     for (const name of ['runs.jsonl', 'index.json', 'writer.lock'])
       await chmod(join(this.dir, name), FILE_MODE).catch((e: unknown) => {
@@ -164,13 +182,19 @@ export class WorkflowRunStore {
 
   // ---- writer guard -------------------------------------------------------------------------
 
-  /** Take the single-writer lock for this workspace. Throws `WRITER_BUSY` naming the holder. */
+  /**
+   * Take the single-writer lock for this workspace.
+   * @param info - Optional run id and workflow name published in the lock.
+   * @throws WorkflowStoreError `WRITER_BUSY` naming the holder.
+   */
   async acquireWriter(info: { runId?: string; workflowName?: string } = {}): Promise<void> {
     if (this.lease) return
     this.lease = await acquireLock(this.dir, { ...info, now: this.now() }, this.probe)
   }
 
-  /** Release the writer lock if this handle holds it. */
+  /**
+   * Release the writer lock if this handle holds it.
+   */
   async releaseWriter(): Promise<void> {
     const lease = this.lease
     this.lease = undefined
@@ -291,8 +315,10 @@ export class WorkflowRunStore {
   // ---- runs ---------------------------------------------------------------------------------
 
   /**
-   * Begin a run: take the writer lock (throws `WRITER_BUSY`), prune old runs, pin `source.yaml`
-   * and append the run header. The lock is released by {@link endRun}.
+   * Begin a run: take the writer lock, prune old runs, pin `source.yaml` and append the run header. The lock is released by {@link endRun}.
+   * @param input - Run identity, pinned source and manifest.
+   * @returns The persisted header record.
+   * @throws WorkflowStoreError `WRITER_BUSY` when a run is active here or elsewhere; `INVALID_INPUT` for bad fields.
    */
   startRun(input: StartRunInput): Promise<RunHeaderRecord> {
     return this.serial(async () => {
@@ -361,7 +387,12 @@ export class WorkflowRunStore {
     if (run.status !== 'running') throw new WorkflowStoreError('RUN_NOT_FOUND', `Run '${runId}' has already ended.`)
   }
 
-  /** Append a node-start (`running`) or node-end record; output over 64 KB spills to disk. */
+  /**
+   * Append a node-start (`running`) or node-end record; output over 64 KB spills to disk.
+   * @param runId - Active run.
+   * @param input - Node status, timing and optional output.
+   * @returns The persisted node record.
+   */
   recordNode(runId: string, input: RecordNodeInput): Promise<NodeRecord> {
     return this.serial(async () => {
       assertNodeId(input.nodeId)
@@ -425,7 +456,12 @@ export class WorkflowRunStore {
     return total
   }
 
-  /** Append a gate record. */
+  /**
+   * Append a gate record.
+   * @param runId - Active run.
+   * @param input - Gate node, kind and outcome token.
+   * @returns The persisted gate record.
+   */
   recordGate(runId: string, input: RecordGateInput): Promise<GateRecord> {
     return this.serial(async () => {
       assertNodeId(input.nodeId)
@@ -446,7 +482,12 @@ export class WorkflowRunStore {
     })
   }
 
-  /** Write a `pending` approval with a fresh 128-bit random id. */
+  /**
+   * Write a `pending` approval with a fresh 128-bit random id.
+   * @param runId - Active run.
+   * @param input - Approval node id and message (capped and cleaned).
+   * @returns The pending approval record.
+   */
   recordApproval(runId: string, input: { nodeId: string; message: string }): Promise<ApprovalRecord> {
     return this.serial(async () => {
       assertNodeId(input.nodeId)
@@ -468,8 +509,13 @@ export class WorkflowRunStore {
   }
 
   /**
-   * Decide a pending approval by compare-and-set: the first call flips it, any later call returns
-   * the existing decision with `decided: false`. Unknown ids throw `APPROVAL_NOT_FOUND`.
+   * Decide a pending approval by compare-and-set: the first call flips it, any later call
+   * returns the existing decision with `decided: false`.
+   * @param runId - Run the approval belongs to.
+   * @param approvalId - Id from {@link recordApproval}.
+   * @param decision - New state and optional reason.
+   * @returns Whether this call decided it, and the winning record.
+   * @throws WorkflowStoreError `APPROVAL_NOT_FOUND` for unknown ids; `NOT_WRITER` when the run is owned elsewhere.
    */
   decideApproval(
     runId: string,
@@ -501,7 +547,12 @@ export class WorkflowRunStore {
     })
   }
 
-  /** Close the run: cancel pending approvals, compute the gate report, append `end`, free the lock. */
+  /**
+   * Close the run: cancel pending approvals, compute the gate report, append `end`, free the lock.
+   * @param runId - Active run.
+   * @param input - Terminal status, optional error and optional explicit report.
+   * @returns The persisted end record.
+   */
   endRun(runId: string, input: EndRunInput): Promise<EndRecord> {
     return this.serial(async () => {
       for (const row of input.report ?? []) {
@@ -547,7 +598,11 @@ export class WorkflowRunStore {
 
   // ---- reads --------------------------------------------------------------------------------
 
-  /** List runs newest first, backed by `index.json` (rebuilt from the log when stale or corrupt). */
+  /**
+   * List runs newest first, backed by `index.json` (rebuilt from the log when stale or corrupt).
+   * @param options - Optional name filter, page size (1-200) and cursor.
+   * @returns One page of summaries and a cursor for the next.
+   */
   async listRuns(options: { name?: string; limit?: number; cursor?: string } = {}): Promise<ListRunsResult> {
     const { runs, skipped } = await this.loadSummaries()
     const limit = Math.min(Math.max(options.limit ?? 50, 1), 200)
@@ -559,7 +614,12 @@ export class WorkflowRunStore {
     return { runs: page, skippedLines: skipped, ...(next ? { nextCursor: next } : {}) }
   }
 
-  /** Full detail of one run. */
+  /**
+   * Full detail of one run.
+   * @param runId - Run to read.
+   * @returns Header, node rows and folded states, gates, approvals and end record.
+   * @throws WorkflowStoreError `RUN_NOT_FOUND` when the run does not exist.
+   */
   async getRun(runId: string): Promise<RunDetail> {
     assertRunId(runId)
     const { records, skipped } = await readLog(this.logPath)
@@ -579,7 +639,11 @@ export class WorkflowRunStore {
     }
   }
 
-  /** The workflow source text pinned when the run started. */
+  /**
+   * The workflow source text pinned when the run started.
+   * @param runId - Run to read.
+   * @returns The pinned `source.yaml` text.
+   */
   async readSource(runId: string): Promise<string> {
     try {
       return await readFile(joinUnder(this.runDir(runId), 'source.yaml'), 'utf8')
@@ -590,7 +654,14 @@ export class WorkflowRunStore {
     }
   }
 
-  /** Read a byte range of a node's output (spill file, inline output, or tail), capped per call. */
+  /**
+   * Read a byte range of a node's output (spill file, inline output, or tail), capped per call.
+   * @param runId - Run to read.
+   * @param nodeId - Node whose latest output is read.
+   * @param offset - Starting byte offset.
+   * @param limit - Maximum bytes to return (capped at 256 KiB).
+   * @returns The text slice, the next offset when more remains, and the total size.
+   */
   async readOutput(runId: string, nodeId: string, offset = 0, limit: number = LIMITS.readOutputMaxLimit): Promise<OutputSlice> {
     assertNodeId(nodeId)
     const detail = await this.getRun(runId)
@@ -636,15 +707,20 @@ export class WorkflowRunStore {
   // ---- recovery and retention ---------------------------------------------------------------
 
   /**
-   * Close every run that has no `end` record and whose owner process is provably gone, with
-   * status `interrupted` and a gate report in which unreached gates read `not-reached`.
-   * Takes the writer lock; if another live process holds it, nothing is done.
+   * Close every run with no `end` record whose owner process is provably gone, as `interrupted`,
+   * with unreached gates marked `not-reached`. Does nothing when another live process holds the
+   * writer lock.
+   * @returns The swept run ids, or `skipped: 'writer-busy'`.
    */
   sweepInterrupted(): Promise<SweepResult> {
     return this.serial(() => this.withLock<SweepResult>(() => this.sweepLocked(), { swept: [], skipped: 'writer-busy' }))
   }
 
-  /** Remove the oldest finished runs (log records, pinned source, spill files) beyond retention. */
+  /**
+   * Remove the oldest finished runs (log records, pinned source, spill files) beyond retention, and reap stale temp files.
+   * @param options - Optional `keep` count overriding the configured retention.
+   * @returns The removed run ids, or `skipped: 'writer-busy'`.
+   */
   prune(options: { keep?: number } = {}): Promise<PruneResult> {
     return this.serial(() =>
       this.withLock<PruneResult>(() => this.pruneLocked(options.keep ?? this.retention), { removed: [], skipped: 'writer-busy' }),

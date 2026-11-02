@@ -22,6 +22,9 @@ export interface WriterHolder {
 
 /** Error with a machine-readable code and a plain-English message that already carries the remedy. */
 export class WorkflowStoreError extends Error {
+  /**
+   * Stable machine-readable failure code.
+   */
   readonly code: WorkflowStoreErrorCode
   /** Present on `WRITER_BUSY` when the lock content could be read. */
   readonly holder?: WriterHolder
