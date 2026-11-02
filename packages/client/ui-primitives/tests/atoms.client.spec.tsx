@@ -646,6 +646,40 @@ describe('Modal focus trap, background inert, and focus restore (SWD-155)', () =
     fireEvent.click(screen.getByRole('button', { name: 'TrulyOutside' }))
     expect(onTrulyOutsideClick).not.toHaveBeenCalled()
   })
+
+  it('answers Escape only on the topmost of two stacked Modals (OP-197)', () => {
+    const onOuterClose = vi.fn()
+    const onInnerClose = vi.fn()
+    function Harness({ innerOpen }: { innerOpen: boolean }) {
+      return (
+        <Modal open onClose={onOuterClose} title="Outer" headless>
+          <button type="button">OuterButton</button>
+          <Modal open={innerOpen} onClose={onInnerClose} title="Inner" headless>
+            <button type="button">InnerButton</button>
+          </Modal>
+        </Modal>
+      )
+    }
+    const { rerender } = render(<Harness innerOpen={false} />)
+    rerender(<Harness innerOpen />)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onInnerClose).toHaveBeenCalledTimes(1)
+    expect(onOuterClose).not.toHaveBeenCalled()
+    rerender(<Harness innerOpen={false} />)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onOuterClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('names the dialog via aria-labelledby instead of aria-label when labelledBy is given', () => {
+    render(
+      <Modal open onClose={() => {}} labelledBy="my-title" headless>
+        <span id="my-title">Rendered Title</span>
+      </Modal>,
+    )
+    const dialog = screen.getByRole('dialog', { name: 'Rendered Title' })
+    expect(dialog.hasAttribute('aria-label')).toBe(false)
+    expect(dialog.getAttribute('aria-labelledby')).toBe('my-title')
+  })
 })
 
 describe('ConnectionBanner', () => {
