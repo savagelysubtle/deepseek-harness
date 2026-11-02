@@ -375,11 +375,24 @@ function sessionStartPayload(ctx: Context, agent: Agent, source: string): Record
 function promptPayload(ctx: Context, agent: Agent, content: ContentBlock[]): Record<string, unknown> {
   return { ...base(ctx, agent, 'UserPromptSubmit'), prompt: blocksToText(content) }
 }
+/**
+ * Claude Code file-edit tools name their target `file_path`; the harness
+ * `str_replace_editor` names it `path` (`edit` and `write` already use `file_path`).
+ * Add `file_path` as an alias when only `path` is a string, so unmodified
+ * Claude-dialect hook scripts that read `tool_input.file_path` work unchanged. The
+ * original `path` stays; an existing `file_path` is never overwritten.
+ */
+function withFilePathAlias(args: unknown): unknown {
+  if (typeof args !== 'object' || args === null || Array.isArray(args)) return args
+  const record = args as Record<string, unknown>
+  if (record.file_path !== undefined || typeof record.path !== 'string') return args
+  return { ...record, file_path: record.path }
+}
 function preToolPayload(ctx: Context, exec: ToolExecution): Record<string, unknown> {
-  return { ...base(ctx, exec.agent, 'PreToolUse'), tool_name: exec.name, tool_input: exec.arguments, tool_use_id: exec.callId }
+  return { ...base(ctx, exec.agent, 'PreToolUse'), tool_name: exec.name, tool_input: withFilePathAlias(exec.arguments), tool_use_id: exec.callId }
 }
 function postToolPayload(ctx: Context, exec: ToolExecution, result: ToolExecutionResult): Record<string, unknown> {
-  return { ...base(ctx, exec.agent, 'PostToolUse'), tool_name: exec.name, tool_input: exec.arguments, tool_use_id: exec.callId, tool_response: blocksToText(result.content) }
+  return { ...base(ctx, exec.agent, 'PostToolUse'), tool_name: exec.name, tool_input: withFilePathAlias(exec.arguments), tool_use_id: exec.callId, tool_response: blocksToText(result.content) }
 }
 /**
  * `stopHookActive` is the caller's loop-guard state (true when this stopping
