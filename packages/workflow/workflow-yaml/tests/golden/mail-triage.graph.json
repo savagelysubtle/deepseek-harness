@@ -1,0 +1,107 @@
+{
+  "nodes": [
+    {
+      "id": "fetch",
+      "kind": "bash",
+      "layer": 0,
+      "order": 0,
+      "gate": true,
+      "triggerRule": "all_success",
+      "dependsOn": [],
+      "label": "fetch"
+    },
+    {
+      "id": "classify",
+      "kind": "prompt",
+      "layer": 1,
+      "order": 0,
+      "gate": false,
+      "triggerRule": "all_success",
+      "dependsOn": [
+        "fetch"
+      ],
+      "tier": "cheap",
+      "label": "classify"
+    },
+    {
+      "id": "draft",
+      "kind": "prompt",
+      "layer": 2,
+      "order": 0,
+      "gate": false,
+      "when": "$classify.output.urgent",
+      "triggerRule": "all_success",
+      "dependsOn": [
+        "classify"
+      ],
+      "tier": "standard",
+      "label": "draft"
+    },
+    {
+      "id": "approve-send",
+      "kind": "approval",
+      "layer": 3,
+      "order": 0,
+      "gate": true,
+      "triggerRule": "all_success",
+      "dependsOn": [
+        "draft"
+      ],
+      "label": "approve-send"
+    },
+    {
+      "id": "send",
+      "kind": "bash",
+      "layer": 4,
+      "order": 0,
+      "gate": true,
+      "triggerRule": "all_success",
+      "dependsOn": [
+        "approve-send"
+      ],
+      "label": "send"
+    }
+  ],
+  "edges": [
+    {
+      "from": "fetch",
+      "to": "classify"
+    },
+    {
+      "from": "classify",
+      "to": "draft",
+      "when": "$classify.output.urgent"
+    },
+    {
+      "from": "draft",
+      "to": "approve-send"
+    },
+    {
+      "from": "approve-send",
+      "to": "send"
+    }
+  ],
+  "layers": 5,
+  "manifest": [
+    {
+      "nodeId": "fetch",
+      "gateKind": "bash"
+    },
+    {
+      "nodeId": "approve-send",
+      "gateKind": "approval"
+    },
+    {
+      "nodeId": "send",
+      "gateKind": "bash"
+    }
+  ],
+  "inputs": [
+    {
+      "name": "folder",
+      "type": "string",
+      "required": false,
+      "default": "inbox"
+    }
+  ]
+}
