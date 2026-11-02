@@ -26,7 +26,7 @@ import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { createTransport } from './transport.ts'
 import { syncTools } from './tools.ts'
 import type { ToolBridgeOptions, ToolDisposers } from './tools.ts'
-import { CredentialsOAuthProvider, sanitizeAuthError } from './oauth.ts'
+import { CredentialsOAuthProvider, flattenAndCap, sanitizeAuthError } from './oauth.ts'
 import { DEFAULT_OAUTH_REDIRECT_PORT } from './index.ts'
 import type { Config } from './index.ts'
 import type { McpServerState, McpServerStatus } from './status.ts'
@@ -59,6 +59,20 @@ function redactAbsolutePaths(text: string): string {
     .replace(QUOTED_DOUBLE_PATH_RE, '"<path>"')
     .replace(QUOTED_SINGLE_PATH_RE, '\'<path>\'')
     .replace(BARE_ABSOLUTE_PATH_RE, '<path>')
+}
+
+/**
+ * Render a connection or sync failure for the host log and `lastError`.
+ * @param config - the server config; only streamable-http text is server-controlled.
+ * @param error - the thrown value.
+ * @param verbatim - skip all filtering (the caller already knows the text is local).
+ * @returns the raw text for stdio; capped and flattened for streamable-http; with an echoed
+ *   OAuth payload also replaced when OAuth is configured.
+ */
+export function describeConnectionFailure(config: Config, error: unknown, verbatim = false): string {
+  const text = String(error)
+  if (verbatim || config.transport !== 'streamable-http') return text
+  return config.auth === undefined ? flattenAndCap(text) : sanitizeAuthError(text)
 }
 
 /**
@@ -592,7 +606,7 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
         } catch (error) {
           // Fetch-phase failure: the previous generation is still registered
           // and `disposers` still owns it — keep serving the last good list.
-          if (!disposed) ctx.logger.error(`${label}: tool re-sync failed: ${String(error)}`)
+          if (!disposed) ctx.logger.error(`${label}: tool re-sync failed: ${describeConnectionFailure(config, error)}`)
         }
       },
     )
@@ -605,9 +619,10 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
       }
       await enqueueSync(generation, startup ? startupOpts : opts)
     } catch (error) {
-      const sanitizing = config.transport === 'streamable-http' && config.auth !== undefined
-        && !(error instanceof UnauthorizedError)
-      const failure = sanitizing ? sanitizeAuthError(String(error)) : String(error)
+      // Every streamable-http failure is bounded (a transport error can embed a
+      // whole response body); the marker strip applies when OAuth is in play.
+      const sanitizing = config.transport === 'streamable-http' && !(error instanceof UnauthorizedError)
+      const failure = describeConnectionFailure(config, error, !sanitizing)
       // The first error is later attached as a `cause` that the host logs, so
       // an auth-server failure is stored already sanitised (OP-203).
       if (firstAttemptError === undefined) firstAttemptError = sanitizing ? new Error(failure) : error

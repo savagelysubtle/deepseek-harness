@@ -36,7 +36,7 @@ export type { ConnectionHandle, ReconnectConfig, ResolvedReconnectPolicy } from 
 // budget from) — `@deepseek-ai/dsh-mcp-status`'s `list()` needs the same
 // default this package's own Config schema uses, not a second guess at it.
 export { RECONNECT_DEFAULTS } from './connection.ts'
-export { CredentialsOAuthProvider, buildClientMetadata, oauthCredentialRef } from './oauth.ts'
+export { CredentialsOAuthProvider, buildClientMetadata, oauthCredentialRef, sanitizeAuthError } from './oauth.ts'
 export type { OAuthCredentialStore } from './oauth.ts'
 // The shared loopback OAuth-callback listener stays owned by this package —
 // `auth-cli.ts`'s standalone `dsh-mcp-client-auth` CLI uses it directly, and

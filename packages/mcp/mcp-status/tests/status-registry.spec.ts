@@ -966,6 +966,63 @@ describe('McpStatusRegistryService — list/register', () => {
   )
 })
 
+describe('McpStatusRegistryService — hostile authorization-server bodies (OP-203)', () => {
+  const secret = 'FAKE-SECRET-sk_test_2222222222'
+  const hostile = `${secret}\nline2\u202e${'q'.repeat(3000)}`
+
+  it('a hostile registration body never reaches the RPC error', async () => {
+    const fixture = await startOAuthFixture({ registrationResponse: { status: 500, body: hostile } })
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-status-'))
+    const ctx = await mountRegistry(join(dir, 'creds.yaml'))
+    try {
+      const registry = new McpStatusRegistryService(ctx, { patchPath: join(dir, 'cordis.patch.yml') })
+      const { handle } = buildOAuthHandle(fixture, ctx, 'hostile-reg')
+      registry.register(httpConfig(fixture, 'hostile-reg'), handle)
+      const error = await registry.authorizeStart('hostile-reg').then(
+        () => { throw new Error('UNEXPECTED_SUCCESS') },
+        (rejected: unknown) => rejected as Error,
+      )
+      expect(error.message).toContain('authorization failed: ')
+      expect(error.message).toContain('authorization server returned an unexpected response')
+      expect(error.message).not.toContain(secret)
+      expect(error.message).not.toContain('qqqq')
+      expect(error.message).not.toMatch(/[\n\u202e]/)
+    } finally {
+      await ctx.fiber.dispose()
+      await fixture.close()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('a hostile token-endpoint body reaches neither the log nor lastError', async () => {
+    const fixture = await startOAuthFixture({ tokenResponse: { status: 500, body: hostile } })
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-status-'))
+    const ctx = await mountRegistry(join(dir, 'creds.yaml'))
+    try {
+      const logged: string[] = []
+      vi.spyOn(ctx.logger, 'error').mockImplementation(((message: unknown) => { logged.push(String(message)) }) as never)
+      const registry = new McpStatusRegistryService(ctx, { patchPath: join(dir, 'cordis.patch.yml') })
+      const { handle, box, endAuthorization } = buildOAuthHandle(fixture, ctx, 'hostile-token')
+      registry.register(httpConfig(fixture, 'hostile-token'), handle)
+      const { consentUrl } = await authorizeStartOnSharedListener(registry, 'hostile-token')
+      const port = Number(new URL(handle.authProvider!.redirectUrl).port)
+      const state = new URL(consentUrl).searchParams.get('state')!
+      await fetch(`http://127.0.0.1:${port}/callback?code=auth-code-hostile&state=${state}`)
+      await vi.waitFor(() => { expect(endAuthorization).toHaveBeenCalledTimes(1) })
+      expect(box.lastError).toContain('authorization server returned an unexpected response')
+      expect(box.lastError).not.toContain(secret)
+      expect(box.lastError).not.toMatch(/[\n\u202e]|qqqq/)
+      expect(logged.some(line => line.includes('consent flow failed'))).toBe(true)
+      expect(logged.join('\n')).not.toContain(secret)
+      expect(logged.join('\n')).not.toContain('qqqq')
+    } finally {
+      await ctx.fiber.dispose()
+      await fixture.close()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('McpStatusRegistryService — authorize-start', () => {
   let dir: string
   let credPath: string

@@ -52,6 +52,8 @@ interface StoredOAuthState {
   tokens?: OAuthTokens
   /** Registered client (static or RFC 7591 dynamic). */
   clientInformation?: OAuthClientInformationMixed
+  /** The redirect URI this client REQUESTED at registration (absent on records written before this field). */
+  registeredRedirectUri?: string
   /** PKCE verifier awaiting an authorization code. */
   codeVerifier?: string
   /** Cached RFC 9728 / authorization-server discovery results. */
@@ -155,21 +157,33 @@ const AUTH_RAW_BODY_POINTER = 'authorization server returned an unexpected respo
  *   zero-width characters collapsed to spaces, and the length capped.
  */
 export function sanitizeAuthError(text: string): string {
-  const withoutBody = text.replace(/(?:Invalid OAuth error response:|Raw body:)[\s\S]*$/, AUTH_RAW_BODY_POINTER)
-  // eslint-disable-next-line no-control-regex
-  const flat = withoutBody.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200d\u2028-\u202e\u2066-\u2069\ufeff]+/g, ' ')
+  return flattenAndCap(text.replace(/(?:Invalid OAuth error response:|Raw body:)[\s\S]*$/, AUTH_RAW_BODY_POINTER))
+}
+
+/**
+ * Collapse control, bidi and zero-width characters to spaces and cap the length,
+ * without touching the wording: for server-controlled text that is not an OAuth
+ * payload (a streamable-http transport error can embed a whole response body).
+ * @param text - the raw text.
+ * @returns the flattened text, at most the auth-error cap plus an ellipsis.
+ */
+export function flattenAndCap(text: string): string {
+  const flat = text.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200d\u2028-\u202e\u2066-\u2069\ufeff]+/g, ' ')
   return flat.length > AUTH_ERROR_MAX_LENGTH ? `${flat.slice(0, AUTH_ERROR_MAX_LENGTH)}...` : flat
 }
 
 /**
- * Comparison key for a redirect URI: origin plus path without trailing slashes.
+ * Comparison key for a redirect URI: origin (loopback hosts unified) plus path without trailing slashes.
  * @param uri - a redirect URI.
  * @returns the key, or `undefined` when the text is not a URL.
  */
 function redirectKey(uri: string): string | undefined {
   try {
     const url = new URL(uri)
-    return `${url.origin}${url.pathname.replace(/\/+$/, '')}`
+    // RFC 8252 lets a server rewrite loopback hosts, so they share one token.
+    const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+    const origin = loopback ? `${url.protocol}//loopback:${url.port}` : url.origin
+    return `${origin}${url.pathname.replace(/\/+$/, '')}`
   } catch {
     return undefined
   }
@@ -178,7 +192,7 @@ function redirectKey(uri: string): string | undefined {
 /**
  * Port numbers of loopback-style redirect URIs, for a secret-free log line.
  * @param uris - redirect URIs to describe.
- * @returns a comma-separated port list, or `none` when no URI carries one.
+ * @returns up to five distinct ports, comma-separated, or `none` when no URI carries one.
  */
 function describePorts(uris: string[]): string {
   const ports = uris.flatMap((uri) => {
@@ -191,10 +205,17 @@ function describePorts(uris: string[]): string {
       return []
     }
   })
-  return ports.length === 0 ? 'none' : ports.join(',')
+  // Bounded: a hostile server can echo an arbitrarily long redirect_uris list.
+  const unique = [...new Set(ports)].slice(0, 5)
+  return unique.length === 0 ? 'none' : unique.join(',')
 }
 
-/** Options for {@link CredentialsOAuthProvider}. */
+/**
+ * Options for {@link CredentialsOAuthProvider}. The host and the auth CLI share
+ * one stored registration per server, so both MUST use the same redirectPort;
+ * a different port in either makes the other wipe the registration and
+ * re-register (the OP-211 reset).
+ */
 export interface CredentialsOAuthProviderOptions {
   /** Stable server namespace from the plugin config; names the credential reference. */
   serverName: string
@@ -264,7 +285,10 @@ export class CredentialsOAuthProvider {
       return
     }
     await this.mutate((state) => {
-      if (scope === 'client') delete state.clientInformation
+      if (scope === 'client') {
+        delete state.clientInformation
+        delete state.registeredRedirectUri
+      }
       if (scope === 'tokens') delete state.tokens
       if (scope === 'verifier') delete state.codeVerifier
       if (scope === 'discovery') delete state.discoveryState
@@ -306,25 +330,37 @@ export class CredentialsOAuthProvider {
     const stored = (await this.load()).clientInformation
     if (stored === undefined) return undefined
     // A registration made for a different redirect URI (e.g. another port) is
-    // rejected by the authorization server at consent time. The configured URI
-    // is the trusted side; stored entries match it by origin + path (trailing
-    // slash and entry order are ignored), so a server that echoes a normalised
-    // form never trips this mid-flow. Only a non-empty list with no match
-    // replaces the registration, and only then are client info and the PKCE
-    // verifier dropped; tokens are always kept. A missing or empty list cannot
-    // be proven stale and is reused.
-    const registered = (stored as { redirect_uris?: unknown }).redirect_uris
-    if (!Array.isArray(registered) || registered.length === 0) return stored
-    const uris = registered.map(String)
-    const wanted = redirectKey(this.options.redirectUri)
-    if (uris.some(uri => redirectKey(uri) === wanted)) return stored
+    // rejected by the authorization server at consent time. Preferred check:
+    // the redirect URI THIS client requested is persisted beside the
+    // registration (saveClientInformation) and compared with the configured
+    // one; the server's echo is ignored entirely, so a server that rewrites,
+    // normalises or strips the echoed URIs never trips this mid-flow. Records
+    // written before that field existed fall back to the echoed list: the
+    // configured URI is the trusted side, entries match by origin + path
+    // (trailing slash, order and loopback aliases ignored), and a missing or
+    // empty list cannot be proven stale and is reused. A mismatch drops the
+    // client info and the PKCE verifier (tokens are always kept).
+    const state = await this.load()
+    const requested = state.registeredRedirectUri
+    let seen: string[]
+    if (typeof requested === 'string') {
+      if (requested === this.options.redirectUri) return stored
+      seen = [requested]
+    } else {
+      const registered = (stored as { redirect_uris?: unknown }).redirect_uris
+      if (!Array.isArray(registered) || registered.length === 0) return stored
+      seen = registered.map(String)
+      const wanted = redirectKey(this.options.redirectUri)
+      if (seen.some(uri => redirectKey(uri) === wanted)) return stored
+    }
     await this.mutate((state) => {
       delete state.clientInformation
+      delete state.registeredRedirectUri
       delete state.codeVerifier
       return state
     })
     this.options.onRegistrationReset?.(
-      `stored OAuth client registration used redirect port ${describePorts(uris)}, configured port is ${describePorts([this.options.redirectUri])}; re-registering`,
+      `stored OAuth client registration used redirect port ${describePorts(seen)}, configured port is ${describePorts([this.options.redirectUri])}; re-registering`,
     )
     return undefined
   }
@@ -335,7 +371,7 @@ export class CredentialsOAuthProvider {
    */
   async saveClientInformation(clientInformation: OAuthClientInformationMixed): Promise<void> {
     if (this.options.staticClientId !== undefined) return
-    await this.mutate(state => ({ ...state, clientInformation }))
+    await this.mutate(state => ({ ...state, clientInformation, registeredRedirectUri: this.options.redirectUri }))
   }
 
   /**
