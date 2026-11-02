@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useEffect, useState } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SettingsOpenSectionRequest, SettingsRootComponentProps } from '../src/client/shell-contract.ts'
 import { SettingsRoot } from '../src/client/SettingsRoot.tsx'
 
@@ -16,6 +17,20 @@ const SEAT_CONTENT: Record<string, string> = {
   'settings.header': 'Settings Title',
   'settings.action': 'Open configuration file',
   'settings.close': 'Close',
+}
+
+/** Stand-in for ModelsSection: a section body that opens a shared Modal (the
+ * "Delete <provider>?" confirmation) from inside the Settings panel. */
+function ModelsStandIn() {
+  const [confirming, setConfirming] = useState(false)
+  return (
+    <div data-testid="section-models">
+      <button type="button" onClick={() => { setConfirming(true) }}>Delete provider</button>
+      <Modal open={confirming} onClose={() => { setConfirming(false) }} title="Delete Acme?">
+        <button type="button" autoFocus onClick={() => { setConfirming(false) }}>Confirm delete</button>
+      </Modal>
+    </div>
+  )
 }
 
 function mount({
@@ -41,7 +56,11 @@ function mount({
   const openListeners = new Set<() => void>()
   const renderSlot = vi.fn(
     ((key: string, _owner: unknown, opts?: { only?: string }) => {
-      if (key === 'settings.section') return <div data-testid={`section-${opts?.only ?? 'all'}`} />
+      if (key === 'settings.section') {
+        return opts?.only === 'models'
+          ? <ModelsStandIn />
+          : <div data-testid={`section-${opts?.only ?? 'all'}`} />
+      }
       return SEAT_CONTENT[key]
     }) as SettingsRootComponentProps['renderSlot'],
   )
@@ -374,5 +393,113 @@ describe('SettingsRoot settings/open-section requests', () => {
     // remount untouched: no new event fires, so the panel must stay closed.
     remount()
     expect(screen.queryByRole('dialog')).toBeNull()
+  })
+})
+
+describe('SettingsRoot through the shared Modal (OP-197)', () => {
+  function openFromTrigger() {
+    const trigger = screen.getByRole('button', { name: 'Settings' })
+    trigger.focus()
+    fireEvent.click(trigger)
+    return trigger
+  }
+
+  it('renders exactly one dialog (Modal\'s) with no duplicate role/aria state of its own', () => {
+    mount()
+    openFromTrigger()
+    expect(screen.getAllByRole('dialog')).toHaveLength(1)
+    const dialog = screen.getByRole('dialog')
+    expect(dialog.getAttribute('aria-modal')).toBe('true')
+    expect(dialog.hasAttribute('aria-label')).toBe(false)
+    expect(dialog.getAttribute('aria-labelledby')).toBeTruthy()
+    // Portaled to body by Modal, not rendered inline next to the trigger.
+    expect(dialog.parentElement?.parentElement).toBe(document.body)
+    expect(document.querySelectorAll('[role="dialog"] [role="dialog"]')).toHaveLength(0)
+  })
+
+  it('Escape closes and returns focus to the Settings trigger, not body', () => {
+    mount()
+    const trigger = openFromTrigger()
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close' }))
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(document.activeElement).toBe(trigger)
+    expect(document.activeElement).not.toBe(document.body)
+  })
+
+  it('the close button restores focus to the trigger', () => {
+    mount()
+    const trigger = openFromTrigger()
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(document.activeElement).toBe(trigger)
+  })
+
+  it('a mask click restores focus to the trigger', () => {
+    mount()
+    const trigger = openFromTrigger()
+    const mask = screen.getByRole('dialog').parentElement?.querySelector('[aria-hidden="true"]')
+    expect(mask).toBeTruthy()
+    fireEvent.click(mask as Element)
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(document.activeElement).toBe(trigger)
+  })
+
+  it('makes the page behind the panel inert and restores it on close', () => {
+    const { view } = mount()
+    openFromTrigger()
+    expect(view.container.inert).toBe(true)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(view.container.inert).toBeFalsy()
+  })
+
+  it('traps Tab and Shift+Tab inside the panel', () => {
+    mount()
+    openFromTrigger()
+    const dialog = screen.getByRole('dialog')
+    const tabbables = Array.from(dialog.querySelectorAll<HTMLElement>('button'))
+    const first = tabbables[0]!
+    const last = tabbables.at(-1)!
+    last.focus()
+    fireEvent.keyDown(document, { key: 'Tab' })
+    expect(document.activeElement).toBe(first)
+    first.focus()
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(last)
+  })
+
+  it('a Modal opened inside Settings stacks on top: Settings goes inert, then is restored with focus back in the panel and finally on the trigger', () => {
+    const { view } = mount()
+    const trigger = openFromTrigger()
+    fireEvent.click(screen.getByRole('button', { name: 'Models' }))
+    const deleteButton = screen.getByRole('button', { name: 'Delete provider' })
+    deleteButton.focus()
+    fireEvent.click(deleteButton)
+
+    const dialogs = screen.getAllByRole('dialog', { hidden: true })
+    expect(dialogs).toHaveLength(2)
+    const settingsRoot = dialogs[0]!.parentElement!
+    const innerRoot = dialogs[1]!.parentElement!
+    expect(settingsRoot.inert).toBeFalsy()
+    expect(innerRoot.inert).toBeFalsy()
+    expect(view.container.inert).toBe(true)
+    expect(dialogs[1]!.contains(document.activeElement)).toBe(true)
+
+    // The inner Modal is topmost: Tab wraps inside it, not the Settings panel.
+    fireEvent.keyDown(document, { key: 'Tab' })
+    expect(dialogs[1]!.contains(document.activeElement)).toBe(true)
+
+    // Escape closes only the topmost (the confirmation): Settings stays open,
+    // un-inert, with focus back on the control that opened the confirmation.
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: 'Delete Acme?' })).toBeNull()
+    expect(screen.getByRole('dialog', { name: 'Settings Title' })).toBeTruthy()
+    expect(settingsRoot.inert).toBeFalsy()
+    expect(document.activeElement).toBe(deleteButton)
+
+    // A second Escape closes Settings and focus lands on the trigger.
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(document.activeElement).toBe(trigger)
+    expect(view.container.inert).toBeFalsy()
   })
 })

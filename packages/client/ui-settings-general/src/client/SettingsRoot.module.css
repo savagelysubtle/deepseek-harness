@@ -46,37 +46,26 @@
   white-space: nowrap;
 }
 
-/* Full-viewport layer (figma Mask 501:29946 #000@24%): mask tokens match the
-   Modal primitive (--dsw-alias-bg-mask-1 + --dsw-mask-blur). */
-.overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.mask {
-  position: absolute;
-  inset: 0;
-  background: var(--dsw-alias-bg-mask-1);
-  backdrop-filter: var(--dsw-mask-blur);
-}
-
 /* Panel (figma Settings 501:29947): r24, white, lv3 shadow (figma effects
    match --dsw-shadow-lv3 exactly); figma's 1080x700 is shrunk to 800 wide.
    One height for every section, taken from the viewport rather than the
    content: sections differ by hundreds of pixels (a settings list against the
    composition editor), and a content-sized panel would resize under the
-   pointer on every nav click. Whatever does not fit scrolls in `.options`. */
-.panel {
-  position: relative;
-  z-index: 1;
+   pointer on every nav click. Whatever does not fit scrolls in `.options`.
+   Mask, portal and full-viewport layer come from the shared Modal; this class
+   re-skins its `.dialog` card. `div.panel` out-ranks Modal's single-class
+   `.dialog` regardless of stylesheet order, and resets its column layout,
+   gap, padding, border and 380px width. */
+div.panel {
   display: flex;
+  flex-direction: row;
+  gap: 0;
+  padding: 0;
+  border: none;
   width: 800px;
   height: min(800px, calc(100vh - 48px));
-  max-width: calc(100vw - 48px);
+  max-height: none;
+  max-width: 100%;
   border-radius: 24px;
   overflow: hidden;
   background: var(--dsw-alias-bg-layer-2);

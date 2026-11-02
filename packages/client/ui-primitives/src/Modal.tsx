@@ -91,6 +91,10 @@ function isOutside(root: HTMLElement, target: EventTarget | null): boolean {
  * is the topmost dialog, swallow outside pointer/focus activity while it is
  * topmost, and hand focus back to whatever had it on open once this dialog
  * closes.
+ * @param openerFocus - the element that held focus before this dialog's
+ * content rendered, captured by `Modal` in its render phase: a child's
+ * `autoFocus` fires during commit, before this setup runs, so reading
+ * `document.activeElement` here would name that child instead of the opener.
  * @param dialog - the mounted `role="dialog"` element (never `null`: this is
  * only ever invoked from the dialog's own callback ref, which React calls
  * with the real node on attach).
@@ -103,14 +107,13 @@ function isOutside(root: HTMLElement, target: EventTarget | null): boolean {
  * if one ever does, it would need its own root added to the stack (or a
  * dedicated exemption) to stay interactive.
  */
-function setupModalTrap(dialog: HTMLDivElement): () => void {
+function setupModalTrap(dialog: HTMLDivElement, openerFocus: Element | null): () => void {
   // Modal's own JSX (below) always renders `dialog` as the sole non-mask
   // child of the portal's root wrapper -- asserting that structural
   // invariant rather than branching on a parent that this file guarantees
   // is never absent.
   const root = dialog.parentElement as HTMLElement
   const entry: ModalStackEntry = { dialog, root }
-  const openerFocus = document.activeElement
 
   modalStack.push(entry)
   syncBackgroundInert()
@@ -194,7 +197,12 @@ function setupModalTrap(dialog: HTMLDivElement): () => void {
  * Render a centered modal over a blurred page mask.
  * @param props.open - whether the dialog is showing.
  * @param props.onClose - Escape or mask click.
- * @param props.title - dialog heading (aria-label in every mode).
+ * @param props.title - dialog heading (aria-label in every mode unless
+ * `labelledBy` is given).
+ * @param props.labelledBy - id of a node inside the dialog that names it
+ * (aria-labelledby), for consumers whose heading is rendered content rather
+ * than a string (OP-197: the Settings shell's title arrives through a slot).
+ * Replaces the aria-label; `title` may then be omitted.
  * @param props.closeLabel - accessible close-button label.
  * @param props.description - optional supporting sentence under the title.
  * @param props.children - body (inputs, etc.).
@@ -208,16 +216,17 @@ function setupModalTrap(dialog: HTMLDivElement): () => void {
  * @returns null when closed; otherwise the overlay tree.
  */
 export function Modal({
-  open, onClose, title, closeLabel = 'Close', description, children, footer, className, contentClassName, headless = false,
+  open, onClose, title, labelledBy, closeLabel = 'Close', description, children, footer, className, contentClassName, headless = false,
 }: {
   open: boolean
   onClose: () => void
-  title: string
+  title?: string
+  labelledBy?: string
   closeLabel?: string
   description?: string
   children?: ReactNode
   footer?: ReactNode
-  className?: string
+  className?: string | undefined
   contentClassName?: string
   headless?: boolean
 }) {
@@ -230,19 +239,32 @@ export function Modal({
   // it on every re-render while open, re-running the trap (and re-stealing
   // focus) on every keystroke inside the dialog instead of once per real
   // mount/unmount.
+  const dialogNodeRef = useRef<HTMLDivElement | null>(null)
+  // Focus holder at the moment this Modal went from closed to open, read in
+  // the render phase -- the only point guaranteed to precede a child's
+  // `autoFocus` (applied during commit, ahead of any ref callback or effect).
+  // Cleared while closed so the next open captures afresh.
+  const openerRef = useRef<Element | null>(null)
+  if (!open) openerRef.current = null
+  else if (openerRef.current === null) openerRef.current = document.activeElement
   const dialogRef = useCallback((node: HTMLDivElement | null) => {
+    dialogNodeRef.current = node
     if (node === null) {
       trapCleanupRef.current?.()
       trapCleanupRef.current = null
       return
     }
-    trapCleanupRef.current = setupModalTrap(node)
+    trapCleanupRef.current = setupModalTrap(node, openerRef.current)
   }, [])
 
   useEffect(() => {
     if (!open) return
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      // Only the topmost stacked dialog answers Escape: with a nested Modal
+      // (e.g. a delete confirmation inside Settings) one keypress must close
+      // the inner one only, not every open dialog at once.
+      const top = modalStack[modalStack.length - 1]
+      if (e.key === 'Escape' && (top === undefined || top.dialog === dialogNodeRef.current)) onClose()
     }
     document.addEventListener('keydown', onKeyDown)
     return () => { document.removeEventListener('keydown', onKeyDown) }
@@ -258,7 +280,8 @@ export function Modal({
         className={clsx(css.dialog, className)}
         role="dialog"
         aria-modal="true"
-        aria-label={title}
+        aria-label={labelledBy === undefined ? title : undefined}
+        aria-labelledby={labelledBy}
         tabIndex={-1}
       >
         {headless

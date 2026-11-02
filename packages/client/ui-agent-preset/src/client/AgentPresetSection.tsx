@@ -86,7 +86,7 @@ function CopyDialog({ state, t, actions }: CopyDialogProps): ReactNode {
       title={draft === null ? t('copyTitle') : `${t('copyTitle')} · ${t('copyOf')} ${sourceTitle}`}
       closeLabel={t('close')}
       description={t('copyIntro')}
-      className={css.dialog as string}
+      className={css.dialog}
       footer={(
         <>
           <Button
@@ -377,7 +377,7 @@ export function AgentPresetSection(props: AgentPresetSectionProps): ReactNode {
         title={state.view === null ? '' : `${t('view')} · ${viewedTitle}`}
         closeLabel={t('close')}
         description={t('composition')}
-        className={css.dialog as string}
+        className={css.dialog}
         footer={(
           <Button variant="outline" autoFocus onClick={() => { props.closeView() }}>
             {t('close')}
@@ -394,7 +394,7 @@ export function AgentPresetSection(props: AgentPresetSectionProps): ReactNode {
         title={t('deleteTitle')}
         closeLabel={t('close')}
         description={t('deleteDescription')}
-        className={css.deleteDialog as string}
+        className={css.deleteDialog}
         footer={(
           <>
             <Button

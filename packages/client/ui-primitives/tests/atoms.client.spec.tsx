@@ -646,6 +646,68 @@ describe('Modal focus trap, background inert, and focus restore (SWD-155)', () =
     fireEvent.click(screen.getByRole('button', { name: 'TrulyOutside' }))
     expect(onTrulyOutsideClick).not.toHaveBeenCalled()
   })
+
+  it('restores focus to the opener on close even when a child uses autoFocus (OP-197)', () => {
+    function Harness() {
+      const [open, setOpen] = useState(false)
+      return (
+        <>
+          <button type="button" onClick={() => { setOpen(true) }}>Opener</button>
+          <Modal open={open} onClose={() => { setOpen(false) }} title="Confirm" headless>
+            <button type="button">First</button>
+            <button type="button" autoFocus onClick={() => { setOpen(false) }}>Cancel</button>
+          </Modal>
+        </>
+      )
+    }
+    render(<Harness />)
+    const opener = screen.getByRole('button', { name: 'Opener' })
+    opener.focus()
+    fireEvent.click(opener)
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Cancel' }))
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(document.activeElement).toBe(opener)
+    // A second open/close cycle captures afresh.
+    opener.focus()
+    fireEvent.click(opener)
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(document.activeElement).toBe(opener)
+  })
+
+  it('answers Escape only on the topmost of two stacked Modals (OP-197)', () => {
+    const onOuterClose = vi.fn()
+    const onInnerClose = vi.fn()
+    function Harness({ innerOpen }: { innerOpen: boolean }) {
+      return (
+        <Modal open onClose={onOuterClose} title="Outer" headless>
+          <button type="button">OuterButton</button>
+          <Modal open={innerOpen} onClose={onInnerClose} title="Inner" headless>
+            <button type="button">InnerButton</button>
+          </Modal>
+        </Modal>
+      )
+    }
+    const { rerender } = render(<Harness innerOpen={false} />)
+    rerender(<Harness innerOpen />)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onInnerClose).toHaveBeenCalledTimes(1)
+    expect(onOuterClose).not.toHaveBeenCalled()
+    rerender(<Harness innerOpen={false} />)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onOuterClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('names the dialog via aria-labelledby instead of aria-label when labelledBy is given', () => {
+    render(
+      <Modal open onClose={() => {}} labelledBy="my-title" headless>
+        <span id="my-title">Rendered Title</span>
+      </Modal>,
+    )
+    const dialog = screen.getByRole('dialog', { name: 'Rendered Title' })
+    expect(dialog.hasAttribute('aria-label')).toBe(false)
+    expect(dialog.getAttribute('aria-labelledby')).toBe('my-title')
+  })
 })
 
 describe('ConnectionBanner', () => {
