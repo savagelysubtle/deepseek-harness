@@ -625,6 +625,43 @@ describe('MessageItem arms', () => {
     expect(view.container.querySelector('[data-context-injection-body]')).toBeNull()
   })
 
+  const budgetNotice = (plugin: string, form: string | null = 'notice') => ({
+    kind: 'context', seq: 3, content: [{ type: 'text', text: 'Workspace instruction budget exceeded.' }],
+    source: {
+      kind: 'plugin', plugin, ...form === null ? {} : { form },
+      summary: 'Instruction budget exceeded: 1 file dropped or truncated',
+    },
+    provenance: { role: 'inject', label: plugin },
+    form,
+  } as never)
+
+  it('the instruction-budget notice renders expanded with a warning accent', () => {
+    const view = render(<MessageItem t={t} node={budgetNotice('agent-instructions')} />)
+    expect(view.container.querySelector('[data-context-injection-body]')).not.toBeNull()
+    expect(view.container.querySelector('[data-context-attention="true"]')).not.toBeNull()
+    expect(view.getByRole('button', { name: /上下文注入/ }).getAttribute('aria-expanded')).toBe('true')
+    expect(view.container.querySelector('[data-context-text]')?.textContent).toContain('budget exceeded')
+  })
+
+  it('the user can collapse the instruction-budget notice', () => {
+    const view = render(<MessageItem t={t} node={budgetNotice('agent-instructions')} />)
+    const button = view.getByRole('button', { name: /上下文注入/ })
+    fireEvent.click(button)
+    expect(button.getAttribute('aria-expanded')).toBe('false')
+    expect(view.container.querySelector('[data-context-injection-body]')).toBeNull()
+  })
+
+  it.each([
+    ['a routine plugin notice', budgetNotice('tool-jobs')],
+    ['an agent-instructions instructions row', budgetNotice('agent-instructions', 'instructions')],
+    ['an agent-instructions row with no form', budgetNotice('agent-instructions', null)],
+  ])('%s stays collapsed and unaccented', (_name, node) => {
+    const view = render(<MessageItem t={t} node={node} />)
+    expect(view.getByRole('button', { name: /上下文注入/ }).getAttribute('aria-expanded')).toBe('false')
+    expect(view.container.querySelector('[data-context-injection-body]')).toBeNull()
+    expect(view.container.querySelector('[data-context-attention]')).toBeNull()
+  })
+
   it('a notice without its account falls back to the opaque body', () => {
     const view = render(
       <MessageItem t={t} node={{
