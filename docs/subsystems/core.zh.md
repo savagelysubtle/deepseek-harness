@@ -630,14 +630,23 @@ withoutInitiator<T>(operation: () => T): T
  * effect-scoped). A traced Cordis service is canonicalized to its concrete
  * target; each create/resume call is then traced through that caller's
  * context so ownership follows the caller without stacking proxy layers.
- * Throws if a factory is already registered. Returns the disposer; on
- * dispose the factory slot is cleared.
+ * Factories are keyed by `driver`; the loop registers under
+ * {@link DEFAULT_AGENT_DRIVER}. Throws if that key is already registered or the
+ * key is malformed. Returns the disposer; on dispose only this key's slot is cleared.
  * @param factory - the loop-owned factory {@link create}/{@link resume} delegate to.
+ * @param driver - registration key matching {@link AGENT_DRIVER_PATTERN}; defaults to `'default'`.
  * @returns the disposer that clears the factory slot. The exact
  *   Cordis effect disposer (single-shot): composite (generator) effects may
  *   yield it directly — exact identity nests the teardown in order.
  */
-setFactory(factory: AgentFactory): () => void
+setFactory(factory: AgentFactory, driver: string = DEFAULT_AGENT_DRIVER): () => void
+
+/**
+ * Read-only list of the driver keys that currently have a registered
+ * factory, sorted. Empty when no factory is registered.
+ * @returns the registered driver keys.
+ */
+listDrivers(): readonly string[]
 
 /**
  * Create and publish a new agent through the registered factory.
@@ -737,7 +746,7 @@ list(): Agent[]
 roots(): Agent[]
 ```
 
-Source: [`packages/core/agent/src/index.ts:256`](../../packages/core/agent/src/index.ts)
+Source: [`packages/core/agent/src/index.ts:284`](../../packages/core/agent/src/index.ts)
 
 <a id="agent-events"></a>
 
