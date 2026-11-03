@@ -125,6 +125,29 @@ describe('run, cancel, approve and the trust challenge over the Remote methods',
     expect(h.engine.runs).toHaveLength(0)
   })
 
+  it('a plan from superseded content cannot run; a fresh dryRun after the edit can', async () => {
+    h = await setupRemote()
+    await h.writeWorkflow('demo', DEMO)
+    const agent = h.agent()
+    const old = await h.service.dryRun(agent, { name: 'demo' })
+    if (!old.ok) throw new Error(old.message)
+    // Edit and save the file through the service, after the human reviewed the old plan.
+    const read = await h.service.read(agent, { name: 'demo' })
+    if (!read.ok) throw new Error(read.message)
+    const saved = await h.service.save(agent, { name: 'demo', text: `${DEMO}# changed after review\n`, expectedToken: read.token })
+    expect(saved).toMatchObject({ ok: true })
+    const refused = failed(await h.service.run(agent, { name: 'demo', trustHash: old.trustKey, trustChallenge: old.trustChallenge! }))
+    expect(refused.error).toBe('TRUST_REQUIRED')
+    expect(refused.remedy).toMatch(/review the commands again/i)
+    expect(h.engine.runs).toHaveLength(0)
+    const fresh = await h.service.dryRun(agent, { name: 'demo' })
+    if (!fresh.ok) throw new Error(fresh.message)
+    expect(fresh.trustKey).not.toBe(old.trustKey)
+    const started = await h.service.run(agent, { name: 'demo', trustHash: fresh.trustKey, trustChallenge: fresh.trustChallenge! })
+    expect(started).toMatchObject({ ok: true })
+    expect(h.engine.runs).toHaveLength(1)
+  })
+
   it('a challenge from one session cannot be used by another', async () => {
     h = await setupRemote()
     await h.writeWorkflow('demo', DEMO)
