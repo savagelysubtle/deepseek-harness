@@ -6,7 +6,8 @@ import type { InvariantFailure, InvariantInstaller } from '@deepseek-ai/dsh-inva
 import {
   CLAUDE_CODE_COMPACT_TRIGGERS, CLAUDE_CODE_DRIVER_NAME, CLAUDE_CODE_EVENT_PREFIX,
   CLAUDE_CODE_EVENT_VERSION, CLAUDE_CODE_FLEET_REFUSAL_REASONS, CLAUDE_CODE_MAX_REASON_CHARS,
-  CLAUDE_CODE_MAX_TEXT_CHARS, CLAUDE_CODE_RATE_LIMIT_SOURCES, CLAUDE_CODE_STEER_KINDS,
+  CLAUDE_CODE_MAX_TEXT_CHARS, CLAUDE_CODE_PAUSE_REASONS, CLAUDE_CODE_RATE_LIMIT_SOURCES,
+  CLAUDE_CODE_RESUME_FAILED_REASONS, CLAUDE_CODE_STEER_KINDS,
 } from './constants.ts'
 import type {} from './types.ts'
 
@@ -173,6 +174,19 @@ function applyEvent(trace: DriverTrace, event: SessionEvent, fail: InvariantFail
       member(data, 'reason', CLAUDE_CODE_FLEET_REFUSAL_REASONS, type, fail)
       amount(data, 'limit', type, fail)
       amount(data, 'observed', type, fail)
+      amount(data, 'at', type, fail)
+      return
+    }
+    case 'claude-code/resume-failed': {
+      if (!trace.bound) fail(`${type} has no earlier claude-code/session-bound`)
+      text(data, 'sdkSessionId', type, fail)
+      member(data, 'reason', CLAUDE_CODE_RESUME_FAILED_REASONS, type, fail)
+      amount(data, 'at', type, fail)
+      return
+    }
+    case 'claude-code/paused': {
+      member(data, 'reason', CLAUDE_CODE_PAUSE_REASONS, type, fail)
+      if (data.until !== undefined) whole(data, 'until', type, fail)
       amount(data, 'at', type, fail)
       return
     }

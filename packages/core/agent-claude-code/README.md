@@ -4,11 +4,11 @@ English | [中文](README.zh.md)
 
 The **Claude Code seat driver** package: a seat keeps its name, mailbox, registry row, and log, and only the thinking moves to the unmodified `claude` program run through the official Agent SDK under the operator's own login. Like [`agent-loop`](../agent-loop/README.md), the driver is its own package and registers against the keyed agent-factory seam in [`dsh-agent`](../agent/README.md); nothing in core depends on it.
 
-This slice ships the **durable record layer only**: the event vocabulary, the redacting recorder, and the invariant companion. The SDK runtime, steering, tools, and fleet limits land in later slices, and `apply` is intentionally inert until the factory registers.
+This slice ships the **durable record layer only**: the event vocabulary, the redacting recorder, and the invariant companion. The SDK runtime lives in [`agent-claude-code-driver`](../../agent/agent-claude-code-driver/README.md); this package's `apply` stays inert.
 
 ## Durable events
 
-Six log-only events (no surface; they never enter model context), each stamped `version: 1`. The browser-safe `@deepseek-ai/dsh-agent-claude-code/types` subpath owns the payload types and the `SessionEventMap` declaration; the generated [persistence catalog](../../../docs/persistence-catalog.md) lists them.
+Eight log-only events (no surface; they never enter model context), each stamped `version: 1`. The browser-safe `@deepseek-ai/dsh-agent-claude-code/types` subpath owns the payload types and the `SessionEventMap` declaration; the generated [persistence catalog](../../../docs/persistence-catalog.md) lists them.
 
 | Event | Written when | Notable fields |
 |---|---|---|
@@ -17,6 +17,8 @@ Six log-only events (no surface; they never enter model context), each stamped `
 | `claude-code/steer` | A push, interrupt-then-push, or resume steered a seat | `kind`, short redacted `reason` (at most 200 characters), `at` |
 | `claude-code/compact` | A Claude-side `compact_boundary` | `preTokens`, `trigger` (`auto` or `manual`), `at` |
 | `claude-code/rate-limited` | A rate limit was observed | `source` (`sdk` or `http`), optional `retryAfterMs`, `breakerTripped`, `at` |
+| `claude-code/resume-failed` | A resume found no readable Claude transcript; the seat needs a deliberate re-seed | `sdkSessionId`, `reason` (`transcript-missing`, `transcript-unreadable`), `at` |
+| `claude-code/paused` | The Claude subscription window refused work (rate limit or usage exhausted): the per-seat pause signal | `reason` (`rate-limit`, `usage-exhausted`), optional `until` (epoch ms), `at` |
 | `claude-code/fleet-refused` | The fleet limiter refused a turn | `reason` (`concurrency`, `turns-per-hour`, `breaker`, `founder-reserve`), `limit`, `observed`, `at` |
 
 `estimatedCostUsd` is the SDK's notional cost; on a subscription it is a usage signal, not a bill.
@@ -32,11 +34,11 @@ Six log-only events (no surface; they never enter model context), each stamped `
 
 ## Invariant
 
-`@deepseek-ai/dsh-agent-claude-code/invariant` registers the package companion. On cold load and every live append it requires: `version: 1`; the required fields and enums of each event; a `session-bound` before any `turn-completed`, `steer`, or `compact`; and strictly increasing `turnIndex`. Repeated `session-bound` events (re-binding) are allowed. `rate-limited` and `fleet-refused` may precede binding because a refusal can happen before a session starts. It is not yet mounted in a bundle; composition lands with the driver.
+`@deepseek-ai/dsh-agent-claude-code/invariant` registers the package companion. On cold load and every live append it requires: `version: 1`; the required fields and enums of each event; a `session-bound` before any `turn-completed`, `steer`, `compact`, or `resume-failed`; and strictly increasing `turnIndex`. Repeated `session-bound` events (re-binding) are allowed. `rate-limited` and `fleet-refused` may precede binding because a refusal can happen before a session starts. It is not yet mounted in a bundle; composition lands with the driver.
 
 ## Known Limitations and Deferred Work
 
-- **No runtime yet** — the SDK-backed `Agent`, streaming steering, cancellation, tool policy, and fleet limits are later slices; this package only records what they will report.
+- **No runtime here** — the SDK-backed `Agent` lives in [`agent-claude-code-driver`](../../agent/agent-claude-code-driver/README.md); tool policy, the event mapper, and fleet limits are later slices. This package only records what they report.
 - **`turnIndex` is strictly increasing per Session** — a driver that restarts numbering within one Session would be rejected by the invariant.
 - **Redaction is shape-based** — a credential that matches none of the known shapes (for example a bare short secret with no key name, a PEM block split across lines, or a base64 blob under 40 characters) is out of scope and not recognized, which is why bodies and prompts are never recorded at all.
 - **S4 requirement: seed `turnIndex` on resume** — on cold resume or crash fallback the driver must seed `turnIndex` from the Session's last `claude-code/turn-completed` plus 1; restarting numbering at 1 within an existing Session is rejected by the invariant.

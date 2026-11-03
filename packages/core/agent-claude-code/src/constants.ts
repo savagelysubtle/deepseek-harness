@@ -2,7 +2,7 @@
 
 import type {
   ClaudeCodeCompactTrigger, ClaudeCodeEventVersion, ClaudeCodeFleetRefusalReason,
-  ClaudeCodeRateLimitSource, ClaudeCodeSteerKind,
+  ClaudeCodePauseReason, ClaudeCodeRateLimitSource, ClaudeCodeResumeFailedReason, ClaudeCodeSteerKind,
 } from './types.ts'
 
 /** Payload schema version stamped on every driver event. */
@@ -19,6 +19,8 @@ export const CLAUDE_CODE_EVENT_TYPES = [
   'claude-code/compact',
   'claude-code/rate-limited',
   'claude-code/fleet-refused',
+  'claude-code/resume-failed',
+  'claude-code/paused',
 ] as const
 
 /** One of {@link CLAUDE_CODE_EVENT_TYPES}. */
@@ -40,6 +42,14 @@ export const CLAUDE_CODE_RATE_LIMIT_SOURCES: readonly ClaudeCodeRateLimitSource[
 export const CLAUDE_CODE_FLEET_REFUSAL_REASONS: readonly ClaudeCodeFleetRefusalReason[] = [
   'concurrency', 'turns-per-hour', 'breaker', 'founder-reserve',
 ]
+
+/** Allowed `claude-code/resume-failed` reasons. */
+export const CLAUDE_CODE_RESUME_FAILED_REASONS: readonly ClaudeCodeResumeFailedReason[] = [
+  'transcript-missing', 'transcript-unreadable',
+]
+
+/** Allowed `claude-code/paused` reasons. */
+export const CLAUDE_CODE_PAUSE_REASONS: readonly ClaudeCodePauseReason[] = ['rate-limit', 'usage-exhausted']
 
 /** Maximum length of any recorded string (identifiers, models, outcomes). */
 export const CLAUDE_CODE_MAX_TEXT_CHARS = 500

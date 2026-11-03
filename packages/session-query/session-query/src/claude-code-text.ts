@@ -28,6 +28,16 @@ interface ClaudeCodeFleetRefusedData {
   observed?: number
 }
 
+interface ClaudeCodeResumeFailedData {
+  reason?: string
+  sdkSessionId?: string
+}
+
+interface ClaudeCodePausedData {
+  reason?: string
+  until?: number
+}
+
 /** Render `label=value` when the value is present, else nothing. */
 function field(label: string, value: string | number | boolean | undefined): string[] {
   return value === undefined ? [] : [`${label}=${String(value)}`]
@@ -73,6 +83,14 @@ export function claudeCodeEventText(type: string, data: unknown): string | undef
         ...field('limit', d.limit),
         ...field('observed', d.observed),
       ].join('\n')
+    }
+    case 'claude-code/resume-failed': {
+      const d = data as ClaudeCodeResumeFailedData
+      return ['claude-code resume-failed', ...field('reason', d.reason), ...field('sdkSessionId', d.sdkSessionId)].join('\n')
+    }
+    case 'claude-code/paused': {
+      const d = data as ClaudeCodePausedData
+      return ['claude-code paused', ...field('reason', d.reason), ...field('until', d.until)].join('\n')
     }
     case 'claude-code/steer':
     case 'claude-code/compact':

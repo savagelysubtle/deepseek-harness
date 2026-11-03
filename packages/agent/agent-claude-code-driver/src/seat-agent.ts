@@ -1,0 +1,728 @@
+/**
+ * The Claude Code seat Agent: one dsh Session driven by the unmodified
+ * `claude` program through the official Agent SDK.
+ *
+ * Turn model (verified in the S0 spike): each turn runs one streaming-input
+ * `query()` whose prompt is an open {@link PromptStream}. `steer()` pushes the
+ * message into that stream; Claude consumes it at its next model-call
+ * boundary, so steering latency is the remaining time of the tool call in
+ * flight. The stream is closed once every pushed message has been answered
+ * and the inbox is empty. The fallback, {@link ClaudeCodeSeatAgent.interruptAndResume},
+ * interrupts the query and delivers the message in a resumed query.
+ *
+ * @module @deepseek-ai/dsh-agent-claude-code-driver/seat-agent
+ */
+
+import { randomUUID } from 'node:crypto'
+import { USAGE_LIMIT_ERROR_PREFIXES } from '@anthropic-ai/claude-agent-sdk'
+import type {
+  Options, Query, SDKMessage, SDKResultMessage, SDKUserMessage, SpawnOptions,
+} from '@anthropic-ai/claude-agent-sdk'
+import type { Context } from '@deepseek-ai/cordis'
+import { Inbox, agentEvents } from '@deepseek-ai/dsh-agent'
+import type {
+  Agent, AgentCancelCause, AgentEventDispatch, AgentOptions, AgentStatus, CancelOptions, InboxTarget,
+} from '@deepseek-ai/dsh-agent'
+import { recordClaudeCodeEvent } from '@deepseek-ai/dsh-agent-claude-code'
+import type { ClaudeCodeEventInputMap, ClaudeCodeEventType } from '@deepseek-ai/dsh-agent-claude-code'
+import { CLAUDE_CODE_DRIVER_NAME } from '@deepseek-ai/dsh-agent-claude-code'
+import { errorChain } from '@deepseek-ai/dsh-llm'
+import { createScope } from '@deepseek-ai/dsh-scope'
+import type { Scope } from '@deepseek-ai/dsh-scope'
+import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
+import { claudeSpawnSpec, ManagedClaudeCodeProcess } from '@deepseek-ai/dsh-subagent-claude-code/src/process.ts'
+import type { SubprocessHandle, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
+import { assertCleanHostEnv } from './env.ts'
+import { buildQueryOptions } from './options.ts'
+import type { QueryBinding, QueryOptionsExtension } from './options.ts'
+import { PromptStream } from './prompt-stream.ts'
+import type { ClaudeCodeSeatConfig } from './seat-config.ts'
+import type { ProcessLedger } from './ledger.ts'
+
+/** Error codes the driver puts on a failed turn's `turn/end` reason. */
+export const CLAUDE_CODE_TURN_ERROR_CODES = {
+  /** The Claude transcript for a bound session is missing or unreadable. */
+  resumeFailed: 'CLAUDE_CODE_RESUME_FAILED',
+  /** The subscription window refused work. */
+  paused: 'CLAUDE_CODE_PAUSED',
+  /** The query ended without a `result` message. */
+  noResult: 'CLAUDE_CODE_NO_RESULT',
+  /** A second live query was requested for a seat that already has one. */
+  busy: 'CLAUDE_CODE_SEAT_BUSY',
+  /** The host environment carries a forbidden credential override. */
+  environment: 'CLAUDE_CODE_ENVIRONMENT',
+} as const
+
+/** A driver failure carrying a stable machine code for `turn/end`. */
+export class ClaudeCodeDriverError extends Error {
+  /**
+   * @param code - one of {@link CLAUDE_CODE_TURN_ERROR_CODES}.
+   * @param message - human-readable message including the remedy.
+   */
+  constructor(readonly code: string, message: string) {
+    super(message)
+    this.name = 'ClaudeCodeDriverError'
+  }
+}
+
+/** How a Claude transcript looks on disk for a bound session. */
+export type TranscriptState = 'ok' | 'missing' | 'unreadable'
+
+/** Everything the agent needs from its environment; every field is injectable for tests. */
+export interface SeatAgentDeps {
+  /** The SDK `query` function. */
+  readonly query: (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => Query
+  /** Spawn a child through the shared subprocess owner (own process group, tree-scoped kill). */
+  readonly spawnProcess: (spec: SubprocessSpawnSpec) => SubprocessHandle
+  /** Kill a process group directly; the last resort when the subprocess owner cannot prove the tree gone. */
+  readonly killProcessGroup: (pid: number) => void
+  /** Inspect the Claude transcript of a bound session. */
+  readonly transcriptState: (sdkSessionId: string, cwd: string) => Promise<TranscriptState>
+  /** The host environment to preflight. */
+  readonly hostEnv: () => NodeJS.ProcessEnv
+  /** The child environment (scrubbed, forbidden names removed). */
+  readonly childEnv: () => Record<string, string>
+  /** Wall clock in epoch milliseconds. */
+  readonly now: () => number
+  /** Process-tree termination grace in milliseconds. */
+  readonly graceMs: number
+  /** How long to refuse turns after a pause signal that carried no reset time. */
+  readonly defaultPauseMs: number
+  /** Pid ledger for orphan reaping; absent disables recording. */
+  readonly ledger?: ProcessLedger | undefined
+  /** Optional S5 settings extension. */
+  readonly extension?: QueryOptionsExtension | undefined
+  /** Warning sink. */
+  readonly warn: (message: string) => void
+}
+
+/** Holds the single live-query slot of each seat in this process. */
+export class SeatGate {
+  private readonly held = new Map<string, unknown>()
+
+  /**
+   * Whether a seat currently has a live query.
+   * @param seat - seat key.
+   * @returns true while the seat's slot is taken.
+   */
+  isHeld(seat: string): boolean {
+    return this.held.has(seat)
+  }
+
+  /**
+   * Take the seat's live-query slot.
+   * @param seat - seat key.
+   * @param holder - identity of the taker, used to release.
+   * @throws when another live query already holds the slot.
+   */
+  acquire(seat: string, holder: unknown): void {
+    if (this.held.has(seat)) {
+      throw new ClaudeCodeDriverError(
+        CLAUDE_CODE_TURN_ERROR_CODES.busy,
+        `agent-claude-code-driver: seat "${seat}" already has a live Claude Code query; only one runs per seat. Steer the live turn or cancel it first.`,
+      )
+    }
+    this.held.set(seat, holder)
+  }
+
+  /**
+   * Release the slot if `holder` still owns it.
+   * @param seat - seat key.
+   * @param holder - identity that took the slot.
+   */
+  release(seat: string, holder: unknown): void {
+    if (this.held.get(seat) === holder) this.held.delete(seat)
+  }
+}
+
+interface RunningPhase {
+  kind: 'running'
+  abort: AbortController
+  turn: number
+  wakeRequested: boolean
+  live: LiveTurn | undefined
+}
+
+type Phase =
+  | { kind: 'idle'; lastTurn: number }
+  | { kind: 'maintenance'; abort: AbortController; lastTurn: number; wakeRequested: boolean }
+  | RunningPhase
+
+interface PauseSignal {
+  readonly reason: 'rate-limit' | 'usage-exhausted'
+  readonly until?: number | undefined
+}
+
+/** State of the one query a running turn owns. */
+class LiveTurn {
+  readonly stream = new PromptStream()
+  query: Query | undefined
+  child: SubprocessHandle | undefined
+  childExited = false
+  /** Uuids of pushed messages no `result` has answered yet. */
+  readonly unanswered = new Set<string>()
+  result: SDKResultMessage | undefined
+  pause: PauseSignal | undefined
+  interrupted = false
+  private tearingDown: Promise<void> | undefined
+
+  constructor(readonly turn: number, readonly abort: AbortController, private readonly deps: SeatAgentDeps) {}
+
+  /** Re-read the exit flag; it can change across awaits, which control-flow narrowing cannot see. */
+  private exitedNow(): boolean {
+    return this.childExited
+  }
+
+  /**
+   * End the prompt stream, close the query, and make sure the child's whole
+   * process group is gone: the subprocess owner's tree-scoped SIGTERM then
+   * SIGKILL ladder first, a direct group kill if it cannot prove the tree
+   * exited. Idempotent; every step tolerates the previous one having failed.
+   */
+  teardown(): Promise<void> {
+    return (this.tearingDown ??= (async () => {
+      this.stream.end()
+      try {
+        this.query?.close()
+      } catch (error: unknown) {
+        this.deps.warn(`agent-claude-code-driver: query.close() failed: ${errorChain(error)}`)
+      }
+      const child = this.child
+      if (child === undefined || child.pid <= 0 || this.childExited) return
+      try {
+        child.terminate()
+      } catch (error: unknown) {
+        this.deps.warn(`agent-claude-code-driver: terminate failed: ${errorChain(error)}`)
+      }
+      let exited = false
+      try {
+        exited = await child.waitForExit(AbortSignal.timeout(this.deps.graceMs * 2 + 1_000))
+      } catch (error: unknown) {
+        this.deps.warn(`agent-claude-code-driver: waiting for child exit failed: ${errorChain(error)}`)
+      }
+      if (exited || this.exitedNow()) return
+      try {
+        this.deps.killProcessGroup(child.pid)
+      } catch (error: unknown) {
+        this.deps.warn(`agent-claude-code-driver: killing process group ${child.pid} failed: ${errorChain(error)}`)
+      }
+    })())
+  }
+}
+
+/** Plain text of a dsh user message; non-text content is refused rather than dropped. */
+function messageText(message: UserMessage): string {
+  const parts: string[] = []
+  for (const block of message.content) {
+    if (block.type !== 'text') {
+      throw new Error(`agent-claude-code-driver: message ${message.id} carries a ${block.type} block; Claude Code seats take text only`)
+    }
+    parts.push(block.text)
+  }
+  return parts.join('\n')
+}
+
+/** Whether a CLI limit message says a usage limit was genuinely reached (the SDK's own prefix list). */
+function isUsageLimitText(text: string): boolean {
+  return USAGE_LIMIT_ERROR_PREFIXES.some(prefix => text.startsWith(prefix))
+}
+
+/** The concatenated text blocks of an assistant message, tolerant of any block shape. */
+function assistantText(message: { message?: { content?: unknown } }): string {
+  const content = message.message?.content
+  if (!Array.isArray(content)) return ''
+  return content.map((block: { type?: string; text?: unknown }) => (block.type === 'text' && typeof block.text === 'string' ? block.text : '')).join('')
+}
+
+/** Epoch milliseconds from an SDK reset time that may be in seconds or milliseconds. */
+function resetMs(value: number | undefined): number | undefined {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return undefined
+  return value < 1e12 ? Math.trunc(value * 1000) : Math.trunc(value)
+}
+
+/** Clamp a pause end into a sane future window. */
+function untilOf(deps: SeatAgentDeps, reset: number | undefined): number {
+  return reset !== undefined && reset > deps.now() ? reset : deps.now() + deps.defaultPauseMs
+}
+
+/** Drives one Session through streaming-input Claude Code queries. */
+export class ClaudeCodeSeatAgent implements Agent {
+  readonly inbox: Inbox
+  readonly options: AgentOptions
+  /** Lifetime scope of this agent. */
+  readonly scope: Scope
+  readonly ctx: Context
+
+  private phase: Phase
+  private activityDone: Promise<void> = Promise.resolve()
+  private disposed = false
+  private readonly dispatch: AgentEventDispatch
+  private sdkSessionId: string | undefined
+  private transcriptKnown = false
+  private pausedUntil = 0
+
+  /**
+   * @param loopCtx - registration context carrying `agents`.
+   * @param id - the shared agent/session id.
+   * @param session - the live session this agent drives.
+   * @param seat - the seat key (registry name).
+   * @param config - the validated seat configuration.
+   * @param cwd - absolute working directory of the seat.
+   * @param deps - injected environment.
+   * @param gate - the process-wide single-live-query gate.
+   */
+  constructor(
+    private readonly loopCtx: Context,
+    readonly id: SessionId,
+    readonly session: Session,
+    private readonly seat: string,
+    private readonly config: ClaudeCodeSeatConfig,
+    private readonly cwd: string,
+    private readonly deps: SeatAgentDeps,
+    private readonly gate: SeatGate,
+  ) {
+    this.options = { provider: CLAUDE_CODE_DRIVER_NAME, model: config.model }
+    this.dispatch = agentEvents(loopCtx, this)
+    this.inbox = new Inbox(session, {
+      inserted: (message) => { this.dispatch.emit('agent/inbox/inserted', { message }) },
+      discarded: (message) => { this.dispatch.emit('agent/inbox/discarded', { message }) },
+      claimed: (message, turn) => { this.dispatch.emit('agent/inbox/claimed', { message, turn }) },
+    })
+    this.phase = { kind: 'idle', lastTurn: session.events.findLast(event => event.type === 'turn/start')?.data.turn ?? 0 }
+    this.scope = createScope(loopCtx, this)
+    this.ctx = this.scope.ctx.extend({ agent: this })
+  }
+
+  get status(): AgentStatus {
+    return this.phase.kind === 'running' ? 'running' : 'idle'
+  }
+
+  /** Epoch milliseconds until which this seat refuses turns after a pause signal; 0 when not paused. */
+  get pausedUntilMs(): number {
+    return this.pausedUntil > this.deps.now() ? this.pausedUntil : 0
+  }
+
+  /** Lift a pause early (for example after the operator confirms the window reopened). */
+  clearPause(): void {
+    this.pausedUntil = 0
+  }
+
+  private setPhase(next: Phase): void {
+    const before = this.status
+    this.phase = next
+    if (this.status !== before) this.dispatch.emit('agent/status', { status: this.status })
+  }
+
+  private rec<Type extends ClaudeCodeEventType>(type: Type, data: ClaudeCodeEventInputMap[Type]): boolean {
+    return recordClaudeCodeEvent(this.session, type, data, (message) => { this.deps.warn(message) })
+  }
+
+  send(message: UserMessage, target: InboxTarget, wakeup: boolean): void {
+    if (wakeup && this.disposed) {
+      this.throwError(new Error(`agent "${this.id}": send refused, agent is disposed`))
+    }
+    const wakingAfterAbort = wakeup && this.phase.kind !== 'idle' && this.phase.abort.signal.aborted
+    this.inbox.splice(wakingAfterAbort ? 'next-turn' : target, Infinity, 0, [message])
+    if (wakeup) this.wake()
+  }
+
+  followup(message: UserMessage): void {
+    this.send(message, 'next-turn', true)
+  }
+
+  /**
+   * Submit steering. An idle seat starts a turn; a running seat pushes the
+   * message into the open prompt stream, which Claude consumes at its next
+   * model-call boundary (the remaining time of the tool call in flight).
+   * @param message - identified steering content.
+   */
+  steer(message: UserMessage): void {
+    this.send(message, 'next-step', true)
+  }
+
+  inject(message: UserMessage): void {
+    this.send(message, 'next-step', false)
+  }
+
+  cancel(cause: AgentCancelCause, options: CancelOptions = {}): boolean {
+    const activeWorkAborted = this.phase.kind !== 'idle'
+    if (cause.kind === 'disposed') this.disposed = true
+    if (options.keepInbox !== true) {
+      this.inbox.clear()
+      if (this.phase.kind !== 'idle') this.phase.wakeRequested = false
+    }
+    if (this.phase.kind !== 'idle') {
+      this.phase.abort.abort(cause)
+      if (this.phase.kind === 'running') void this.phase.live?.teardown()
+    }
+    return activeWorkAborted
+  }
+
+  /**
+   * Run exclusive maintenance work while the agent is idle.
+   * @param job - the work; receives a signal that aborts on cancel.
+   * @returns the job's result.
+   */
+  runMaintenance<T>(job: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    if (this.phase.kind !== 'idle') throw new Error(`agent "${this.id}" already has active work`)
+    const done = Promise.withResolvers<void>()
+    const maintenance: Phase = { kind: 'maintenance', abort: new AbortController(), lastTurn: this.phase.lastTurn, wakeRequested: false }
+    this.setPhase(maintenance)
+    this.activityDone = done.promise
+    return (async () => {
+      try {
+        return await job(maintenance.abort.signal)
+      } finally {
+        this.setPhase({ kind: 'idle', lastTurn: maintenance.lastTurn })
+        if (maintenance.wakeRequested && !this.disposed && this.inbox.hasPending) this.wake()
+        done.resolve()
+      }
+    })()
+  }
+
+  async whenIdle(): Promise<void> {
+    let activity: Promise<void>
+    do {
+      await (activity = this.activityDone)
+    } while (activity !== this.activityDone)
+  }
+
+  /**
+   * The documented fallback when a push cannot reach a running turn: interrupt
+   * the query, then deliver the message in a resumed query. Interrupt and close
+   * are wrapped because the result iterator throws after an interrupt.
+   * @param message - the message to deliver after the interrupt.
+   */
+  async interruptAndResume(message: UserMessage): Promise<void> {
+    const live = this.phase.kind === 'running' ? this.phase.live : undefined
+    this.inbox.splice('next-turn', Infinity, 0, [message])
+    if (live?.query === undefined) {
+      this.wake()
+      return
+    }
+    live.interrupted = true
+    this.rec('claude-code/steer', { kind: 'interrupt-push', reason: 'mail interrupted the running turn', at: this.deps.now() })
+    try {
+      await live.query.interrupt()
+    } catch (error: unknown) {
+      this.deps.warn(`agent-claude-code-driver: interrupt failed: ${errorChain(error)}`)
+    }
+    await live.teardown()
+  }
+
+  /** Start the driver when idle; steer a running turn; latch behind maintenance or an aborted turn. */
+  private wake(): void {
+    if (this.phase.kind !== 'idle') {
+      if (this.phase.kind === 'running' && !this.phase.abort.signal.aborted) {
+        this.pumpSteer(this.phase)
+      } else {
+        this.phase.wakeRequested = true
+      }
+      return
+    }
+    if (this.disposed) {
+      this.throwError(new Error(`agent "${this.id}": dispatch blocked, agent is disposed`))
+    }
+    const driver = Promise.withResolvers<void>()
+    this.activityDone = driver.promise
+    const running: RunningPhase = { kind: 'running', abort: new AbortController(), turn: this.phase.lastTurn, wakeRequested: false, live: undefined }
+    this.setPhase(running)
+    this.loopCtx.agents.withInitiator(this, () => this.kick(running)).then(driver.resolve, driver.reject)
+  }
+
+  private throwError(error: unknown): never {
+    const turn = this.phase.kind === 'running' ? this.phase.turn : this.phase.lastTurn
+    this.dispatch.emit('agent/error', { turn, step: 0, error })
+    throw error
+  }
+
+  private async kick(phase: RunningPhase): Promise<void> {
+    try {
+      while (await this.turn(phase)) {}
+    } catch (error: unknown) {
+      this.deps.warn(`agent "${this.id}": turn failed: ${errorChain(error)}`)
+    } finally {
+      this.setPhase({ kind: 'idle', lastTurn: phase.turn })
+      if (phase.wakeRequested && !this.disposed && this.inbox.hasPending) this.wake()
+    }
+  }
+
+  /** Claim queued next-step mail and push it into the live prompt stream. */
+  private pumpSteer(phase: RunningPhase): void {
+    const { live, turn } = phase
+    if (live === undefined || live.stream.closed || this.inbox.nextStep.length === 0) return
+    for (const message of this.inbox.claim('next-step', turn)) {
+      this.session.append('user/message', message, { surfaceOp: 'append' })
+      this.pushMessage(live, message)
+      this.rec('claude-code/steer', { kind: 'push', reason: 'mail pushed into the live turn', at: this.deps.now() })
+    }
+  }
+
+  private pushMessage(live: LiveTurn, message: UserMessage): void {
+    const uuid = randomUUID()
+    live.unanswered.add(uuid)
+    live.stream.push({
+      type: 'user',
+      message: { role: 'user', content: messageText(message) },
+      parent_tool_use_id: null,
+      uuid,
+    })
+  }
+
+  /**
+   * Decide how this turn's query binds to its Claude session, recording the
+   * binding BEFORE any prompt is sent. A bound session whose transcript is
+   * gone after a completed turn is refused loudly, never started fresh.
+   */
+  private async resolveBinding(): Promise<QueryBinding> {
+    const bound = this.session.events.findLast(event => event.type === 'claude-code/session-bound')
+    this.sdkSessionId ??= (bound?.data as { sdkSessionId?: string } | undefined)?.sdkSessionId
+    if (this.sdkSessionId === undefined) {
+      const sdkSessionId = randomUUID()
+      const written = this.rec('claude-code/session-bound', {
+        sessionId: this.id, sdkSessionId, model: this.config.model, driver: CLAUDE_CODE_DRIVER_NAME, at: this.deps.now(),
+      })
+      if (!written) throw new Error(`agent "${this.id}": could not record claude-code/session-bound; refusing to send a prompt without a durable binding`)
+      this.sdkSessionId = sdkSessionId
+      return { kind: 'first', sdkSessionId }
+    }
+    const sdkSessionId = this.sdkSessionId
+    if (this.transcriptKnown) return { kind: 'resume', sdkSessionId }
+    const state = await this.deps.transcriptState(sdkSessionId, this.cwd)
+    if (state === 'ok') {
+      this.transcriptKnown = true
+      return { kind: 'resume', sdkSessionId }
+    }
+    const completedBefore = this.session.events.some(event => event.type === 'claude-code/turn-completed')
+    if (state === 'missing' && !completedBefore) return { kind: 'first', sdkSessionId }
+    this.rec('claude-code/resume-failed', {
+      sdkSessionId, reason: state === 'missing' ? 'transcript-missing' : 'transcript-unreadable', at: this.deps.now(),
+    })
+    throw new ClaudeCodeDriverError(
+      CLAUDE_CODE_TURN_ERROR_CODES.resumeFailed,
+      `agent-claude-code-driver: seat "${this.seat}" cannot resume Claude session ${sdkSessionId}: transcript is ${state}. `
+      + 'The seat needs a re-seed (start a new session whose first prompt is a digest of the old log); it will not start fresh silently.',
+    )
+  }
+
+  private makeSpawn(live: LiveTurn): (options: SpawnOptions) => ManagedClaudeCodeProcess {
+    return (spawnOptions) => {
+      const child = this.deps.spawnProcess(claudeSpawnSpec(spawnOptions, this.deps.graceMs))
+      live.child = child
+      if (child.pid > 0) {
+        try {
+          this.deps.ledger?.record(this.seat, child.pid)
+        } catch (error: unknown) {
+          this.deps.warn(`agent-claude-code-driver: could not record child pid in the ledger: ${errorChain(error)}`)
+        }
+      }
+      void child.done.then(() => undefined, () => undefined).then(() => {
+        live.childExited = true
+        if (child.pid <= 0) return
+        try {
+          this.deps.ledger?.clear(this.seat, child.pid)
+        } catch (error: unknown) {
+          this.deps.warn(`agent-claude-code-driver: could not clear child pid in the ledger: ${errorChain(error)}`)
+        }
+      })
+      return new ManagedClaudeCodeProcess(child)
+    }
+  }
+
+  /** Note a subscription-window refusal: record it, remember the pause, and stop the turn. */
+  private notePause(live: LiveTurn, signal: PauseSignal): void {
+    if (live.pause !== undefined) return
+    live.pause = signal
+    const until = untilOf(this.deps, signal.until)
+    this.pausedUntil = until
+    this.rec('claude-code/paused', { reason: signal.reason, until, at: this.deps.now() })
+    live.abort.abort({ kind: 'hook', reason: 'claude-code paused' })
+    void live.teardown()
+  }
+
+  /** Inspect one SDK message for turn-level facts. */
+  private observe(phase: RunningPhase, live: LiveTurn, message: SDKMessage): void {
+    if (message.type === 'rate_limit_event') {
+      const info = message.rate_limit_info
+      if (info.status !== 'rejected') return
+      const exhausted = info.rateLimitType === 'overage' || info.errorCode === 'credits_required'
+      this.notePause(live, { reason: exhausted ? 'usage-exhausted' : 'rate-limit', until: resetMs(info.resetsAt) })
+      return
+    }
+    if (message.type === 'assistant' && message.error !== undefined) {
+      if (message.error === 'rate_limit') {
+        this.notePause(live, { reason: isUsageLimitText(assistantText(message)) ? 'usage-exhausted' : 'rate-limit' })
+      } else if (message.error === 'billing_error') this.notePause(live, { reason: 'usage-exhausted' })
+      return
+    }
+    if (message.type !== 'result') return
+    live.result = message
+    if (message.subtype === 'success' && message.is_error && isUsageLimitText(message.result)) {
+      this.notePause(live, { reason: 'usage-exhausted' })
+      return
+    }
+    if ('api_error_status' in message && message.api_error_status === 429) {
+      this.notePause(live, { reason: 'rate-limit' })
+      return
+    }
+    const answered = (message as { user_message_uuids?: readonly string[] }).user_message_uuids
+    const matched = answered?.filter(uuid => live.unanswered.delete(uuid)).length ?? 0
+    // A result that names none of our messages (older CLI, error result) answers everything pushed so far.
+    if (matched === 0) live.unanswered.clear()
+    if (live.unanswered.size === 0 && this.inbox.nextStep.length === 0) live.stream.end()
+    else this.pumpSteer(phase)
+  }
+
+  /** Map the final result to the durable turn-completed record. */
+  private recordResult(turn: number, result: SDKResultMessage): void {
+    const usage = result.usage
+    this.rec('claude-code/turn-completed', {
+      turnIndex: turn,
+      outcome: result.subtype,
+      isError: result.is_error,
+      model: this.config.model,
+      numTurns: result.num_turns,
+      durationMs: result.duration_ms,
+      durationApiMs: result.duration_api_ms,
+      estimatedCostUsd: result.total_cost_usd,
+      usage: {
+        inputTokens: usage.input_tokens,
+        outputTokens: usage.output_tokens,
+        cacheReadInputTokens: usage.cache_read_input_tokens,
+        cacheCreationInputTokens: usage.cache_creation_input_tokens,
+      },
+      modelUsage: Object.fromEntries(Object.entries(result.modelUsage).map(([model, entry]) => [model, {
+        inputTokens: entry.inputTokens,
+        outputTokens: entry.outputTokens,
+        cacheReadInputTokens: entry.cacheReadInputTokens,
+        cacheCreationInputTokens: entry.cacheCreationInputTokens,
+        estimatedCostUsd: entry.costUSD,
+        webSearchRequests: entry.webSearchRequests,
+      }])),
+      stopReason: result.stop_reason,
+    })
+  }
+
+  /** The turn-end reason for everything that happened to this turn. */
+  private endReason(signal: AbortSignal, live: LiveTurn | undefined, failure: unknown): TurnEndReason {
+    if (live?.pause !== undefined) {
+      const until = new Date(this.pausedUntil).toISOString()
+      return {
+        kind: 'error',
+        error: {
+          code: CLAUDE_CODE_TURN_ERROR_CODES.paused,
+          message: `Claude subscription window refused work (${live.pause.reason}); seat paused until ${until}. The lease fails with a refusal notice; retry after that time.`,
+        },
+      }
+    }
+    if (live?.interrupted === true) {
+      return { kind: 'aborted', reason: { kind: 'hook', reason: 'claude-code steer interrupt' } }
+    }
+    if (signal.aborted) return { kind: 'aborted', reason: signal.reason as AgentCancelCause }
+    if (failure !== undefined) {
+      return {
+        kind: 'error',
+        error: {
+          code: failure instanceof ClaudeCodeDriverError ? failure.code : 'UNKNOWN',
+          message: errorChain(failure),
+        },
+      }
+    }
+    const result = live?.result
+    if (result === undefined) {
+      return { kind: 'error', error: { code: CLAUDE_CODE_TURN_ERROR_CODES.noResult, message: 'Claude Code ended without a result message' } }
+    }
+    if (result.is_error || result.subtype !== 'success') {
+      const detail = result.subtype === 'success' ? 'success result marked as an error' : result.errors.join('; ') || result.subtype
+      return { kind: 'error', error: { code: `CLAUDE_CODE_${result.subtype.toUpperCase()}`, message: `Claude Code failed: ${detail}` } }
+    }
+    return { kind: 'completed' }
+  }
+
+  /** Run one turn; resolves true when queued work remains and the driver should run another. */
+  private async turn(phase: RunningPhase): Promise<boolean> {
+    const signal = phase.abort.signal
+
+    const turn = phase.turn + 1
+    this.session.append('turn/start', { turn })
+    phase.turn = turn
+    let live: LiveTurn | undefined
+    let failure: unknown
+    let stepOpen = false
+    let holdsGate = false
+    let binding: QueryBinding | undefined
+    let reason: TurnEndReason | undefined
+    try {
+      // Preflight before anything is claimed, so a refusal leaves the mail queued.
+      assertCleanHostEnv(this.deps.hostEnv())
+      if (this.pausedUntilMs > 0) {
+        this.notePauseRefusal()
+      }
+      this.gate.acquire(this.seat, this)
+      holdsGate = true
+      binding = await this.resolveBinding()
+      signal.throwIfAborted()
+
+      const claimed = this.inbox.claim('next-turn', turn)
+      this.session.append('step/start', { turn, step: 1 })
+      stepOpen = true
+      for (const message of claimed) this.session.append('user/message', message, { surfaceOp: 'append' })
+
+      live = new LiveTurn(turn, phase.abort, this.deps)
+      phase.live = live
+      const options = buildQueryOptions({
+        seat: this.seat,
+        config: this.config,
+        cwd: this.cwd,
+        binding,
+        env: this.deps.childEnv(),
+        abortController: phase.abort,
+        spawn: this.makeSpawn(live),
+        extension: this.deps.extension,
+      })
+      for (const message of claimed) this.pushMessage(live, message)
+      live.query = this.deps.query({ prompt: live.stream, options })
+      this.pumpSteer(phase)
+      try {
+        for await (const message of live.query) this.observe(phase, live, message)
+      } catch (error: unknown) {
+        // An interrupt, a cancel, or a pause makes the result iterator throw; that is the expected end.
+        if (!signal.aborted && !live.interrupted) throw error
+      }
+      if (live.result !== undefined && !live.result.is_error) this.transcriptKnown = true
+    } catch (error: unknown) {
+      failure = error
+    } finally {
+      await live?.teardown()
+      if (holdsGate) this.gate.release(this.seat, this)
+      phase.live = undefined
+      if (live?.result !== undefined && live.pause === undefined) this.recordResult(turn, live.result)
+      if (stepOpen) this.session.append('step/end', { turn, step: 1 })
+      reason = this.endReason(signal, live, failure)
+      this.session.append('turn/end', { turn, reason })
+    }
+    if (failure !== undefined && !signal.aborted) {
+      this.dispatch.emit('agent/error', { turn, step: 1, error: failure })
+    }
+    // A failed turn, a cancel, a pause, or a refused resume must not spin on the still-queued mail;
+    // only a clean turn, or one deliberately interrupted to deliver mail, runs again.
+    const proceed = (reason.kind === 'completed' || live?.interrupted === true) && !signal.aborted
+    if (!proceed || !this.hasMail() || this.pausedUntilMs > 0) return false
+    phase.abort = new AbortController()
+    phase.wakeRequested = false
+    return true
+  }
+
+  /** Whether mail is queued; a method so flow narrowing from earlier checks does not go stale across awaits. */
+  private hasMail(): boolean {
+    return this.inbox.hasPending
+  }
+
+  /** Refuse a turn while the seat is paused, naming the end time. */
+  private notePauseRefusal(): never {
+    throw new ClaudeCodeDriverError(
+      CLAUDE_CODE_TURN_ERROR_CODES.paused,
+      `agent-claude-code-driver: seat "${this.seat}" is paused until ${new Date(this.pausedUntil).toISOString()} after a subscription-window refusal; its mail stays queued.`,
+    )
+  }
+}

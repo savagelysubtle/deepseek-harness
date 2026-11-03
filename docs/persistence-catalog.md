@@ -260,7 +260,7 @@ Source: [`packages/core/session/src/types.ts:277`](../packages/core/session/src/
 'claude-code/compact': ClaudeCodeCompactData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:132`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:156`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codefleet-refused--log-only"></a>
 
@@ -274,7 +274,21 @@ Source: [`packages/core/agent-claude-code/src/types.ts:132`](../packages/core/ag
 'claude-code/fleet-refused': ClaudeCodeFleetRefusedData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:142`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:166`](../packages/core/agent-claude-code/src/types.ts)
+
+<a id="claude-codepaused--log-only"></a>
+
+#### `claude-code/paused` — log-only
+
+```ts persistence-catalog
+/**
+ * Records the per-seat pause after a rate-limit or usage-exhausted signal.
+ * @param data - pause reason, optional reopen time, and time.
+ */
+'claude-code/paused': ClaudeCodePausedData
+```
+
+Source: [`packages/core/agent-claude-code/src/types.ts:176`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-coderate-limited--log-only"></a>
 
@@ -288,7 +302,21 @@ Source: [`packages/core/agent-claude-code/src/types.ts:142`](../packages/core/ag
 'claude-code/rate-limited': ClaudeCodeRateLimitedData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:137`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:161`](../packages/core/agent-claude-code/src/types.ts)
+
+<a id="claude-coderesume-failed--log-only"></a>
+
+#### `claude-code/resume-failed` — log-only
+
+```ts persistence-catalog
+/**
+ * Records a refused resume (missing or unreadable Claude transcript).
+ * @param data - SDK session id, reason, and time.
+ */
+'claude-code/resume-failed': ClaudeCodeResumeFailedData
+```
+
+Source: [`packages/core/agent-claude-code/src/types.ts:171`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codesession-bound--log-only"></a>
 
@@ -302,7 +330,7 @@ Source: [`packages/core/agent-claude-code/src/types.ts:137`](../packages/core/ag
 'claude-code/session-bound': ClaudeCodeSessionBoundData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:117`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:141`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codesteer--log-only"></a>
 
@@ -316,7 +344,7 @@ Source: [`packages/core/agent-claude-code/src/types.ts:117`](../packages/core/ag
 'claude-code/steer': ClaudeCodeSteerData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:127`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:151`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codeturn-completed--log-only"></a>
 
@@ -330,7 +358,7 @@ Source: [`packages/core/agent-claude-code/src/types.ts:127`](../packages/core/ag
 'claude-code/turn-completed': ClaudeCodeTurnCompletedData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:122`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:146`](../packages/core/agent-claude-code/src/types.ts)
 
 ### `command/*`
 

@@ -278,6 +278,20 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 
 来源：[`packages/core/agent-claude-code/src/types.ts:142`](../packages/core/agent-claude-code/src/types.ts)
 
+<a id="claude-codepaused--log-only"></a>
+
+#### `claude-code/paused` — log-only
+
+```ts persistence-catalog
+/**
+ * Records the per-seat pause after a rate-limit or usage-exhausted signal.
+ * @param data - pause reason, optional reopen time, and time.
+ */
+'claude-code/paused': ClaudeCodePausedData
+```
+
+来源：[`packages/core/agent-claude-code/src/types.ts:176`](../packages/core/agent-claude-code/src/types.ts)
+
 <a id="claude-coderate-limited--log-only"></a>
 
 #### `claude-code/rate-limited` — log-only
@@ -291,6 +305,20 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 ```
 
 来源：[`packages/core/agent-claude-code/src/types.ts:137`](../packages/core/agent-claude-code/src/types.ts)
+
+<a id="claude-coderesume-failed--log-only"></a>
+
+#### `claude-code/resume-failed` — log-only
+
+```ts persistence-catalog
+/**
+ * Records a refused resume (missing or unreadable Claude transcript).
+ * @param data - SDK session id, reason, and time.
+ */
+'claude-code/resume-failed': ClaudeCodeResumeFailedData
+```
+
+来源：[`packages/core/agent-claude-code/src/types.ts:171`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codesession-bound--log-only"></a>
 
