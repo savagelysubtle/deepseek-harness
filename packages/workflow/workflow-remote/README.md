@@ -8,7 +8,7 @@ It is its own package, mounted by its own Loader entry in [`packages/bundle/web-
 
 ## Call shapes
 
-Browser code imports the contract from `@deepseek-ai/dsh-workflow-remote/client` (types, constants, `WORKFLOW_LOOPBACK_ONLY_MESSAGE`, `explainWorkflowRefusal`, `explainWorkflowRejection`, the lease timings); it re-exports `src/wire.ts` only, which imports nothing, so no Host module is reachable from it. The Remote face wraps every method result once more, so a call has three possible outcomes:
+Browser code imports the contract from `@deepseek-ai/dsh-workflow-remote/client` (types, constants, `WORKFLOW_LOOPBACK_ONLY_MESSAGE`, `explainWorkflowRefusal`, `explainWorkflowRejection`, the lease timings); it re-exports `src/wire.ts` only, which has no value imports (one erased type-only import anchors the cordis event augmentation), so no Host module is reachable from it. The Remote face wraps every method result once more, so a call has three possible outcomes:
 
 - **Success** is `RemoteResult<{ ok: true, ... }>`, for example `{ ok: true, value: { ok: true, leaseId: 'ab12...', ttlMs: 45000, workspaceKey: '0f3a...' } }`.
 - **A Host-reported failure** is `{ ok: true, value: { ok: false, error: 'NOT_FOUND', message: '...' } }`; the machine-readable field is `error` (a `WorkflowErrorCode`), never `code`. `validate` reports a bad draft as `{ ok: false, diagnostics }` without `error`, so `error` is what separates a failed call from a verdict.

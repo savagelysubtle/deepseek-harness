@@ -9,6 +9,10 @@
  * @module @deepseek-ai/dsh-workflow-remote/wire
  */
 
+// Type-only (erased at build): makes the cordis project a real dependency of this file for the
+// event augmentation below. No runtime module is reachable from here.
+import type {} from '@deepseek-ai/cordis'
+
 /** Typert namespace every Remote method below is published under. */
 export const WORKFLOW_NAMESPACE = 'workflow'
 

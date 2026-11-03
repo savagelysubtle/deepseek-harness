@@ -1,7 +1,7 @@
 /**
  * Browser-safe face of the `workflow` Remote contract: the wire types, the error-code and event-name
  * constants, the lease timings, `WORKFLOW_LOOPBACK_ONLY_MESSAGE`, `explainWorkflowRefusal` and
- * `explainWorkflowRejection`. It re-exports `../wire.ts` only, which imports nothing, so no node,
+ * `explainWorkflowRejection`. It re-exports `../wire.ts` only, which has no value imports, so no node,
  * filesystem or Host module is reachable from it. Client bundles import
  * `@deepseek-ai/dsh-workflow-remote/client`.
  *

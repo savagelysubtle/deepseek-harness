@@ -10,11 +10,12 @@ describe('client face', () => {
     expect(client.WORKFLOW_ATTACH_TTL_MS).toBe(45_000)
   })
 
-  it('reaches no module that is not browser-safe: the wire file imports nothing', () => {
+  it('reaches no module that is not browser-safe: the wire file has no value imports', () => {
     for (const file of ['../src/wire.ts', '../src/client/index.ts']) {
       const text = readFileSync(new URL(file, import.meta.url), 'utf8')
       const imports = text.split('\n').filter(line => /^\s*(import\b|export .* from )/.test(line))
-      expect(imports.filter(line => !line.includes('../wire.ts'))).toEqual([])
+      // The only allowed import is the erased `import type {}` that anchors the cordis augmentation.
+      expect(imports.filter(line => !line.includes('../wire.ts') && line.trim() !== "import type {} from '@deepseek-ai/cordis'")).toEqual([])
     }
   })
 })

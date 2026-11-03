@@ -8,7 +8,7 @@ Workflows UI（OP-240）所使用的常驻挂载 Typert Remote 命名空间 `wor
 
 ## 调用形态
 
-浏览器代码从 `@deepseek-ai/dsh-workflow-remote/client` 导入契约（类型、常量、`WORKFLOW_LOOPBACK_ONLY_MESSAGE`、`explainWorkflowRefusal`、`explainWorkflowRejection`、租约时间）；它只重新导出不含任何导入的 `src/wire.ts`，因此无法触达任何 Host 模块。Remote 层会再包装一次方法结果，所以一次调用有以下几种结果：
+浏览器代码从 `@deepseek-ai/dsh-workflow-remote/client` 导入契约（类型、常量、`WORKFLOW_LOOPBACK_ONLY_MESSAGE`、`explainWorkflowRefusal`、`explainWorkflowRejection`、租约时间）；它只重新导出没有值导入的 `src/wire.ts`（仅一条被擦除的纯类型导入用于锚定 cordis 事件扩充），因此无法触达任何 Host 模块。Remote 层会再包装一次方法结果，所以一次调用有以下几种结果：
 
 - **成功** 为 `RemoteResult<{ ok: true, ... }>`，例如 `{ ok: true, value: { ok: true, leaseId: 'ab12...', ttlMs: 45000, workspaceKey: '0f3a...' } }`。
 - **Host 报告的失败** 为 `{ ok: true, value: { ok: false, error: 'NOT_FOUND', message: '...' } }`；机器可读字段是 `error`（一个 `WorkflowErrorCode`），从来不是 `code`。`validate` 把无效草稿报告为不带 `error` 的 `{ ok: false, diagnostics }`，所以用 `error` 区分调用失败与校验结论。
