@@ -199,7 +199,6 @@
   group: true
   isolate:
     workflowEngine: true
-    workflowRuns: true
   config:
     - id: tool-subagent-control
       name: '@deepseek-ai/dsh-tool-subagent-control'
@@ -250,10 +249,13 @@
     - id: tool-workflow
       name: '@deepseek-ai/dsh-tool-workflow'
 
-    # YAML workflows (OP-240): the model-facing `workflow_run` tool over this preset's own engine.
-    # The host's Workflows overlay uses its own runner service; this one serves the model.
+    # YAML workflows (OP-240): the model-facing `workflow_run` tool only. The runner (`workflowRuns`)
+    # stays on the host plane, like the subagent registry above, so a model run and an overlay run
+    # share one store handle, one writer guard and one event stream.
     - id: workflow-run-tool
       name: '@deepseek-ai/dsh-tool-workflow-run'
+      config:
+        exposeService: false
 
     - id: tool-ralph
       name: '@deepseek-ai/dsh-tool-ralph'

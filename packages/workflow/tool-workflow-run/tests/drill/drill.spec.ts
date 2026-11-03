@@ -124,7 +124,7 @@ const MAIL_SCRIPT = (): ReturnType<typeof textResponse>[] => [
 const mailShell = (spec: { command: string }): { stdoutText: string } | Record<string, never> =>
   spec.command.startsWith('mail-cli list') ? { stdoutText: '[{"id":"m1","subject":"server down"}]' } : {}
 
-describe('drill: reject and not-reached', () => {
+describe('drill: reject and skipped', () => {
   it('a rejected approval fails the run, fires its gate as a block and skips the downstream gate', async () => {
     d = await bootDrill({ script: MAIL_SCRIPT(), shell: mailShell })
     const started = await d.startTrusted('mail-triage')

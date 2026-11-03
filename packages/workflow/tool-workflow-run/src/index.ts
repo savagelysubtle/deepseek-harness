@@ -47,6 +47,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   // schemastery (the exported Config schema) has already filled the defaulted fields.
   const resolved = config as ResolvedConfig
   assertConfigUsable(resolved)
-  new WorkflowRunsService(ctx, resolved)
-  if (resolved.exposeTool) ctx.inject(['workflowEngine'], (engineCtx) => { registerWorkflowRunTool(engineCtx, resolved) })
+  if (resolved.exposeService) new WorkflowRunsService(ctx, resolved)
+  // The tool waits for what it needs: the local engine when this mount runs the service, else the host's service.
+  if (resolved.exposeTool) ctx.inject([resolved.exposeService ? 'workflowEngine' : 'workflowRuns'], (toolCtx) => { registerWorkflowRunTool(toolCtx, resolved) })
 }

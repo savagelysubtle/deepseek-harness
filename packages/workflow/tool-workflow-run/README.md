@@ -24,6 +24,7 @@ The model-facing **`workflow_run` tool** and the **`ctx.workflowRuns` host runne
 |---|---|---|
 | `toolName` | `workflow_run` | The model-facing tool name. |
 | `exposeTool` | `true` | False mounts only the `ctx.workflowRuns` service (for the Workflows UI) and registers no model tool; the web composition sets it at the global layer and mounts the tool in the `standard` preset. |
+| `exposeService` | `true` | False builds no runner: the tool is registered once the host's `ctx.workflowRuns` exists and uses it, so a preset's model tool and the Workflows overlay share one runner, store handle and event stream (the `standard` preset mounts the tool this way). |
 | `workflowsDir` | `.workflows` | Workspace-relative directory holding `<name>.yaml` files; must stay inside the workspace. |
 | `approvalWaitMs` | `3600000` | Longest an approval waits (1 to 86400000 ms) before it expires and the node is rejected. |
 | `headless` | `false` | True when no human can answer: approval nodes are rejected immediately with a reason and remedy. |

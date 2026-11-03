@@ -3131,6 +3131,12 @@ export interface Config {
    * which the Workflows UI uses, so a composition can serve the UI without giving every agent the tool.
    */
   exposeTool?: boolean
+  /**
+   * Build the `ctx.workflowRuns` service (default true). False mounts the tool only and resolves the
+   * service from the host plane, so a preset's model tool and the Workflows overlay share one runner,
+   * one store handle and one set of live events.
+   */
+  exposeService?: boolean
   /** Workspace-relative directory holding `<name>.yaml` workflow files (default `.workflows`). */
   workflowsDir?: string
   /** How long an approval may wait for an answer before it expires and the node is rejected, in milliseconds (default 3600000). */

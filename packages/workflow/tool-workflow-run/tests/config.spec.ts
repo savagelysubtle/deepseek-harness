@@ -1,3 +1,5 @@
+import { Service } from '@deepseek-ai/cordis'
+import type { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Config } from '../src/index.ts'
 import { setup } from './harness.ts'
@@ -17,11 +19,22 @@ describe('config', () => {
     expect(await h.ctx.workflowRuns.listWorkflows(h.workspace)).toEqual([])
   })
 
+  it('exposeService false builds no runner and waits for the host one before registering the tool', async () => {
+    h = await setup({ config: { exposeService: false }, ui: false })
+    expect(h.ctx.tools.schemas().map(schema => schema.name)).not.toContain('workflow_run')
+    expect(h.ctx.get('workflowRuns')).toBeUndefined()
+    // The host plane provides the service: the tool now registers and resolves it.
+    class HostRuns extends Service { constructor(ctx: Context) { super(ctx, 'workflowRuns') } }
+    await h.ctx.plugin(HostRuns)
+    expect(h.ctx.tools.schemas().map(schema => schema.name)).toContain('workflow_run')
+  })
+
   it('fills the documented defaults', () => {
     const resolved = Config({})
     expect(resolved).toMatchObject({
       toolName: 'workflow_run',
       exposeTool: true,
+      exposeService: true,
       workflowsDir: '.workflows',
       approvalWaitMs: 3_600_000,
       headless: false,
