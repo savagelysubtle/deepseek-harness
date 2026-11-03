@@ -573,7 +573,7 @@ export class WorkerRun implements WorkflowRun {
         if ((error as { code?: unknown } | null)?.code === 'NO_ADAPTER') {
           // No adapter for this provider (headless/replay configs): no catalog to consult, so only the
           // string-level denylist below applies to the requested id. Every other failure stays closed.
-          this.ctx.logger.debug(`workflow-worker-thread: model catalog check skipped, no adapter registered for provider "${provider}"`)
+          this.ctx.logger.debug(`workflow-worker-thread: model catalog check skipped, no adapter registered for provider ${JSON.stringify(provider.slice(0, 64))}`)
         } else {
           this.ctx.logger.warn(`workflow-worker-thread: model catalog lookup failed: ${renderThrown(error)}`)
           throw new Error(`model "${final}" could not be checked against the model catalog, so the node was not started`)
