@@ -41,7 +41,7 @@ export const CLAUDE_CODE_FORBIDDEN_ENV: readonly string[] = [
  * URL, OAuth, auth, certificate, proxy or extra-body setting, and any
  * `ANTHROPIC*` / `CLAUDE*` name that looks like a key, token, password or secret.
  */
-export const FORBIDDEN_ENV_PATTERNS: readonly RegExp[] = [
+const FORBIDDEN_ENV_PATTERNS: readonly RegExp[] = [
   /^ANTHROPIC_/,
   /^CLAUDE_CODE_USE_/,
   /^CLAUDE_CODE_SKIP_/,
