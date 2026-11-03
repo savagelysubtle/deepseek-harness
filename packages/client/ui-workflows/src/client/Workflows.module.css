@@ -51,6 +51,9 @@
   min-width: min(1080px, calc(100vw - 96px));
   max-height: calc(100vh - 160px);
   overflow: auto;
+  /* Elevated surface: l2 scrollbar pair (ui-theme styles/scrollbar.css rebinding contract). */
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
 }
 
 /* Sticky inside the scrolling panel so the tabs and the lease indicator stay visible under a long dry-run plan. */
@@ -194,6 +197,9 @@
   padding: 8px 10px;
   max-height: 220px;
   overflow: auto;
+  /* Elevated surface: l2 scrollbar pair (ui-theme styles/scrollbar.css rebinding contract). */
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
   border-radius: 8px;
   background: var(--dsw-alias-bg-module-platform);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -305,6 +311,9 @@
 .graphScroll {
   overflow: auto;
   max-height: 320px;
+  /* Elevated surface: l2 scrollbar pair (ui-theme styles/scrollbar.css rebinding contract). */
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
   border-radius: 8px;
   background: var(--dsw-alias-bg-module-platform);
 }
