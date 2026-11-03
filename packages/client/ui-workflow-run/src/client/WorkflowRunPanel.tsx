@@ -296,6 +296,39 @@ export function ApprovalBadge({ state, t }: {
   return <span className={css.approvalBadge} data-approval-text data-approval-badge={state}>{t(APPROVAL_KEYS[state])}</span>
 }
 
+function EarlierAttempts({ earlier, t }: {
+  readonly earlier: readonly NonNullable<WorkflowRunNodeData['earlier']>[number][]
+  readonly t: WorkflowRunTranslate
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <span className={css.earlier} data-node-earlier>
+      <button
+        type="button"
+        className={css.gateToggle}
+        aria-expanded={open}
+        data-node-earlier-toggle
+        onClick={() => { setOpen(value => !value) }}
+      >
+        {t('node.earlier', { count: earlier.length })}
+      </button>
+      {open
+        ? (
+          <ul className={css.nodeList}>
+            {earlier.map(item => (
+              <li key={item.attempt} data-node-earlier-attempt={item.attempt} data-node-status={item.status}>
+                {t('node.earlierItem', { attempt: item.attempt, status: t(NODE_STATUS_KEYS[item.status]) })}
+                {item.durationMs === undefined ? '' : ` · ${t('node.duration', { ms: item.durationMs })}`}
+                {item.reason === undefined ? '' : ` — ${item.reason}`}
+              </li>
+            ))}
+          </ul>
+        )
+        : null}
+    </span>
+  )
+}
+
 /**
  * One node row: status dot and text, exit code and duration, truncation marker, approval badge and the
  * verbatim reason. The row carries `data-workflow-node`, `data-node-id` and `data-node-status`, plus
@@ -325,9 +358,26 @@ export function NodeRow({ node, t }: { readonly node: WorkflowRunNodeData; reado
       {node.truncated === true
         ? <span className={css.nodeMeta} data-node-truncated>{t('node.truncated')}</span>
         : null}
+      {node.attempts !== undefined && node.attempts > 1
+        ? <span className={css.nodeMeta} data-node-attempt>{t('node.attempt', { attempt: node.attempt ?? node.attempts, total: node.attempts })}</span>
+        : null}
+      {node.failure === undefined
+        ? null
+        : (
+          <span className={css.nodeReason} data-node-failure>
+            <span data-node-failure-code>{node.failure.code}</span>
+            {': '}
+            <span data-node-failure-message>{node.failure.message}</span>
+            {' '}
+            <span data-node-failure-remedy>{t('node.failure.remedy', { text: node.failure.remedy })}</span>
+          </span>
+        )}
       {node.reason === undefined
         ? null
         : <span className={css.nodeReason} data-node-reason>{node.reason}</span>}
+      {node.earlier === undefined || node.earlier.length === 0
+        ? null
+        : <EarlierAttempts earlier={node.earlier} t={t} />}
     </li>
   )
 }

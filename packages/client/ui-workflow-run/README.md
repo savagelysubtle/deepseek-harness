@@ -20,6 +20,19 @@ A member opens a child Session only while every current fact agrees: the member 
 
 For YAML workflow runs the node also folds `tool-workflow/node-start`, `tool-workflow/node-end`, `tool-workflow/approval` and `tool-workflow/gate-report`. A node-start makes a row `running` with its start time; a node-end settles it as `done`, `failed`, `skipped`, `cancelled` or `interrupted`, and a later node-end for the same node replaces the earlier one (agent-node truncation is only known at run end). A node still running when the run ends reads `interrupted`. Each row (`data-workflow-node`, `data-node-id`, `data-node-status`) shows status text, exit code, duration and an output-truncated marker from the event's `truncated` field. A node with an approval record carries `data-approval-state` (`pending`, `allowed`, `rejected`, `expired`, `unavailable` or `cancelled`) and a text badge taken from the latest `tool-workflow/approval` event; decisions are final, so a late `pending` never reverts one. The approval reason (else the gate-report reason) is shown verbatim, so a headless or no-answerer rejection reads with its remedy. Events whose run has no `run-start` are ignored. The gate report renders after the run disclosure as a captioned table (`data-gate-table`) with one row per gate: node, kind, a text outcome badge for `fired-pass`, `fired-block`, `skipped`, `not-reached` or `never-evaluated`, and the reason. It is collapsed by default and opens by default when a gate blocked; the toggle (`data-gate-toggle`, `aria-expanded`) is remembered per run id in component state only. Plain `workflow` tool runs render exactly as before.
 
+## Selectors
+
+Stable `data-*` hooks for tests and the pilot:
+
+| Selector | Meaning |
+| --- | --- |
+| `[data-workflow-node]` | One node row; `data-node-id`, `data-node-kind`, `data-node-status`, and `data-approval-state` when it has an approval |
+| `[data-node-attempt]` | The "attempt N of M" label, present only when the node ran more than one attempt |
+| `[data-node-earlier-toggle]` / `[data-node-earlier-attempt]` | Expander for earlier attempts of a retried node, and each earlier attempt once expanded; earlier attempts are never separate rows |
+| `[data-node-failure-code]` / `[data-node-failure-message]` / `[data-node-failure-remedy]` | The supervisor stop (`NODE_STALLED` or `NODE_TIMEOUT`), its message and its remedy, as plain text |
+| `[data-node-reason]` / `[data-node-truncated]` | The verbatim approval or failure reason, and the output-truncated marker |
+| `[data-gate-report]` / `[data-gate-toggle]` / `[data-gate-table]` / `[data-gate-row]` | The gate report, its toggle, table and rows; rows carry `data-gate-outcome` |
+
 ## Embeddable run view
 
 The client entry (`@deepseek-ai/dsh-client-ui-workflow-run/client`) also exports the pieces the Workflows overlay embeds so it does not re-render the same facts: `NodeList` (`nodes`, `t`), `NodeRow` (`node`, `t`), `ApprovalBadge` (`state`, `t`), and the controlled `GateReport` (`rows`, `open`, `onToggle`, `t`), where `t` is the `workflowRun` namespace translate function. `runDetailToNodeData(detail)` is a pure mapper from the `runDetail` result body (`nodes`, `gates`, `approvals`) to `{ nodes, gateReport }`: node status `success` reads `done`, an unknown status `interrupted`, an unknown approval state `unavailable`; a node takes its latest approval, and its reason is the approval reason, else the node error, capped at 500 characters. The Chat projection from session events is unchanged.

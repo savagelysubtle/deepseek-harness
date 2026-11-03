@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render } from '@testing-library/react'
+import { cleanup, fireEvent, render } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 import { makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import { ApprovalBadge, GateReport, NodeList, runDetailToNodeData } from '../src/client/index.ts'
@@ -66,5 +66,61 @@ describe('runDetailToNodeData', () => {
     expect(container.querySelector('[data-node-truncated]')).not.toBeNull()
     expect(container.querySelector('[data-gate-outcome="fired-block"]')).not.toBeNull()
     expect(container.querySelector('[data-approval-badge="pending"]')?.textContent).toBe('Approval: pending')
+  })
+
+  it('collapses attempts to one row per node showing the latest, earlier ones kept aside', () => {
+    const view = runDetailToNodeData({
+      nodes: [
+        { nodeId: 'a', kind: 'prompt', status: 'failed', attempt: 1, durationMs: 10, error: 'stalled once' },
+        { nodeId: 'b', kind: 'bash', status: 'success' },
+        { nodeId: 'a', kind: 'prompt', status: 'success', attempt: 2, durationMs: 30 },
+      ],
+      gates: [], approvals: [],
+    })
+    expect(view.nodes.map(n => n.nodeId)).toEqual(['a', 'b'])
+    expect(view.nodes[0]).toEqual({
+      nodeId: 'a', kind: 'prompt', status: 'done', durationMs: 30, attempt: 2, attempts: 2,
+      earlier: [{ attempt: 1, status: 'failed', durationMs: 10, reason: 'stalled once' }],
+    })
+    expect(view.nodes[1]?.attempts).toBeUndefined()
+    expect(view.nodes[1]?.earlier).toBeUndefined()
+  })
+
+  it('renders the attempt label, expandable earlier attempts and the failure as plain text', () => {
+    const t = makeTranslate(en)
+    const view = runDetailToNodeData({
+      nodes: [
+        { nodeId: 'a', kind: 'prompt', status: 'failed', attempt: 1, durationMs: 10 },
+        {
+          nodeId: 'a', kind: 'prompt', status: 'failed', attempt: 2,
+          failure: { code: 'NODE_STALLED', message: 'no output for 60 s after 2 attempts <b>x</b>', remedy: 'raise idle_timeout_s' },
+        },
+        { nodeId: 'solo', kind: 'bash', status: 'success' },
+      ],
+      gates: [], approvals: [],
+    })
+    const { container } = render(<NodeList nodes={view.nodes} t={t} />)
+    const a = container.querySelector('[data-node-id="a"]')
+    expect(a?.querySelector('[data-node-attempt]')?.textContent).toBe('attempt 2 of 2')
+    expect(a?.querySelector('[data-node-failure-code]')?.textContent).toBe('NODE_STALLED')
+    expect(a?.querySelector('[data-node-failure-message]')?.textContent).toContain('<b>x</b>')
+    expect(a?.querySelector('b')).toBeNull()
+    expect(a?.querySelector('[data-node-failure-remedy]')?.textContent).toBe('Remedy: raise idle_timeout_s')
+    expect(a?.querySelector('[data-node-earlier-attempt]')).toBeNull()
+    fireEvent.click(a?.querySelector('[data-node-earlier-toggle]') as HTMLElement)
+    expect(a?.querySelector('[data-node-earlier-attempt="1"]')?.textContent).toBe('Attempt 1: Failed · 10 ms')
+    expect(container.querySelectorAll('[data-workflow-node]')).toHaveLength(2)
+    const solo = container.querySelector('[data-node-id="solo"]')
+    expect(solo?.querySelector('[data-node-attempt]')).toBeNull()
+    expect(solo?.querySelector('[data-node-earlier-toggle]')).toBeNull()
+    expect(solo?.querySelector('[data-node-failure-code]')).toBeNull()
+  })
+
+  it('trusts the producer attempts count when only the last attempt row exists', () => {
+    const view = runDetailToNodeData({
+      nodes: [{ nodeId: 'a', kind: 'prompt', status: 'success', attempts: 3 }], gates: [], approvals: [],
+    })
+    expect(view.nodes[0]).toMatchObject({ attempt: 3, attempts: 3 })
+    expect(view.nodes[0]?.earlier).toBeUndefined()
   })
 })

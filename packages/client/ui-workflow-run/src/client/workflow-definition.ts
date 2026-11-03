@@ -39,6 +39,22 @@ export type WorkflowApprovalDisplayState = ToolWorkflowApprovalState
 export type WorkflowGateDisplayOutcome =
   'fired-pass' | 'fired-block' | 'skipped' | 'not-reached' | 'never-evaluated'
 
+/** A supervisor stop recorded on a node: the code, the message and the remedy, all shown as plain text. */
+export interface WorkflowRunNodeFailure {
+  readonly code: string
+  readonly message: string
+  readonly remedy: string
+}
+
+/** One earlier attempt of a retried node, shown in the compact expandable list. */
+export interface WorkflowRunNodeAttempt {
+  readonly attempt: number
+  readonly status: WorkflowNodeDisplayStatus
+  readonly exitCode?: number
+  readonly durationMs?: number
+  readonly reason?: string
+}
+
 /** One settled YAML workflow node. */
 export interface WorkflowRunNodeData {
   readonly nodeId: string
@@ -46,6 +62,14 @@ export interface WorkflowRunNodeData {
   readonly status: WorkflowNodeDisplayStatus
   readonly exitCode?: number
   readonly durationMs?: number
+  /** The attempt this row shows (the latest one); set with {@link attempts} when the node was retried. */
+  readonly attempt?: number
+  /** Real attempts the node ran, retries included; the "attempt N of M" label shows when above one. */
+  readonly attempts?: number
+  /** Earlier attempts, oldest first; never rendered as rows of their own. */
+  readonly earlier?: readonly WorkflowRunNodeAttempt[]
+  /** Why the supervisor stopped the node's agent (stall or hard timeout). */
+  readonly failure?: WorkflowRunNodeFailure
   /** Epoch milliseconds from `node-start`, when seen. */
   readonly startedAt?: number
   /** True when the node's recorded output is cut. */
@@ -183,6 +207,10 @@ function projectNodes(state: WorkflowState, interrupted: boolean): readonly Work
       ...n.ended?.durationMs === undefined ? {} : { durationMs: n.ended.durationMs },
       ...n.startedAt === undefined ? {} : { startedAt: n.startedAt },
       ...n.ended?.truncated === true ? { truncated: true } : {},
+      ...n.ended?.attempts !== undefined && n.ended.attempts > 1
+        ? { attempt: n.ended.attempts, attempts: n.ended.attempts }
+        : {},
+      ...n.ended?.failure === undefined ? {} : { failure: { ...n.ended.failure } },
       ...approval === undefined ? {} : { approval: approval.state },
       ...reason === undefined ? {} : { reason },
     }
@@ -288,6 +316,8 @@ function updateNodeEnd(state: WorkflowState, data: ToolWorkflowNodeEndData): Wor
       ...data.exitCode === undefined ? {} : { exitCode: data.exitCode },
       ...data.durationMs === undefined ? {} : { durationMs: data.durationMs },
       ...data.truncated === undefined ? {} : { truncated: data.truncated },
+      ...data.attempts === undefined ? {} : { attempts: data.attempts },
+      ...data.failure === undefined ? {} : { failure: data.failure },
     },
   }))
 }

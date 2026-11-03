@@ -1,6 +1,6 @@
 import {
   capReason,
-  type WorkflowApprovalDisplayState, type WorkflowNodeDisplayStatus, type WorkflowRunGateRow,
+  type WorkflowApprovalDisplayState, type WorkflowRunNodeAttempt, type WorkflowNodeDisplayStatus, type WorkflowRunGateRow,
   type WorkflowRunNodeData,
 } from './workflow-definition.ts'
 
@@ -16,6 +16,12 @@ export interface RunDetailNodeInput {
   /** Failure text; shown as the reason when no approval reason exists. */
   readonly error?: string
   readonly truncated?: boolean
+  /** The attempt this row records (the store keeps one row per attempt); absent reads as 1. */
+  readonly attempt?: number
+  /** Real attempts the node ran, when the producer knows it. */
+  readonly attempts?: number
+  /** The supervisor stop that ended the node. */
+  readonly failure?: { readonly code: string; readonly message: string; readonly remedy: string }
 }
 
 /** The `runDetail` approval shape this mapper reads (a subset of the remote `WorkflowApprovalView`). */
@@ -79,9 +85,29 @@ export function runDetailToNodeData(detail: RunDetailInput): RunDetailView {
     const prior = latest.get(approval.nodeId)
     if (prior === undefined || approval.at >= prior.at) latest.set(approval.nodeId, approval)
   }
-  const nodes: WorkflowRunNodeData[] = detail.nodes.map((node) => {
+  const order: string[] = []
+  const byNode = new Map<string, RunDetailNodeInput[]>()
+  for (const row of detail.nodes) {
+    const rows = byNode.get(row.nodeId)
+    if (rows === undefined) { order.push(row.nodeId); byNode.set(row.nodeId, [row]) } else rows.push(row)
+  }
+  const nodes: WorkflowRunNodeData[] = order.map((nodeId) => {
+    // One row per node: the highest attempt (later entry wins ties) shown, the others kept as earlier attempts.
+    const rows = (byNode.get(nodeId) ?? []).map((row, index) => ({ row, index, attempt: row.attempt ?? 1 }))
+      .sort((x, y) => x.attempt - y.attempt || x.index - y.index)
+    const last = rows[rows.length - 1]
+    if (last === undefined) throw new Error('unreachable: node group is never empty')
+    const node = last.row
     const approval = latest.get(node.nodeId)
     const reason = approval?.reason ?? node.error
+    const total = Math.max(node.attempts ?? 0, last.attempt, rows.length)
+    const earlier = rows.slice(0, -1).map(({ row, attempt }): WorkflowRunNodeAttempt => ({
+      attempt,
+      status: nodeStatus(row.status),
+      ...row.durationMs === undefined ? {} : { durationMs: row.durationMs },
+      ...row.exitCode === undefined ? {} : { exitCode: row.exitCode },
+      ...row.error === undefined ? {} : { reason: capReason(row.error) },
+    }))
     return {
       nodeId: node.nodeId,
       kind: node.kind,
@@ -90,12 +116,15 @@ export function runDetailToNodeData(detail: RunDetailInput): RunDetailView {
       ...node.durationMs === undefined ? {} : { durationMs: node.durationMs },
       ...node.startedAt === undefined ? {} : { startedAt: node.startedAt },
       ...node.truncated === true ? { truncated: true } : {},
+      ...total > 1 ? { attempt: last.attempt > 1 ? last.attempt : total, attempts: total } : {},
+      ...earlier.length === 0 ? {} : { earlier },
+      ...node.failure === undefined ? {} : { failure: { ...node.failure } },
       ...approval === undefined ? {} : { approval: approvalState(approval.state) },
       ...reason === undefined ? {} : { reason: capReason(reason) },
     }
   })
   for (const [nodeId, approval] of latest) {
-    if (detail.nodes.some(node => node.nodeId === nodeId)) continue
+    if (byNode.has(nodeId)) continue
     const state = approvalState(approval.state)
     nodes.push({
       nodeId,

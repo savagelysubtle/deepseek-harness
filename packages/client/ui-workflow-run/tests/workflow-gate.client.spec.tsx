@@ -113,6 +113,21 @@ describe('node-end and gate-report projection', () => {
     expect(data.nodes).toEqual([{ nodeId: 'a', kind: 'bash', status: 'failed', exitCode: 1, startedAt: 50 }])
   })
 
+  it('carries attempts and the supervisor failure from node-end, and omits both for one attempt', () => {
+    const failure = { code: 'NODE_TIMEOUT', message: 'hard limit 600 s', remedy: 'raise timeout_s' }
+    const data = build([
+      ...start(),
+      at(3, 'tool-workflow/node-end', { runId: R, nodeId: 'a', kind: 'prompt', status: 'failed', attempts: 2, failure }),
+      at(4, 'tool-workflow/node-end', { runId: R, nodeId: 'b', kind: 'prompt', status: 'success', attempts: 1 }),
+    ])
+    expect(data.nodes?.[0]).toMatchObject({ attempt: 2, attempts: 2, failure })
+    expect(data.nodes?.[1]?.attempts).toBeUndefined()
+    const { container } = render(<WorkflowRunPanel {...props(data, en)} />)
+    expect(container.querySelector('[data-node-id="a"] [data-node-attempt]')?.textContent).toBe('attempt 2 of 2')
+    expect(container.querySelector('[data-node-id="a"] [data-node-failure-code]')?.textContent).toBe('NODE_TIMEOUT')
+    expect(container.querySelector('[data-node-id="b"] [data-node-attempt]')).toBeNull()
+  })
+
   it('marks a still-running node interrupted once the run has ended', () => {
     const data = build([
       ...start(),

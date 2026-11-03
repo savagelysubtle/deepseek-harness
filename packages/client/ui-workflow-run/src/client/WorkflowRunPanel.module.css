@@ -323,6 +323,12 @@
   color: var(--dsw-alias-state-success-primary);
 }
 
+.earlier {
+  flex-basis: 100%;
+  padding-left: 24px;
+  font-size: 12px;
+}
+
 .nodeReason {
   flex-basis: 100%;
   padding-left: 24px;
