@@ -1,0 +1,72 @@
+# @deepseek-ai/dsh-agent-claude-code-driver
+
+English | [中文](README.zh.md)
+
+The **Claude Code seat driver**: a seat whose registry row says `driver: claude-code` keeps its name, mailbox, row, and dsh log, and only the thinking moves to the unmodified `claude` program, run through the official Agent SDK under the operator's own login. dsh never sends a model request itself and never touches the login token.
+
+The package registers a factory under the `claude-code` key of the keyed agent-factory seam in [`dsh-agent`](../../core/agent/README.md) (`ctx.agents.setFactory(factory, 'claude-code')`). Callers that pass no `driver` still reach the default loop ([`agent-loop`](../../core/agent-loop/README.md)) unchanged. The durable record vocabulary lives in [`agent-claude-code`](../../core/agent-claude-code/README.md); this package reuses its recorder.
+
+## Seat row
+
+```yaml
+seats:
+  mail-triage:
+    driver: claude-code
+    claude_code:
+      model: haiku            # opus | sonnet | haiku or a claude-<family>-<version> id; fable only with fable_ok: true
+      effort: low             # optional: low | medium | high | xhigh | max
+      role: mail-only         # coder | lead | mail-only
+      max_turns: 20           # SDK maxTurns for one query
+      claude_path: /home/me/.local/share/claude/versions/2.1.317/claude   # absolute, required
+      claude_path_sha256: <64 hex>   # optional: re-pin after an intended upgrade
+      max_calls_per_window: 30   # optional; enforced by a later slice
+    fable_ok: false
+```
+
+- `claude_path` must be absolute and is used as given: there is never a PATH lookup (`which claude` may be a wrapper script).
+- The validator folds the model id with Unicode NFKC, drops invisible format characters, and lowercases it, then accepts only an allowlist: `opus`, `sonnet`, `haiku`, or `claude-opus|sonnet|haiku-<digits and dashes>`. A fable id passes only with `fable_ok: true`; anything else (for example a Bedrock or Vertex style id) is refused.
+- `role: coder` rows are refused at plugin start: they need the permission-policy extension of a later slice, and until it exists a coder seat would run with no deny rules.
+- **Binary attestation.** At plugin start `claude_path` must resolve to a regular file owned by the running user that is not group- or world-writable, has no script extension (`.js .mjs .cjs .sh .py`, checked before and after symlink resolution), and sits under no group- or world-writable directory (a sticky directory such as `/tmp` is exempt); every directory above it, both along the resolved file and along every directory prefix of the configured path as written (so a symlinked intermediate directory and the directory that holds the symlink are covered), must be owned by the operator or root. Its SHA-256 is pinned per seat in `<stateDir>/claude-code-binary-pins.json` on first sight. A different hash later refuses the start and names the new hash; set `claude_path_sha256` to that hash on the row to accept the upgrade. The SDK is given the attested real path, never the configured one. Before every turn the configured path is re-resolved and the file's size, mtime, ctime and inode are re-checked, so a swap, or a retargeted symlink (the Claude Code auto-updater retargets `~/.local/bin/claude` this way), refuses the turn until the host is restarted.
+- The plugin `Config` is `{ stateDir, dshHome?, seats, disposeGraceMs?, defaultPauseMs? }`. `stateDir` must live inside the harness home (`dshHome`, else `$DSH_HOME`, else `~/.dsh`): a plain name such as `claude-code` is a subdirectory of it, an absolute path must already be inside it, and the home itself or anything outside is refused. The directory is created with mode `0700` and refused if it is a symlink, owned by someone else, or open to group or others. Until the registry slice lands, the seat for a session is looked up by `meta.agentPreset`, else by the session id.
+
+## Turn model and steering
+
+Every turn is one streaming-input `query()`. Its `prompt` is an open `AsyncIterable<SDKUserMessage>` (`PromptStream`) that stays open while the query runs.
+
+- **First query** passes a fresh UUID as `sessionId`; **later queries** pass `resume` with `persistSession: true`. The driver appends `claude-code/session-bound` to the dsh log and flushes the session store **before the first prompt is sent**, so a crash between bind and prompt keeps the binding. Every seat agent flushes once on its first turn, even when it read the binding back from the log, so a flush that failed under an earlier instance is never skipped; a failed flush refuses the prompt (`CLAUDE_CODE_BINDING`) and is retried on the next turn. A store with no durability listener (no persistence plugin) cannot make anything durable: the plugin logs one warning. A logged session id that is not a UUID is refused as a damaged log. Error text written to the log is redacted and capped. A bound session whose Claude transcript is missing or unreadable after a completed turn is refused: `claude-code/resume-failed` is appended and the turn fails with a "needs a re-seed" remedy. The driver never starts a fresh Claude session silently, and the mail stays queued.
+- **`agent.steer(msg)`** claims the message and pushes it into the open stream. Claude consumes it at its **next model-call boundary**, so the latency is the remaining time of the tool call in flight (the S0 spike measured a push at 8 s landing at 24.5 s during a 20 s `sleep`). `agent.followup(msg)` queues a separate later turn.
+- The stream is closed once every pushed message has been answered by a `result` and the inbox is empty. A result that names none of the pushed message uuids is taken as answering all of them.
+- **Fallback:** `interruptAndResume(msg)` calls `query.interrupt()`, then delivers the message in a resumed query. The result iterator throws after an interrupt, so interrupt and close are wrapped.
+- **Phase machine:** exactly one live query per seat in this process. A second `create`/`resume`, or a second agent's turn, for a seat with a live query is rejected with a coded error (`CLAUDE_CODE_SEAT_BUSY`).
+
+## Tools, options, and cancel
+
+- Every query sets `settingSources: []`, `strictMcpConfig: true`, `permissionMode: 'dontAsk'`, `maxTurns`, `model`, the pinned `pathToClaudeCodeExecutable`, and the scrubbed `env`. `lead` and `mail-only` seats get `tools: []`; `coder` seats get `Read, Grep, Glob, Edit, Write`. Native `Bash` and `AskUserQuestion` are always in `disallowedTools`.
+- `QueryOptionsExtension` is the typed extension point for inline `settings` (hooks and deny rules, a later slice). Its output is allowlisted: only `hooks` and `permissions.deny` / `permissions.ask` string lists survive, everything else (allow rules, directories, a default mode, a settings file path) is dropped with a warning. Hooks are validated strictly: known event names only, and every handler must be `{type: "command", command: <string>}` (with an optional numeric `timeout`). `prompt`, `agent` and `http` handlers make model calls or send tool input off the machine, so any other type or extra key refuses the whole settings object and the query does not start, because a partially applied policy is worse than none. It is applied before the fences, so it cannot loosen them, and a final check re-verifies that the finished options carry no forbidden environment name and an allowed model.
+- **Cancel** aborts the controller, calls `query.close()` (try/catch), then makes the child's process group exit: the subprocess owner's SIGTERM-then-SIGKILL ladder first, a direct group `SIGKILL` if it cannot prove the tree gone. The turn ends `aborted`, and the inbox is cleared unless `keepInbox`.
+- **Process ownership:** the child is spawned through the shared subprocess owner in its own process group. Each seat's children (several per seat are kept) are recorded in `<stateDir>/claude-code-seat-pids.json` with the child's pid and start time, the host's pid and start time, and the kernel boot id. The file is written atomically (exclusive temporary file, mode `0600`) and is refused if it is a symlink, foreign-owned, group- or world-accessible, or corrupt; the error names the path and the remedy. At plugin start `ProcessLedger.reapStale()` kills a recorded child only when the boot id matches, its start time still matches, and its owning host is gone. An entry from an earlier boot is dropped; an entry whose owning host is still alive is left alone and warned about; a dead leader whose group still has members is reported, not killed; one failing kill does not stop the pass. Entries of live owners, failed kills and surviving groups stay in the file so the next start looks at them again.
+
+## Environment
+
+The child environment is the credential-scrubbed parent environment minus `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, and `CLAUDE_CODE_OAUTH_TOKEN`. Names are denied by family, case-insensitively, at start and at every turn: everything starting `ANTHROPIC_`, everything starting `CLAUDE_CODE_USE_` (including `_ANTHROPIC_AWS` and `_ANTHROPIC_GOOGLE_CLOUD`) or `CLAUDE_CODE_SKIP_`, any `CLAUDE_CODE_*` name containing `BASE_URL`, `OAUTH`, `AUTH`, `CERT`, `PROXY` or `EXTRA_BODY`, any `ANTHROPIC*` / `CLAUDE*` name containing `KEY`, `TOKEN`, `PASSWORD` or `SECRET`, plus `CLAUDE_CONFIG_DIR`. Three names that match a family are explicitly allowed because they only switch a local tool or stop local history writes: `CLAUDE_CODE_USE_NATIVE_FILE_SEARCH`, `CLAUDE_CODE_USE_POWERSHELL_TOOL`, `CLAUDE_CODE_SKIP_PROMPT_HISTORY`. A host that was itself started from a Claude Code session carries `CLAUDE_CODE_MESSAGING_TOKEN`, which is refused: start the dsh host from a plain shell. The plugin refuses to start, and every turn refuses to run, when any of those is set in the host environment.
+
+## Subscription pause
+
+The SDK has no dedicated "rate limit" result subtype. The driver treats these as the window being refused: a `rate_limit_event` whose `rate_limit_info.status` is `rejected` (reason `usage-exhausted` for the `overage` type or `credits_required`, else `rate-limit`), an assistant message with `error: 'rate_limit'` or `'billing_error'`, and a result with `api_error_status: 429`. A rejected window is not a pause while the request is being served on overage credit (`isUsingOverage: true`) or while overage is still allowed (`overageStatus` `allowed` / `allowed_warning`) on a non-overage window; a rejected `overage` window is always a pause, whatever `isUsingOverage` says, and so is a rejection with no overage allowance. The seat appends `claude-code/paused {reason, until?}`, stops the query, fails the turn with code `CLAUDE_CODE_PAUSED`, and refuses further turns (mail stays queued) until the reset time, or `defaultPauseMs` (15 minutes) when none was reported. The window is capped at 24 hours, and a pause still in force is restored from the log when the seat is built again after a restart. This is a per-seat signal only; fleet-wide pausing is a later slice.
+
+## Durable records written
+
+`claude-code/session-bound`, `claude-code/resume-failed`, `claude-code/steer`, `claude-code/paused`, and one `claude-code/turn-completed` per turn (mapped from named `result` fields only). The turn index is the dsh turn number, so it keeps increasing across restarts as the record invariant requires.
+
+## Known Limitations and Deferred Work
+
+- **No event mapper yet** — assistant text, tool calls, compaction boundaries, and unmapped messages are not yet written to the dsh log (plan section 9); only the records listed above are.
+- **No lease or inbox integration** — the driver runs on the agent inbox; failing a mailbox lease on pause or resume failure, crash-recovery idempotency keys, and the bridge flip refusal belong to later slices.
+- **Seat lookup is provisional** — seats are found by `meta.agentPreset` or the session id until the registry slice supplies the real resolver.
+- **Rules, git fence, and sandboxed shell are not wired** — only the options extension point exists; coder seats have no shell.
+- **Transcript check uses the SDK** — `getSessionInfo` returning nothing is read as a missing transcript, so a transcript with no extractable summary would also be refused.
+- **Operator-environment pass-throughs** — `HTTPS_PROXY`, `HTTP_PROXY`, `NODE_EXTRA_CA_CERTS`, `NODE_OPTIONS` and `CLAUDE_ENV_FILE` are not scrubbed: they belong to the operator's own environment. A proxy together with a custom CA can read the login traffic, and `NODE_OPTIONS` or `CLAUDE_ENV_FILE` can run code in the child; keep them clean on the host.
+- **Slash-command mail is untested** — a mail body starting with `/` has not been exercised against the SDK yet; it waits for the live drill.
+- **A missing transcript before any completed turn continues under the same id** — by design a session that never completed a turn may start over with its recorded id, because nothing was lost.
+- **The working directory is the caller's** — it must already be its own realpath; sourcing it from the seat row belongs to the registry slice (S3).
+- **Per-seat window cap and fleet limits** — `max_calls_per_window` is validated but not enforced.

@@ -266,6 +266,7 @@
       "@deepseek-ai/dsh-memory/invariant": ["./packages/memory/memory/src/invariant.ts"],
       "@deepseek-ai/dsh-*": [
         "./packages/core/*/src",
+        "./packages/agent/*/src",
         "./packages/prompt/*/src",
         "./packages/llm/*/src",
         "./packages/shell/*/src",

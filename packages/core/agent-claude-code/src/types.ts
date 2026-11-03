@@ -108,6 +108,30 @@ export interface ClaudeCodeFleetRefusedData {
   readonly at: number
 }
 
+/** Why the Claude transcript could not be resumed. */
+export type ClaudeCodeResumeFailedReason = 'transcript-missing' | 'transcript-unreadable'
+
+/** Records a refused resume: the seat needs a deliberate re-seed, never a silent fresh start. */
+export interface ClaudeCodeResumeFailedData {
+  readonly version: ClaudeCodeEventVersion
+  /** The Claude SDK session id that could not be resumed. */
+  readonly sdkSessionId: string
+  readonly reason: ClaudeCodeResumeFailedReason
+  readonly at: number
+}
+
+/** Why a seat stopped taking turns until a later time. */
+export type ClaudeCodePauseReason = 'rate-limit' | 'usage-exhausted'
+
+/** Records that the Claude subscription window refused work: the per-seat pause signal. */
+export interface ClaudeCodePausedData {
+  readonly version: ClaudeCodeEventVersion
+  readonly reason: ClaudeCodePauseReason
+  /** Epoch milliseconds when the window is expected to reopen, when the SDK reported it. */
+  readonly until?: number
+  readonly at: number
+}
+
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     /**
@@ -140,5 +164,15 @@ declare module '@deepseek-ai/dsh-session/types' {
      * @param data - refusal reason, configured limit, observed value, and time.
      */
     'claude-code/fleet-refused': ClaudeCodeFleetRefusedData
+    /**
+     * Records a refused resume (missing or unreadable Claude transcript).
+     * @param data - SDK session id, reason, and time.
+     */
+    'claude-code/resume-failed': ClaudeCodeResumeFailedData
+    /**
+     * Records the per-seat pause after a rate-limit or usage-exhausted signal.
+     * @param data - pause reason, optional reopen time, and time.
+     */
+    'claude-code/paused': ClaudeCodePausedData
   }
 }

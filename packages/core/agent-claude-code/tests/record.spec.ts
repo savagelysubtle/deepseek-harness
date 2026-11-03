@@ -17,10 +17,10 @@ async function newSession(): Promise<Session> {
 const TOKEN = 'sk-ant-oat01-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-abcdef'
 
 describe('claude-code event vocabulary', () => {
-  it('lists all six event types and every one is a known session event type', () => {
+  it('lists all eight event types and every one is a known session event type', () => {
     expect([...CLAUDE_CODE_EVENT_TYPES].sort()).toEqual([
-      'claude-code/compact', 'claude-code/fleet-refused', 'claude-code/rate-limited',
-      'claude-code/session-bound', 'claude-code/steer', 'claude-code/turn-completed',
+      'claude-code/compact', 'claude-code/fleet-refused', 'claude-code/paused', 'claude-code/rate-limited',
+      'claude-code/resume-failed', 'claude-code/session-bound', 'claude-code/steer', 'claude-code/turn-completed',
     ])
     for (const type of CLAUDE_CODE_EVENT_TYPES) expect(KNOWN_SESSION_EVENT_TYPES.has(type)).toBe(true)
   })
@@ -86,6 +86,27 @@ describe('recordClaudeCodeEvent', () => {
     expect(compact).toEqual({ version: 1, preTokens: 150000, trigger: 'auto', at: 3 })
     expect(limited).toEqual({ version: 1, source: 'http', retryAfterMs: 1500, breakerTripped: true, at: 4 })
     expect(refused).toEqual({ version: 1, reason: 'founder-reserve', limit: 0.3, observed: 0.31, at: 5 })
+  })
+
+  it('records resume-failed and paused with allowlisted fields and drops invalid ones', async () => {
+    const session = await newSession()
+    recordClaudeCodeEvent(session, 'claude-code/session-bound', {
+      sessionId: 'dsh-1', sdkSessionId: 'sdk-1', model: 'm', driver: 'claude-code', at: 0,
+    })
+    expect(recordClaudeCodeEvent(session, 'claude-code/resume-failed', {
+      sdkSessionId: 'sdk-1', reason: 'transcript-missing', at: 1, path: '/home/steve/.claude/x',
+    } as never)).toBe(true)
+    expect(recordClaudeCodeEvent(session, 'claude-code/paused', {
+      reason: 'usage-exhausted', until: 1_800_000_000_000.9, at: 2,
+    })).toBe(true)
+    expect(recordClaudeCodeEvent(session, 'claude-code/paused', { reason: 'rate-limit', at: 3 })).toBe(true)
+    expect(recordClaudeCodeEvent(session, 'claude-code/resume-failed', { sdkSessionId: '', reason: 'transcript-missing', at: 1 })).toBe(false)
+    expect(recordClaudeCodeEvent(session, 'claude-code/resume-failed', { sdkSessionId: 'a', reason: 'nope' as never, at: 1 })).toBe(false)
+    expect(recordClaudeCodeEvent(session, 'claude-code/paused', { reason: 'nope' as never, at: 1 })).toBe(false)
+    const [failed, paused, bare] = session.events.slice(-3).map(event => event.data)
+    expect(failed).toEqual({ version: 1, sdkSessionId: 'sdk-1', reason: 'transcript-missing', at: 1 })
+    expect(paused).toEqual({ version: 1, reason: 'usage-exhausted', until: 1_800_000_000_000, at: 2 })
+    expect(bare).toEqual({ version: 1, reason: 'rate-limit', at: 3 })
   })
 
   it('redacts tokens and paths, strips control characters, and caps free text', async () => {

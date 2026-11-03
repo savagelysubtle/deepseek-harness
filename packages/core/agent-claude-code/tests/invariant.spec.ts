@@ -41,6 +41,8 @@ describe('claude-code durable record invariants', () => {
     raw(session, 'claude-code/compact', { version: 1, preTokens: 10, trigger: 'manual', at: 3 })
     raw(session, 'claude-code/rate-limited', { version: 1, source: 'sdk', breakerTripped: false, at: 4 })
     raw(session, 'claude-code/turn-completed', { ...turn(2), stopReason: 'end_turn' })
+    raw(session, 'claude-code/resume-failed', { version: 1, sdkSessionId: 'sdk', reason: 'transcript-missing', at: 5 })
+    raw(session, 'claude-code/paused', { version: 1, reason: 'rate-limit', until: 9, at: 6 })
   })
 
   const cases: readonly [string, string, unknown, RegExp][] = [
@@ -59,6 +61,9 @@ describe('claude-code durable record invariants', () => {
     ['rate-limited bad source', 'claude-code/rate-limited', { version: 1, source: 'ws', breakerTripped: true, at: 1 }, /source ws is invalid/],
     ['rate-limited missing breaker', 'claude-code/rate-limited', { version: 1, source: 'sdk', at: 1 }, /breakerTripped must be a boolean/],
     ['fleet-refused bad reason', 'claude-code/fleet-refused', { version: 1, reason: 'nope', limit: 1, observed: 1, at: 1 }, /reason nope is invalid/],
+    ['resume-failed before binding', 'claude-code/resume-failed', { version: 1, sdkSessionId: 'sdk', reason: 'transcript-missing', at: 1 }, /no earlier claude-code\/session-bound/],
+    ['paused bad reason', 'claude-code/paused', { version: 1, reason: 'nope', at: 1 }, /reason nope is invalid/],
+    ['paused fractional until', 'claude-code/paused', { version: 1, reason: 'rate-limit', until: 1.5, at: 1 }, /until must be a non-negative safe integer/],
     ['fleet-refused missing observed', 'claude-code/fleet-refused', { version: 1, reason: 'breaker', limit: 1, at: 1 }, /observed must be a finite non-negative number/],
   ]
   for (const [label, type, data, message] of cases) {
@@ -73,6 +78,14 @@ describe('claude-code durable record invariants', () => {
       expect(() => { raw(session, 'claude-code/session-bound', bound) }).not.toThrow()
     })
   }
+
+  it('rejects resume-failed with a bad reason once the session is bound', async () => {
+    const ctx = await setup()
+    const session = ctx.sessions.create(SessionId('cc-bad-resume'))
+    raw(session, 'claude-code/session-bound', bound)
+    expect(() => { raw(session, 'claude-code/resume-failed', { version: 1, sdkSessionId: 'sdk', reason: 'nope', at: 1 }) })
+      .toThrow(/reason nope is invalid/)
+  })
 
   const bad: readonly [string, Record<string, unknown>, RegExp][] = [
     ['zero turnIndex', turn(0), /turnIndex must be at least 1/],

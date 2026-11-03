@@ -31,6 +31,7 @@ interface SentenceContract {
  */
 const NO_MODEL_EXPERIENCE_SECTION: Readonly<Record<string, string>> = {
   'packages/core/scope': 'The package is a model-agnostic registration and lifecycle primitive; model-facing consumers own any context selection.',
+  'packages/agent/agent-claude-code-driver': 'The package drives an external Claude Code process whose context and prompts it does not author; model-visible text is whatever the dispatched mail contains.',
   'packages/core/agent-claude-code': 'The package records log-only driver events that never enter a provider request; the Claude Code process it will drive owns its own context.',
   'packages/util/brand': 'The package is a type-only primitive erased at compile time.',
   'packages/util/home-paths': 'The package only resolves harness-owned host paths; model-facing consumers own any rendered use.',

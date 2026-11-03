@@ -5,14 +5,15 @@ import type { Session, SessionEventMap } from '@deepseek-ai/dsh-session'
 import {
   CLAUDE_CODE_COMPACT_TRIGGERS, CLAUDE_CODE_DRIVER_NAME, CLAUDE_CODE_EVENT_VERSION,
   CLAUDE_CODE_FLEET_REFUSAL_REASONS, CLAUDE_CODE_MAX_MODEL_USAGE_ENTRIES,
-  CLAUDE_CODE_MAX_REASON_CHARS, CLAUDE_CODE_RATE_LIMIT_SOURCES, CLAUDE_CODE_STEER_KINDS,
+  CLAUDE_CODE_MAX_REASON_CHARS, CLAUDE_CODE_PAUSE_REASONS, CLAUDE_CODE_RATE_LIMIT_SOURCES,
+  CLAUDE_CODE_RESUME_FAILED_REASONS, CLAUDE_CODE_STEER_KINDS,
 } from './constants.ts'
 import type { ClaudeCodeEventType } from './constants.ts'
 import { sanitizeFreeText, sanitizeLabel } from './sanitize.ts'
 import type {
   ClaudeCodeCompactData, ClaudeCodeFleetRefusedData, ClaudeCodeModelUsage,
-  ClaudeCodeRateLimitedData, ClaudeCodeSessionBoundData, ClaudeCodeSteerData,
-  ClaudeCodeUsage,
+  ClaudeCodePausedData, ClaudeCodeRateLimitedData, ClaudeCodeResumeFailedData,
+  ClaudeCodeSessionBoundData, ClaudeCodeSteerData, ClaudeCodeUsage,
 } from './types.ts'
 
 /** SDK-sourced counter that may be absent; absent or invalid values are recorded as 0. */
@@ -57,6 +58,8 @@ export interface ClaudeCodeEventInputMap {
   'claude-code/compact': WithoutVersion<ClaudeCodeCompactData>
   'claude-code/rate-limited': WithoutVersion<ClaudeCodeRateLimitedData>
   'claude-code/fleet-refused': WithoutVersion<ClaudeCodeFleetRefusedData>
+  'claude-code/resume-failed': WithoutVersion<ClaudeCodeResumeFailedData>
+  'claude-code/paused': WithoutVersion<ClaudeCodePausedData>
 }
 
 /** Optional sink for the one-line reason a record was dropped (the recorder itself has no logger). */
@@ -196,6 +199,22 @@ function normalize(type: ClaudeCodeEventType, data: unknown): Plain | undefined 
         at: timestamp(read(data, 'at')),
       }
     }
+    case 'claude-code/resume-failed': {
+      const sdkSessionId = sanitizeLabel(read(data, 'sdkSessionId'))
+      const reason = oneOf(read(data, 'reason'), CLAUDE_CODE_RESUME_FAILED_REASONS)
+      if (sdkSessionId === '' || reason === undefined) return undefined
+      return { version, sdkSessionId, reason, at: timestamp(read(data, 'at')) }
+    }
+    case 'claude-code/paused': {
+      const reason = oneOf(read(data, 'reason'), CLAUDE_CODE_PAUSE_REASONS)
+      if (reason === undefined) return undefined
+      const until = read(data, 'until')
+      return {
+        version, reason,
+        ...typeof until === 'number' && Number.isFinite(until) && until >= 0 ? { until: Math.trunc(until) } : {},
+        at: timestamp(read(data, 'at')),
+      }
+    }
     default:
       return undefined
   }
@@ -211,7 +230,7 @@ function normalize(type: ClaudeCodeEventType, data: unknown): Plain | undefined 
  * append. Any failure (bad input, invariant rejection, closed session) is
  * contained and reported as `false`; the caller's turn is never affected.
  * @param session - the dsh Session to append to.
- * @param type - one of the six `claude-code/*` event types.
+ * @param type - one of the eight `claude-code/*` event types.
  * @param data - caller input; `version` is stamped here.
  * @param warn - optional sink for the reason a record was dropped.
  * @returns whether the event was appended.
@@ -233,7 +252,7 @@ export function recordClaudeCodeEvent<Type extends ClaudeCodeEventType>(
       warn?.(`${type}: dropped event that is not lossless JSON`)
       return false
     }
-    // All six events are log-only; narrowing the generic append face
+    // All eight events are log-only; narrowing the generic append face
     // discharges Session.append's conditional options tuple.
     const append = session.append.bind(session) as <Event extends ClaudeCodeEventType>(
       event: Event,
