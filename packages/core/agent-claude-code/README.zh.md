@@ -35,7 +35,7 @@
 `recordClaudeCodeEvent(session, type, data, warn?)` 是唯一的写入者。它从不抛出异常,并返回事件是否已追加:
 
 - 载荷由**具名字段重建**(白名单),因此未知字段、提示文本、工具结果正文、响应正文与响应头都无法夹带进去。速率限制响应中只保留 `retryAfterMs`。
-- 自由文本(转向原因、outcome、停止原因)会去除控制字符、**脱敏令牌**(`sk-ant-…`、其他 `sk-…`、GitHub 令牌、Slack `xox*-`、AWS `AKIA…`/`ASIA…`、Stripe `sk_live_…`/`rk_live_…`/`whsec_…`、Twilio `SK…`/`AC…`、Google `AIza…`/`ya29.…`、GitLab `glpat-`、npm `npm_…`、PEM 私钥块、JWT、bearer(均不区分大小写),以及 `token`/`secret`/`password`/`api_key` 赋值(含带引号的 JSON 值),另加任何 40 个以上字符的类令牌串)、**脱敏路径**(以 `/` 或 `~` 开头且至少两段;日期、`a/b/c` 与 URL 尾部保持不变)并截断(500 字符;转向原因 200 字符)。标识符字段(`sessionId`、`sdkSessionId`、`model`)跳过长串与路径规则,因为带 cwd 盐的会话 id 本就可能超过 40 字符。
+- 自由文本(转向原因、outcome、停止原因)会去除控制字符、**脱敏令牌**(`sk-ant-…`、其他 `sk-…`、GitHub 令牌、Slack `xox*-`、AWS `AKIA…`/`ASIA…`、Stripe `sk_live_…`/`rk_live_…`/`whsec_…`、Twilio 大写 `SK…`/`AC…`(小写的 34 位十六进制词是普通标识符,保持不变)、Google `AIza…`/`ya29.…`、GitLab `glpat-`、npm `npm_…`、PEM 私钥块、JWT、bearer(均不区分大小写),以及 `token`/`secret`/`password`/`api_key` 赋值(含带引号的 JSON 值),另加任何 40 个以上字符的类令牌串)、**脱敏路径**(以 `/` 或 `~` 开头且至少两段;日期、`a/b/c` 与 URL 尾部保持不变)并截断(500 字符;转向原因 200 字符)。标识符字段(`sessionId`、`sdkSessionId`、`model`)跳过长串与路径规则,因为带 cwd 盐的会话 id 本就可能超过 40 字符。
 - 缺失、为负或非有限的 SDK 数值记录为 `0`。
 - 追加前先把结果快照为无损 JSON;循环引用、恶意或无法记录的输入会丢弃该事件而不是让该轮失败。可选的 `warn` 接收一行丢弃原因(记录器自身没有日志器)。
 

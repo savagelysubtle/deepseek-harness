@@ -9,30 +9,50 @@ vi.mock('../src/options.ts', () => ({
   buildQueryOptions: (): Options => built.options,
 }))
 
-const SAFE = { tools: [], persistSession: false }
+const SAFE = { tools: [], persistSession: false, settingSources: [], strictMcpConfig: true, permissionMode: 'dontAsk', model: 'sonnet' }
+
+/** SDK 0.3.263 options a throwaway query must never carry, each of which the allowlist refuses by name. */
+const FORBIDDEN_KEYS = [
+  'hooks', 'canUseTool', 'allowDangerouslySkipPermissions', 'permissionPromptToolName', 'toolConfig', 'toolAliases', 'skills', 'agent',
+  'sandbox', 'extraArgs', 'executableArgs', 'managedSettings', 'additionalDirectories', 'sessionStore', 'continue', 'resumeSessionAt',
+  'forkSession', 'fallbackModel', 'debug', 'debugFile', 'mcpServers', 'allowedTools', 'agents', 'plugins', 'settings', 'resume',
+]
+
+async function refuse(options: Record<string, unknown>): Promise<{ code: string; message: string; leases: string[]; queries: number }> {
+  built.options = options
+  const h = await harness()
+  const agent = h.agent()
+  agent.followup(mailMessage('portal', 'm-t', { tainted: true }))
+  await agent.whenIdle()
+  const end = agent.session.events.findLast(event => event.type === 'turn/end')?.data as { reason: { error: { code: string; message: string } } }
+  return { code: end.reason.error.code, message: end.reason.error.message, leases: h.state.leases, queries: h.queries.length }
+}
 
 describe('the throwaway guarantee on a tainted turn', () => {
   it.each<[string, Record<string, unknown>, RegExp]>([
-    ['a tool in the list', { tools: ['Read'], persistSession: false }, /empty tool list/],
-    ['no tool list at all', { persistSession: false }, /empty tool list/],
-    ['persistence left on', { tools: [] }, /persistSession off/],
-    ['an MCP server', { ...SAFE, mcpServers: {} }, /none of mcpServers/],
-    ['an allowed-tools list', { ...SAFE, allowedTools: [] }, /none of allowedTools/],
-    ['an agents map', { ...SAFE, agents: {} }, /none of agents/],
-    ['a plugin', { ...SAFE, plugins: [] }, /none of plugins/],
-    ['inline settings', { ...SAFE, settings: {} }, /none of settings/],
-    ['a resumed session', { ...SAFE, resume: '12345678-1234-4234-8234-123456789012' }, /none of resume/],
-    ['several at once', { ...SAFE, mcpServers: {}, plugins: [] }, /none of mcpServers, plugins/],
+    ['a tool in the list', { ...SAFE, tools: ['Read'] }, /empty tool list/],
+    ['no tool list at all', { ...SAFE, tools: undefined }, /empty tool list/],
+    ['persistence left on', { ...SAFE, persistSession: true }, /persistSession off/],
+    ['a settings source', { ...SAFE, settingSources: ['user'] }, /settingSources: \[\]/],
+    ['no settings sources list', { ...SAFE, settingSources: undefined }, /settingSources: \[\]/],
+    ['MCP not strict', { ...SAFE, strictMcpConfig: false }, /strictMcpConfig: true/],
+    ['a permission mode other than dontAsk', { ...SAFE, permissionMode: 'default' }, /permissionMode: 'dontAsk'/],
+    ['a model off the allowlist', { ...SAFE, model: 'not-a-model' }, /an allowed model/],
+    ['a fable model on a seat without fable_ok', { ...SAFE, model: 'fable' }, /an allowed model/],
+    ['no model', { ...SAFE, model: undefined }, /an allowed model/],
   ])('refuses to start a tainted query with %s, and fails the mail', async (_label, options, message) => {
-    built.options = options
-    const h = await harness()
-    const agent = h.agent()
-    agent.followup(mailMessage('portal', 'm-t', { tainted: true }))
-    await agent.whenIdle()
-    expect(h.queries).toHaveLength(0)
-    const end = agent.session.events.findLast(event => event.type === 'turn/end')?.data as { reason: { error: { code: string; message: string } } }
-    expect(end.reason.error.code).toBe(CLAUDE_CODE_TURN_ERROR_CODES.tainted)
-    expect(end.reason.error.message).toMatch(message)
-    expect(h.state.leases).toEqual([expect.stringMatching(/^fail:m-t:.*tainted mail must run with/)])
+    const result = await refuse(options)
+    expect(result.queries).toBe(0)
+    expect(result.code).toBe(CLAUDE_CODE_TURN_ERROR_CODES.tainted)
+    expect(result.message).toMatch(message)
+    expect(result.leases).toEqual([expect.stringMatching(/^fail:m-t:.*tainted mail must run with/)])
+  })
+
+  it.each(FORBIDDEN_KEYS)('refuses a tainted query that carries the %s option, even when it is empty', async (key) => {
+    const result = await refuse({ ...SAFE, [key]: key === 'debug' ? false : undefined })
+    expect(result.queries).toBe(0)
+    expect(result.code).toBe(CLAUDE_CODE_TURN_ERROR_CODES.tainted)
+    expect(result.message).toContain(`no "${key}" option`)
+    expect(result.leases).toEqual([expect.stringMatching(/^fail:m-t:.*tainted mail must run with/)])
   })
 })

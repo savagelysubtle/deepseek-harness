@@ -266,14 +266,42 @@ describe('the kill switch', () => {
     expect(turnEnd(agent.session).reason.error?.code).toBe(CLAUDE_CODE_TURN_ERROR_CODES.killSwitch)
   })
 
-  it('uses a 500 ms poll when no interval is configured, and stops polling when the turn ends', async () => {
+  it('uses a 500 ms poll when no interval is configured, and clears the timer when the turn ends', async () => {
     const h = await harness()
     ;(h.deps as { killSwitchPollMs?: number | undefined }).killSwitchPollMs = undefined
+    const started = vi.spyOn(globalThis, 'setInterval')
+    const cleared = vi.spyOn(globalThis, 'clearInterval')
+    try {
+      const agent = h.agent()
+      agent.followup(userMessage('quick'))
+      answer(await h.query(0))
+      await agent.whenIdle()
+      expect(turnEnd(agent.session).reason.kind).toBe('completed')
+      const index = started.mock.calls.findIndex(call => call[1] === 500)
+      expect(index).toBeGreaterThanOrEqual(0)
+      expect(cleared).toHaveBeenCalledWith(started.mock.results[index]?.value)
+    } finally {
+      started.mockRestore()
+      cleared.mockRestore()
+    }
+  })
+
+  it('treats an injected kill-switch check that throws as the switch being up', async () => {
+    const h = await harness()
+    let broken = false
+    ;(h.deps as { killSwitchActive: SeatAgentDeps['killSwitchActive'] }).killSwitchActive = () => {
+      if (broken) throw new Error('flag directory unreadable')
+      return false
+    }
     const agent = h.agent()
-    agent.followup(userMessage('quick'))
-    answer(await h.query(0))
+    agent.followup(userMessage('long tool'))
+    const query = await h.query(0)
+    await tick(15)
+    expect(query.closed).toBe(false)
+    broken = true
     await agent.whenIdle()
-    expect(turnEnd(agent.session).reason.kind).toBe('completed')
+    expect(query.closed).toBe(true)
+    expect(dataOf(agent.session, 'claude-code/refused')).toEqual([expect.objectContaining({ reason: 'kill-switch', detail: expect.stringContaining('aborted') as string })])
   })
 
   it('aborts the running query when the flag appears mid-turn, once, and fails its mail', async () => {

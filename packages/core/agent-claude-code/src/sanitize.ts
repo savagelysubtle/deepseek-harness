@@ -21,8 +21,6 @@ const TOKEN_PATTERNS: readonly RegExp[] = [
   // Stripe secret, restricted and publishable keys, and webhook signing secrets (underscore variants).
   /\b(?:sk|rk|pk)_(?:live|test)_[a-z0-9]{8,}/gi,
   /\bwhsec_[a-z0-9]{8,}/gi,
-  // Twilio API key and account SIDs: SK or AC followed by 32 hex characters.
-  /\b(?:SK|AC)[0-9a-f]{32}\b/gi,
   /\b(?:ghp|gho|ghu|ghs|ghr)_[a-z0-9]{16,}/gi,
   /\bgithub_pat_\w{16,}/gi,
   /\bglpat-[\w-]{16,}/gi,
@@ -35,9 +33,33 @@ const TOKEN_PATTERNS: readonly RegExp[] = [
   /\bya29\.[\w.-]{20,}/gi,
   /\beyJ[\w-]{8,}\.[\w-]{8,}(?:\.[\w-]*)?/gi,
   /\b(?:Bearer|Basic)\s+[\w.~+/=-]{8,}/gi,
-  // key=value / key: value / quoted JSON "key":"value" for credential-named keys.
-  /["']?\b[\w-]*(?:token|secret|passw(?:or)?d|api[_-]?key|apikey|auth)["']?\s*[:=]\s*["']?[^\s"',;]{4,}["']?/gi,
 ]
+
+// Twilio API key and account SIDs: upper-case SK or AC followed by 32 hex characters. Case-SENSITIVE on purpose: a
+// lower-case 34-character hex word is an ordinary identifier, and redacting it would break ids that must stay intact.
+const TWILIO_SID = /\b(?:SK|AC)[0-9a-f]{32}\b/g
+
+// key=value / key: value / quoted JSON "key":"value" for credential-named keys. The pattern starts at the keyword (so
+// a long run of word characters is not rescanned from every position); the redaction then reaches left over the rest
+// of the key name and an opening quote.
+const KEY_VALUE_PATTERN = /(?:token|secret|passw(?:or)?d|api[_-]?key|apikey|auth)["']?\s*[:=]\s*["']?[^\s"',;]{4,}["']?/gi
+
+const KEY_NAME_CHAR = /[\w-]/
+
+/** Replace every credential-named key=value, including the whole key name and its opening quote. */
+function redactKeyValues(text: string): string {
+  let out = ''
+  let kept = 0
+  for (const match of text.matchAll(KEY_VALUE_PATTERN)) {
+    let start = match.index
+    while (start > kept && KEY_NAME_CHAR.test(text.charAt(start - 1))) start -= 1
+    const quote = text.charAt(start - 1)
+    if (start > kept && (quote === '"' || quote === "'")) start -= 1
+    out += text.slice(kept, start) + REDACTED_TOKEN
+    kept = match.index + match[0].length
+  }
+  return out + text.slice(kept)
+}
 
 /** A long token-like run; applied to free text only, never to identifiers. */
 const LONG_RUN_PATTERN = /\b[\w-]{40,}\b/g
@@ -60,7 +82,7 @@ const CONTROL_PATTERN = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g
 export function redactTokens(text: string): string {
   let out = text
   for (const pattern of TOKEN_PATTERNS) out = out.replace(pattern, REDACTED_TOKEN)
-  return out
+  return redactKeyValues(out.replace(TWILIO_SID, REDACTED_TOKEN))
 }
 
 /**

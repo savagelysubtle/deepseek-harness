@@ -220,6 +220,24 @@ describe('recordClaudeCodeEvent', () => {
     expect(redactTokens('ordinary words, a-b-c, and sk and ac and ya29 stay')).toBe('ordinary words, a-b-c, and sk and ac and ya29 stay')
   })
 
+  it('leaves an ordinary lower-case 34-character hex word alone: only upper-case SK and AC SIDs are Twilio', () => {
+    const hex32 = '0123456789abcdef0123456789abcdef'
+    for (const word of [`ac${hex32}`, `sk${hex32}`, `Ac${hex32}`]) expect(redactTokens(`id ${word} end`)).toBe(`id ${word} end`)
+    expect(sanitizeLabel(`ac${hex32}`)).toBe(`ac${hex32}`)
+    expect(redactTokens(`id AC${hex32} end`)).toBe('id [redacted] end')
+  })
+
+  it('redacts key=value pairs including the whole key name and quote, in linear time on a long word run', () => {
+    expect(redactTokens('x my-api_key: "abcd1234" y')).toBe('x [redacted] y')
+    expect(redactTokens("see 'secret'='hunter2hunter2' then token=abcdefgh and auth: wxyz1234")).toBe('see [redacted] then [redacted] and [redacted]')
+    expect(redactTokens('before"token":"abc123def456"')).toBe('before[redacted]')
+    const started = performance.now()
+    const run = 'a-'.repeat(8000)
+    expect(redactTokens(run)).toBe(run)
+    expect(redactTokens(`${run}token=abcdefgh`)).toBe('[redacted]')
+    expect(performance.now() - started).toBeLessThan(100)
+  })
+
   it('redacts credential-shaped strings of several vendors', () => {
     for (const secret of [
       TOKEN, 'ghp_abcdefghijklmnopqrstuvwxyz0123456789', 'Bearer abcdefghijklmnop1234',

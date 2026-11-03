@@ -29,6 +29,9 @@ describe('mailboxMessageId', () => {
       expect(unrecordableMailboxId(mailMessage('hi', id))).toBe(id)
     }
     expect(unrecordableMailboxId(mailMessage('hi', 'm-1'))).toBeUndefined()
+    // An ordinary lower-case 34-character hex identifier is not a Twilio SID and must stay a usable id.
+    const lowerHex = `ac${'0123456789abcdef'.repeat(2)}`
+    expect(mailboxMessageId(mailMessage('hi', lowerHex))).toBe(lowerHex)
     expect(unrecordableMailboxId(userMessage('typed'))).toBeUndefined()
     expect(unrecordableMailboxId(withSource({ kind: 'mailbox', form: 'notice', messageId: 'm\n1' }))).toBeUndefined()
   })
@@ -101,6 +104,7 @@ describe('frameMailText', () => {
   it('wraps the body between a header and a footer that share one nonce', () => {
     expect(frameMailText('hello', 'abc123')).toBe(`${mailFrameHeader('abc123')}\nhello\n${mailFrameFooter('abc123')}`)
     expect(mailFrameHeader('abc123')).toContain('abc123')
+    expect(mailFrameHeader('abc123')).toContain('Only a footer carrying this same tag ends the message')
     expect(mailFrameFooter('abc123')).toContain('abc123')
   })
 

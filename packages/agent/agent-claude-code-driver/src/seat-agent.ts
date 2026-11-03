@@ -41,6 +41,7 @@ import { StreamMapper } from './mapper.ts'
 import { buildQueryOptions } from './options.ts'
 import type { QueryBinding, QueryOptionsExtension } from './options.ts'
 import { PromptStream } from './prompt-stream.ts'
+import { isAllowedModel } from './seat-config.ts'
 import type { ClaudeCodeSeatConfig } from './seat-config.ts'
 import type { ProcessLedger } from './ledger.ts'
 
@@ -327,18 +328,30 @@ function messageText(message: UserMessage): string {
   return frameMailText(parts.join('\n'))
 }
 
-/** Query options a throwaway (tainted-mail) query must not carry: anything that adds tools, agents, plugins or settings. */
-const THROWAWAY_ABSENT_OPTIONS = ['mcpServers', 'allowedTools', 'agents', 'plugins', 'settings', 'resume'] as const
+/**
+ * The only query options a throwaway (tainted-mail) query may carry: the fixed fences, the cap and model settings,
+ * the binding, and the plumbing every query gets. Anything else (an MCP server, hooks, a permission callback,
+ * extra arguments, a resumed session, any option a later SDK adds) refuses the turn.
+ */
+const THROWAWAY_ALLOWED_OPTIONS: ReadonlySet<string> = new Set([
+  'settingSources', 'strictMcpConfig', 'permissionMode', 'tools', 'disallowedTools', 'maxTurns', 'maxBudgetUsd', 'model', 'effort',
+  'cwd', 'pathToClaudeCodeExecutable', 'env', 'abortController', 'persistSession', 'sessionId', 'spawnClaudeCodeProcess',
+])
 
 /**
  * What is wrong with the options of a throwaway query, or `undefined` when they hold the guarantee: an empty
- * tool list, nothing persisted, and none of the options that could add capability.
+ * tool list, nothing persisted, only allowlisted keys, and the fixed fences at their fixed values.
  */
-function throwawayViolation(options: Options): string | undefined {
+function throwawayViolation(options: Options, fableOk: boolean): string | undefined {
   if (!Array.isArray(options.tools) || options.tools.length !== 0) return 'an empty tool list'
-  if (options.persistSession !== false) return 'persistSession off (and an empty tool list)'
-  const present = THROWAWAY_ABSENT_OPTIONS.filter(key => options[key] !== undefined)
-  return present.length === 0 ? undefined : `an empty tool list and none of ${present.join(', ')}`
+  if (options.persistSession !== false) return 'persistSession off'
+  const unexpected = Object.keys(options).find(key => !THROWAWAY_ALLOWED_OPTIONS.has(key))
+  if (unexpected !== undefined) return `no "${unexpected}" option`
+  if (!Array.isArray(options.settingSources) || options.settingSources.length !== 0) return 'settingSources: []'
+  if (options.strictMcpConfig !== true) return 'strictMcpConfig: true'
+  if (options.permissionMode !== 'dontAsk') return "permissionMode: 'dontAsk'"
+  if (typeof options.model !== 'string' || !isAllowedModel(options.model, fableOk)) return 'an allowed model'
+  return undefined
 }
 
 /** Tools whose use means untrusted content (files, fetched pages) entered the context. */
@@ -488,10 +501,7 @@ export class ClaudeCodeSeatAgent implements Agent {
   private admitMail(message: UserMessage, path: MailAdmissionPath): { tainted: boolean } | undefined {
     const unrecordable = unrecordableMailboxId(message)
     if (unrecordable !== undefined) {
-      const detail = 'the mailbox message id changes when recorded (control characters, a credential shape, or too long), so the idempotency record could not match a redelivery'
-      this.rec('claude-code/refused', { reason: 'admission', detail, at: this.deps.now() })
-      this.deps.warn(`agent-claude-code-driver: seat "${this.seat}" refused ${path} mail with an unrecordable mailbox id: ${detail}`)
-      void this.leaseCall(() => this.deps.lease?.fail(unrecordable, `refused: ${detail}`))
+      this.refuseUnrecordable(path, unrecordable)
       return undefined
     }
     const messageId = mailboxMessageId(message)
@@ -515,6 +525,14 @@ export class ClaudeCodeSeatAgent implements Agent {
     this.deps.warn(`agent-claude-code-driver: seat "${this.seat}" refused ${path} mail${messageId === undefined ? '' : ` ${messageId}`}: ${reason}`)
     if (messageId !== undefined) void this.leaseCall(() => this.deps.lease?.fail(messageId, `refused: ${reason}`))
     return undefined
+  }
+
+  /** Refuse mailbox mail whose id changes when recorded: a record, a warning, and a failed lease under the raw id. */
+  private refuseUnrecordable(path: MailAdmissionPath, rawId: string): void {
+    const detail = 'the mailbox message id changes when recorded (control characters, a credential shape, or too long), so the idempotency record could not match a redelivery'
+    this.rec('claude-code/refused', { reason: 'admission', detail, at: this.deps.now() })
+    this.deps.warn(`agent-claude-code-driver: seat "${this.seat}" refused ${path} mail with an unrecordable mailbox id: ${detail}`)
+    void this.leaseCall(() => this.deps.lease?.fail(rawId, `refused: ${detail}`))
   }
 
   /** Run one lease call to completion in the background; a failure is a warning, never an exception. */
@@ -826,7 +844,7 @@ export class ClaudeCodeSeatAgent implements Agent {
 
   /** Inspect one SDK message for turn-level facts. */
   private observe(phase: RunningPhase, live: LiveTurn, message: SDKMessage): void {
-    if (this.deps.killSwitchActive?.() === true) this.tripKillSwitch(live)
+    if (this.killSwitchUp()) this.tripKillSwitch(live)
     live.mapper?.map(message)
     if (message.type === 'rate_limit_event') {
       const info = message.rate_limit_info
@@ -868,6 +886,15 @@ export class ClaudeCodeSeatAgent implements Agent {
     else this.pumpSteer(phase)
   }
 
+  /** Whether the kill-switch flag is up; an injected check that throws counts as up (fail closed). */
+  private killSwitchUp(): boolean {
+    try {
+      return this.deps.killSwitchActive?.() === true
+    } catch {
+      return true
+    }
+  }
+
   /** The kill-switch file appeared mid-turn: record it, abort the running query. */
   private tripKillSwitch(live: LiveTurn): void {
     if (live.killed) return
@@ -879,7 +906,7 @@ export class ClaudeCodeSeatAgent implements Agent {
 
   /** Refuse a turn while the kill-switch file is present. */
   private assertKillSwitchOff(): void {
-    if (this.deps.killSwitchActive?.() !== true) return
+    if (!this.killSwitchUp()) return
     this.rec('claude-code/refused', { reason: 'kill-switch', detail: 'kill-switch flag file present; turn refused', at: this.deps.now() })
     throw new ClaudeCodeDriverError(
       CLAUDE_CODE_TURN_ERROR_CODES.killSwitch,
@@ -941,6 +968,12 @@ export class ClaudeCodeSeatAgent implements Agent {
   private screenClaimed(claimed: readonly UserMessage[], mailIds: string[]): UserMessage[] {
     const run: UserMessage[] = []
     for (const message of claimed) {
+      // A message queued before the admission rule existed can come back from the log: it must not run unrecorded.
+      const unrecordable = unrecordableMailboxId(message)
+      if (unrecordable !== undefined) {
+        this.refuseUnrecordable('send', unrecordable)
+        continue
+      }
       const id = mailboxMessageId(message)
       if (id === undefined) {
         run.push(message)
@@ -1001,11 +1034,11 @@ export class ClaudeCodeSeatAgent implements Agent {
    * for a reason that outlives this session (it needs a re-seed), or the agent was cancelled. Typed
    * input is left alone.
    */
-  private async failQueuedMail(why: string, remove = false): Promise<void> {
+  private async failQueuedMail(why: string, remove = false, only?: (message: UserMessage) => boolean): Promise<void> {
     const work: Promise<void>[] = []
     for (const message of [...this.inbox.nextStep, ...this.inbox.nextTurn]) {
       const id = mailboxMessageId(message)
-      if (id === undefined) continue
+      if (id === undefined || (only !== undefined && !only(message))) continue
       if (remove) this.inbox.remove(message.id)
       work.push(this.finishMail(id, 'failed', why))
     }
@@ -1131,6 +1164,7 @@ export class ClaudeCodeSeatAgent implements Agent {
     let binding: QueryBinding | undefined
     let executable: string | undefined
     let reason: TurnEndReason | undefined
+    let unmarkedTainted = false
     const mailIds: string[] = []
     try {
       // Preflight before anything is claimed, so a refusal leaves the mail queued.
@@ -1145,7 +1179,13 @@ export class ClaudeCodeSeatAgent implements Agent {
       holdsGate = true
       const plan = this.planClaim()
       // Mark the turn before any of its messages are logged, so no re-seed digest can carry its untrusted text.
-      if (plan.tainted) this.rec('claude-code/throwaway-turn', { turnIndex: turn, at: this.deps.now() })
+      if (plan.tainted && !this.rec('claude-code/throwaway-turn', { turnIndex: turn, at: this.deps.now() })) {
+        unmarkedTainted = true
+        throw new ClaudeCodeDriverError(
+          CLAUDE_CODE_TURN_ERROR_CODES.tainted,
+          `agent-claude-code-driver: seat "${this.seat}": could not record claude-code/throwaway-turn; refusing to run tainted mail unmarked`,
+        )
+      }
       // Tainted mail never touches the seat's Claude session: a fresh id, nothing bound, nothing resumed.
       binding = plan.tainted ? { kind: 'first', sdkSessionId: randomUUID() } : await this.resolveBinding()
       signal.throwIfAborted()
@@ -1183,7 +1223,7 @@ export class ClaudeCodeSeatAgent implements Agent {
           throwaway: plan.tainted,
           warn: this.deps.warn,
         })
-        const violation = plan.tainted ? throwawayViolation(options) : undefined
+        const violation = plan.tainted ? throwawayViolation(options, this.config.fableOk) : undefined
         if (violation !== undefined) {
           throw new ClaudeCodeDriverError(
             CLAUDE_CODE_TURN_ERROR_CODES.tainted,
@@ -1198,7 +1238,7 @@ export class ClaudeCodeSeatAgent implements Agent {
         this.pumpSteer(phase)
         // A flag file set while the query is busy inside one long tool call produces no stream message to notice it on.
         const poll = setInterval(() => {
-          if (this.deps.killSwitchActive?.() === true) this.tripKillSwitch(active)
+          if (this.killSwitchUp()) this.tripKillSwitch(active)
         }, this.deps.killSwitchPollMs ?? KILL_SWITCH_POLL_MS)
         poll.unref()
         try {
@@ -1224,6 +1264,9 @@ export class ClaudeCodeSeatAgent implements Agent {
       await this.finishTurnMail(mailIds, live, reason)
       if (failure instanceof ClaudeCodeDriverError && failure.code === CLAUDE_CODE_TURN_ERROR_CODES.resumeFailed) {
         await this.failQueuedMail(`${failure.message} The queued mail was not delivered.`, true)
+      } else if (unmarkedTainted) {
+        // Nothing was claimed; the tainted mail cannot run without its marker, so its lease fails now.
+        await this.failQueuedMail(`${errText(failure)} The tainted mail was not delivered.`, true, isTaintedMail)
       }
     }
     if (failure !== undefined && !signal.aborted) {

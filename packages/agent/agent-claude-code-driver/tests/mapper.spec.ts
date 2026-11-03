@@ -96,10 +96,33 @@ describe('assistant and user messages', () => {
     const hostile = 'a-'.repeat(500_000)
     const started = performance.now()
     mapper.map(assistant({ type: 'text', text: hostile }))
-    expect(performance.now() - started).toBeLessThan(500)
+    expect(performance.now() - started).toBeLessThan(100)
     const text = seen.texts[0] as string
-    expect(text.endsWith(`\n[truncated ${hostile.length - MAX_ASSISTANT_TEXT_CHARS} characters]`)).toBe(true)
+    // The whole run is token-like, so the cut drops all of it rather than leave a prefix.
+    expect(text).toBe(`\n[truncated ${hostile.length} characters]`)
     expect(text.length).toBeLessThan(MAX_ASSISTANT_TEXT_CHARS + 60)
+  })
+
+  it('drops the credential-like run the cut lands in, so no secret prefix survives', () => {
+    const hex32 = '0123456789abcdef0123456789abcdef'
+    for (const secret of [`AC${hex32}`, 'AKIAIOSFODNN7EXAMPLE', `ASIA${'A1B2C3D4E5'.repeat(2)}`, `ghp_${'a1B2c3D4e5'.repeat(3)}`, 'npm_aB3dE6gH9jK2mN5pQ8sT']) {
+      const { mapper, seen } = rig()
+      // The cut lands three characters before the end of the secret.
+      const text = `${' '.repeat(MAX_ASSISTANT_TEXT_CHARS - (secret.length - 3))}${secret} tail words`
+      mapper.map(assistant({ type: 'text', text }))
+      const out = seen.texts[0] as string
+      expect(out).not.toContain(secret.slice(0, 6))
+      expect(out).toMatch(/\[truncated \d+ characters\]$/)
+    }
+  })
+
+  it('keeps everything up to a cut that lands on whitespace, and counts only what was dropped', () => {
+    const { mapper, seen } = rig()
+    const text = 'word '.repeat(4000)
+    mapper.map(assistant({ type: 'text', text }))
+    const out = seen.texts[0] as string
+    expect(out.startsWith('word '.repeat(3200))).toBe(true)
+    expect(out.endsWith('\n[truncated 4000 characters]')).toBe(true)
   })
 
   it('keeps a text of exactly the cap whole, with no marker', () => {

@@ -54,10 +54,19 @@ const MAX_DIGEST_INPUT_CHARS = 1_000_000
  */
 export const MAX_ASSISTANT_TEXT_CHARS = 16_000
 
-/** Cut a text to {@link MAX_ASSISTANT_TEXT_CHARS} before any pattern touches it, noting how much was dropped. */
+/** Characters a credential can be made of; a cut that lands inside such a run could leave a recognisable prefix. */
+const TOKEN_CHAR = /[\w.-]/
+
+/**
+ * Cut a text to {@link MAX_ASSISTANT_TEXT_CHARS} before any pattern touches it, drop the trailing token-like run
+ * the cut landed in (a half-cut credential keeps a prefix no pattern would still recognise), and note how much
+ * was dropped.
+ */
 function boundedAssistantText(text: string): string {
   if (text.length <= MAX_ASSISTANT_TEXT_CHARS) return redactTokens(text)
-  return `${redactTokens(text.slice(0, MAX_ASSISTANT_TEXT_CHARS))}\n[truncated ${text.length - MAX_ASSISTANT_TEXT_CHARS} characters]`
+  let end = MAX_ASSISTANT_TEXT_CHARS
+  while (end > 0 && TOKEN_CHAR.test(text.charAt(end - 1))) end -= 1
+  return `${redactTokens(text.slice(0, end))}\n[truncated ${text.length - end} characters]`
 }
 
 /** Plain object read that survives getters that throw. */

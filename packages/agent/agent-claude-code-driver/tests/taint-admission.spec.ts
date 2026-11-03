@@ -1,8 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { recordClaudeCodeEvent } from '@deepseek-ai/dsh-agent-claude-code'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session } from '@deepseek-ai/dsh-session'
+import { mailboxMessageId } from '../src/admission.ts'
 import type { MailAdmissionRequest } from '../src/admission.ts'
+import { CLAUDE_CODE_TURN_ERROR_CODES } from '../src/seat-agent.ts'
 import { framed, harness, mailMessage, resultMessage, seatConfig, tick, userMessage } from './fakes.ts'
 import type { FakeQuery } from './fakes.ts'
 
@@ -90,6 +92,21 @@ describe('an injected admission check', () => {
     expect(agent.turnTainted).toBe(false)
   })
 
+  it('does not run a queued mailbox message whose id cannot be recorded, even when it comes back from the log unchecked', async () => {
+    const h = await harness()
+    const agent = h.agent()
+    agent.inbox.splice('next-turn', Infinity, 0, [mailMessage('queued before the rule existed', 'm\nold')])
+    agent.followup(userMessage('typed'))
+    answer(await h.query(0))
+    await agent.whenIdle()
+    expect(h.queries).toHaveLength(1)
+    const refused = dataOf(agent.session, 'claude-code/refused')
+    expect(refused).toEqual([expect.objectContaining({ reason: 'admission', detail: expect.stringContaining('changes when recorded') as string })])
+    expect(refused[0]).not.toHaveProperty('messageId')
+    expect(dataOf(agent.session, 'claude-code/mail-claimed')).toEqual([])
+    expect(h.state.leases).toEqual([expect.stringMatching(/^fail:m\nold:refused:/)])
+  })
+
   it('does not claim or settle a refusal notice, and refuses mailbox mail that carries no seat sender class', async () => {
     const h = await harness()
     const agent = h.agent()
@@ -146,6 +163,25 @@ describe('an injected admission check', () => {
 })
 
 describe('tainted mail runs in a throwaway session with no tools', () => {
+  it('refuses tainted mail whose throwaway-turn marker cannot be recorded: nothing claimed, its lease failed, clean mail kept', async () => {
+    const h = await harness()
+    const agent = h.agent()
+    const original = agent.session.append.bind(agent.session) as (type: string, data: unknown, options?: unknown) => unknown
+    vi.spyOn(agent.session, 'append').mockImplementation(((type: string, data: unknown, options?: unknown) => {
+      if (type === 'claude-code/throwaway-turn') throw new Error('log closed')
+      return original(type, data, options)
+    }) as never)
+    agent.followup(mailMessage('portal text', 'm-nomark', { tainted: true }))
+    agent.followup(mailMessage('clean mail', 'm-clean'))
+    await agent.whenIdle()
+    expect(h.queries).toHaveLength(0)
+    expect(dataOf(agent.session, 'claude-code/mail-claimed')).toEqual([])
+    const end = agent.session.events.findLast(event => event.type === 'turn/end')?.data as { reason: { error: { code: string } } }
+    expect(end.reason.error.code).toBe(CLAUDE_CODE_TURN_ERROR_CODES.tainted)
+    expect(h.state.leases).toEqual([expect.stringMatching(/^fail:m-nomark:.*could not record claude-code\/throwaway-turn.*not delivered/)])
+    expect(agent.inbox.nextTurn.map(message => mailboxMessageId(message))).toEqual(['m-clean'])
+  })
+
   it('uses a fresh session id, persists nothing, binds nothing, and never touches the seat session', async () => {
     const h = await harness()
     h.state.admit = () => ({ allow: true })
