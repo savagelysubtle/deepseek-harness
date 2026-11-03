@@ -144,6 +144,28 @@ describe('session-query semantic extraction', () => {
     } as never)).toBe('completed\nparent-session')
   })
 
+  it('extracts claude-code driver events', () => {
+    const at = (type: string, data: unknown): string => extractSessionEventText({ type, seq: 0, time: 1, data } as never)
+    expect(at('claude-code/session-bound', {
+      version: 1, sessionId: 's', sdkSessionId: 'sdk-1', model: 'haiku', driver: 'claude-code', at: 1,
+    })).toBe('claude-code session-bound\nmodel=haiku\nsdkSessionId=sdk-1')
+    expect(at('claude-code/turn-completed', {
+      version: 1, turnIndex: 1, outcome: 'success', model: 'haiku', estimatedCostUsd: 0.0123, numTurns: 1,
+    })).toBe('claude-code turn-completed\nsuccess\nmodel=haiku\nestimatedCostUsd=0.0123')
+    expect(at('claude-code/rate-limited', {
+      version: 1, source: 'sdk', retryAfterMs: 1500, breakerTripped: true, at: 1,
+    })).toBe('claude-code rate-limited\nsource=sdk\nretryAfterMs=1500\nbreakerTripped=true')
+    expect(at('claude-code/rate-limited', { version: 1, source: 'http', breakerTripped: false }))
+      .toBe('claude-code rate-limited\nsource=http\nbreakerTripped=false')
+    expect(at('claude-code/fleet-refused', {
+      version: 1, reason: 'concurrency', limit: 2, observed: 3, at: 1,
+    })).toBe('claude-code fleet-refused\nreason=concurrency\nlimit=2\nobserved=3')
+    expect(at('claude-code/steer', { version: 1, kind: 'push', reason: 'mail', at: 1 })).toBe('')
+    expect(at('claude-code/compact', { version: 1, preTokens: 9, trigger: 'auto', at: 1 })).toBe('')
+    expect(at('claude-code/unrelated', { anything: 'here' })).toBe('')
+    expect(at('claude-code/turn-completed', {})).toBe('claude-code turn-completed')
+  })
+
   it('extracts meaningful turn outcomes and skips structural or unknown events', () => {
     const reasons: Array<[SessionEvent<'turn/end'>['data']['reason'], string]> = [
       [{ kind: 'error', error: { message: 'boom', code: 'UNKNOWN' } }, 'error\nboom'],
