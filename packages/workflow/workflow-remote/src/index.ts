@@ -22,7 +22,7 @@ import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { modelFacingError, stripUnsafe, WorkflowFileError } from '@deepseek-ai/dsh-tool-workflow-run'
 import type { StartRefused, WorkflowRunsEvent, WorkflowRunsService } from '@deepseek-ai/dsh-tool-workflow-run'
 import { WorkflowStoreError } from '@deepseek-ai/dsh-workflow-run-store'
-import type { RunDetail } from '@deepseek-ai/dsh-workflow-run-store'
+import type { NodeRecord, RunDetail } from '@deepseek-ai/dsh-workflow-run-store'
 // Typert-generated ./typert and ./remote artifacts import Zod at runtime.
 import type {} from 'zod'
 import {
@@ -685,17 +685,11 @@ function inputsOf(raw: unknown): WorkflowInputValues | undefined {
   return out
 }
 
-/** Fixed remedy per supervisor-stop code. The store keeps the message (the node's error) but not the remedy. */
-const NODE_FAILURE_REMEDY = {
-  NODE_STALLED: "raise idleTimeoutMs for this node or check the agent's output",
-  NODE_TIMEOUT: 'raise timeoutMs (timeout_ms in YAML) for this node or split its work into smaller nodes',
-} as const
-
-/** Read the coded stop out of a stored node error, which begins with its code. */
-function failureOf(error: string | undefined): WorkflowNodeFailure | undefined {
-  if (error === undefined) return undefined
-  const code = error.startsWith('NODE_STALLED:') ? 'NODE_STALLED' : error.startsWith('NODE_TIMEOUT:') ? 'NODE_TIMEOUT' : undefined
-  return code === undefined ? undefined : { code, message: stripUnsafe(error, 500), remedy: NODE_FAILURE_REMEDY[code] }
+/** Read the persisted supervisor stop of a node record. Older records carry none: no field, no guess. */
+function failureOf(record: Pick<NodeRecord, 'failure'>): WorkflowNodeFailure | undefined {
+  const f = record.failure
+  if (f === undefined || (f.code !== 'NODE_STALLED' && f.code !== 'NODE_TIMEOUT')) return undefined
+  return { code: f.code, message: stripUnsafe(f.message, 500), remedy: stripUnsafe(f.remedy, 500) }
 }
 
 function projectRun(detail: RunDetail, pinnedHash: string, fileChanged: boolean) {
@@ -705,7 +699,7 @@ function projectRun(detail: RunDetail, pinnedHash: string, fileChanged: boolean)
   const nodes: WorkflowNodeView[] = detail.nodeStates.map((state) => {
     const r = state.record
     const last = highest.get(state.nodeId) === state.attempt
-    const failure = last ? failureOf(r.error) : undefined
+    const failure = last ? failureOf(r) : undefined
     return {
       ...last && state.attempt > 1 ? { attempts: state.attempt } : {},
       ...failure === undefined ? {} : { failure },

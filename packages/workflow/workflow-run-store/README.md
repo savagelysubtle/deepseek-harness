@@ -6,6 +6,8 @@ Durable on-disk store for YAML workflow runs (OP-240): an append-only record log
 
 The package root exports `openStore`, `workflowStoreDir`, `WorkflowRunStore` (`startRun`, `recordNode`, `recordGate`, `recordApproval`, `decideApproval`, `endRun`, `listRuns`, `getRun`, `readSource`, `readOutput`, `acquireWriter`, `releaseWriter`, `sweepInterrupted`, `prune`), `WorkflowStoreError`, `writeFileAtomic`, `LIMITS`, the record types, and `WORKFLOW_RUN_RECORD_VERSION`.
 
+A node record may carry an optional `failure` (`{code, message, remedy}`) naming why the supervisor stopped the node's agent (`NODE_STALLED` or `NODE_TIMEOUT`). `recordNode` bounds message and remedy to 500 characters and drops a failure whose code is not upper-case letters and underscores; records written before the field existed simply have none.
+
 The single-writer lock is published with temp file plus `link()` and records pid, process start time and boot id; it is taken over only when that triple proves the holder dead. A second writer is refused with `WRITER_BUSY` naming the holder. Unknown record or index versions are refused, never guessed at.
 
 ## Model Experience

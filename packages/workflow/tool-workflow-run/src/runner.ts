@@ -1034,6 +1034,7 @@ export class WorkflowRunsService extends Service {
       ...output === undefined ? {} : { output },
       ...outputTruncated ? { outputTruncated: true } : {},
       ...error === undefined ? {} : { error },
+      ...node.failure === undefined ? {} : { failure: node.failure },
     }))
     this.publish({ type: 'run-changed', runId: run.runId, status: 'running', nodeId, nodeStatus: node.status })
   }

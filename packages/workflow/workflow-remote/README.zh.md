@@ -13,7 +13,7 @@ Workflows UI（OP-240）所使用的常驻挂载 Typert Remote 命名空间 `wor
 - **成功** 为 `RemoteResult<{ ok: true, ... }>`，例如 `{ ok: true, value: { ok: true, leaseId: 'ab12...', ttlMs: 45000, workspaceKey: '0f3a...' } }`。
 - **Host 报告的失败** 为 `{ ok: true, value: { ok: false, error: 'NOT_FOUND', message: '...' } }`；机器可读字段是 `error`（一个 `WorkflowErrorCode`），从来不是 `code`。`validate` 把无效草稿报告为不带 `error` 的 `{ ok: false, diagnostics }`，所以用 `error` 区分调用失败与校验结论。
 - **载体失败**（特权方法上的 403、网络故障）为 `{ ok: false, error: { message: '... HTTP 403 ...' } }` 或一次拒绝，它不是 `WorkflowFailure`。把它们传给 `explainWorkflowRejection('workflow/save', cause)`：对特权端点上的 403 返回 `WORKFLOW_LOOPBACK_ONLY_MESSAGE`，否则返回 `undefined`。
-- **`runDetail` 的节点** 每次尝试一行。节点最高尝试次数的那一行还可能带有 `attempts`（真实次数，仅在多于一次时）和 `failure`（`WorkflowNodeFailure`：`NODE_STALLED` 或 `NODE_TIMEOUT`、受限长度的消息，以及固定的处理办法）。存储把停止消息保存为节点的 error，但不保存处理办法，所以这里的处理办法是按代码固定的文本表；较早的运行以及未运行 agent 的节点两者都没有。
+- **`runDetail` 的节点** 每次尝试一行。节点最高尝试次数的那一行还可能带有 `attempts`（真实次数，仅在多于一次时）和 `failure`（`WorkflowNodeFailure`：`NODE_STALLED` 或 `NODE_TIMEOUT`、受限长度的消息，以及固定的处理办法）。`failure` 原样读取 `tool-workflow-run` 写入节点记录的内容（消息与处理办法各限 500 字符）；不解析 error 文本，也没有处理办法表，因此在该字段出现之前写入的记录以及未运行 agent 的节点两者都没有。
 - **`validate` 不接受会话参数：** 其请求为 `{ text, name? }`，其余每个方法都根据调用方会话解析工作区。
 
 ## 模型体验

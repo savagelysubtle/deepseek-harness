@@ -34,6 +34,7 @@ import {
   type GateRecord,
   type IndexFile,
   type ListRunsResult,
+  type NodeFailureRecord,
   type NodeRecord,
   type OutputSlice,
   type PruneResult,
@@ -412,6 +413,7 @@ export class WorkflowRunStore {
         ...(input.durationMs !== undefined ? { durationMs: input.durationMs } : {}),
         attempt: input.attempt ?? 1,
         ...(input.error ? { error: input.error.slice(0, LIMITS.maxErrorChars) } : {}),
+        ...(failureRecord(input.failure) ?? {}),
       } as const
       let record: NodeRecord = { ...base, truncated: input.outputTruncated === true }
       if (input.output !== undefined) {
@@ -865,4 +867,19 @@ function validateStartInput(input: StartRunInput): void {
     refuse(`the parent session id is longer than ${LIMITS.parentSessionIdChars} characters`)
   if (Buffer.byteLength(JSON.stringify(input.manifest)) > LIMITS.manifestBytes)
     refuse(`the workflow manifest is larger than ${LIMITS.manifestBytes / 1024} KB`)
+}
+
+/** Longest message or remedy kept in a persisted node failure. */
+const MAX_FAILURE_TEXT_CHARS = 500
+
+/** Bound a caller's node failure for persistence; a malformed code drops it rather than guessing. */
+function failureRecord(failure: NodeFailureRecord | undefined): { failure: NodeFailureRecord } | undefined {
+  if (failure === undefined || !/^[A-Z_]{1,40}$/.test(failure.code)) return undefined
+  return {
+    failure: {
+      code: failure.code,
+      message: failure.message.slice(0, MAX_FAILURE_TEXT_CHARS),
+      remedy: failure.remedy.slice(0, MAX_FAILURE_TEXT_CHARS),
+    },
+  }
 }

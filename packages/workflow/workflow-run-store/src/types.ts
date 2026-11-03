@@ -50,6 +50,16 @@ export interface RunHeaderRecord {
   readonly ownerBootId: string | null
 }
 
+/** Why a node's agent was stopped by the supervisor, as persisted with the node. */
+export interface NodeFailureRecord {
+  /** Upper-case reason code such as `NODE_STALLED` or `NODE_TIMEOUT`. */
+  readonly code: string
+  /** What happened (bounded). */
+  readonly message: string
+  /** What to change (bounded). */
+  readonly remedy: string
+}
+
 /** Node start or end record. */
 export interface NodeRecord {
   readonly v: 1
@@ -73,6 +83,8 @@ export interface NodeRecord {
   /** True when the complete output cannot be recovered from the store. */
   readonly truncated: boolean
   readonly error?: string
+  /** Why the supervisor stopped the node's agent; absent for other failures and in records written before the field existed. */
+  readonly failure?: NodeFailureRecord
   /** Why the full output is not recoverable (for example the per-run spill budget was reached). */
   readonly outputNote?: string
 }
@@ -166,6 +178,8 @@ export interface RecordNodeInput {
   /** Set when the caller already clipped `output` so the full text no longer exists anywhere. */
   readonly outputTruncated?: boolean
   readonly error?: string
+  /** The supervisor stop that failed the node. Persisted only when the code is upper-case letters and underscores. */
+  readonly failure?: NodeFailureRecord
 }
 
 /** Input of {@link WorkflowRunStore.recordGate}. */

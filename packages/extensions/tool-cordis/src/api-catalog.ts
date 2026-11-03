@@ -4021,8 +4021,12 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface ModelModalityMap {\n    text: \'text\';\n    image: \'image\';\n}',
   },
   {
+    name: 'NodeFailureRecord',
+    declaration: 'export interface NodeFailureRecord {\n    readonly code: string;\n    readonly message: string;\n    readonly remedy: string;\n}',
+  },
+  {
     name: 'NodeRecord',
-    declaration: 'export interface NodeRecord {\n    readonly v: 1;\n    readonly kind: \'node\';\n    readonly runId: string;\n    readonly nodeId: string;\n    readonly nodeKind: string;\n    readonly status: WorkflowNodeStatus;\n    readonly exitCode?: number;\n    readonly startedAt: number;\n    readonly endedAt?: number;\n    readonly durationMs?: number;\n    readonly attempt: number;\n    readonly outputTail?: string;\n    readonly output?: string;\n    readonly outputRef?: string;\n    readonly truncated: boolean;\n    readonly error?: string;\n    readonly outputNote?: string;\n}',
+    declaration: 'export interface NodeRecord {\n    readonly v: 1;\n    readonly kind: \'node\';\n    readonly runId: string;\n    readonly nodeId: string;\n    readonly nodeKind: string;\n    readonly status: WorkflowNodeStatus;\n    readonly exitCode?: number;\n    readonly startedAt: number;\n    readonly endedAt?: number;\n    readonly durationMs?: number;\n    readonly attempt: number;\n    readonly outputTail?: string;\n    readonly output?: string;\n    readonly outputRef?: string;\n    readonly truncated: boolean;\n    readonly error?: string;\n    readonly failure?: NodeFailureRecord;\n    readonly outputNote?: string;\n}',
   },
   {
     name: 'NodeState',
@@ -5375,10 +5379,6 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'WorkflowNodeEndInfo',
     declaration: 'export interface WorkflowNodeEndInfo extends WorkflowNodeInfo {\n    status: WorkflowNodeStatus;\n    exitCode?: number;\n    durationMs?: number;\n    truncated?: boolean;\n    error?: string;\n    failure?: WorkflowNodeFailure;\n    attempts?: number;\n    synthesized?: boolean;\n}',
-  },
-  {
-    name: 'WorkflowNodeFailure',
-    declaration: 'export interface WorkflowNodeFailure {\n    code: \'NODE_STALLED\' | \'NODE_TIMEOUT\';\n    message: string;\n    remedy: string;\n}',
   },
   {
     name: 'WorkflowNodeInfo',

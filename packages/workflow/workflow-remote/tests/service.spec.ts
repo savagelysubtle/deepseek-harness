@@ -332,6 +332,29 @@ describe('runDetail and nodeOutput', () => {
     noLeak(detail)
   })
 
+  it('returns exactly the persisted failure, and none for an older record whose error only looks coded', async () => {
+    h = await setupRemote()
+    await h.writeWorkflow('demo', DEMO)
+    const agent = h.agent()
+    const plan = await h.service.dryRun(agent, { name: 'demo' })
+    if (!plan.ok) throw new Error(plan.message)
+    const started = await h.service.run(agent, { name: 'demo', trustHash: plan.trustKey, trustChallenge: plan.trustChallenge! })
+    if (!started.ok) throw new Error(started.message)
+    const run = h.engine.runs[0]!
+    const persisted = { code: 'NODE_TIMEOUT' as const, message: 'NODE_TIMEOUT: persisted message', remedy: 'persisted remedy, not the old table' }
+    run.nodeStart({ nodeId: 'slow', kind: 'prompt' })
+    run.nodeEnd({ nodeId: 'slow', kind: 'prompt', status: 'failed', error: 'NODE_TIMEOUT: persisted message', failure: persisted })
+    run.nodeStart({ nodeId: 'old', kind: 'prompt' })
+    // An older record: the error text begins with a code but no failure was stored. Nothing is guessed from the text.
+    run.nodeEnd({ nodeId: 'old', kind: 'prompt', status: 'failed', error: 'NODE_STALLED: written before failure was persisted' })
+    run.settle(COMPLETED)
+    await expect.poll(async () => (await h!.service.runDetail(agent, { runId: started.runId }) as { status?: string }).status).not.toBe('running')
+    const detail = await h.service.runDetail(agent, { runId: started.runId })
+    if (!detail.ok) throw new Error(detail.message)
+    expect(detail.nodes.find(n => n.nodeId === 'slow')!.failure).toEqual(persisted)
+    expect(detail.nodes.find(n => n.nodeId === 'old')).not.toHaveProperty('failure')
+  })
+
   it('projects the run without raw output and serves output in bounded slices', async () => {
     h = await setupRemote()
     await h.writeWorkflow('demo', DEMO)

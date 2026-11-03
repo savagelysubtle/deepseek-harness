@@ -6,6 +6,8 @@ YAML 工作流运行的持久化磁盘存储（OP-240）：包含仅追加的记
 
 包根导出 `openStore`、`workflowStoreDir`、`WorkflowRunStore`（`startRun`、`recordNode`、`recordGate`、`recordApproval`、`decideApproval`、`endRun`、`listRuns`、`getRun`、`readSource`、`readOutput`、`acquireWriter`、`releaseWriter`、`sweepInterrupted`、`prune`）、`WorkflowStoreError`、`writeFileAtomic`、`LIMITS`、各记录类型以及 `WORKFLOW_RUN_RECORD_VERSION`。
 
+节点记录可带可选的 `failure`（`{code, message, remedy}`），说明监督器为何停止该节点的 agent（`NODE_STALLED` 或 `NODE_TIMEOUT`）。`recordNode` 把消息与处理办法各限制在 500 字符，并丢弃代码不是大写字母加下划线的 failure；该字段出现之前写入的记录没有它。
+
 单写者锁通过临时文件加 `link()` 发布，并记录 pid、进程启动时间与启动 id；只有该三元组证明持有者已不存在时才会接管。第二个写者会被 `WRITER_BUSY` 拒绝，并指明持有者。未知的记录或索引版本会被拒绝，绝不猜测。
 
 ## 模型体验
