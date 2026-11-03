@@ -14,7 +14,7 @@
 
 对于根 transport 执行（`exec.parent` 缺省），工具还会把运行投影到调用 Agent 的 Session：`start()` 返回后写 run-start，只记录 `run.id` 匹配的成员开始与结束，并且只在 `run.result` 已取得且 `dispose()` 完全停稳后写 run-end。嵌套 transport 调用照常执行，但不写工作流记录。任一次 Session append 首次失败后，本运行会停止后续记录并只告警一次，留下空记录或合法连续前缀，同时不改变工具结果和清理。
 
-浏览器安全的 `@deepseek-ai/dsh-tool-workflow/types` 子路径拥有这些 log-only 事件 payload（上述四类，加上仅为 YAML 运行写入的 `tool-workflow/node-start`、带 `truncated` 标志的 `tool-workflow/node-end`、`tool-workflow/approval` 与 `tool-workflow/gate-report`）及其 `SessionEventMap` 声明。包 invariant 会在冷加载和实时追加时拒绝重复 start、未配对成员、仍有开放成员的终点和 run-end 后更新，同时允许缺失终态后缀的连续前缀。
+浏览器安全的 `@deepseek-ai/dsh-tool-workflow/types` 子路径拥有这些 log-only 事件 payload（上述四类，加上仅为 YAML 运行写入的 `tool-workflow/node-start`、带 `truncated` 标志以及可选 `attempts` 与 `failure`（`NODE_STALLED` 或 `NODE_TIMEOUT`，含消息与补救）的 `tool-workflow/node-end`、`tool-workflow/approval` 与 `tool-workflow/gate-report`）及其 `SessionEventMap` 声明。包 invariant 会在冷加载和实时追加时拒绝重复 start、未配对成员、仍有开放成员的终点和 run-end 后更新，同时允许缺失终态后缀的连续前缀。
 
 `createWorkflowRecorder(ctx)` 已导出，供 [`@deepseek-ai/dsh-tool-workflow-run`](../tool-workflow-run/README.md) 通过同一个记录器投影 YAML 运行。`start(session, run, { recordId, nodes })` 写入持久化的存储运行 id 而不是引擎 id，并选择开启 `node-end`；`gateReport(runId, rows)` 写入运行结束时的门禁报告，必须在 `finish` 之前调用。普通 `workflow` 工具两个选项都不用，因此其记录不变。
 

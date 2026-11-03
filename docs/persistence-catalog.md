@@ -874,7 +874,7 @@ Source: [`packages/core/session/src/types.ts:303`](../packages/core/session/src/
 'tool-workflow/agent-end': ToolWorkflowAgentEndData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:117`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:121`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowagent-start--log-only"></a>
 
@@ -888,7 +888,7 @@ Source: [`packages/workflow/tool-workflow/src/types.ts:117`](../packages/workflo
 'tool-workflow/agent-start': ToolWorkflowAgentStartData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:112`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:116`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowapproval--log-only"></a>
 
@@ -902,7 +902,7 @@ Source: [`packages/workflow/tool-workflow/src/types.ts:112`](../packages/workflo
 'tool-workflow/approval': ToolWorkflowApprovalData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:127`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:131`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowgate-report--log-only"></a>
 
@@ -916,7 +916,7 @@ Source: [`packages/workflow/tool-workflow/src/types.ts:127`](../packages/workflo
 'tool-workflow/gate-report': ToolWorkflowGateReportData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:137`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:141`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflownode-end--log-only"></a>
 
@@ -930,7 +930,7 @@ Source: [`packages/workflow/tool-workflow/src/types.ts:137`](../packages/workflo
 'tool-workflow/node-end': ToolWorkflowNodeEndData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:132`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:136`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflownode-start--log-only"></a>
 
@@ -944,7 +944,7 @@ Source: [`packages/workflow/tool-workflow/src/types.ts:132`](../packages/workflo
 'tool-workflow/node-start': ToolWorkflowNodeStartData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:122`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:126`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowrun-end--log-only"></a>
 
@@ -958,7 +958,7 @@ Source: [`packages/workflow/tool-workflow/src/types.ts:122`](../packages/workflo
 'tool-workflow/run-end': ToolWorkflowRunEndData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:142`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:146`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowrun-start--log-only"></a>
 
@@ -972,7 +972,7 @@ Source: [`packages/workflow/tool-workflow/src/types.ts:142`](../packages/workflo
 'tool-workflow/run-start': ToolWorkflowRunStartData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:107`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:111`](../packages/workflow/tool-workflow/src/types.ts)
 
 ### `turn/*`
 

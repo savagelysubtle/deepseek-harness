@@ -31,6 +31,7 @@ export type {
   WorkflowGateInfo,
   WorkflowGateOutcome,
   WorkflowNodeEndInfo,
+  WorkflowNodeFailure,
   WorkflowNodeInfo,
   WorkflowNodeStatus,
   WorkflowAgentEndInfo,

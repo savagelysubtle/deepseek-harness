@@ -1086,6 +1086,8 @@ export class WorkerRun implements WorkflowRun {
       ...typeof end.durationMs === 'number' && Number.isFinite(end.durationMs) && end.durationMs >= 0 ? { durationMs: end.durationMs } : {},
       ...typeof end.truncated === 'boolean' ? { truncated: end.truncated } : {},
       ...typeof end.error === 'string' ? { error: cleanText(end.error, NODE_ERROR_MAX_CHARS) } : {},
+      ...readNodeFailure(end.failure),
+      ...typeof end.attempts === 'number' && Number.isSafeInteger(end.attempts) && end.attempts >= 1 && end.attempts <= 100 ? { attempts: end.attempts } : {},
       synthesized: false,
     })
   }
@@ -1396,6 +1398,15 @@ function readNodeInfo(raw: unknown): WorkflowNodeInfo | undefined {
   if (typeof record.kind !== 'string' || !LABEL_PATTERN.test(record.kind)) return undefined
   if (record.gateKind !== undefined && (typeof record.gateKind !== 'string' || !LABEL_PATTERN.test(record.gateKind))) return undefined
   return { nodeId: record.nodeId, kind: record.kind, ...record.gateKind !== undefined ? { gateKind: record.gateKind } : {} }
+}
+
+/** Re-validate a worker-supplied node failure: only the two known codes pass, texts are cleaned and bounded. */
+function readNodeFailure(raw: unknown): { failure?: NonNullable<WorkflowNodeEndInfo['failure']> } {
+  if (typeof raw !== 'object' || raw === null) return {}
+  const f = raw as Record<string, unknown>
+  if ((f.code !== 'NODE_STALLED' && f.code !== 'NODE_TIMEOUT') || typeof f.message !== 'string' || typeof f.remedy !== 'string') return {}
+  const message = cleanText(f.message, NODE_ERROR_MAX_CHARS)
+  return { failure: { code: f.code, message, remedy: cleanText(f.remedy, NODE_ERROR_MAX_CHARS) } }
 }
 
 /** The result a supervisor-stopped child settles with; `timeout` and `stalled` are what the engine's retry treats as transient. */

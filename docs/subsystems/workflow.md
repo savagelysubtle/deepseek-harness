@@ -188,7 +188,7 @@ Workflow Service Definition contract. Invalid requests throw before publication;
 abstract start(request: WorkflowStartRequest): WorkflowRun
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:170`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:171`](../../packages/workflow/workflow/src/index.ts)
 
 <a id="ctxworkflowruns--workflowrunsservice"></a>
 
@@ -291,7 +291,7 @@ async dryRun(workspace: string, options: DryRunOptions): Promise<DryRunPlan | St
 async start(options: StartOptions): Promise<StartResult>
 ```
 
-Source: [`packages/workflow/tool-workflow-run/src/runner.ts:213`](../../packages/workflow/tool-workflow-run/src/runner.ts)
+Source: [`packages/workflow/tool-workflow-run/src/runner.ts:229`](../../packages/workflow/tool-workflow-run/src/runner.ts)
 
 <a id="workflow-events"></a>
 
@@ -317,7 +317,7 @@ One `agent()` call settled (clean result, child failure, or run cancellation). P
 'workflow/agent-end'(info: WorkflowRunInfo, agent: WorkflowAgentEndInfo): void
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:110`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:111`](../../packages/workflow/workflow/src/index.ts)
 
 <a id="workflowagent-start--emit"></a>
 
@@ -338,7 +338,7 @@ One `agent()` call established a published child run. Paired with Events['workfl
 'workflow/agent-start'(info: WorkflowRunInfo, agent: WorkflowAgentInfo): void
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:99`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:100`](../../packages/workflow/workflow/src/index.ts)
 
 <a id="workflowapproval-decided--emit"></a>
 
@@ -393,7 +393,7 @@ A workflow run settled (any stop reason). Fired when WorkflowRun.result resolves
 'workflow/end'(info: WorkflowRunInfo, result: WorkflowResultInfo): void
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:120`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:121`](../../packages/workflow/workflow/src/index.ts)
 
 <a id="workflowgate--emit"></a>
 
@@ -414,7 +414,7 @@ A declared gate was evaluated. Exactly one per gate-declaring node on every term
 'workflow/gate'(info: WorkflowRunInfo, gate: WorkflowGateInfo): void
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:147`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:148`](../../packages/workflow/workflow/src/index.ts)
 
 <a id="workflowlog--emit"></a>
 
@@ -432,7 +432,7 @@ The script emitted a narration line (a `log(message)` call).
 'workflow/log'(info: WorkflowRunInfo, message: string): void
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:89`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:90`](../../packages/workflow/workflow/src/index.ts)
 
 <a id="workflownode-end--emit"></a>
 
@@ -452,7 +452,7 @@ A workflow node settled. Exactly one end per started node on every terminal path
 'workflow/node-end'(info: WorkflowRunInfo, node: WorkflowNodeEndInfo): void
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:137`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:138`](../../packages/workflow/workflow/src/index.ts)
 
 <a id="workflownode-start--emit"></a>
 
@@ -471,7 +471,7 @@ A workflow node started (the script's `nodeStart` hook). Paired with Events['wor
 'workflow/node-start'(info: WorkflowRunInfo, node: WorkflowNodeInfo): void
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:128`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:129`](../../packages/workflow/workflow/src/index.ts)
 
 <a id="workflowphase--emit"></a>
 
@@ -490,7 +490,7 @@ The script entered a phase (a `phase(title)` call) — progress grouping for obs
 'workflow/phase'(info: WorkflowRunInfo, title: string): void
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:82`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:83`](../../packages/workflow/workflow/src/index.ts)
 
 <a id="workflowrun-changed--emit"></a>
 
@@ -527,5 +527,5 @@ A workflow run started — the script's meta block validated, the body about to 
 'workflow/start'(info: WorkflowRunInfo): void
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:74`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:75`](../../packages/workflow/workflow/src/index.ts)
 <!-- END GENERATED cordis-surface -->

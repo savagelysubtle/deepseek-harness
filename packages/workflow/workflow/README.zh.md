@@ -34,7 +34,7 @@
 - `workflow/start` / `workflow/end` 为运行配对；
 - `workflow/phase` 和 `workflow/log` 公开脚本叙述；
 - `workflow/agent-start` / `workflow/agent-end` 按 `seq` 为每次子 agent 调用配对；提供方的异步启动调用被拒绝时，该子 agent 不会发出其中任何一个事件；
-- `workflow/node-start` / `workflow/node-end` 按 `nodeId` 为每个节点配对，`workflow/gate` 报告每个已声明的关卡；引擎在每条终止路径上补发缺失的结束事件或关卡事件。
+- `workflow/node-start` / `workflow/node-end` 按 `nodeId` 为每个节点配对，`workflow/gate` 报告每个已声明的关卡；引擎在每条终止路径上补发缺失的结束事件或关卡事件。`workflow/node-end` 还可携带 `attempts`（该节点实际运行的 agent 尝试次数，含重试）和 `failure`（`{code, message, remedy}`，仅当子 agent 监督器停止了该节点的 agent 时设置：空闲窗口内无输出为 `NODE_STALLED`，超过单节点硬性上限为 `NODE_TIMEOUT`）。两者均为可选；仅仅未完成的节点两者都不带。
 
 同进程事件 payload 是以不可变方式借用的值。每个监听器都独立隔离：同步抛出异常或返回的 promise 被拒绝时，只会记录日志，不会阻塞同级监听器或改变执行。
 

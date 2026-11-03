@@ -163,6 +163,8 @@ export function createWorkflowRecorder(ctx: Context): WorkflowRecorder {
       ...node.exitCode === undefined ? {} : { exitCode: node.exitCode },
       ...node.durationMs === undefined ? {} : { durationMs: node.durationMs },
       truncated: node.truncated === true,
+      ...node.attempts === undefined ? {} : { attempts: node.attempts },
+      ...node.failure === undefined ? {} : { failure: node.failure },
     }
     if (!append(record.session, 'tool-workflow/node-end', data)) active.delete(info.id)
   })

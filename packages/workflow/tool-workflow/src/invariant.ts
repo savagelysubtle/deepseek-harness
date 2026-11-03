@@ -138,6 +138,16 @@ function applyEvent(trace: WorkflowTrace, event: SessionEvent, fail: InvariantFa
       stringId(data.status, 'tool-workflow/node-end status', fail)
       // Absent in records written before the field existed.
       if (data.truncated !== undefined && typeof data.truncated !== 'boolean') fail('tool-workflow/node-end truncated must be a boolean when present')
+      if (data.attempts !== undefined && (typeof data.attempts !== 'number' || !Number.isSafeInteger(data.attempts) || data.attempts < 1)) {
+        fail('tool-workflow/node-end attempts must be a positive integer when present')
+      }
+      if (data.failure !== undefined) {
+        const failure = data.failure as Record<string, unknown> | null
+        if (failure === null || typeof failure !== 'object' || (failure.code !== 'NODE_STALLED' && failure.code !== 'NODE_TIMEOUT')
+          || typeof failure.message !== 'string' || typeof failure.remedy !== 'string') {
+          fail('tool-workflow/node-end failure must carry a NODE_STALLED or NODE_TIMEOUT code, a message and a remedy when present')
+        }
+      }
       return
     }
     case 'tool-workflow/gate-report': {

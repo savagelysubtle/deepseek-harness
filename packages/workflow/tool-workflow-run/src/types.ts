@@ -20,6 +20,10 @@ export interface RunNodeSummary {
   readonly status: string
   readonly exitCode?: number
   readonly durationMs?: number
+  /** Real agent attempts the node ran, retries included. */
+  readonly attempts?: number
+  /** `NODE_STALLED` or `NODE_TIMEOUT` when the supervisor stopped the node's agent. */
+  readonly failureCode?: string
 }
 
 /** How a finished run ended, with everything the tool result and the UI show. */

@@ -9,6 +9,10 @@ import type { ChildAppendEvent } from '@deepseek-ai/dsh-workflow-worker-thread'
  * child that keeps logging for longer than `idleTimeoutMs` must not be stopped, and one that goes
  * quiet must be. The log lines the child prints stand in for the session appends of a working agent
  * (the supervisor reads append events; it never looks at the process).
+ *
+ * Scope of the proof: this test feeds the child's stdout lines into the supervisor as appends
+ * ITSELF. It proves the idle logic against a real clock and a real process, not the agent append
+ * path (the host's `session/event` feed); that path is covered by the drill's silent-child test.
  */
 
 const IDLE_MS = 1000

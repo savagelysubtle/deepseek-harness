@@ -41,6 +41,20 @@ describe('exported workflow recorder', () => {
     ])
   })
 
+  it('projects attempts and the failure additively, and omits both when the engine sent neither', async () => {
+    const { ctx, session } = await setup()
+    const recorder = createWorkflowRecorder(ctx)
+    recorder.start(session, engineRun, { nodes: true })
+    const emit = (...args: unknown[]): void => { (ctx as unknown as { emit(...a: unknown[]): void }).emit(...args) }
+    const failure = { code: 'NODE_STALLED', message: 'NODE_STALLED: no output for 1000 ms', remedy: 'raise idleTimeoutMs' }
+    emit('workflow/node-end', info, { nodeId: 'think', kind: 'prompt', status: 'failed', attempts: 2, failure })
+    emit('workflow/node-end', info, { nodeId: 'plain', kind: 'bash', status: 'success' })
+    const [stalled, plain] = session.events.filter(e => e.type === 'tool-workflow/node-end')
+    expect(stalled?.data).toMatchObject({ nodeId: 'think', attempts: 2, failure })
+    expect(plain?.data).not.toHaveProperty('attempts')
+    expect(plain?.data).not.toHaveProperty('failure')
+  })
+
   it('does not project node-end by default (the plain workflow tool is unchanged)', async () => {
     const { ctx, session } = await setup()
     const recorder = createWorkflowRecorder(ctx)
@@ -74,6 +88,9 @@ describe('invariant: node-end and gate-report', () => {
     expect(() => session.append('tool-workflow/gate-report', { runId, rows: [{ nodeId: '', gateKind: 'bash', outcome: 'x' }] })).toThrow(InvariantError)
     expect(() => session.append('tool-workflow/gate-report', { runId, rows: 'no' as never })).toThrow(InvariantError)
     expect(() => session.append('tool-workflow/node-end', { runId, nodeId: 'a', kind: 'bash', status: 'success', truncated: 'no' as never })).toThrow(InvariantError)
+    session.append('tool-workflow/node-end', { runId, nodeId: 'a', kind: 'prompt', status: 'failed', truncated: false, attempts: 2, failure: { code: 'NODE_TIMEOUT', message: 'm', remedy: 'r' } })
+    expect(() => session.append('tool-workflow/node-end', { runId, nodeId: 'a', kind: 'prompt', status: 'failed', truncated: false, attempts: 0 })).toThrow(InvariantError)
+    expect(() => session.append('tool-workflow/node-end', { runId, nodeId: 'a', kind: 'prompt', status: 'failed', truncated: false, failure: { code: 'OTHER' } as never })).toThrow(InvariantError)
     session.append('tool-workflow/node-start', { runId, nodeId: 'b', kind: 'prompt', at: 1 })
     expect(() => session.append('tool-workflow/node-start', { runId, nodeId: 'b', kind: 'prompt', at: 'x' as never })).toThrow(InvariantError)
     session.append('tool-workflow/approval', { runId, nodeId: 'ask', kind: 'approval', approvalId: 'a1', state: 'pending', at: 2 })

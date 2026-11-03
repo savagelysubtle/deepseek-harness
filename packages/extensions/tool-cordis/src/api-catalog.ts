@@ -4286,7 +4286,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'RunNodeSummary',
-    declaration: 'export interface RunNodeSummary {\n    readonly nodeId: string;\n    readonly kind: string;\n    readonly status: string;\n    readonly exitCode?: number;\n    readonly durationMs?: number;\n}',
+    declaration: 'export interface RunNodeSummary {\n    readonly nodeId: string;\n    readonly kind: string;\n    readonly status: string;\n    readonly exitCode?: number;\n    readonly durationMs?: number;\n    readonly attempts?: number;\n    readonly failureCode?: string;\n}',
   },
   {
     name: 'RunOutcome',
@@ -5374,7 +5374,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'WorkflowNodeEndInfo',
-    declaration: 'export interface WorkflowNodeEndInfo extends WorkflowNodeInfo {\n    status: WorkflowNodeStatus;\n    exitCode?: number;\n    durationMs?: number;\n    truncated?: boolean;\n    error?: string;\n    synthesized?: boolean;\n}',
+    declaration: 'export interface WorkflowNodeEndInfo extends WorkflowNodeInfo {\n    status: WorkflowNodeStatus;\n    exitCode?: number;\n    durationMs?: number;\n    truncated?: boolean;\n    error?: string;\n    failure?: WorkflowNodeFailure;\n    attempts?: number;\n    synthesized?: boolean;\n}',
+  },
+  {
+    name: 'WorkflowNodeFailure',
+    declaration: 'export interface WorkflowNodeFailure {\n    code: \'NODE_STALLED\' | \'NODE_TIMEOUT\';\n    message: string;\n    remedy: string;\n}',
   },
   {
     name: 'WorkflowNodeInfo',

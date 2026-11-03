@@ -80,6 +80,10 @@ export interface ToolWorkflowNodeEndData {
   readonly durationMs?: number
   /** True when the recorded output is cut (engine cap or 8192-character agent tail); absent only in older records. */
   readonly truncated?: boolean
+  /** Real agent attempts the node ran, retries included; absent for a node that ran no agent and in older records. */
+  readonly attempts?: number
+  /** Why the supervisor stopped the node's agent: `NODE_STALLED` (idle window) or `NODE_TIMEOUT` (hard limit). Absent otherwise. */
+  readonly failure?: { readonly code: 'NODE_STALLED' | 'NODE_TIMEOUT'; readonly message: string; readonly remedy: string }
 }
 
 /** One row of a gate report: a declared gate and what happened to it. */

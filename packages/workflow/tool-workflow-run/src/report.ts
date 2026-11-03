@@ -59,7 +59,7 @@ export function renderOutcome(outcome: RunOutcome, maxChars: number): string {
   if (outcome.nodes.length > 0) {
     lines.push('', 'Nodes:')
     for (const n of outcome.nodes) {
-      lines.push(`- ${n.nodeId} (${n.kind}): ${n.status}${n.exitCode === undefined ? '' : ` exit ${n.exitCode}`}${n.durationMs === undefined ? '' : ` ${n.durationMs} ms`}`)
+      lines.push(`- ${n.nodeId} (${n.kind}): ${n.status}${n.exitCode === undefined ? '' : ` exit ${n.exitCode}`}${n.durationMs === undefined ? '' : ` ${n.durationMs} ms`}${n.attempts === undefined || n.attempts < 2 ? '' : ` after ${n.attempts} attempts`}${n.failureCode === undefined ? '' : ` [${n.failureCode}]`}`)
     }
   }
   lines.push('', 'Workflow gate report:')

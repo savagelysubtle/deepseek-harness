@@ -933,6 +933,80 @@ describe('supervisor stop and engine retry', () => {
     expect(() => handleRef?.stop('stalled')).not.toThrow()
   })
 
+  /** A provider whose children follow `script` in order: `hang` never settles, `done` completes, `error` ends with stopReason error. */
+  async function scriptedSetup(script: readonly ('hang' | 'done' | 'error')[]) {
+    const ctx = new Context()
+    await ctx.plugin(SubagentRuntime)
+    let count = 0
+    ctx.subagents.registerProvider({
+      name: 'stub',
+      capabilities: { outputSchema: true, depthLimit: true, toolFilter: true, persona: false },
+      inheritsParentContext: false,
+      start: () => {
+        const behaviour = script[count] ?? 'done'
+        count += 1
+        const result: Promise<SubagentResult> = behaviour === 'hang'
+          ? new Promise(() => {})
+          : Promise.resolve({ output: [{ type: 'text', text: 'out' }], stopReason: behaviour === 'done' ? 'completed' : 'error' })
+        return Promise.resolve({ id: SessionId(`n-${count}`), localAgent: undefined, result, dispose: () => Promise.resolve() })
+      },
+    })
+    await ctx.plugin(WorkerThreadWorkflowEngine, { provider: 'stub', maxConcurrentAgents: 2 })
+    const ends: WorkflowNodeEndInfo[] = []
+    ctx.on('workflow/node-end', (_info, node) => { ends.push(node) })
+    return { ctx, ends }
+  }
+
+  const stopping = (reason: 'timeout' | 'stalled'): WorkflowChildSupervisor => ({
+    bind: (_child, _id, handle) => { setTimeout(() => { handle.stop(reason) }, 20) },
+  })
+
+  const NODE_SCRIPT = (opts: string): string => `
+    nodeStart('think', 'prompt')
+    const r = await agent('p', { nodeId: 'think', ${opts} })
+    nodeEnd('think', { status: r === null ? 'failed' : 'success', ...(r === null ? { error: 'the agent did not complete' } : {}) })
+    return r`
+
+  it('NODE_STALLED: both attempts stalled, node-end carries the code, the idle window, the retry count and attempts 2', async () => {
+    const { ctx, ends } = await scriptedSetup(['hang', 'hang'])
+    const result = await finish(start(ctx, NODE_SCRIPT('idleTimeoutMs: 1000, retry: { maxAttempts: 2, delayMs: 0 }'), { supervisor: stopping('stalled') }))
+    expect(result.value).toBeNull()
+    expect(ends).toHaveLength(1)
+    expect(ends[0]!.attempts).toBe(2)
+    expect(ends[0]!.failure).toMatchObject({ code: 'NODE_STALLED', remedy: "raise idleTimeoutMs for this node or check the agent's output" })
+    expect(ends[0]!.failure!.message).toContain('1000 ms')
+    expect(ends[0]!.failure!.message).toContain('1 retry')
+    expect(ends[0]!.error).toBe(ends[0]!.failure!.message)
+  })
+
+  it('NODE_TIMEOUT: the hard per-node limit is named apart from a stall', async () => {
+    const { ctx, ends } = await scriptedSetup(['hang'])
+    await finish(start(ctx, NODE_SCRIPT('timeoutMs: 60000'), { supervisor: stopping('timeout') }))
+    expect(ends[0]!.attempts).toBe(1)
+    expect(ends[0]!.failure).toMatchObject({ code: 'NODE_TIMEOUT' })
+    expect(ends[0]!.failure!.message).toContain('60000 ms')
+    expect(ends[0]!.failure!.message).toContain('0 retries')
+  })
+
+  it('nearest allow: a genuine non-completion keeps "did not complete" and carries no failure', async () => {
+    const { ctx, ends } = await scriptedSetup(['error'])
+    await finish(start(ctx, NODE_SCRIPT('idleTimeoutMs: 1000, retry: { maxAttempts: 2, delayMs: 0 }')))
+    expect(ends[0]!.error).toBe('the agent did not complete')
+    expect(ends[0]!.failure).toBeUndefined()
+    expect(ends[0]!.attempts).toBe(1)
+  })
+
+  it('nearest allow: a child that answers inside the window is not marked stalled, and a stall that a retry recovers carries no failure', async () => {
+    const quick = await scriptedSetup(['done'])
+    await finish(start(quick.ctx, NODE_SCRIPT('idleTimeoutMs: 1000')))
+    expect(quick.ends[0]).toMatchObject({ status: 'success', attempts: 1 })
+    expect(quick.ends[0]!.failure).toBeUndefined()
+    const recovered = await scriptedSetup(['hang', 'done'])
+    await finish(start(recovered.ctx, NODE_SCRIPT('idleTimeoutMs: 1000, retry: { maxAttempts: 2, delayMs: 0 }'), { supervisor: stopping('stalled') }))
+    expect(recovered.ends[0]).toMatchObject({ status: 'success', attempts: 2 })
+    expect(recovered.ends[0]!.failure).toBeUndefined()
+  })
+
   it('a tier named like a prototype member never resolves through the prototype chain', async () => {
     const seen: SubagentStartRequest[] = []
     const { ctx } = await setup(['ok'], seen)

@@ -34,7 +34,7 @@ Workflow events are observe-only. They carry `WorkflowRunInfo` (`id` plus `meta`
 - `workflow/start` / `workflow/end` pair the run.
 - `workflow/phase` and `workflow/log` expose script narration.
 - `workflow/agent-start` / `workflow/agent-end` pair each child call by `seq`; a child whose async provider start rejects emits neither.
-- `workflow/node-start` / `workflow/node-end` pair each node by `nodeId`, and `workflow/gate` reports each declared gate; the engine synthesizes any missing end or gate on every terminal path.
+- `workflow/node-start` / `workflow/node-end` pair each node by `nodeId`, and `workflow/gate` reports each declared gate; the engine synthesizes any missing end or gate on every terminal path. `workflow/node-end` may also carry `attempts` (the real number of agent attempts the node ran, retries included) and `failure` (`{code, message, remedy}`, set only when the child supervisor stopped the node's agent: `NODE_STALLED` for no output inside the idle window, `NODE_TIMEOUT` for the hard per-node limit). Both are optional; a node that merely did not complete carries neither.
 
 Same-process event payloads are borrowed immutable values. Every listener is independently contained: a synchronous throw or rejected returned promise is logged without starving peers or changing execution.
 

@@ -110,6 +110,22 @@ interface NodeLedgerEntry {
   status?: string
   exitCode?: number
   durationMs?: number
+  /** Real agent attempts the node ran (retries included); absent for a node that ran no agent. */
+  attempts?: number
+  /** The supervisor stop that failed the node (stall or hard timeout), when there was one. */
+  failure?: { code: string; message: string; remedy: string }
+}
+
+/** The `workflow/node-end` fields this runner reads. */
+interface NodeEndPayload {
+  readonly nodeId: string
+  readonly kind: string
+  readonly status: string
+  readonly exitCode?: number
+  readonly durationMs?: number
+  readonly error?: string
+  readonly attempts?: number
+  readonly failure?: { readonly code: string; readonly message: string; readonly remedy: string }
 }
 
 interface BashBuffer {
@@ -971,7 +987,7 @@ export class WorkflowRunsService extends Service {
 
   private onNodeEnd(
     run: ActiveRun,
-    node: { nodeId: string; kind: string; status: string; exitCode?: number; durationMs?: number; error?: string },
+    node: NodeEndPayload,
   ): void {
     const { nodeId, kind } = node
     if (!WORKFLOW_NODE_ID_PATTERN.test(nodeId)) return
@@ -981,6 +997,13 @@ export class WorkflowRunsService extends Service {
     entry.status = node.status
     if (node.exitCode !== undefined) entry.exitCode = node.exitCode
     if (node.durationMs !== undefined) entry.durationMs = node.durationMs
+    const attempts = node.attempts !== undefined && node.attempts >= 1 ? node.attempts : 1
+    if (node.attempts !== undefined) entry.attempts = attempts
+    if (node.failure !== undefined) {
+      entry.failure = node.failure
+      // The gate report row for this node carries the coded reason (a block reason already recorded wins).
+      if (!run.reasons.has(nodeId)) run.reasons.set(nodeId, `${node.failure.message}; remedy: ${node.failure.remedy}`)
+    }
     run.nodes.set(nodeId, entry)
     let output: string | undefined
     let outputTruncated = false
@@ -997,8 +1020,15 @@ export class WorkflowRunsService extends Service {
       outputTruncated = true
     }
     const error = node.status === 'interrupted' ? `interrupted: ${node.error ?? 'the run ended before the node did'}` : node.error
+    // Attempts before the last were each stopped and retried: close their records so none stays "running".
+    for (let earlier = 1; earlier < attempts; earlier++) {
+      this.enqueueWrite(run, `node ${nodeId} attempt ${earlier}`, () => run.store.recordNode(run.runId, {
+        nodeId, nodeKind: kind, status: 'failed', startedAt: entry.startedAt, endedAt: Date.now(), attempt: earlier,
+        error: `attempt ${earlier} of ${attempts} was stopped and retried`,
+      }))
+    }
     this.enqueueWrite(run, `node ${nodeId} end`, () => run.store.recordNode(run.runId, {
-      nodeId, nodeKind: kind, status, startedAt: entry.startedAt, endedAt: Date.now(), attempt: 1,
+      nodeId, nodeKind: kind, status, startedAt: entry.startedAt, endedAt: Date.now(), attempt: attempts,
       ...node.exitCode === undefined ? {} : { exitCode: node.exitCode },
       ...node.durationMs === undefined ? {} : { durationMs: node.durationMs },
       ...output === undefined ? {} : { output },
@@ -1062,10 +1092,11 @@ export class WorkflowRunsService extends Service {
             nodeId: item.id, kind: entry.kind, status: 'success', truncated: true,
             ...exitCode === undefined ? {} : { exitCode },
             ...entry.durationMs === undefined ? {} : { durationMs: entry.durationMs },
+            ...entry.attempts === undefined ? {} : { attempts: entry.attempts },
           })
         }
         await run.queue.run(() => run.store.recordNode(run.runId, {
-          nodeId: item.id as string, nodeKind: entry.kind, status: 'success', startedAt: entry.startedAt, endedAt: Date.now(), attempt: 1,
+          nodeId: item.id as string, nodeKind: entry.kind, status: 'success', startedAt: entry.startedAt, endedAt: Date.now(), attempt: entry.attempts ?? 1,
           ...exitCode === undefined ? {} : { exitCode },
           output, ...output.length >= SCRIPT_OUTPUT_TAIL ? { outputTruncated: true } : {},
         })).catch((error: unknown) => {
@@ -1106,6 +1137,8 @@ export class WorkflowRunsService extends Service {
         nodeId: n.id, kind: n.kind, status: e?.status ?? 'not-run',
         ...e?.exitCode === undefined ? {} : { exitCode: e.exitCode },
         ...e?.durationMs === undefined ? {} : { durationMs: e.durationMs },
+        ...e?.attempts === undefined ? {} : { attempts: e.attempts },
+        ...e?.failure === undefined ? {} : { failureCode: e.failure.code },
       }
     })
     const reasons = Object.fromEntries(run.reasons)

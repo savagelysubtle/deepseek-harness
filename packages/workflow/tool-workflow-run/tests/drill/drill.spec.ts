@@ -250,24 +250,29 @@ describe('drill: stall and done_when', () => {
   it('a silent child is stopped inside the idle window, retried once, and the node then fails', async () => {
     d = await bootDrill({ examples: false, script: ['hang', 'hang'] })
     await d.writeWorkflow('stall', STALL)
-    const t0 = Date.now()
     const started = await d.startTrusted('stall')
     const outcome = await started.done
-    const elapsed = Date.now() - t0
     expect(outcome.status).toBe('failed')
     expect(outcome.nodes.find(n => n.nodeId === 'think')?.status).toBe('failed')
-    // One retry: exactly two child attempts, each stopped as stalled (two 1 s idle windows + 100 ms delay).
+    // One retry: exactly two child attempts, each stopped as stalled. The proof is the reason, not wall time.
     expect(d.adapter.requests).toHaveLength(2)
-    expect(elapsed).toBeGreaterThanOrEqual(2000)
-    expect(elapsed).toBeLessThan(15_000)
     const store = await d.ctx.workflowRuns.storeFor(d.workspace)
     const detail = await store.getRun(started.runId)
-    const think = detail.nodeStates.find(s => s.nodeId === 'think')
+    const thinkStates = detail.nodeStates.filter(s => s.nodeId === 'think')
+    const think = thinkStates.at(-1)
     expect(think?.record.status).toBe('failed')
-    // Found while drilling: the stall reason itself (`stalled`) is not surfaced. The compiled script
-    // sees a null agent result and records the generic text below, so only the two attempts and the
-    // elapsed time prove the watchdog fired and the retry ran.
-    expect(think?.record.error).toBe('the agent did not complete')
+    // The earlier attempt is closed, never left "running".
+    expect(thinkStates.map(s => [s.attempt, s.running])).toEqual([[1, false], [2, false]])
+    // The watchdog's own reason survives: coded, naming the idle window and the retry count, with the real attempt count.
+    expect(think?.attempt).toBe(2)
+    expect(think?.record.error).toContain('NODE_STALLED')
+    expect(think?.record.error).toContain('1000 ms')
+    expect(think?.record.error).toContain('1 retry')
+    expect(think?.record.error).not.toContain('did not complete')
+    expect(outcome.nodes.find(n => n.nodeId === 'think')).toMatchObject({ attempts: 2, failureCode: 'NODE_STALLED' })
+    expect(outcome.reasons.think).toContain("raise idleTimeoutMs for this node or check the agent's output")
+    const nodeEnd = d.parent.session.events.find(e => e.type === 'tool-workflow/node-end' && (e.data as { nodeId?: string }).nodeId === 'think')
+    expect(nodeEnd?.data).toMatchObject({ attempts: 2, failure: { code: 'NODE_STALLED' } })
     const types = d.parent.session.events.map(e => e.type)
     expect(types.filter(t => t === 'tool-workflow/agent-start')).toHaveLength(2)
     const ends = d.parent.session.events.filter(e => e.type === 'tool-workflow/agent-end').map(e => (e.data as { outcome?: string }).outcome)

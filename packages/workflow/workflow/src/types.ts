@@ -149,6 +149,16 @@ export interface WorkflowNodeInfo {
   gateKind?: string
 }
 
+/** Why a node's agent was stopped by the child supervisor (never a genuine non-completion). */
+export interface WorkflowNodeFailure {
+  /** `NODE_STALLED`: no output inside the idle window. `NODE_TIMEOUT`: the hard per-node deadline passed. */
+  code: 'NODE_STALLED' | 'NODE_TIMEOUT'
+  /** The failure text, naming the elapsed window and the retry count (bounded). */
+  message: string
+  /** What to change to avoid it. */
+  remedy: string
+}
+
 /** One node's settlement (the `workflow/node-end` payload). */
 export interface WorkflowNodeEndInfo extends WorkflowNodeInfo {
   /** How the node settled. */
@@ -161,6 +171,10 @@ export interface WorkflowNodeEndInfo extends WorkflowNodeInfo {
   truncated?: boolean
   /** The failure text (never a secret; bounded). */
   error?: string
+  /** The supervisor stop that ended an agent node (stall or hard timeout); absent for a genuine non-completion. */
+  failure?: WorkflowNodeFailure
+  /** The real number of agent attempts the node ran (retries included), when the node ran an agent. */
+  attempts?: number
   /** True when the HOST synthesized this end on a terminal path (the script never reported it). */
   synthesized?: boolean
 }

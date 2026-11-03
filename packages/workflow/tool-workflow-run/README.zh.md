@@ -15,7 +15,8 @@
 - **恢复。** 只读取存储。仅当某节点成功、输出可恢复（完整输出或其溢写文件）且其所有依赖也被跳过时才跳过它。当某个会修改工作区的成功节点（bash、loop，或标记了 `mutatesCheckout` 的 prompt）输出不可恢复时，恢复会拒绝并指明该节点；若这样的节点已成功、但它依赖的节点没有可恢复输出（它将不得不再次运行），同样拒绝。恢复后的运行到达审批节点时，会重新创建待处理审批。
 - **可选引擎。** 不注入 `ctx.workflowEngine`：没有它的组合（web 预设）仍会挂载运行器（`workflow_run` 工具仅在引擎出现后才注册，因此模型的工具层保持为空），`dryRun` 与读取可用，`start` 会在写入任何信任或运行记录之前以 `RUNNER_UNAVAILABLE` 被拒绝。
 - **界面控制。** `attachUi()` 是显式的有人在场信号（返回释放函数；订阅并不算），`cancel(runId, reason, scope)` 接受 `CancelScope`（工作区，给定时还包括会话），对范围之外的运行与未知运行作出完全相同的应答；`dryRun(workspace, options)` 接受 `DryRunOptions`（`name`、`path`、`inputs`、`caller`），对不受信任的内容返回一次性 `trustChallenge`（五分钟，绑定调用方、工作区与信任键；每个调用方最多同时持有四个），`start` 必须将其与 `trustHash` 一同提交。已受信任的内容会忽略两者。
-- **会话记录。** 通过 [`@deepseek-ai/dsh-tool-workflow`](../tool-workflow/README.md) 导出的记录器写入：`tool-workflow/run-start`、`agent-start`、`agent-end`、`node-start`、`node-end`（带 `truncated`）、`approval`（待定及每次决定，原因去除控制字符并限 500 字符）、`gate-report`、`run-end`，均为仅日志事件，以存储运行 id 为键。这些事件在回合之间合法，因此空闲的父 agent 无需打开的回合即可记录。
+- **会话记录。** 通过 [`@deepseek-ai/dsh-tool-workflow`](../tool-workflow/README.md) 导出的记录器写入：`tool-workflow/run-start`、`agent-start`、`agent-end`、`node-start`、`node-end`（带 `truncated`、实际 `attempts`，以及看门狗或截止时间停止 agent 时的 `failure` 代码）、`approval`（待定及每次决定，原因去除控制字符并限 500 字符）、`gate-report`、`run-end`，均为仅日志事件，以存储运行 id 为键。这些事件在回合之间合法，因此空闲的父 agent 无需打开的回合即可记录。
+- **节点失败原因。** 其 agent 被监督器停止的 prompt 节点会以带代码的原因失败，而不再是“the agent did not complete”：`NODE_STALLED`（`idle_timeout_ms` 内无输出；消息写明窗口与重试次数；补救：为该节点调大 `idle_timeout_ms` 或检查 agent 的输出）或 `NODE_TIMEOUT`（超过硬性 `timeout_ms` 上限；补救：调大 `timeout_ms` 或拆分节点）。代码与消息进入节点记录（`error`，`attempt` 为实际尝试次数，之前的尝试记为失败）、运行结果的节点行与原因、关卡报告行以及 `tool-workflow/node-end` 事件（`failure`、`attempts`）。子 agent 自行结束但未完成时仍保留“the agent did not complete”。
 
 ## 配置
 

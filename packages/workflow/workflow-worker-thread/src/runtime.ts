@@ -60,6 +60,32 @@ const LABEL_PATTERN = /^[a-z][a-z_]{0,31}$/
 /** Bound on a node's error text carried in an event. */
 const NODE_ERROR_MAX_CHARS = 2000
 
+/**
+ * The documented node failure for a supervisor stop. A stall is "no output for the idle window";
+ * a timeout is the hard per-node limit. Both name the window and the retry count.
+ */
+function describeStop(
+  stop: { code: 'NODE_STALLED' | 'NODE_TIMEOUT'; idleTimeoutMs?: number; timeoutMs?: number },
+  attempts: number,
+): NonNullable<WorkflowNodeEndInfo['failure']> {
+  const retries = Math.max(attempts - 1, 0)
+  const retried = `after ${attempts} attempt${attempts === 1 ? '' : 's'} (${retries} retr${retries === 1 ? 'y' : 'ies'})`
+  if (stop.code === 'NODE_STALLED') {
+    const window = stop.idleTimeoutMs === undefined ? 'the idle window' : `${stop.idleTimeoutMs} ms`
+    return {
+      code: 'NODE_STALLED',
+      message: `NODE_STALLED: the agent produced no output for ${window} (idleTimeoutMs) ${retried}`,
+      remedy: "raise idleTimeoutMs for this node or check the agent's output",
+    }
+  }
+  const limit = stop.timeoutMs === undefined ? 'the node deadline' : `${stop.timeoutMs} ms`
+  return {
+    code: 'NODE_TIMEOUT',
+    message: `NODE_TIMEOUT: the agent did not finish within ${limit} (timeoutMs, the hard per-node limit) ${retried}`,
+    remedy: 'raise timeoutMs (timeout_ms in YAML) for this node or split its work into smaller nodes',
+  }
+}
+
 /** The `agent()` options the script may pass; everything else rejects loud. */
 const SUPPORTED_AGENT_OPTIONS = new Set([
   'label', 'phase', 'schema', 'provider', 'model', 'nodeId', 'tier', 'timeoutMs', 'idleTimeoutMs', 'retry', 'doneWhen',
@@ -130,6 +156,10 @@ export class WorkflowExecution {
   private readonly liveNodes = new Map<string, WorkflowNodeInfo>()
   /** The last exhausted done-when evidence per node label (read by the `evidence()` hook). */
   private readonly evidenceByNode = new Map<string, WorkflowContinuationEvidence>()
+  /** Attempts the node's latest agent call ran, retries included (reported as `attempts` on node-end). */
+  private readonly attemptsByNode = new Map<string, number>()
+  /** The supervisor stop that ended a node's latest agent call, when it was a stall or a deadline. */
+  private readonly stopByNode = new Map<string, { code: 'NODE_STALLED' | 'NODE_TIMEOUT'; idleTimeoutMs?: number; timeoutMs?: number }>()
 
   constructor(
     meta: WorkflowMeta,
@@ -333,21 +363,41 @@ export class WorkflowExecution {
     const opts = this.readAgentOptions(rawOpts)
     const maxAttempts = opts.retry?.maxAttempts ?? 1
     for (let attempt = 1; ; attempt += 1) {
-      let outcome: { value: unknown; transient: boolean }
+      let outcome: { value: unknown; transient: boolean; stopReason?: string }
       try {
         outcome = await this.agentAttempt(rawPrompt, opts)
       } catch (error: unknown) {
         const startFailure = error instanceof WorkflowError && error.code === 'AGENT_START' && !this.isCancelled()
-        if (!startFailure || attempt >= maxAttempts) throw error
+        if (!startFailure || attempt >= maxAttempts) {
+          this.noteAgentCall(opts, attempt, undefined)
+          throw error
+        }
         outcome = { value: null, transient: true }
       }
-      if (!outcome.transient || attempt >= maxAttempts) return outcome.value
+      if (!outcome.transient || attempt >= maxAttempts) {
+        this.noteAgentCall(opts, attempt, outcome.stopReason)
+        return outcome.value
+      }
       await this.pause(opts.retry?.delayMs ?? 0)
     }
   }
 
+  /** Remember how many attempts a node's agent call ran and whether the supervisor stopped the last one. */
+  private noteAgentCall(opts: ReturnType<WorkflowExecution['readAgentOptions']>, attempts: number, stopReason: string | undefined): void {
+    const nodeId = opts.nodeId
+    if (nodeId === undefined) return
+    this.attemptsByNode.set(nodeId, attempts)
+    if (stopReason === 'stalled') {
+      this.stopByNode.set(nodeId, { code: 'NODE_STALLED', ...opts.idleTimeoutMs !== undefined ? { idleTimeoutMs: opts.idleTimeoutMs } : {} })
+    } else if (stopReason === 'timeout') {
+      this.stopByNode.set(nodeId, { code: 'NODE_TIMEOUT', ...opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {} })
+    } else {
+      this.stopByNode.delete(nodeId)
+    }
+  }
+
   /** One attempt of {@link agent}. */
-  private async agentAttempt(rawPrompt: string, opts: ReturnType<WorkflowExecution['readAgentOptions']>): Promise<{ value: unknown; transient: boolean }> {
+  private async agentAttempt(rawPrompt: string, opts: ReturnType<WorkflowExecution['readAgentOptions']>): Promise<{ value: unknown; transient: boolean; stopReason?: string }> {
     if (this.started >= this.limits.maxTotalAgents) {
       throw new WorkflowError(
         `this run reached its total agent cap (${this.limits.maxTotalAgents}) — a runaway-loop backstop; raise the applicable maxTotalAgents limit if the scale is intentional`,
@@ -439,7 +489,7 @@ export class WorkflowExecution {
           throw this.cancelledError()
         }
         this.observer.agentEnd({ ...info, outcome: 'failed' })
-        return { value: null, transient: TRANSIENT_STOP_REASONS.has(result.stopReason) }
+        return { value: null, transient: TRANSIENT_STOP_REASONS.has(result.stopReason), stopReason: result.stopReason }
       } finally {
         await run.dispose()
       }
@@ -748,13 +798,20 @@ export class WorkflowExecution {
     if (info.output !== undefined && typeof info.output !== 'string') throw new WorkflowError('nodeEnd() output must be a string', 'INVALID_ARGUMENT')
     if (info.error !== undefined && typeof info.error !== 'string') throw new WorkflowError('nodeEnd() error must be a string', 'INVALID_ARGUMENT')
     this.liveNodes.delete(nodeId)
+    const attempts = this.attemptsByNode.get(nodeId)
+    const stop = this.stopByNode.get(nodeId)
+    this.attemptsByNode.delete(nodeId)
+    this.stopByNode.delete(nodeId)
+    const failure = info.status === 'failed' && stop !== undefined ? describeStop(stop, attempts ?? 1) : undefined
     this.observer.nodeEnd({
       ...started,
       status: info.status as WorkflowNodeStatus,
+      ...attempts !== undefined ? { attempts } : {},
+      ...failure !== undefined ? { failure, error: failure.message.slice(0, NODE_ERROR_MAX_CHARS) } : {},
       ...exitCode !== undefined ? { exitCode } : {},
       ...durationMs !== undefined ? { durationMs } : {},
       ...info.truncated !== undefined ? { truncated: info.truncated } : {},
-      ...typeof info.error === 'string' ? { error: info.error.slice(0, NODE_ERROR_MAX_CHARS) } : {},
+      ...typeof info.error === 'string' && failure === undefined ? { error: info.error.slice(0, NODE_ERROR_MAX_CHARS) } : {},
     })
   }
 
