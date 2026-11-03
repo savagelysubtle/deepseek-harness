@@ -53,7 +53,13 @@
   overflow: auto;
 }
 
+/* Sticky inside the scrolling panel so the tabs and the lease indicator stay visible under a long dry-run plan. */
 .header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding-bottom: 8px;
+  background: var(--dsw-alias-bg-module-platform);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
