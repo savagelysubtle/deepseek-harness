@@ -3,19 +3,46 @@ import { useState } from 'react'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { WorkflowRunTranslate, WorkflowRunViewContract } from '@deepseek-ai/dsh-client-ui-workflow-run/client'
 import type { WorkflowApprovalView, WorkflowNodeView } from '@deepseek-ai/dsh-workflow-remote/client'
-import type { NodeOutputView, RunDetailView, WorkflowsController, WorkflowsState } from '../controller.ts'
+import type { LeaseView, NodeOutputView, RunDetailView, WorkflowsController, WorkflowsState } from '../controller.ts'
 import css from '../Workflows.module.css'
 import { FailureNotice, statusLabel } from './shared.tsx'
 import type { T } from './shared.tsx'
 
-/** Approve / reject controls for one waiting approval. */
-function ApprovalActions({ controller, runId, approvalId, t }: {
+/** Why approve and reject are unavailable, next to where they would be. */
+function ApprovalFence({ lease, t }: { lease: LeaseView; t: T }) {
+  return (
+    <span className={css.approvalActions} data-approval-fenced data-lease-state={lease.state}>
+      {lease.failure === undefined
+        ? <span className={css.remedy} data-approval-fence-reason>{t('approvals.fenced', { state: t(`lease.${lease.state}`) })}</span>
+        : lease.failure.error === 'LEASE_LAPSED'
+          ? <span className={css.remedy} data-approval-fence-reason>{t('lease.lapsedExpired')}</span>
+          : <FailureNotice failure={lease.failure} scope="approval-fence" t={t} />}
+    </span>
+  )
+}
+
+/** The command a node would run, from the open plan of the same workflow; plain text only. */
+function ApprovalCommand({ commands, t }: { commands: readonly { command: string; field: string }[] | undefined; t: T }) {
+  if (commands === undefined) return <span className={css.muted} data-approval-command-unknown>{t('approvals.noCommand')}</span>
+  if (commands.length === 0) return <span className={css.muted} data-approval-command-none>{t('approvals.noShell')}</span>
+  return (
+    <span data-approval-commands>
+      {commands.map((entry, index) => <pre key={`${entry.field}:${index}`} className={css.pre} data-approval-command>{entry.command}</pre>)}
+    </span>
+  )
+}
+
+/** Approve / reject controls for one waiting approval; present only while the lease is attached. */
+function ApprovalActions({ controller, runId, approvalId, lease, busy, t }: {
   controller: WorkflowsController
   runId: string
   approvalId: string
+  lease: LeaseView
+  busy: boolean
   t: T
 }) {
   const [reason, setReason] = useState('')
+  if (lease.state !== 'attached') return <ApprovalFence lease={lease} t={t} />
   return (
     <span className={css.approvalActions}>
       <input
@@ -26,11 +53,23 @@ function ApprovalActions({ controller, runId, approvalId, t }: {
         value={reason}
         onChange={(event) => { setReason(event.target.value) }}
       />
-      <Button size="sm" variant="primary" data-approve onClick={() => { void controller.approve(runId, approvalId) }}>{t('approvals.approve')}</Button>
-      <Button size="sm" variant="outline" data-reject onClick={() => { void controller.reject(runId, approvalId, reason) }}>{t('approvals.reject')}</Button>
+      <Button size="sm" variant="primary" data-approve disabled={busy} onClick={() => { void controller.approve(runId, approvalId) }}>{t('approvals.approve')}</Button>
+      <Button size="sm" variant="outline" data-reject disabled={busy} onClick={() => { void controller.reject(runId, approvalId, reason) }}>{t('approvals.reject')}</Button>
     </span>
   )
 }
+
+/** The shell commands of one node when the open plan belongs to that workflow, otherwise unknown. */
+function commandsFor(
+  state: WorkflowsState, workflow: string | undefined, nodeId: string,
+): { command: string; field: string }[] | undefined {
+  const plan = state.dryRun?.plan
+  if (plan === undefined || workflow === undefined || plan.name !== workflow) return undefined
+  return plan.trust.bashCommands.filter(entry => entry.nodeId === nodeId)
+}
+
+/** Statuses with nothing to resume: still live, still closing, or finished well. */
+const NOT_RESUMABLE: ReadonlySet<string> = new Set(['running', 'cancelling', 'success', 'completed'])
 
 const APPROVAL_STATES: ReadonlySet<string> = new Set(['pending', 'allowed', 'rejected', 'expired', 'cancelled', 'unavailable'])
 
@@ -65,8 +104,9 @@ function NodeOutput({ node, output, controller, t }: {
   )
 }
 
-function RunDetail({ controller, view, t, runT, runView }: {
+function RunDetail({ controller, state, view, t, runT, runView }: {
   controller: WorkflowsController
+  state: WorkflowsState
   view: RunDetailView
   t: T
   runT: WorkflowRunTranslate
@@ -95,8 +135,8 @@ function RunDetail({ controller, view, t, runT, runView }: {
             {detail.status === 'running' && (
               <Button size="sm" variant="outline" data-run-cancel onClick={() => { void controller.cancel(detail.runId) }}>{t('detail.cancel')}</Button>
             )}
-            {detail.status !== 'running' && detail.status !== 'success' && detail.status !== 'completed' && (
-              <Button size="sm" variant="outline" data-run-resume onClick={() => { void controller.resume(detail.runId) }}>{t('detail.resume')}</Button>
+            {!NOT_RESUMABLE.has(detail.status) && (
+              <Button size="sm" variant="outline" data-run-resume disabled={state.busy.includes(`resume:${detail.runId}`)} onClick={() => { void controller.resume(detail.runId) }}>{t('detail.resume')}</Button>
             )}
           </div>
           {detail.inputs !== undefined && Object.keys(detail.inputs).length > 0 && (
@@ -139,9 +179,10 @@ function RunDetail({ controller, view, t, runT, runView }: {
                     data-approval-state={approval.state}
                   >
                     <span>{approval.message}</span>
+                    <ApprovalCommand commands={commandsFor(state, detail.name, approval.nodeId)} t={t} />
                     <ApprovalState state={approval.state} t={runT} view={runView} />
                     {approval.reason !== undefined && <span className={css.muted} data-approval-reason>{approval.reason}</span>}
-                    {approval.state === 'pending' && <ApprovalActions controller={controller} runId={detail.runId} approvalId={approval.approvalId} t={t} />}
+                    {approval.state === 'pending' && <ApprovalActions controller={controller} runId={detail.runId} approvalId={approval.approvalId} lease={state.lease} busy={state.busy.includes(`approval:${approval.approvalId}`)} t={t} />}
                   </li>
                 ))}
               </ul>
@@ -178,7 +219,18 @@ export function RunsTab({ controller, state, t, runT, runView }: {
             <li key={approval.approvalId} className={css.node} data-approval-row data-run-id={approval.runId} data-approval-id={approval.approvalId} data-approval-state="pending">
               <span className={css.muted}>{approval.runId} · {approval.nodeId}</span>
               <span data-approval-message>{approval.message}</span>
-              <ApprovalActions controller={controller} runId={approval.runId} approvalId={approval.approvalId} t={t} />
+              <ApprovalCommand
+                commands={commandsFor(state, runs.items.find(run => run.runId === approval.runId)?.name, approval.nodeId)}
+                t={t}
+              />
+              <ApprovalActions
+                controller={controller}
+                runId={approval.runId}
+                approvalId={approval.approvalId}
+                lease={state.lease}
+                busy={state.busy.includes(`approval:${approval.approvalId}`)}
+                t={t}
+              />
             </li>
           ))}
         </ul>
@@ -219,7 +271,7 @@ export function RunsTab({ controller, state, t, runT, runView }: {
         )}
         {detail === null
           ? null
-          : <RunDetail key={detail.runId} controller={controller} view={detail} t={t} runT={runT} runView={runView} />}
+          : <RunDetail key={detail.runId} controller={controller} state={state} view={detail} t={t} runT={runT} runView={runView} />}
       </section>
     </div>
   )

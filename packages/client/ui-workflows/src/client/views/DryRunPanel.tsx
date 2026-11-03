@@ -1,8 +1,8 @@
 /** Dry-run view: the plan, the gate manifest, every shell command, and the trust confirmation flow. */
-import { useState } from 'react'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import { WORKFLOW_LAYOUT } from '@deepseek-ai/dsh-workflow-remote/client'
 import type { WorkflowDryRunOk, WorkflowInputSpec, WorkflowInputValue } from '@deepseek-ai/dsh-workflow-remote/client'
+import { planIdentity } from '../controller.ts'
 import type { DryRunView, WorkflowsController } from '../controller.ts'
 import css from '../Workflows.module.css'
 import { FailureNotice } from './shared.tsx'
@@ -182,15 +182,17 @@ export function DryRunPanel({ controller, dryRun, inputs, t }: {
   inputs: readonly WorkflowInputSpec[]
   t: T
 }) {
-  const [ack, setAck] = useState(false)
   const plan = dryRun.plan
   const untrusted = plan !== undefined && !plan.trusted
+  // The acknowledgement lives in the controller, bound to this exact plan; it never outlives a re-plan.
+  const ack = plan !== undefined && dryRun.ackKey !== undefined && dryRun.ackKey === planIdentity(plan)
+  const unconfirmable = untrusted && plan.confirmText === undefined
   return (
     <section className={css.dryrun} data-dryrun-view data-dryrun-status={dryRun.status}>
       <div className={css.sectionHead}>
         <h3 className={css.heading}>{t('dryrun.heading')}</h3>
         <span>
-          <button type="button" className={css.linkButton} data-dryrun-refresh onClick={() => { setAck(false); void controller.dryRun() }}>{t('dryrun.refresh')}</button>
+          <button type="button" className={css.linkButton} data-dryrun-refresh onClick={() => { void controller.dryRun() }}>{t('dryrun.refresh')}</button>
           <button type="button" className={css.linkButton} data-dryrun-close onClick={() => { controller.closeDryRun() }}>{t('dryrun.close')}</button>
         </span>
       </div>
@@ -222,14 +224,15 @@ export function DryRunPanel({ controller, dryRun, inputs, t }: {
                 <pre className={css.pre} data-confirm-text>{plan.confirmText}</pre>
               </>
             )}
-            {untrusted && (
+            {unconfirmable && <p className={css.warn} role="alert" data-no-confirm-text>{t('dryrun.noConfirm')}</p>}
+            {untrusted && !unconfirmable && (
               <label className={css.ack}>
                 <input
                   type="checkbox"
                   data-trust-ack
                   checked={ack}
-                  disabled={dryRun.spent}
-                  onChange={(event) => { setAck(event.target.checked) }}
+                  disabled={dryRun.spent || dryRun.stale || dryRun.starting}
+                  onChange={(event) => { controller.setAck(event.target.checked) }}
                 />
                 <span>{t('dryrun.ack')}</span>
               </label>
@@ -242,8 +245,9 @@ export function DryRunPanel({ controller, dryRun, inputs, t }: {
               size="sm"
               data-run-start
               data-trust-run={untrusted ? 'true' : 'false'}
-              disabled={dryRun.starting || dryRun.stale || dryRun.spent || (untrusted && !ack)}
-              onClick={() => { void controller.startRun(ack) }}
+              disabled={dryRun.starting || dryRun.stale || dryRun.spent || dryRun.startedRunId !== undefined
+                || unconfirmable || (untrusted && !ack)}
+              onClick={() => { void controller.startRun() }}
             >
               {untrusted ? t('dryrun.trustRun') : t('dryrun.run')}
             </Button>

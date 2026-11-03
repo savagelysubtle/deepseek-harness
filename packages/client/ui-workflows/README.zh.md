@@ -8,8 +8,8 @@
 
 - **工作流标签页。** 列出工作区的工作流文件，带有效/无效标记、节点数与诊断数以及最近一次运行。打开文件时会连同保存令牌一起读取并校验（防抖、按需，且每次加载后都会校验）。*新建工作流*会填入模板，并以 `expectedToken: null` 保存。
 - **编辑器。** 自带的 `WorkflowEditor`（文本框、行号栏、可点击的诊断）。保存时发送文件加载时的令牌。输掉竞争（`CONFLICT`）会触发编辑器的冲突状态并显示 Host 的消息与处理办法；**重新加载**会重读文件并丢弃未保存的修改，横幅上会如实说明。保存成功但目录刷新失败时，Host 的 `warning` 会以可见的*已保存，但有警告*提示显示，并按已保存处理。读取失败的文件显示失败原因，而不是空编辑器。
-- **试运行与信任。** 试运行和运行都会打开*已保存*文件的计划（有未保存修改时会先要求保存）：执行顺序、按 Host 布局绘制的依赖图、门禁清单、逐字显示的每条 Shell 命令（含工作目录和所设环境变量的名称）、智能体节点、提示文件与警告。声明的输入有一个小表单；修改输入会使计划过期，直到刷新。已受信任的计划可直接运行。未受信任的计划会显示 Host 给出的确切 `confirmText`，在勾选确认框之前*信任并运行*保持禁用；随后的运行会携带 `trustHash`（计划的 `trustKey`）和 `trustChallenge`。挑战令牌只能使用一次：未受信任的启动被拒后，计划被标记为已用，并要求刷新。启动运行后会在运行标签页中打开它。
-- **运行标签页。** 待处理的审批（*批准*、*拒绝*及可选原因）、按游标分页的运行列表，以及单个运行的详情：节点的状态、尝试次数、退出码与耗时，门禁报告、审批、输入、*文件在运行后已更改*提示，按 64 KiB 分片读取的节点输出，运行中可*取消运行*，已结束的可*恢复运行*。被拒绝的批准、拒绝、取消或恢复会一直显示 Host 的消息与处理办法，直到被关闭。
+- **试运行与信任。** 试运行和运行都会打开*已保存*文件的计划（有未保存修改时会先要求保存）：执行顺序、按 Host 布局绘制的依赖图、门禁清单、逐字显示的每条 Shell 命令（含工作目录和所设环境变量的名称）、智能体节点、提示文件与警告。声明的输入有一个小表单；修改输入会使计划过期，直到刷新。已受信任的计划可直接运行。未受信任的计划会显示 Host 给出的确切 `confirmText`，在勾选确认框之前*信任并运行*保持禁用。确认只对这份计划有效（其 `trustKey`、挑战令牌与文本）：任何新的试运行、编辑、保存、输入修改、令牌已用或关闭计划都会清除它，控制器自身在没有确认时也拒绝运行。Host 没有给出 `confirmText` 的未受信任计划不能运行（请刷新计划）。运行会携带 `trustHash`（计划的 `trustKey`）和 `trustChallenge`。挑战令牌只能使用一次：未受信任的启动被拒后，计划被标记为已用，并要求刷新。启动运行后会在运行标签页中打开它。
+- **运行标签页。** 待处理的审批（*批准*、*拒绝*及可选原因，仅在实时审批租约已连接时提供；否则在按钮所在位置显示租约的原因与处理办法；每个审批同一时间只发一次调用；当已打开的试运行计划属于同一工作流时，在消息旁显示该节点的 Shell 命令，否则该行会说明未显示命令）、按游标分页的运行列表，以及单个运行的详情：节点的状态、尝试次数、退出码与耗时，门禁报告、审批、输入、*文件在运行后已更改*提示，按 64 KiB 分片读取的节点输出，运行中可*取消运行*，已结束的可*恢复运行*（运行仍处于 `cancelling` 时不提供）。被拒绝的批准、拒绝、取消或恢复会一直显示 Host 的消息与处理办法，直到被关闭。
 - **实时审批租约。** 打开浮层会调用 `attachUi`；每 15 秒续约一次（Host 的有效期为 45 秒），浮层关闭或卸载时用 `detachUi` 释放。头部显示*实时审批已连接*；否则显示*已中断*或*不可用*，并给出原因与处理办法。续约失败会立即显示*已中断*，下一个周期重新获取租约；续约一直没有回应时，在有效期耗尽时宣告中断。403 是终态（*不可用*，不再重试）。
 - **事件。** `workflow/run-changed`、`workflow/approval-pending` 与 `workflow/approval-decided` 会发给每个已连接的浏览器，因此每个处理函数都会把事件的 `workspaceKey` 与 `list`、`runs`、`attachUi` 返回的键比较，忽略其他一切，包括没有键的事件。匹配的事件会刷新运行列表、工作流列表、待处理审批和已打开的运行；突发事件合并为一次进行中的刷新加一次排队的刷新。
 - **仅限本机的调用。** `save`、`run`、`resume`、`cancel`、`approve`、`reject`、`attachUi`、`detachUi` 和 `nodeOutput` 对不在 Host 机器上的浏览器只会返回一个简单的 `403`。每次调用都在 `src/client/api.ts` 中折叠为一个永不抛出的结果；这些端点上的 403 会用 `explainWorkflowRefusal`（Host 的*仅限本机*说明）加一行处理办法来解释，绝不会只显示状态码。
@@ -26,8 +26,8 @@
 | 列表 | `[data-workflow-list]`、`[data-workflow-row][data-workflow-name][data-workflow-valid][data-selected]`、`[data-list-refresh]`、`[data-new-workflow-name]`、`[data-new-workflow]`、`[data-new-workflow-problem="invalid\|exists"]` |
 | 编辑器 | `[data-workflow-editor]`、`[data-editor-textarea]`、`[data-validate]`、`[data-save]`、`[data-dryrun]`、`[data-run]`、`[data-conflict]`、`[data-reload]`、`[data-diagnostic]`、`[data-save-ok]`、`[data-save-warning]`（`[data-save-warning-text]`）、`[data-save-first]`、`[data-editor-new]` |
 | 试运行 | `[data-dryrun-view][data-dryrun-status]`、`[data-dryrun-refresh]`、`[data-dryrun-close]`、`[data-input-field][data-input-name]`、`[data-dryrun-stale]`、`[data-plan-list]` / `[data-plan-node][data-node-id]`、`[data-plan-graph]` / `[data-graph-node][data-node-id][data-node-kind][data-node-gate]` / `[data-graph-edge][data-from][data-to]`、`[data-gate-manifest]` / `[data-gate-entry][data-gate-node][data-gate-kind]`、`[data-trust-command][data-node-id]`（含 `[data-command]`）、`[data-trust-agent]`、`[data-plan-warning]` |
-| 信任与运行 | `[data-trust-state="trusted\|untrusted"]`、`[data-confirm-text]`、`[data-trust-ack]`、`[data-run-start][data-trust-run="true\|false"]`、`[data-trust-spent]`、`[data-run-started][data-run-id]` |
-| 运行 | `[data-run-list]`、`[data-run-row][data-run-id][data-run-status]`、`[data-runs-refresh]`、`[data-runs-more]`、`[data-pending-approvals]`、`[data-approval-row][data-run-id][data-approval-id][data-approval-state]`、`[data-approve]`、`[data-reject]`、`[data-reject-reason]` |
+| 信任与运行 | `[data-trust-state="trusted\|untrusted"]`、`[data-confirm-text]`、`[data-trust-ack]`、`[data-no-confirm-text]`、`[data-run-start][data-trust-run="true\|false"]`、`[data-trust-spent]`、`[data-run-started][data-run-id]` |
+| 运行 | `[data-run-list]`、`[data-run-row][data-run-id][data-run-status]`、`[data-runs-refresh]`、`[data-runs-more]`、`[data-pending-approvals]`、`[data-approval-row][data-run-id][data-approval-id][data-approval-state]`、`[data-approve]`、`[data-reject]`、`[data-reject-reason]`（仅在租约已连接时出现；否则显示 `[data-approval-fenced][data-lease-state]` 与 `[data-approval-fence-reason]`）、`[data-approval-command]`、`[data-approval-command-unknown]`、`[data-approval-command-none]` |
 | 运行详情 | `[data-run-detail][data-run-id][data-run-status]`、`[data-detail-close]`、`[data-run-cancel]`、`[data-run-resume]`、`[data-file-changed]`、`[data-run-error]`、`[data-workflow-nodes]` / `[data-workflow-node][data-node-id][data-node-kind][data-node-status]`、`[data-node-output-button]`、`[data-node-output]`、`[data-gate-table]` / `[data-gate-row][data-gate-node][data-gate-kind][data-gate-outcome]` |
 
 ## 组合方式
@@ -44,6 +44,8 @@
 
 ## 已知限制与暂缓事项
 
+- *恢复运行*不发送信任密钥或挑战令牌。恢复未受信任内容的运行会被 Host 拒绝，拒绝原因与处理办法会显示出来；信任的途径是重新试运行并运行该工作流，而不是恢复。
+- 审批旁显示的命令只来自同一工作流已打开的试运行计划。运行详情不带节点命令，而仅为查看而生成计划会产生新的一次性挑战令牌，因此该行会说明命令不可用。
 - 运行详情嵌入了 `ui-workflow-run` 的节点列表和门禁报告（经其 `runDetailToNodeData` 由 `runDetail` 映射），因此节点状态显示为 `done` 而不是线上的 `success`，且门禁报告的原因列为空（线上的门禁视图没有该字段）。门禁报告默认折叠，除非有门禁阻止。
 - 冲突的保存会把未保存的修改留在屏幕上，但只提供*重新加载*，而它会丢弃这些修改。
 - 图是静态的分层绘制（无缩放和平移）；很宽的工作流需要滚动。

@@ -31,6 +31,14 @@ async function started() {
   return ctx
 }
 
+/** Started controller with the `build` file open in the editor. */
+async function ready() {
+  const ctx = await started()
+  await ctx.controller.selectWorkflow('build')
+  await flush()
+  return ctx
+}
+
 beforeEach(() => { vi.useFakeTimers() })
 afterEach(() => { vi.useRealTimers() })
 
@@ -349,13 +357,6 @@ describe('editor', () => {
 })
 
 describe('dry run, trust and run', () => {
-  async function ready() {
-    const ctx = await started()
-    await ctx.controller.selectWorkflow('build')
-    await flush()
-    return ctx
-  }
-
   it('refuses to plan unsaved or new text, asking for a save first', async () => {
     const { remote, controller } = await ready()
     controller.edit('changed')
@@ -372,7 +373,8 @@ describe('dry run, trust and run', () => {
     const { remote, controller } = await started()
     await controller.dryRun()
     controller.setInput('a', 1)
-    await controller.startRun(true)
+    controller.setAck(true)
+    await controller.startRun()
     controller.closeDryRun()
     expect(remote.dryRun).not.toHaveBeenCalled()
     expect(remote.run).not.toHaveBeenCalled()
@@ -395,7 +397,8 @@ describe('dry run, trust and run', () => {
     await controller.dryRun()
     controller.setInput('target', 'prod')
     expect(controller.getSnapshot().dryRun).toMatchObject({ stale: true, inputValues: { target: 'prod' } })
-    await controller.startRun(true)
+    controller.setAck(true)
+    await controller.startRun()
     expect(remote.run).not.toHaveBeenCalled()
     await controller.dryRun()
     expect(remote.dryRun).toHaveBeenLastCalledWith(SESSION, { name: 'build', inputs: { target: 'prod' } })
@@ -407,11 +410,12 @@ describe('dry run, trust and run', () => {
   it('will not start an untrusted plan until the human confirmed, then sends the key and the challenge', async () => {
     const { remote, controller } = await ready()
     await controller.dryRun()
-    await controller.startRun(false)
+    await controller.startRun()
     expect(remote.run).not.toHaveBeenCalled()
     controller.setInput('target', 'prod')
     await controller.dryRun()
-    await controller.startRun(true)
+    controller.setAck(true)
+    await controller.startRun()
     expect(remote.run).toHaveBeenCalledWith(SESSION, {
       name: 'build', inputs: { target: 'prod' }, trustHash: PLAN.trustKey, trustChallenge: PLAN.trustChallenge,
     })
@@ -425,9 +429,11 @@ describe('dry run, trust and run', () => {
     const { remote, controller } = await ready()
     await controller.dryRun()
     remote.run.mockResolvedValue(hostValue(fail('TRUST_DENIED', { remedy: 'Refresh the plan.' })))
-    await controller.startRun(true)
+    controller.setAck(true)
+    await controller.startRun()
     expect(controller.getSnapshot().dryRun).toMatchObject({ spent: true, starting: false, startFailure: { error: 'TRUST_DENIED', remedy: 'Refresh the plan.' } })
-    await controller.startRun(true)
+    controller.setAck(true)
+    await controller.startRun()
     expect(remote.run).toHaveBeenCalledTimes(1)
     await controller.dryRun()
     expect(controller.getSnapshot().dryRun!.spent).toBe(false)
@@ -439,10 +445,10 @@ describe('dry run, trust and run', () => {
     remote.dryRun.mockResolvedValue(hostValue(TRUSTED_PLAN))
     await controller.dryRun()
     remote.run.mockResolvedValueOnce(hostValue(fail('WRITER_BUSY')))
-    await controller.startRun(false)
+    await controller.startRun()
     expect(remote.run).toHaveBeenLastCalledWith(SESSION, { name: 'build' })
     expect(controller.getSnapshot().dryRun).toMatchObject({ spent: false, startFailure: { error: 'WRITER_BUSY' } })
-    await controller.startRun(false)
+    await controller.startRun()
     expect(controller.getSnapshot().dryRun!.startedRunId).toBe('r9')
     controller.dispose()
   })
@@ -451,7 +457,8 @@ describe('dry run, trust and run', () => {
     const { remote, controller } = await ready()
     remote.dryRun.mockResolvedValue(hostValue({ ...PLAN, trustChallenge: undefined }))
     await controller.dryRun()
-    await controller.startRun(true)
+    controller.setAck(true)
+    await controller.startRun()
     expect(remote.run).toHaveBeenCalledWith(SESSION, { name: 'build', trustHash: PLAN.trustKey })
 
     const slow = Promise.withResolvers<unknown>()
@@ -581,5 +588,154 @@ describe('runs and run actions', () => {
     await controller.resume('r0')
     expect(controller.getSnapshot().actionFailure).toMatchObject({ error: 'TRUST_REQUIRED' })
     controller.dispose()
+  })
+})
+
+describe('trust acknowledgement is bound to the plan it was given for', () => {
+  it('drops the acknowledgement when the file is edited, and refuses to run on the stale plan', async () => {
+    const { remote, controller } = await ready()
+    await controller.dryRun()
+    controller.setAck(true)
+    expect(controller.getSnapshot().dryRun!.ackKey).toBeDefined()
+    controller.edit('changed')
+    expect(controller.getSnapshot().dryRun!.stale).toBe(true)
+    expect(controller.getSnapshot().dryRun!.ackKey).toBeUndefined()
+    await controller.startRun()
+    expect(remote.run).not.toHaveBeenCalled()
+    controller.dispose()
+  })
+
+  it('edit then save then a fresh plan does not inherit the earlier acknowledgement', async () => {
+    const { remote, controller } = await ready()
+    await controller.dryRun()
+    controller.setAck(true)
+    controller.edit('version: 1\nname: build\n# more\n')
+    await controller.save('version: 1\nname: build\n# more\n', 'tok-1')
+    expect(controller.getSnapshot().dryRun!.ackKey).toBeUndefined()
+    remote.dryRun.mockResolvedValueOnce(hostValue({ ...PLAN, trustChallenge: 'c2', confirmText: 'new text' }))
+    await controller.dryRun()
+    expect(controller.getSnapshot().dryRun!.stale).toBe(false)
+    expect(controller.getSnapshot().dryRun!.ackKey).toBeUndefined()
+    await controller.startRun()
+    expect(remote.run).not.toHaveBeenCalled()
+    controller.dispose()
+  })
+
+  it('a re-plan clears the acknowledgement; closing the plan does too', async () => {
+    const { remote, controller } = await ready()
+    await controller.dryRun()
+    controller.setAck(true)
+    await controller.dryRun()
+    expect(controller.getSnapshot().dryRun!.ackKey).toBeUndefined()
+    await controller.startRun()
+    expect(remote.run).not.toHaveBeenCalled()
+    controller.setAck(true)
+    controller.closeDryRun()
+    expect(controller.getSnapshot().dryRun).toBeNull()
+    controller.dispose()
+  })
+
+  it('an acknowledgement for another plan identity does not authorise this one', async () => {
+    const { remote, controller } = await ready()
+    await controller.dryRun()
+    controller.setAck(true)
+    remote.dryRun.mockResolvedValueOnce(hostValue({ ...PLAN, trustChallenge: 'other' }))
+    await controller.dryRun()
+    await controller.startRun()
+    expect(remote.run).not.toHaveBeenCalled()
+    controller.dispose()
+  })
+
+  it('an untrusted plan with no confirmation text cannot be acknowledged or run', async () => {
+    const { remote, controller } = await ready()
+    remote.dryRun.mockResolvedValue(hostValue({ ...PLAN, confirmText: undefined }))
+    await controller.dryRun()
+    controller.setAck(true)
+    expect(controller.getSnapshot().dryRun!.ackKey).toBeUndefined()
+    await controller.startRun()
+    expect(remote.run).not.toHaveBeenCalled()
+    controller.dispose()
+  })
+
+  it('a spent token clears the acknowledgement', async () => {
+    const { remote, controller } = await ready()
+    await controller.dryRun()
+    controller.setAck(true)
+    remote.run.mockResolvedValue(hostValue(fail('TRUST_DENIED')))
+    await controller.startRun()
+    expect(controller.getSnapshot().dryRun!.spent).toBe(true)
+    expect(controller.getSnapshot().dryRun!.ackKey).toBeUndefined()
+    controller.dispose()
+  })
+})
+
+describe('in-flight guards and the lease fence', () => {
+  it('sends one run for a double click and none after the run started', async () => {
+    const { remote, controller } = await started()
+    await controller.selectWorkflow('build')
+    await flush()
+    remote.dryRun.mockResolvedValue(hostValue(TRUSTED_PLAN))
+    await controller.dryRun()
+    const slow = Promise.withResolvers<unknown>()
+    remote.run.mockImplementationOnce(() => slow.promise)
+    const first = controller.startRun()
+    const second = controller.startRun()
+    slow.resolve(hostValue({ ok: true, runId: 'r9' }))
+    await Promise.all([first, second])
+    await controller.startRun()
+    expect(remote.run).toHaveBeenCalledTimes(1)
+    controller.dispose()
+  })
+
+  it('sends one approve, one reject and one resume per double click', async () => {
+    const { remote, controller } = await started()
+    const slow = Promise.withResolvers<unknown>()
+    remote.approve.mockImplementationOnce(() => slow.promise)
+    const a = [controller.approve('r1', 'ap1'), controller.approve('r1', 'ap1')]
+    expect(controller.getSnapshot().busy).toEqual(['approval:ap1'])
+    slow.resolve(hostValue({ ok: true }))
+    await Promise.all(a)
+    expect(remote.approve).toHaveBeenCalledTimes(1)
+    expect(controller.getSnapshot().busy).toEqual([])
+
+    const slowReject = Promise.withResolvers<unknown>()
+    remote.reject.mockImplementationOnce(() => slowReject.promise)
+    const r = [controller.reject('r1', 'ap1', ''), controller.reject('r1', 'ap1', '')]
+    slowReject.resolve(hostValue({ ok: true }))
+    await Promise.all(r)
+    expect(remote.reject).toHaveBeenCalledTimes(1)
+
+    const slowResume = Promise.withResolvers<unknown>()
+    remote.resume.mockImplementationOnce(() => slowResume.promise)
+    const s = [controller.resume('r0'), controller.resume('r0')]
+    slowResume.resolve(hostValue({ ok: true, runId: 'r8' }))
+    await Promise.all(s)
+    expect(remote.resume).toHaveBeenCalledTimes(1)
+    controller.dispose()
+  })
+
+  it('does not send approve or reject unless the lease is attached, and says why', async () => {
+    const { remote, controller } = await started()
+    remote.attachUi.mockResolvedValueOnce(hostValue(fail('NOT_FOUND', { remedy: 'Reopen the panel.' })))
+    await vi.advanceTimersByTimeAsync(WORKFLOW_ATTACH_RENEW_MS)
+    expect(controller.getSnapshot().lease.state).toBe('lapsed')
+    await controller.approve('r1', 'ap1')
+    await controller.reject('r1', 'ap1', '')
+    expect(remote.approve).not.toHaveBeenCalled()
+    expect(remote.reject).not.toHaveBeenCalled()
+    expect(controller.getSnapshot().actionFailure).toMatchObject({ error: 'NOT_FOUND', remedy: 'Reopen the panel.' })
+    controller.dispose()
+  })
+
+  it('releases a lease minted by a renew that resolves after dispose', async () => {
+    const { remote, controller } = await started()
+    const slow = Promise.withResolvers<unknown>()
+    remote.attachUi.mockImplementationOnce(() => slow.promise)
+    await vi.advanceTimersByTimeAsync(WORKFLOW_ATTACH_RENEW_MS)
+    controller.dispose()
+    remote.detachUi.mockClear()
+    slow.resolve(hostValue({ ok: true, leaseId: 'n'.repeat(32), ttlMs: 45_000, workspaceKey: KEY }))
+    await flush()
+    expect(remote.detachUi).toHaveBeenCalledWith(SESSION, { leaseId: 'n'.repeat(32) })
   })
 })

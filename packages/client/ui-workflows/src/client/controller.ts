@@ -62,6 +62,12 @@ export interface DryRunView {
   readonly starting: boolean
   readonly startFailure?: UiFailure | undefined
   readonly startedRunId?: string | undefined
+  /**
+   * Identity of the plan the human acknowledged (see {@link planIdentity}); undefined when no
+   * acknowledgement stands. It is cleared by every re-plan, edit, save, input change and spent token,
+   * so an acknowledgement can never carry over to a plan the human did not read.
+   */
+  readonly ackKey?: string | undefined
 }
 
 /** One node's loaded output. */
@@ -102,6 +108,8 @@ export interface WorkflowsState {
   readonly approvals: Loadable<WorkflowPendingApproval>
   readonly detail: RunDetailView | null
   readonly lease: LeaseView
+  /** Keys of the approve, reject and resume calls in flight; their buttons are disabled. */
+  readonly busy: readonly string[]
   /** The last approve, reject, cancel or resume that failed; shown until dismissed or superseded. */
   readonly actionFailure?: UiFailure | undefined
 }
@@ -118,6 +126,15 @@ export interface WorkflowEventSource {
     approvalPending(approval: WorkflowApprovalPending): void
     approvalDecided(decision: WorkflowApprovalDecided): void
   }): () => void
+}
+
+/**
+ * What an acknowledgement is bound to: the plan's trust key and its single-use challenge.
+ * @param plan - a dry-run plan.
+ * @returns a string equal only for the same plan as issued.
+ */
+export function planIdentity(plan: WorkflowDryRunOk): string {
+  return JSON.stringify([plan.trustKey, plan.trustChallenge ?? null, plan.confirmText ?? null])
 }
 
 /** Workflow file names the Host accepts. */
@@ -139,12 +156,14 @@ const RUNS_PAGE = 50
 export class WorkflowsController {
   private state: WorkflowsState = {
     tab: 'workflows', workspaceKey: null, list: EMPTY_LOAD, editor: null, dryRun: null,
-    runs: EMPTY_LOAD, approvals: EMPTY_LOAD, detail: null, lease: { state: 'detached' },
+    runs: EMPTY_LOAD, approvals: EMPTY_LOAD, detail: null, lease: { state: 'detached' }, busy: [],
   }
   private readonly listeners = new Set<() => void>()
   private disposed = false
   private started = false
   private leaseId: string | undefined
+  private releasedLeaseId: string | undefined
+  private readonly inFlight = new Set<string>()
   private renewTimer: ReturnType<typeof setInterval> | undefined
   private ttlTimer: ReturnType<typeof setTimeout> | undefined
   private renewing = false
@@ -212,6 +231,7 @@ export class WorkflowsController {
     this.ttlTimer = undefined
     const leaseId = this.leaseId
     this.leaseId = undefined
+    this.releasedLeaseId = leaseId
     if (leaseId !== undefined) void this.api.detachUi(leaseId)
     this.listeners.clear()
   }
@@ -241,7 +261,12 @@ export class WorkflowsController {
     this.renewing = true
     try {
       const result = await this.api.attachUi(this.leaseId)
-      if (this.isClosed()) return
+      if (this.isClosed()) {
+        // The overlay closed while the renew was in flight: a lease the Host minted for it was never
+        // stored, so release it here rather than leave it to run out its TTL.
+        if (!isFailure(result) && result.leaseId !== this.releasedLeaseId) void this.api.detachUi(result.leaseId)
+        return
+      }
       this.applyLease(result)
     } finally {
       this.renewing = false
@@ -390,6 +415,13 @@ export class WorkflowsController {
    */
   edit(text: string): void {
     this.setEditor({ text, justSaved: false, saveFirst: false })
+    this.markPlanStale()
+  }
+
+  /** The open plan no longer describes the file or its inputs; drop any acknowledgement of it. */
+  private markPlanStale(): void {
+    const dryRun = this.state.dryRun
+    if (dryRun !== null) this.set({ dryRun: { ...dryRun, stale: true, ackKey: undefined } })
   }
 
   /**
@@ -418,6 +450,7 @@ export class WorkflowsController {
     const editor = this.state.editor
     if (editor === null || editor.saving) return
     this.setEditor({ saving: true, failure: undefined, justSaved: false })
+    this.markPlanStale()
     const result = await this.api.save({ name: editor.name, text, expectedToken: editor.isNew ? null : token })
     if (isFailure(result)) {
       this.setEditor({
@@ -432,6 +465,7 @@ export class WorkflowsController {
       saving: false, isNew: false, conflict: false, savedText: text, token: result.token,
       diagnostics: result.diagnostics, justSaved: true, warning: result.warning,
     }, editor.name)
+    this.markPlanStale()
     this.refresh('list', () => this.reloadList())
   }
 
@@ -469,7 +503,7 @@ export class WorkflowsController {
     if (dryRun === null) return
     const { [name]: _replaced, ...others } = dryRun.inputValues
     const inputValues = value === undefined ? others : { ...others, [name]: value }
-    this.set({ dryRun: { ...dryRun, inputValues, stale: true } })
+    this.set({ dryRun: { ...dryRun, inputValues, stale: true, ackKey: undefined } })
   }
 
   /**
@@ -481,16 +515,33 @@ export class WorkflowsController {
   }
 
   /**
-   * Start the planned run. An untrusted plan needs `confirmed` (the human ticked the box under the
-   * exact confirmation text); the key and the single-use challenge from that plan go with the call.
-   * @param confirmed - whether the human acknowledged the confirmation text.
+   * Record the human's acknowledgement of the plan now showing. Refused unless the plan is ready,
+   * untrusted, current, unspent and carries a confirmation text to have read; unticking clears it.
+   * @param value - whether the human ticked the acknowledgement.
    */
-  async startRun(confirmed: boolean): Promise<void> {
+  setAck(value: boolean): void {
     const dryRun = this.state.dryRun
     const plan = dryRun?.plan
-    if (dryRun === null || plan === undefined || dryRun.starting || dryRun.stale || dryRun.spent) return
+    if (dryRun === null || plan === undefined) return
+    if (!value) {
+      this.set({ dryRun: { ...dryRun, ackKey: undefined } })
+      return
+    }
+    if (plan.trusted || plan.confirmText === undefined || dryRun.stale || dryRun.spent || dryRun.starting) return
+    this.set({ dryRun: { ...dryRun, ackKey: planIdentity(plan) } })
+  }
+
+  /**
+   * Start the planned run. An untrusted plan needs the acknowledgement recorded for exactly this
+   * plan (and a confirmation text); the key and the single-use challenge from that plan go with the call.
+   */
+  async startRun(): Promise<void> {
+    const dryRun = this.state.dryRun
+    const plan = dryRun?.plan
+    if (dryRun === null || plan === undefined) return
+    if (dryRun.starting || dryRun.stale || dryRun.spent || dryRun.startedRunId !== undefined) return
     const trusted = plan.trusted
-    if (!trusted && !confirmed) return
+    if (!trusted && (plan.confirmText === undefined || dryRun.ackKey !== planIdentity(plan))) return
     this.setDryRun({ starting: true, startFailure: undefined })
     const inputs = Object.keys(dryRun.inputValues).length === 0 ? undefined : dryRun.inputValues
     const result = await this.api.run({
@@ -504,10 +555,10 @@ export class WorkflowsController {
     if (this.state.dryRun === null) return
     if (isFailure(result)) {
       // The challenge is single-use: once presented, a failed attempt needs a fresh plan.
-      this.setDryRun({ starting: false, startFailure: result, spent: !trusted })
+      this.setDryRun({ starting: false, startFailure: result, spent: !trusted, ackKey: undefined })
       return
     }
-    this.setDryRun({ starting: false, startedRunId: result.runId })
+    this.setDryRun({ starting: false, startedRunId: result.runId, ackKey: undefined })
     this.refresh('runs', () => this.reloadRuns())
     this.refresh('list', () => this.reloadList())
     void this.openRun(result.runId)
@@ -639,14 +690,44 @@ export class WorkflowsController {
     if (this.state.detail?.runId === runId) this.refresh('detail', () => this.reloadDetail(runId))
   }
 
+  /** Run one privileged call at most once at a time per key; false when it is already in flight. */
+  private enter(key: string): boolean {
+    if (this.inFlight.has(key)) return false
+    this.inFlight.add(key)
+    this.set({ busy: [...this.inFlight] })
+    return true
+  }
+
+  private leave(key: string): void {
+    this.inFlight.delete(key)
+    this.set({ busy: [...this.inFlight] })
+  }
+
+  /** Approve and reject only go out while the human-present lease is held; otherwise say so. */
+  private leaseHeld(): boolean {
+    const { lease } = this.state
+    if (lease.state === 'attached') return true
+    this.set({
+      actionFailure: lease.failure ?? {
+        ok: false, error: 'LEASE_LAPSED', message: 'Live approvals are not attached, so this approval cannot be answered here.',
+      },
+    })
+    return false
+  }
+
   /**
    * Allow a waiting approval; a refusal stays visible as the action failure.
    * @param runId - the run.
    * @param approvalId - the approval.
    */
   async approve(runId: string, approvalId: string): Promise<void> {
-    const result = await this.api.approve(runId, approvalId)
-    this.set({ actionFailure: isFailure(result) ? result : undefined })
+    if (!this.leaseHeld() || !this.enter(`approval:${approvalId}`)) return
+    try {
+      const result = await this.api.approve(runId, approvalId)
+      this.set({ actionFailure: isFailure(result) ? result : undefined })
+    } finally {
+      this.leave(`approval:${approvalId}`)
+    }
     this.afterAction(runId)
   }
 
@@ -657,9 +738,14 @@ export class WorkflowsController {
    * @param reason - why; blank sends none.
    */
   async reject(runId: string, approvalId: string, reason: string): Promise<void> {
-    const trimmed = reason.trim()
-    const result = await this.api.reject(runId, approvalId, trimmed === '' ? undefined : trimmed)
-    this.set({ actionFailure: isFailure(result) ? result : undefined })
+    if (!this.leaseHeld() || !this.enter(`approval:${approvalId}`)) return
+    try {
+      const trimmed = reason.trim()
+      const result = await this.api.reject(runId, approvalId, trimmed === '' ? undefined : trimmed)
+      this.set({ actionFailure: isFailure(result) ? result : undefined })
+    } finally {
+      this.leave(`approval:${approvalId}`)
+    }
     this.afterAction(runId)
   }
 
@@ -668,23 +754,34 @@ export class WorkflowsController {
    * @param runId - the run.
    */
   async cancel(runId: string): Promise<void> {
-    const result = await this.api.cancel(runId)
-    this.set({ actionFailure: isFailure(result) ? result : undefined })
+    if (!this.enter(`cancel:${runId}`)) return
+    try {
+      const result = await this.api.cancel(runId)
+      this.set({ actionFailure: isFailure(result) ? result : undefined })
+    } finally {
+      this.leave(`cancel:${runId}`)
+    }
     this.afterAction(runId)
   }
 
   /**
-   * Resume an earlier run and open the new one.
+   * Resume an earlier run and open the new one. This sends no trust key: resuming a run of content
+   * that is not trusted yet is refused by the Host and the refusal and its remedy are shown.
    * @param runId - the run to resume.
    */
   async resume(runId: string): Promise<void> {
-    const result = await this.api.resume(runId)
-    if (isFailure(result)) {
-      this.set({ actionFailure: result })
-      return
+    if (!this.enter(`resume:${runId}`)) return
+    try {
+      const result = await this.api.resume(runId)
+      if (isFailure(result)) {
+        this.set({ actionFailure: result })
+        return
+      }
+      this.set({ actionFailure: undefined })
+      this.refresh('runs', () => this.reloadRuns())
+      void this.openRun(result.runId)
+    } finally {
+      this.leave(`resume:${runId}`)
     }
-    this.set({ actionFailure: undefined })
-    this.refresh('runs', () => this.reloadRuns())
-    void this.openRun(result.runId)
   }
 }

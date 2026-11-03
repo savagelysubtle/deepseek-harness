@@ -68,6 +68,22 @@ async function openEditor(remote = makeRemote()) {
   return ctx
 }
 
+/** Open the overlay, the first file, and its dry-run plan. */
+async function plan(remote = makeRemote()) {
+  const ctx = await openEditor(remote)
+  click('[data-dryrun]')
+  await present('[data-plan-list]')
+  return ctx
+}
+
+/** Open the overlay on its Runs tab. */
+async function runsTab(remote = makeRemote()) {
+  const ctx = await open(remote)
+  click('[data-workflows-tab-button="runs"]')
+  await present('[data-run-row]')
+  return ctx
+}
+
 describe('open, list and lease', () => {
   it('opens for the pressing session, lists files with validity, and attaches the live-approvals lease', async () => {
     const { remote, overlay } = await open()
@@ -252,13 +268,6 @@ describe('editor', () => {
 })
 
 describe('dry run and the trust flow', () => {
-  async function plan(remote = makeRemote()) {
-    const ctx = await openEditor(remote)
-    click('[data-dryrun]')
-    await present('[data-plan-list]')
-    return ctx
-  }
-
   it('shows the plan order, the graph, the gate manifest, every shell command, and the warnings', async () => {
     await plan()
     expect(qa('[data-plan-node]').map(node => node.dataset.nodeId)).toEqual(['clean', 'ship'])
@@ -364,13 +373,6 @@ describe('dry run and the trust flow', () => {
 })
 
 describe('runs, approvals and run detail', () => {
-  async function runsTab(remote = makeRemote()) {
-    const ctx = await open(remote)
-    click('[data-workflows-tab-button="runs"]')
-    await present('[data-run-row]')
-    return ctx
-  }
-
   it('lists runs and pending approvals', async () => {
     await runsTab()
     expect(qa('[data-run-row]').map(row => `${row.dataset.runId}:${row.dataset.runStatus}`)).toEqual(['r1:running', 'r0:failed'])
@@ -585,5 +587,136 @@ describe('header control', () => {
     expect(button.getAttribute('aria-expanded')).toBe('true')
     act(() => { overlay.close() })
     expect(button.getAttribute('aria-expanded')).toBe('false')
+  })
+})
+
+describe('trust acknowledgement across re-plans (view)', () => {
+  it('edit + save after ticking the box leaves the toolbar Run unable to run the next plan', async () => {
+    const remote = makeRemote()
+    await plan(remote)
+    click('[data-trust-ack]')
+    expect((q('[data-run-start]') as HTMLButtonElement).disabled).toBe(false)
+    const area = q('[data-editor-textarea]') as HTMLTextAreaElement
+    fireEvent.change(area, { target: { value: `${area.value}# edited\n` } })
+    await present('[data-dryrun-stale]')
+    expect((q('[data-run-start]') as HTMLButtonElement).disabled).toBe(true)
+    await waitFor(() => { expect((q('[data-save]') as HTMLButtonElement).disabled).toBe(false) })
+    click('[data-save]')
+    await present('[data-save-ok]')
+    remote.dryRun.mockResolvedValue(hostValue({ ...PLAN, trustChallenge: 'second', confirmText: 'second text' }))
+    click('[data-run]')
+    await waitFor(() => { expect(text('[data-confirm-text]')).toBe('second text') })
+    expect((q('[data-trust-ack]') as HTMLInputElement).checked).toBe(false)
+    expect((q('[data-run-start]') as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(q('[data-run-start]')!)
+    expect(remote.run).not.toHaveBeenCalled()
+  })
+
+  it('a new challenge from the toolbar Dry-run unticks the box and disables Run', async () => {
+    const remote = makeRemote()
+    await plan(remote)
+    click('[data-trust-ack]')
+    remote.dryRun.mockResolvedValue(hostValue({ ...PLAN, trustChallenge: 'second', confirmText: 'second text' }))
+    click('[data-dryrun]')
+    await waitFor(() => { expect(text('[data-confirm-text]')).toBe('second text') })
+    expect((q('[data-trust-ack]') as HTMLInputElement).checked).toBe(false)
+    expect((q('[data-run-start]') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('shows a notice and no runnable button for an untrusted plan without confirmation text', async () => {
+    const remote = makeRemote()
+    remote.dryRun.mockResolvedValue(hostValue({ ...PLAN, confirmText: undefined }))
+    await plan(remote)
+    expect(text('[data-no-confirm-text]')).toContain('no confirmation text')
+    expect(q('[data-trust-ack]')).toBeNull()
+    expect((q('[data-run-start]') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('sends a trusted run once on a double click and disables Run after it started', async () => {
+    const remote = makeRemote()
+    remote.dryRun.mockResolvedValue(hostValue(TRUSTED_PLAN))
+    await plan(remote)
+    const run = q('[data-run-start]')!
+    fireEvent.click(run)
+    fireEvent.click(run)
+    await waitFor(() => { expect(remote.run).toHaveBeenCalledTimes(1) })
+    await present('[data-run-detail]')
+    fireEvent.click(run)
+    expect(remote.run).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('approvals are fenced by the lease', () => {
+  it('shows the reason instead of approve and reject when the lease is refused (403)', async () => {
+    const remote = makeRemote()
+    remote.attachUi.mockResolvedValue(carrierFailure('transport failure for workflow/attachUi: HTTP 403'))
+    await runsTab(remote)
+    await present('[data-lease-state="refused"]')
+    expect(q('[data-approve]')).toBeNull()
+    expect(q('[data-reject]')).toBeNull()
+    expect(text('[data-approval-fenced] [data-failure-message]')).toBe(WORKFLOW_LOOPBACK_ONLY_MESSAGE)
+    expect(text('[data-approval-fenced] [data-failure-remedy]')).toContain('127.0.0.1')
+  })
+
+  it('removes approve and reject when the lease lapses and brings them back on re-attach', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const remote = makeRemote()
+    await runsTab(remote)
+    await present('[data-lease-state="attached"]')
+    expect(q('[data-pending-approvals] [data-approve]')).not.toBeNull()
+    remote.attachUi.mockResolvedValueOnce(hostValue(fail('NOT_FOUND', { remedy: 'Re-attaching.' })))
+    await act(async () => { await vi.advanceTimersByTimeAsync(WORKFLOW_ATTACH_RENEW_MS) })
+    await present('[data-lease-state="lapsed"]')
+    expect(q('[data-pending-approvals] [data-approve]')).toBeNull()
+    expect(q('[data-pending-approvals] [data-reject]')).toBeNull()
+    expect(text('[data-pending-approvals] [data-approval-fenced]')).toContain('Re-attaching.')
+    await act(async () => { await vi.advanceTimersByTimeAsync(WORKFLOW_ATTACH_RENEW_MS) })
+    await waitFor(() => { expect(q('[data-pending-approvals] [data-approve]')).not.toBeNull() })
+  })
+
+  it('shows the node command from the open plan next to the approval message, as text', async () => {
+    const remote = makeRemote()
+    remote.dryRun.mockResolvedValue(hostValue({ ...PLAN, trust: { ...PLAN.trust, bashCommands: [{ nodeId: 'ship', field: 'approval', command: '<b>rm -rf /</b>', envKeys: [], env: {} }] } }))
+    await openEditor(remote)
+    click('[data-dryrun]')
+    await present('[data-plan-list]')
+    click('[data-workflows-tab-button="runs"]')
+    await present('[data-run-row]')
+    expect(text('[data-pending-approvals] [data-approval-command]')).toBe('<b>rm -rf /</b>')
+    expect(q('[data-pending-approvals] [data-approval-command] b')).toBeNull()
+  })
+
+  it('says the command is unknown when no plan of that workflow is open', async () => {
+    await runsTab(makeRemote())
+    expect(q('[data-pending-approvals] [data-approval-command-unknown]')).not.toBeNull()
+  })
+})
+
+describe('resume', () => {
+  it('offers no Resume for a cancelling run', async () => {
+    const remote = makeRemote()
+    remote.runDetail.mockResolvedValue(hostValue({ ...DETAIL, status: 'cancelling' }))
+    await open(remote)
+    click('[data-workflows-tab-button="runs"]')
+    await present('[data-run-row]')
+    fireEvent.click(qa('[data-run-row]')[0]!)
+    await present('[data-run-detail]')
+    expect(q('[data-run-resume]')).toBeNull()
+    expect(q('[data-run-cancel]')).toBeNull()
+  })
+
+  it('shows the Host refusal and its remedy when resuming an untrusted run (no trust path from here)', async () => {
+    const remote = makeRemote()
+    remote.runDetail.mockResolvedValue(hostValue({ ...DETAIL, status: 'failed', approvals: [] }))
+    remote.resume.mockResolvedValue(hostValue(fail('TRUST_REQUIRED', { remedy: 'Dry-run the workflow and confirm it first.' })))
+    await open(remote)
+    click('[data-workflows-tab-button="runs"]')
+    await present('[data-run-row]')
+    fireEvent.click(qa('[data-run-row]')[1]!)
+    await present('[data-run-resume]')
+    click('[data-run-resume]')
+    await present('[data-failure-scope="action"]')
+    expect(remote.resume).toHaveBeenCalledWith(SESSION, { runId: 'r1' })
+    expect(text('[data-failure-scope="action"] [data-failure-remedy]')).toContain('Dry-run the workflow and confirm it first.')
   })
 })
