@@ -46,7 +46,7 @@ describe('exported workflow recorder', () => {
     const recorder = createWorkflowRecorder(ctx)
     recorder.start(session, engineRun, { nodes: true })
     const emit = (...args: unknown[]): void => { (ctx as unknown as { emit(...a: unknown[]): void }).emit(...args) }
-    const failure = { code: 'NODE_STALLED', message: 'NODE_STALLED: no output for 1000 ms', remedy: 'raise idleTimeoutMs' }
+    const failure = { code: 'NODE_STALLED', message: 'no output for 1000 ms', remedy: 'raise idleTimeoutMs' }
     emit('workflow/node-end', info, { nodeId: 'think', kind: 'prompt', status: 'failed', attempts: 2, failure })
     emit('workflow/node-end', info, { nodeId: 'plain', kind: 'bash', status: 'success' })
     const [stalled, plain] = session.events.filter(e => e.type === 'tool-workflow/node-end')

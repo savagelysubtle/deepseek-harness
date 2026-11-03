@@ -31,6 +31,18 @@ describe('node failure persistence', () => {
     expect(think[0]!.record.failure).toBeUndefined()
   })
 
+  it('puts the code in the model-facing gate reason, since the message carries no prefix', async () => {
+    h = await setup()
+    await h.writeWorkflow('demo', DEMO)
+    const started = await startTrusted(h)
+    const run = h.engine.runs[0]!
+    run.nodeStart({ nodeId: 'think', kind: 'prompt' })
+    run.nodeEnd({ nodeId: 'think', kind: 'prompt', status: 'failed', attempts: 2, error: `NODE_STALLED: ${MESSAGE}`, failure: { code: 'NODE_STALLED', message: MESSAGE, remedy: REMEDY } })
+    run.settle(COMPLETED)
+    const outcome = await started.done
+    expect(outcome.reasons['think']).toBe(`NODE_STALLED: ${MESSAGE}; remedy: ${REMEDY}`)
+  })
+
   it('writes no failure for a node that merely did not complete', async () => {
     const states = await runWith((run) => {
       run.nodeStart({ nodeId: 'think', kind: 'prompt' })

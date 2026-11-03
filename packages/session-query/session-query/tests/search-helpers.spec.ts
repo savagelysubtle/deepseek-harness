@@ -151,9 +151,9 @@ describe('session-query semantic extraction', () => {
       time: 1,
       data: {
         runId: 'r', nodeId: 'think', kind: 'prompt', status: 'failed', truncated: false, attempts: 2,
-        failure: { code: 'NODE_STALLED', message: 'NODE_STALLED: no output for 1000 ms', remedy: 'raise idleTimeoutMs' },
+        failure: { code: 'NODE_STALLED', message: 'no output for 1000 ms', remedy: 'raise idleTimeoutMs' },
       },
-    } as never)).toBe('think\nNODE_STALLED\nNODE_STALLED: no output for 1000 ms\nraise idleTimeoutMs\nattempts 2')
+    } as never)).toBe('think\nNODE_STALLED\nno output for 1000 ms\nraise idleTimeoutMs\nattempts 2')
     expect(extractSessionEventText({
       type: 'tool-workflow/node-end', seq: 1, time: 2, data: { runId: 'r', nodeId: 'a', kind: 'bash', status: 'success', truncated: false },
     } as never)).toBe('')

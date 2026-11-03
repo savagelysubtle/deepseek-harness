@@ -1002,7 +1002,7 @@ export class WorkflowRunsService extends Service {
     if (node.failure !== undefined) {
       entry.failure = node.failure
       // The gate report row for this node carries the coded reason (a block reason already recorded wins).
-      if (!run.reasons.has(nodeId)) run.reasons.set(nodeId, `${node.failure.message}; remedy: ${node.failure.remedy}`)
+      if (!run.reasons.has(nodeId)) run.reasons.set(nodeId, `${node.failure.code}: ${node.failure.message}; remedy: ${node.failure.remedy}`)
     }
     run.nodes.set(nodeId, entry)
     let output: string | undefined

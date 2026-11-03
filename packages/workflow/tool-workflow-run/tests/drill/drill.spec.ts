@@ -270,6 +270,7 @@ describe('drill: stall and done_when', () => {
     expect(think?.record.error).toContain('1 retry')
     expect(think?.record.error).not.toContain('did not complete')
     expect(outcome.nodes.find(n => n.nodeId === 'think')).toMatchObject({ attempts: 2, failureCode: 'NODE_STALLED' })
+    expect(outcome.reasons.think).toContain('NODE_STALLED: the agent produced no output')
     expect(outcome.reasons.think).toContain("raise idleTimeoutMs for this node or check the agent's output")
     const nodeEnd = d.parent.session.events.find(e => e.type === 'tool-workflow/node-end' && (e.data as { nodeId?: string }).nodeId === 'think')
     expect(nodeEnd?.data).toMatchObject({ attempts: 2, failure: { code: 'NODE_STALLED' } })

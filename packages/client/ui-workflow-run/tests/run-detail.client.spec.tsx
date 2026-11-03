@@ -141,4 +141,22 @@ describe('runDetailToNodeData', () => {
     expect(text.split('NODE_TIMEOUT').length - 1).toBe(1)
     expect(text.split(message).length - 1).toBe(1)
   })
+
+  it('keeps the approval reason beside the failure card without duplicating the failure', () => {
+    const t = makeTranslate(en)
+    const message = 'the command did not finish within 500 ms'
+    const view = runDetailToNodeData({
+      nodes: [{
+        nodeId: 'slow', kind: 'bash', status: 'failed', error: `NODE_TIMEOUT: ${message}`,
+        failure: { code: 'NODE_TIMEOUT', message, remedy: 'raise timeoutMs' },
+      }],
+      gates: [], approvals: [{ nodeId: 'slow', state: 'rejected', reason: 'not now' }],
+    } as never)
+    const { container } = render(<NodeList nodes={view.nodes} t={t} />)
+    const card = container.querySelector('[data-node-id="slow"]')
+    expect(card?.querySelector('[data-node-reason]')?.textContent).toBe('not now')
+    const text = card?.textContent ?? ''
+    expect(text.split('NODE_TIMEOUT').length - 1).toBe(1)
+    expect(text.split(message).length - 1).toBe(1)
+  })
 })
