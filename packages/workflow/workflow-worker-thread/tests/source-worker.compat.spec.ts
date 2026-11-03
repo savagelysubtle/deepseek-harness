@@ -27,7 +27,7 @@ it('runs the default config through the source worker', async () => {
   }
   ctx.subagents.registerProvider(provider)
   const engine = await ctx.plugin(WorkerThreadWorkflowEngine, {})
-  const parent = { id: SessionId('workflow-compat-parent'), options: {} } as unknown as Agent
+  const parent = { id: SessionId('workflow-compat-parent'), options: { model: 'test-model' } } as unknown as Agent
   try {
     const run = ctx.workflowEngine.start({
       script: 'return 6 * 7',

@@ -560,11 +560,17 @@ describe('plugin lifecycle', () => {
     await fiber.await()
     expect(ctx.conversationEvents.entries().map(entry => entry.kind)).toEqual(['workflow-run'])
     expect(ctx.slots.entries('conversation.chat.node')).toHaveLength(1)
+    const view = ctx.workflowRunView
+    expect(typeof view.NodeList).toBe('function')
+    expect(typeof view.GateReport).toBe('function')
+    expect(typeof view.ApprovalBadge).toBe('function')
+    expect(view.runDetailToNodeData({ nodes: [], gates: [], approvals: [] })).toEqual({ nodes: [], gateReport: [] })
     const entry = ctx.slots.entries('conversation.chat.node')[0]!
     const face = entry.inject?.() as unknown as WorkflowRunInjected
     face.openSession(CHILD_ID)
     expect((ctx.sessions as unknown as TestSessions).opened).toEqual([CHILD_ID])
     await fiber.dispose()
+    expect(ctx.get('workflowRunView')).toBeUndefined()
     expect(ctx.conversationEvents.entries()).toEqual([])
     expect(ctx.slots.entries('conversation.chat.node')).toEqual([])
 

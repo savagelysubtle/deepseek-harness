@@ -7,7 +7,17 @@
  * @module @deepseek-ai/dsh-workflow-worker-thread/protocol
  */
 
-import type { WorkflowAgentEndInfo, WorkflowAgentInfo, WorkflowResult } from '@deepseek-ai/dsh-workflow'
+import type {
+  WorkflowAgentEndInfo,
+  WorkflowAgentInfo,
+  WorkflowApprovalOutcome,
+  WorkflowBashOptions,
+  WorkflowBashResult,
+  WorkflowGateInfo,
+  WorkflowNodeEndInfo,
+  WorkflowNodeInfo,
+  WorkflowResult,
+} from '@deepseek-ai/dsh-workflow'
 import type { ChildResult, ChildStartRequest } from './types.ts'
 
 /** Message tags the worker sends the host (the wire values are the tag strings). */
@@ -28,6 +38,16 @@ export enum WorkerToHostType {
   ChildDispose = 'child-dispose',
   /** The run's single terminal result. */
   Result = 'result',
+  /** Observer lifecycle: a node started (the `nodeStart` hook). */
+  NodeStart = 'node-start',
+  /** Observer lifecycle: a node settled (the `nodeEnd` hook). */
+  NodeEnd = 'node-end',
+  /** Observer lifecycle: a gate was evaluated (the `gate` hook). */
+  Gate = 'gate',
+  /** RPC: run a bash command on the host (answered by BashResult or BashError). */
+  BashStart = 'bash-start',
+  /** RPC: ask the host's approver a question (answered by ApproveResult). */
+  ApproveStart = 'approve-start',
 }
 
 /** The payload each worker→host tag carries. */
@@ -48,6 +68,16 @@ export interface WorkerToHostPayloads {
   [WorkerToHostType.ChildDispose]: { callId: number }
   /** The run's terminal outcome. */
   [WorkerToHostType.Result]: { result: WorkflowResult }
+  /** The node identity. */
+  [WorkerToHostType.NodeStart]: { info: WorkflowNodeInfo }
+  /** The node identity plus its settlement. */
+  [WorkerToHostType.NodeEnd]: { info: WorkflowNodeEndInfo }
+  /** The gate evaluation. */
+  [WorkerToHostType.Gate]: { info: WorkflowGateInfo }
+  /** The RPC correlation id, the command text, and the (worker-validated) options. */
+  [WorkerToHostType.BashStart]: { callId: number; command: string; options: WorkflowBashOptions }
+  /** The RPC correlation id, the approval node, and the question text. */
+  [WorkerToHostType.ApproveStart]: { callId: number; nodeId: string; message: string; timeoutMs?: number }
 }
 
 /** Message tags the host sends the worker (the wire values are the tag strings). */
@@ -66,6 +96,12 @@ export enum HostToWorkerType {
   ChildFailed = 'child-failed',
   /** Child RPC reply: a requested disposal completed. */
   ChildDisposed = 'child-disposed',
+  /** Bash RPC reply: the command ran (any exit code). */
+  BashResult = 'bash-result',
+  /** Bash RPC reply: the host refused or could not spawn the command. */
+  BashError = 'bash-error',
+  /** Approve RPC reply: the question was decided (including cancelled/unavailable). */
+  ApproveResult = 'approve-result',
 }
 
 /** The payload each host→worker tag carries. */
@@ -84,6 +120,12 @@ export interface HostToWorkerPayloads {
   [HostToWorkerType.ChildFailed]: { callId: number; rendered: string }
   /** The RPC correlation id of the completed disposal. */
   [HostToWorkerType.ChildDisposed]: { callId: number }
+  /** The RPC correlation id and the exit facts plus bounded output. */
+  [HostToWorkerType.BashResult]: { callId: number; result: WorkflowBashResult }
+  /** The RPC correlation id and the rendered refusal (a host-side validation or spawn failure). */
+  [HostToWorkerType.BashError]: { callId: number; rendered: string }
+  /** The RPC correlation id and the closed outcome (the approval id stays host-side). */
+  [HostToWorkerType.ApproveResult]: { callId: number; outcome: WorkflowApprovalOutcome }
 }
 
 /**

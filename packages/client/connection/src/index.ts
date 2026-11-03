@@ -133,6 +133,24 @@ const PRIVILEGED_METHODS = new Set([
   'mcp/authorize-start',
   'mcp/reconnect',
   'mcp/set-enabled',
+  // `workflow/*` writes a workflow file inside the checkout, starts and stops runs whose bash
+  // nodes run as this process's user, answers approvals, and claims that a human is looking
+  // (`attachUi`, which decides whether an unanswerable approval waits or fails closed).
+  // `nodeOutput` returns the raw, uncut output of a bash node (it can hold secrets, more than the
+  // transcript tail), so it is pinned too. The other reads (`list`, `read`, `validate`, `dryRun`,
+  // `runs`, `runDetail`, `pendingApprovals`) are NOT pinned: they return file text and run
+  // records the same caller can already read from the session transcript. Keep this block equal to `WORKFLOW_PRIVILEGED_ENDPOINTS` in
+  // `@deepseek-ai/dsh-workflow-remote/wire` (a test compares them). A non-loopback browser gets
+  // the bare 403 here, so the Workflows UI explains it with `WORKFLOW_LOOPBACK_ONLY_MESSAGE`.
+  'workflow/save',
+  'workflow/run',
+  'workflow/resume',
+  'workflow/cancel',
+  'workflow/nodeOutput',
+  'workflow/approve',
+  'workflow/reject',
+  'workflow/attachUi',
+  'workflow/detachUi',
 ])
 
 /**
@@ -161,7 +179,10 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
         : undefined
       if (method !== undefined
         && PRIVILEGED_METHODS.has(method)
-        && !isTrustedApiRequest(request, [])) {
+        // The pin is the raw socket peer (fail closed), never a header: a LAN caller can send
+        // `Host: localhost`, and `X-Forwarded-For` is deliberately not consulted. The Host
+        // check stays as the second, DNS-rebinding half.
+        && (!peerIsLoopback || !isTrustedApiRequest(request, []))) {
         return new Response('forbidden', { status: 403 })
       }
       if (request.method === 'GET' && (pathname === MUX_EVENTS_PATH || pathname === HOST_EVENTS_PATH)) {

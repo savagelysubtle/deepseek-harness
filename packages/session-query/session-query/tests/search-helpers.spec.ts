@@ -144,6 +144,21 @@ describe('session-query semantic extraction', () => {
     } as never)).toBe('completed\nparent-session')
   })
 
+  it('extracts the failure code, message, remedy and attempts of a tool-workflow node-end, and nothing for a plain one', () => {
+    expect(extractSessionEventText({
+      type: 'tool-workflow/node-end',
+      seq: 0,
+      time: 1,
+      data: {
+        runId: 'r', nodeId: 'think', kind: 'prompt', status: 'failed', truncated: false, attempts: 2,
+        failure: { code: 'NODE_STALLED', message: 'no output for 1000 ms', remedy: 'raise idleTimeoutMs' },
+      },
+    } as never)).toBe('think\nNODE_STALLED\nno output for 1000 ms\nraise idleTimeoutMs\nattempts 2')
+    expect(extractSessionEventText({
+      type: 'tool-workflow/node-end', seq: 1, time: 2, data: { runId: 'r', nodeId: 'a', kind: 'bash', status: 'success', truncated: false },
+    } as never)).toBe('')
+  })
+
   it('extracts claude-code driver events', () => {
     const at = (type: string, data: unknown): string => extractSessionEventText({ type, seq: 0, time: 1, data } as never)
     expect(at('claude-code/session-bound', {

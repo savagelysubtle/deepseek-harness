@@ -72,6 +72,8 @@ function openRun(trace: WorkflowTrace, runId: string, eventType: string, fail: I
   return run
 }
 
+const APPROVAL_STATES: ReadonlySet<string> = new Set(['pending', 'allowed', 'rejected', 'expired', 'unavailable', 'cancelled'])
+
 /** Advance the workflow-record fold with one relevant Session event. */
 function applyEvent(trace: WorkflowTrace, event: SessionEvent, fail: InvariantFailure): void {
   const data = recordOf(event, fail)
@@ -108,6 +110,58 @@ function applyEvent(trace: WorkflowTrace, event: SessionEvent, fail: InvariantFa
       if (ended === undefined) fail(`tool-workflow/agent-end has no matching member seq ${seq} in run ${runId}`)
       if (ended) fail(`tool-workflow/agent-end repeats member seq ${seq} in run ${runId}`)
       run.members.set(seq, true)
+      return
+    }
+    case 'tool-workflow/node-start': {
+      openRun(trace, runId, event.type, fail)
+      stringId(data.nodeId, 'tool-workflow/node-start nodeId', fail)
+      stringId(data.kind, 'tool-workflow/node-start kind', fail)
+      if (typeof data.at !== 'number' || !Number.isFinite(data.at)) fail('tool-workflow/node-start at must be a finite number')
+      return
+    }
+    case 'tool-workflow/approval': {
+      openRun(trace, runId, event.type, fail)
+      stringId(data.nodeId, 'tool-workflow/approval nodeId', fail)
+      stringId(data.kind, 'tool-workflow/approval kind', fail)
+      stringId(data.approvalId, 'tool-workflow/approval approvalId', fail)
+      if (!APPROVAL_STATES.has(String(data.state))) fail(`tool-workflow/approval state ${String(data.state)} is invalid`)
+      if (data.reason !== undefined && (typeof data.reason !== 'string' || data.reason.length > 500)) {
+        fail('tool-workflow/approval reason must be a string of at most 500 characters when present')
+      }
+      if (typeof data.at !== 'number' || !Number.isFinite(data.at)) fail('tool-workflow/approval at must be a finite number')
+      return
+    }
+    case 'tool-workflow/node-end': {
+      openRun(trace, runId, event.type, fail)
+      stringId(data.nodeId, 'tool-workflow/node-end nodeId', fail)
+      stringId(data.kind, 'tool-workflow/node-end kind', fail)
+      stringId(data.status, 'tool-workflow/node-end status', fail)
+      // Absent in records written before the field existed.
+      if (data.truncated !== undefined && typeof data.truncated !== 'boolean') fail('tool-workflow/node-end truncated must be a boolean when present')
+      if (data.attempts !== undefined && (typeof data.attempts !== 'number' || !Number.isSafeInteger(data.attempts) || data.attempts < 1)) {
+        fail('tool-workflow/node-end attempts must be a positive integer when present')
+      }
+      if (data.failure !== undefined) {
+        const failure = data.failure as Record<string, unknown> | null
+        const codeOk = failure !== null && typeof failure === 'object'
+          && (failure.code === 'NODE_STALLED' || failure.code === 'NODE_TIMEOUT')
+        const textOk = codeOk && typeof failure.message === 'string' && typeof failure.remedy === 'string'
+        if (!textOk) {
+          fail('tool-workflow/node-end failure must carry a NODE_STALLED or NODE_TIMEOUT code, a message and a remedy when present')
+        }
+      }
+      return
+    }
+    case 'tool-workflow/gate-report': {
+      openRun(trace, runId, event.type, fail)
+      if (!Array.isArray(data.rows)) fail('tool-workflow/gate-report rows must be an array')
+      for (const row of data.rows as unknown[]) {
+        if (row === null || typeof row !== 'object' || Array.isArray(row)) fail('tool-workflow/gate-report rows must be objects')
+        const fields = row as Record<string, unknown>
+        stringId(fields.nodeId, 'tool-workflow/gate-report nodeId', fail)
+        stringId(fields.gateKind, 'tool-workflow/gate-report gateKind', fail)
+        stringId(fields.outcome, 'tool-workflow/gate-report outcome', fail)
+      }
       return
     }
     case 'tool-workflow/run-end': {

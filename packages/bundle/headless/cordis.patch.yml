@@ -20,6 +20,13 @@
     # Keep the same temporary process-wide Code Mode opt-in as the Web surface.
     mode: !!js process.env.DSH_TOOLS_MODE
 
+# No human can answer an approval node in a one-shot run, so workflow_run
+# rejects approval nodes at once with a reason and remedy instead of waiting
+# out the approval window with the workspace writer lock held.
+- id: tool-workflow-run
+  config:
+    headless: true
+
 - insert:
     # Code Mode is a core execution capability, not a Web component.
     - id: code-runtime

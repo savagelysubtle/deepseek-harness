@@ -1,0 +1,150 @@
+{
+  "nodes": [
+    {
+      "id": "plan",
+      "kind": "prompt",
+      "layer": 0,
+      "order": 0,
+      "gate": false,
+      "triggerRule": "all_success",
+      "dependsOn": [],
+      "tier": "standard",
+      "label": "Plan the work"
+    },
+    {
+      "id": "implement",
+      "kind": "loop",
+      "layer": 1,
+      "order": 0,
+      "gate": true,
+      "triggerRule": "all_success",
+      "dependsOn": [
+        "plan"
+      ],
+      "tier": "standard",
+      "label": "implement"
+    },
+    {
+      "id": "gate-tests",
+      "kind": "bash",
+      "layer": 2,
+      "order": 0,
+      "gate": true,
+      "triggerRule": "all_success",
+      "dependsOn": [
+        "implement"
+      ],
+      "label": "gate-tests"
+    },
+    {
+      "id": "review",
+      "kind": "prompt",
+      "layer": 3,
+      "order": 0,
+      "gate": true,
+      "triggerRule": "all_success",
+      "dependsOn": [
+        "gate-tests"
+      ],
+      "tier": "cheap",
+      "label": "review"
+    },
+    {
+      "id": "pass-check",
+      "kind": "bash",
+      "layer": 4,
+      "order": 0,
+      "gate": true,
+      "when": "$review.output.pass == true",
+      "triggerRule": "all_success",
+      "dependsOn": [
+        "review"
+      ],
+      "label": "pass-check"
+    },
+    {
+      "id": "approve",
+      "kind": "approval",
+      "layer": 5,
+      "order": 0,
+      "gate": true,
+      "triggerRule": "all_success",
+      "dependsOn": [
+        "pass-check"
+      ],
+      "label": "approve"
+    },
+    {
+      "id": "stop-on-reject",
+      "kind": "cancel",
+      "layer": 6,
+      "order": 0,
+      "gate": false,
+      "when": "$approve.status == 'failed'",
+      "triggerRule": "all_done",
+      "dependsOn": [
+        "approve"
+      ],
+      "label": "stop-on-reject"
+    }
+  ],
+  "edges": [
+    {
+      "from": "plan",
+      "to": "implement"
+    },
+    {
+      "from": "implement",
+      "to": "gate-tests"
+    },
+    {
+      "from": "gate-tests",
+      "to": "review"
+    },
+    {
+      "from": "review",
+      "to": "pass-check",
+      "when": "$review.output.pass == true"
+    },
+    {
+      "from": "pass-check",
+      "to": "approve"
+    },
+    {
+      "from": "approve",
+      "to": "stop-on-reject",
+      "when": "$approve.status == 'failed'"
+    }
+  ],
+  "layers": 7,
+  "manifest": [
+    {
+      "nodeId": "implement",
+      "gateKind": "until_bash"
+    },
+    {
+      "nodeId": "gate-tests",
+      "gateKind": "bash"
+    },
+    {
+      "nodeId": "review",
+      "gateKind": "verifier"
+    },
+    {
+      "nodeId": "pass-check",
+      "gateKind": "bash"
+    },
+    {
+      "nodeId": "approve",
+      "gateKind": "approval"
+    }
+  ],
+  "inputs": [
+    {
+      "name": "feature",
+      "type": "string",
+      "required": true,
+      "description": "What to build."
+    }
+  ]
+}

@@ -27,4 +27,7 @@ export const API_REMOTE_FORWARDED_EVENTS = [
   'llm/adapters-updated',
   'mcp/status-changed',
   'settings/document-updated',
+  'workflow/approval-decided',
+  'workflow/approval-pending',
+  'workflow/run-changed',
 ] as const

@@ -7,7 +7,14 @@
 
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { ObjectJsonSchema } from '@deepseek-ai/dsh-tools'
-import type { WorkflowMeta } from '@deepseek-ai/dsh-workflow'
+import type {
+  WorkflowApprovalOutcome,
+  WorkflowBashOptions,
+  WorkflowBashResult,
+  WorkflowContinuationEvidence,
+  WorkflowDoneWhen,
+  WorkflowMeta,
+} from '@deepseek-ai/dsh-workflow'
 
 /**
  * The per-run limits the worker-side runtime enforces. The host keeps the
@@ -34,6 +41,12 @@ export interface WorkerInit {
   args?: unknown
   /** The worker-enforced limits. */
   limits: WorkerLimits
+  /**
+   * Whether `bash()` (and the `agent()` `doneWhen` option) is enabled for this run. Off by
+   * default: the hook runs host-side commands, so only an owner that vouches for the script
+   * (a compiled, trusted workflow) turns it on. Off makes the hooks throw `UNSUPPORTED_OPTION`.
+   */
+  bashEnabled?: boolean
 }
 
 /** What the worker asks the host to start for one `agent()` call (options already validated worker-side). */
@@ -46,6 +59,16 @@ export interface ChildStartRequest {
   provider?: string
   /** The per-child model override, if the call passed one. */
   model?: string
+  /** The node the call belongs to (the `nodeId` option), used for supervision and evidence lookup. */
+  nodeId?: string
+  /** Model tier label (`cheap`, `standard`, `premium`); the host resolves it through `tierModels` when no model is given. */
+  tier?: string
+  /** Absolute child deadline in milliseconds (enforced by the child supervisor). */
+  timeoutMs?: number
+  /** Stall deadline in milliseconds: no child activity for this long (enforced by the child supervisor). */
+  idleTimeoutMs?: number
+  /** The done-when check (validated and clamped worker-side, re-validated host-side). */
+  doneWhen?: WorkflowDoneWhen
 }
 
 /**
@@ -60,6 +83,15 @@ export interface ChildResult {
   structured?: unknown
   /** Why the child run ended (`'completed'` is the only value the runtime branches on). */
   stopReason: string
+  /** Present when a done-when check ran: how many iterations ran and whether the cap was exhausted. */
+  continuation?: {
+    /** Iterations run (1 = the first run only). */
+    iterations: number
+    /** True when the cap ended the loop with the check still failing (the node fails with `evidence`). */
+    exhausted: boolean
+    /** The last failing evidence (present when `exhausted`). */
+    evidence?: WorkflowContinuationEvidence
+  }
 }
 
 /**
@@ -91,4 +123,26 @@ export interface ChildPort {
    *   provider's asynchronous start fails.
    */
   startAgent(request: ChildStartRequest): Promise<ChildHandle>
+}
+
+/**
+ * The worker-side port the `bash()` and `approve()` hooks use to reach the
+ * host. Both calls execute host-side: the worker never spawns a process.
+ */
+export interface HookPort {
+  /**
+   * Run one validated bash call on the host.
+   * @param command - the command text.
+   * @param options - the validated options bag.
+   * @returns the exit facts and bounded output; rejects with a rendered host-side refusal.
+   */
+  bash(command: string, options: WorkflowBashOptions): Promise<WorkflowBashResult>
+  /**
+   * Put one approval question to the host's approver.
+   * @param nodeId - the approval node.
+   * @param message - the question text.
+   * @param timeoutMs - requested wait cap (the host clamps it).
+   * @returns the closed outcome (the approval id never crosses to the worker).
+   */
+  approve(nodeId: string, message: string, timeoutMs?: number): Promise<WorkflowApprovalOutcome>
 }

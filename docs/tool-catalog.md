@@ -40,6 +40,7 @@ This table connects model-visible tool names to the plugin package and service s
 | `@deepseek-ai/dsh-tool-todo` | `todo_write` | `ctx.tools`, `owning Agent session` | `tool/call`, `todo/write`, `tool/result` | - | todo_write is session-owned state; UIs render the latest todo/write event as a checklist. `allowParallelInProgress` is required with no default, so the catalog states its choice: `true`, whose description invites several `in_progress` items. A deployment choosing `false` receives the same tool with a description asking for exactly one active task. |
 | `@deepseek-ai/dsh-tool-compact` | `compact` | `ctx.tools`, `ctx.compaction (engine takes llm, tokenMeter, sessions)` | `tool/call`, `tool/result`, `compaction/start once the current turn ends` | - | Scheduling is accept-immediately: the request arms process-local state and real condensation claims the next idle boundary through the engine's compaction/start lock. |
 | `@deepseek-ai/dsh-tool-workflow` | `workflow` | `ctx.tools`, `ctx.workflowEngine`, `ctx.systemPrompt`, `a calling Agent (exec.agent parents the script children)` | `tool/call`, `tool/result` | - | - |
+| `@deepseek-ai/dsh-tool-workflow-run` | `workflow_run` | `ctx.tools`, `ctx.workflowEngine`, `ctx.shell (at run time)`, `a calling Agent (exec.agent parents the run)` | `tool/call`, `tool/result`, `tool-workflow/run-start`, `tool-workflow/agent-start`, `tool-workflow/agent-end`, `tool-workflow/node-end`, `tool-workflow/gate-report`, `tool-workflow/run-end` | - | Runs a YAML workflow from the workspace workflows directory. Exactly one of name, path, resume or cancel is given; dryRun returns the graph, gate manifest and shell commands and starts nothing. Every shell command runs through ctx.shell, under the session sandbox policy when a confining shell is mounted. A workflow hash the user has not confirmed is refused until a human confirms it, and an approval node is rejected immediately (with a reason and remedy) when the session is headless, nobody can answer, or the trust policy is never. |
 | `@deepseek-ai/dsh-tool-web` | `web_fetch`, `web_search` | `ctx.tools`, `ctx.web`, `ctx.systemPrompt` | `tool/call`, `tool/result` | - | web_search and web_fetch keep provider selection behind ctx.web so model-visible schemas stay stable across backend swaps. |
 | `@deepseek-ai/dsh-memory` | `memory` | `ctx.tools`, `ctx.memory`, `an agent session with a cwd (execution time)` | `tool/call`, `tool/result` | - | Subpath-exported (`@deepseek-ai/dsh-memory/tool`), so the completeness guard's directory glob cannot see it on its own — discovery also matches package.json `exports` subpaths named `.../tool`. Mounted only in the `standard` preset, in a `cordis:group` realm alongside `@deepseek-ai/dsh-memory/local-plugin` (`apps/cli/config/agent-presets/standard/agent.cordis.yml`). Storage is workspace-scoped under the harness home by default; content enters context only through explicit `memory` calls, never background injection. |
 | `@deepseek-ai/dsh-session-title` | `session_title` | `ctx.tools`, `ctx.sessionTitle`, `a live agent session (execution time)` | `tool/call`, `session/title`, `tool/result` | - | Subpath-exported (`@deepseek-ai/dsh-session-title/tool`), so the completeness guard's directory glob cannot see it on its own — same discovery gap as `@deepseek-ai/dsh-memory/tool` above. The `sessionTitle` service is mounted once in the host composition (`packages/bundle/base/cordis.patch.yml`), before any preset joins; this entry boots it locally with the host's own config only to harvest the schema. Only a running session may title itself: `session.rename` over the host API answers `agent-busy` against the session's own pid while it holds its one-writer log lock. |
@@ -1964,6 +1965,60 @@ Constraints: concurrency and total-agent caps apply; no filesystem, network, tim
 ```
 
 Source: [`packages/workflow/tool-workflow/src/index.ts`](../packages/workflow/tool-workflow/src/index.ts)
+
+<a id="deepseek-aidsh-tool-workflow-run"></a>
+
+## `@deepseek-ai/dsh-tool-workflow-run`
+
+### `workflow_run`
+
+Run a workflow defined as a YAML file in the workspace workflows directory (default `.workflows/<name>.yaml`). A workflow is a graph of nodes (`prompt`, `bash`, `loop`, `approval`, `cancel`) with dependencies, optional `when` conditions, retries, and hard gates (verifier, bash, approval, done_when, until_bash). Use it only when the user asks to run a named workflow, or when a workflow file already exists for the task.
+
+Exactly one of these selects what to do:
+- `name`: the workflow file name without `.yaml` (lowercase words joined by hyphens). `path` is an alternative: a workspace-relative path to a `<name>.yaml` file inside the workflows directory.
+- `resume`: a run id. Starts a new run from that run's pinned source and skips nodes that already succeeded with recoverable output. It refuses, with a reason, if a successful node that changes the workspace has no recoverable output, or depends on a node that has none.
+- `cancel`: a run id owned by this process. Cancels it.
+
+Other arguments: `inputs` (object, values for the workflow's declared inputs; unknown or missing required names are rejected before anything runs) and `dryRun` (true returns the graph, the gate manifest and every shell command the workflow would run, and starts nothing).
+
+A run is foreground: the call returns when the whole workflow finished. The result is a status line, a node table and a gate report (one row per declared gate: fired-pass, fired-block, skipped, not-reached or never-evaluated). Only one run per workspace may be active; a second start is refused and names the holder. The first run of an unseen or edited workflow asks the user to confirm the shell commands. Approval nodes wait for a human answer (up to the configured cap) and are rejected at once when the session is headless or approvals are disabled, with a reason in the report. The run is pinned to the file content at start, so editing the file during a run changes nothing about that run. Compile or validation errors come back as located `line:column` diagnostics: fix the YAML and call again.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Workflow file name without .yaml (lowercase words joined by hyphens)."
+    },
+    "path": {
+      "type": "string",
+      "description": "Alternative to name: a workspace-relative path to a <name>.yaml file in the workflows directory."
+    },
+    "inputs": {
+      "type": "object",
+      "description": "Values for the workflow's declared inputs.",
+      "additionalProperties": true
+    },
+    "dryRun": {
+      "type": "boolean",
+      "description": "Return the graph, gate manifest and shell commands without running anything."
+    },
+    "resume": {
+      "type": "string",
+      "description": "A run id to resume from its pinned source, skipping nodes that already succeeded."
+    },
+    "cancel": {
+      "type": "string",
+      "description": "A run id owned by this process to cancel."
+    }
+  }
+}
+```
+
+Source: [`packages/workflow/tool-workflow-run/src/index.ts`](../packages/workflow/tool-workflow-run/src/index.ts)
+
+Runs a YAML workflow from the workspace workflows directory. Exactly one of name, path, resume or cancel is given; dryRun returns the graph, gate manifest and shell commands and starts nothing. Every shell command runs through ctx.shell, under the session sandbox policy when a confining shell is mounted. A workflow hash the user has not confirmed is refused until a human confirms it, and an approval node is rejected immediately (with a reason and remedy) when the session is headless, nobody can answer, or the trust policy is never.
 
 <a id="deepseek-aidsh-tool-web"></a>
 

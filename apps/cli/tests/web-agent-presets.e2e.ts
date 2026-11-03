@@ -217,7 +217,7 @@ describe('the shipped Web composition', () => {
         'ask_user_question', 'await_subagent', 'bash', 'create_goal', 'edit', 'exit_plan_mode',
         'get_goal', 'interrupt_agent', 'job_kill', 'job_list', 'job_output', 'list_agents', 'memory', 'ralph', 'read', 'read_image', 'send_message', 'session_title', 'skill',
         'subagent', 'subagent_fork', 'todo_write', 'update_goal', 'web_search',
-        'workflow', 'write',
+        'workflow', 'workflow_run', 'write',
       ])
     } finally {
       await handle.dispose()
@@ -842,4 +842,91 @@ describe('a session keeps the preset it was created with', () => {
       await handle.dispose()
     }
   })
+})
+
+const MODEL_RUN_FLOW = `version: 1
+name: shared-runner
+description: one bash step, an approval, one bash step.
+nodes:
+  - id: first
+    kind: bash
+    bash: echo first
+    gate: true
+  - id: ask
+    kind: approval
+    depends_on: [first]
+    message: Continue?
+  - id: last
+    kind: bash
+    depends_on: [ask]
+    bash: echo last
+    gate: true
+`
+
+describe('workflow_run in the standard preset shares the host runner', () => {
+  it('shows a model-started run in the host runner events and holds the one writer guard', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'dsh-web-wfrun-'))
+    await mkdir(join(workspace, '.workflows'))
+    await writeFile(join(workspace, '.workflows', 'shared-runner.yaml'), MODEL_RUN_FLOW)
+    const runs = ctx.workflowRuns
+    const events: { type: string; runId?: string; workspace?: string }[] = []
+    const unsubscribe = runs.subscribe((event) => { events.push(event) })
+    const detach = runs.attachUi()
+    const handle = await ctx.agents.create({
+      sessionId: SessionId(`preset-workflow-run-${randomUUID()}`),
+      meta: { agentPreset: 'standard', cwd: workspace },
+      setup: agentCtx => ctx.agentPresets.mount(agentCtx, 'standard').then(() => undefined),
+    })
+    try {
+      // The model tool is the preset's, but it resolves the HOST runner: no preset-local service exists.
+      expect(toolNames(ctx, handle.agent)).toContain('workflow_run')
+      // A human confirms the commands once (the overlay path), so the model's run is trusted.
+      const dry = await runs.dryRun(workspace, { name: 'shared-runner', caller: handle.agent.session.id })
+      if (!dry.ok) throw new Error(dry.message)
+      const trial = await runs.start({
+        parent: handle.agent, name: 'shared-runner', trustHash: dry.trustKey,
+        ...dry.trustChallenge === undefined ? {} : { trustChallenge: dry.trustChallenge },
+      })
+      if (!trial.ok) throw new Error(`${trial.error}: ${trial.message}`)
+      const firstApproval = async (runId: string) => {
+        for (let i = 0; i < 400 && runs.pendingApprovals(runId).length === 0; i += 1) await new Promise(r => setTimeout(r, 25))
+        const waiting = runs.pendingApprovals(runId)[0]
+        if (waiting === undefined) throw new Error('no approval became pending')
+        return waiting
+      }
+      await runs.answerApproval(trial.runId, (await firstApproval(trial.runId)).approvalId, 'reject')
+      expect((await trial.done).status).toBe('failed')
+      events.length = 0
+
+      // The model starts the run through the preset's tool.
+      const call = ctx.tools.execute({
+        signal: new AbortController().signal,
+        callId: CallId('preset-workflow-run-call'),
+        name: 'workflow_run',
+        arguments: { name: 'shared-runner' },
+        agent: handle.agent,
+      })
+      await expect.poll(() => events.find(e => e.type === 'approval-pending'), { timeout: 20_000 }).toBeDefined()
+      const started = events.find(e => e.type === 'approval-pending')
+      if (started?.runId === undefined) throw new Error('the host runner never announced the model run')
+      // Events carry the realpath workspace key the overlay filters on.
+      const { realpath } = await import('node:fs/promises')
+      expect(started.workspace).toBe(await realpath(workspace))
+      expect(events.some(e => e.type === 'run-changed' && e.runId === started.runId)).toBe(true)
+      expect(runs.activeRuns().map(run => run.runId)).toEqual([started.runId])
+
+      // One store handle: an overlay start on the same workspace is refused with the model run as holder.
+      const second = await runs.start({ parent: handle.agent, name: 'shared-runner' })
+      expect(second).toMatchObject({ ok: false, error: 'WRITER_BUSY', holder: { runId: started.runId, workflowName: 'shared-runner' } })
+
+      await runs.answerApproval(started.runId, (await firstApproval(started.runId)).approvalId, 'allow')
+      const result = await call
+      expect(result.isError).toBeFalsy()
+      expect(events.some(e => e.type === 'run-changed' && e.runId === started.runId && (e as { status?: string }).status === 'completed')).toBe(true)
+    } finally {
+      detach()
+      unsubscribe()
+      await handle.dispose()
+    }
+  }, 60_000)
 })

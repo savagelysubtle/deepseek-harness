@@ -960,7 +960,7 @@ Source: [`packages/core/session/src/types.ts:303`](../packages/core/session/src/
 'tool-workflow/agent-end': ToolWorkflowAgentEndData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:57`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:121`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowagent-start--log-only"></a>
 
@@ -974,7 +974,63 @@ Source: [`packages/workflow/tool-workflow/src/types.ts:57`](../packages/workflow
 'tool-workflow/agent-start': ToolWorkflowAgentStartData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:52`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:116`](../packages/workflow/tool-workflow/src/types.ts)
+
+<a id="tool-workflowapproval--log-only"></a>
+
+#### `tool-workflow/approval` — log-only
+
+```ts persistence-catalog
+/**
+ * One approval transition of a YAML workflow run (pending, then each decision).
+ * @param data - run identity, node id and kind, approval id, state, optional reason, and time.
+ */
+'tool-workflow/approval': ToolWorkflowApprovalData
+```
+
+Source: [`packages/workflow/tool-workflow/src/types.ts:131`](../packages/workflow/tool-workflow/src/types.ts)
+
+<a id="tool-workflowgate-report--log-only"></a>
+
+#### `tool-workflow/gate-report` — log-only
+
+```ts persistence-catalog
+/**
+ * The gate report of a YAML workflow run, one row per declared gate.
+ * @param data - run identity and the report rows.
+ */
+'tool-workflow/gate-report': ToolWorkflowGateReportData
+```
+
+Source: [`packages/workflow/tool-workflow/src/types.ts:141`](../packages/workflow/tool-workflow/src/types.ts)
+
+<a id="tool-workflownode-end--log-only"></a>
+
+#### `tool-workflow/node-end` — log-only
+
+```ts persistence-catalog
+/**
+ * Settles one YAML workflow node; a later record for the same node replaces an earlier one.
+ * @param data - run identity, node id and kind, status, optional exit code and duration, and whether output was cut.
+ */
+'tool-workflow/node-end': ToolWorkflowNodeEndData
+```
+
+Source: [`packages/workflow/tool-workflow/src/types.ts:136`](../packages/workflow/tool-workflow/src/types.ts)
+
+<a id="tool-workflownode-start--log-only"></a>
+
+#### `tool-workflow/node-start` — log-only
+
+```ts persistence-catalog
+/**
+ * Opens one YAML workflow node.
+ * @param data - run identity, node id and kind, and start time.
+ */
+'tool-workflow/node-start': ToolWorkflowNodeStartData
+```
+
+Source: [`packages/workflow/tool-workflow/src/types.ts:126`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowrun-end--log-only"></a>
 
@@ -988,7 +1044,7 @@ Source: [`packages/workflow/tool-workflow/src/types.ts:52`](../packages/workflow
 'tool-workflow/run-end': ToolWorkflowRunEndData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:62`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:146`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowrun-start--log-only"></a>
 
@@ -1002,7 +1058,7 @@ Source: [`packages/workflow/tool-workflow/src/types.ts:62`](../packages/workflow
 'tool-workflow/run-start': ToolWorkflowRunStartData
 ```
 
-Source: [`packages/workflow/tool-workflow/src/types.ts:47`](../packages/workflow/tool-workflow/src/types.ts)
+Source: [`packages/workflow/tool-workflow/src/types.ts:111`](../packages/workflow/tool-workflow/src/types.ts)
 
 ### `turn/*`
 

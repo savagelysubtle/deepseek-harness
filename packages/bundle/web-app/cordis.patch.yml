@@ -101,6 +101,18 @@
     - id: mcp-status
       name: '@deepseek-ai/dsh-mcp-status'
 
+    # Permanent mount for the same reason as mcp-status: the workflow/*
+    # Typert manifest is keyed to this entry, which never unmounts (OP-240).
+    - id: workflow-remote
+      name: '@deepseek-ai/dsh-workflow-remote'
+
+    # The host-plane workflow engine the Workflows overlay (OP-240) runs YAML workflows on. A separate
+    # row id from the presets' own engine rows, which stay entry-local to each preset.
+    - id: workflow-engine-host
+      name: '@deepseek-ai/dsh-workflow-worker-thread'
+      config:
+        provider: spawn
+
     # The API gateway: the transport-agnostic dispatch face every client shape
     # shares. The base layer's agent-default-model service owns the default model.
     - id: api-gateway
@@ -200,6 +212,11 @@
     # served-roster drift. Draws only -- a later slice owns mutation.
     - id: ui-org-board
       name: '@deepseek-ai/dsh-client-ui-org-board'
+
+    # Workflows surface (OP-240): a session-header button opening the
+    # Workflows overlay over the Host's workflow Remote namespace.
+    - id: ui-workflows
+      name: '@deepseek-ai/dsh-client-ui-workflows'
 
     - id: ui-settings
       name: '@deepseek-ai/dsh-client-ui-settings'
@@ -413,8 +430,16 @@
 # scope-aware — one copy per mounted preset means every child gets `report`
 # registered once per live session, which throws on the second.
 
+# Stays off under this id: the presets mount their own `workflow-worker-thread` row and a row id
+# belongs to exactly one plane. The host engine the Workflows overlay needs is the `workflow-engine-host` row above.
 - id: workflow-worker-thread
   disabled: true
+
+# The overlay needs the runner service, not the model tool: the tool is mounted in the `standard`
+# preset only, so the global tool layer and the minimal preset stay as they were.
+- id: tool-workflow-run
+  config:
+    exposeTool: false
 
 - id: tool-workflow
   disabled: true

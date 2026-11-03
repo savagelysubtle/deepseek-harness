@@ -44,3 +44,9 @@ That reachability is incidental, not a guarantee — if it ever leaves the graph
 mirror the helper like the rest.
 
 Nothing mechanically enforces this rule; keep it in review.
+
+## Running the lane
+
+These scenarios need the built frontend: `pnpm run build:web` first (it writes the gitignored
+`apps/web/dist`), then `pnpm exec vitest run --config vitest.web.config.ts <file>`. They run in the
+`test:web` lane, not in `test:e2e`. Re-record a golden with `DSH_SNAPSHOT=refresh`.

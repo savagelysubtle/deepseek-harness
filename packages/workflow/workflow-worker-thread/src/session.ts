@@ -18,11 +18,13 @@ import type { HostToWorkerMessage, WorkerToHostPayloads } from './protocol.ts'
 import { renderThrown } from './realm.ts'
 import { WorkflowExecution } from './runtime.ts'
 import type { ExecutionObserver } from './runtime.ts'
+import type { WorkflowApprovalOutcome, WorkflowBashOptions, WorkflowBashResult } from '@deepseek-ai/dsh-workflow'
 import type {
   ChildHandle,
   ChildPort,
   ChildResult,
   ChildStartRequest,
+  HookPort,
   WorkerInit,
 } from './types.ts'
 
@@ -120,6 +122,57 @@ class ChildRpcBridge implements ChildPort {
 }
 
 /**
+ * The worker-side bridge for the `bash()` and `approve()` RPCs ({@link HookPort}): allocates
+ * callIds, posts the request, and settles from the host's reply. A reply for an unknown callId
+ * is dropped (nothing awaits it).
+ */
+class HookRpcBridge implements HookPort {
+  private nextCallId = 0
+  private readonly bashPending = new Map<number, PromiseWithResolvers<WorkflowBashResult>>()
+  private readonly approvePending = new Map<number, PromiseWithResolvers<WorkflowApprovalOutcome>>()
+
+  constructor(private readonly post: Post) {}
+
+  bash(command: string, options: WorkflowBashOptions): Promise<WorkflowBashResult> {
+    this.nextCallId += 1
+    const callId = this.nextCallId
+    const entry = Promise.withResolvers<WorkflowBashResult>()
+    entry.promise.catch(() => { /* consumed: a cancelled script may drop the awaiting hook */ })
+    this.bashPending.set(callId, entry)
+    this.post(WorkerToHostType.BashStart, { callId, command, options })
+    return entry.promise
+  }
+
+  approve(nodeId: string, message: string, timeoutMs?: number): Promise<WorkflowApprovalOutcome> {
+    this.nextCallId += 1
+    const callId = this.nextCallId
+    const entry = Promise.withResolvers<WorkflowApprovalOutcome>()
+    entry.promise.catch(() => { /* consumed: see bash() */ })
+    this.approvePending.set(callId, entry)
+    this.post(WorkerToHostType.ApproveStart, { callId, nodeId, message, ...timeoutMs !== undefined ? { timeoutMs } : {} })
+    return entry.promise
+  }
+
+  onBashResult(callId: number, result: WorkflowBashResult): void {
+    const entry = this.bashPending.get(callId)
+    this.bashPending.delete(callId)
+    entry?.resolve(result)
+  }
+
+  onBashError(callId: number, rendered: string): void {
+    const entry = this.bashPending.get(callId)
+    this.bashPending.delete(callId)
+    entry?.reject(new Error(rendered))
+  }
+
+  onApproveResult(callId: number, outcome: WorkflowApprovalOutcome): void {
+    const entry = this.approvePending.get(callId)
+    this.approvePending.delete(callId)
+    entry?.resolve(outcome)
+  }
+}
+
+/**
  * Narrow the nullable `parentPort` the bootstrap reads from
  * `node:worker_threads`.
  * @param port - `parentPort` as imported (null on the main thread).
@@ -145,17 +198,21 @@ export async function runWorkerSession(port: MessagePort, init: WorkerInit): Pro
     port.postMessage({ type, ...payload })
   }
   const children = new ChildRpcBridge(post)
+  const hooks = new HookRpcBridge(post)
 
   const observer: ExecutionObserver = {
     phase: (title) => { post(WorkerToHostType.Phase, { title }) },
     log: (message) => { post(WorkerToHostType.Log, { message }) },
     agentStart: (info) => { post(WorkerToHostType.AgentStart, { info }) },
     agentEnd: (info) => { post(WorkerToHostType.AgentEnd, { info }) },
+    nodeStart: (info) => { post(WorkerToHostType.NodeStart, { info }) },
+    nodeEnd: (info) => { post(WorkerToHostType.NodeEnd, { info }) },
+    gate: (info) => { post(WorkerToHostType.Gate, { info }) },
   }
 
   let execution: WorkflowExecution
   try {
-    execution = new WorkflowExecution(init.meta, init.body, init.args, init.limits, observer, children)
+    execution = new WorkflowExecution(init.meta, init.body, init.args, init.limits, observer, children, hooks, init.bashEnabled === true)
   } catch (error: unknown) {
     post(WorkerToHostType.Result, { result: { value: null, stopReason: 'error', error: renderThrown(error), agentsStarted: 0 } })
     return
@@ -187,6 +244,15 @@ export async function runWorkerSession(port: MessagePort, init: WorkerInit): Pro
         break
       case HostToWorkerType.ChildDisposed:
         children.onChildDisposed(message.callId)
+        break
+      case HostToWorkerType.BashResult:
+        hooks.onBashResult(message.callId, message.result)
+        break
+      case HostToWorkerType.BashError:
+        hooks.onBashError(message.callId, message.rendered)
+        break
+      case HostToWorkerType.ApproveResult:
+        hooks.onApproveResult(message.callId, message.outcome)
         break
       /* v8 ignore next 2 -- closed engine-owned union; the arm only makes adding a message type a compile error */
       default:

@@ -84,6 +84,13 @@ describe('client bundle purity gate', () => {
     expect(() => resolveId('@deepseek-ai/dsh-goal/remote/nested')).toThrow(/purity/)
   })
 
+  it('lets only the workflow-remote client face inline, not its host entries', () => {
+    expect(resolveId('@deepseek-ai/dsh-workflow-remote/client')).toBeNull()
+    expect(() => resolveId('@deepseek-ai/dsh-workflow-remote')).toThrow(/purity/)
+    expect(() => resolveId('@deepseek-ai/dsh-workflow-remote/wire')).toThrow(/purity/)
+    expect(() => resolveId('@deepseek-ai/dsh-workflow-remote/typert')).toThrow(/purity/)
+  })
+
   it('throws on any other @deepseek-ai leak', () => {
     expect(() => resolveId('@deepseek-ai/dsh-agent')).toThrow(/purity/)
     expect(() => resolveId('@deepseek-ai/dsh-client-web')).toThrow(/purity/)

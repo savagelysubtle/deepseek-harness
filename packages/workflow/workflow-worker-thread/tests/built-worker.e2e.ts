@@ -46,7 +46,7 @@ const run = ctx.workflowEngine.start({
   script: "const value = await agent('answer', { schema: { type: 'object', properties: { answer: { type: 'number' } }, required: ['answer'] } }); return value.answer",
   meta: { name: 'built-smoke', description: 'built worker smoke' },
   subagentProvider: 'built-selected',
-  parent: { id: 'built-smoke-parent', options: {} },
+  parent: { id: 'built-smoke-parent', options: { model: 'test-model' } },
 })
 const result = await run.result
 await run.dispose()

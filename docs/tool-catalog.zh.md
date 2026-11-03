@@ -42,6 +42,7 @@
 | `@deepseek-ai/dsh-tool-compact` | `compact` | `ctx.tools`、`ctx.compaction (engine takes llm, tokenMeter, sessions)` | `tool/call`、`tool/result`、`compaction/start once the current turn ends` | - | 调度为立即接受：请求先登记进程本地的状态，真正的压缩在当前回合结束后的空闲边界上经引擎的 compaction/start 锁执行。 |
 | `@deepseek-ai/dsh-tool-todo` | `todo_write` | `ctx.tools`、`owning Agent session` | `tool/call`、`todo/write`、`tool/result` | - | todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为检查清单。`allowParallelInProgress` 是没有默认值的必填项，因此本目录明确选择 `true`，对应描述允许同时存在多个 `in_progress` 项。选择 `false` 的部署会获得同一工具，但描述会要求只能有 1 个活动任务。 |
 | `@deepseek-ai/dsh-tool-workflow` | `workflow` | `ctx.tools`、`ctx.workflowEngine`、`ctx.systemPrompt`、`a calling Agent (exec.agent parents the script children)` | `tool/call`、`tool/result` | - | - |
+| `@deepseek-ai/dsh-tool-workflow-run` | `workflow_run` | `ctx.tools`、`ctx.workflowEngine`、`ctx.shell (at run time)`、`a calling Agent (exec.agent parents the run)` | `tool/call`、`tool/result`、`tool-workflow/run-start`、`tool-workflow/agent-start`、`tool-workflow/agent-end`、`tool-workflow/node-end`、`tool-workflow/gate-report`、`tool-workflow/run-end` | - | 从工作区工作流目录运行 YAML 工作流。`name`、`path`、`resume`、`cancel` 必须且只能给出一个；`dryRun` 返回图、门禁清单和 shell 命令，且不启动任何东西。每条 shell 命令都通过 ctx.shell 运行，挂载了限制型 shell 时受会话沙箱策略约束。用户尚未确认的工作流哈希会被拒绝，直到有人确认；当会话为无人值守、无人可回答或信任策略为 never 时，审批节点会立即被拒绝（并给出原因与处理办法）。 |
 | `@deepseek-ai/dsh-tool-web` | `web_fetch`、`web_search` | `ctx.tools`、`ctx.web`、`ctx.systemPrompt` | `tool/call`、`tool/result` | - | web_search 和 web_fetch 将提供方选择置于 ctx.web 之后，使模型可见 schema 在更换后端时保持稳定。 |
 | `@deepseek-ai/dsh-memory` | `memory` | `ctx.tools`、`ctx.memory`、`an agent session with a cwd (execution time)` | `tool/call`、`tool/result` | - | 子路径导出（`@deepseek-ai/dsh-memory/tool`），因此完整性守卫单靠目录 glob 无法发现它——发现规则现在也会匹配名为 `.../tool` 的 package.json `exports` 子路径。仅在 `standard` 预设中挂载，位于与 `@deepseek-ai/dsh-memory/local-plugin` 同一个 `cordis:group` realm 中（`apps/cli/config/agent-presets/standard/agent.cordis.yml`）。存储默认作用域限定在 harness home 下的工作区；内容只通过显式的 `memory` 调用进入上下文，绝不做后台注入。 |
 | `@deepseek-ai/dsh-session-title` | `session_title` | `ctx.tools`、`ctx.sessionTitle`、`a live agent session (execution time)` | `tool/call`、`session/title`、`tool/result` | - | 子路径导出（`@deepseek-ai/dsh-session-title/tool`），因此完整性守卫单靠目录 glob 无法发现它——与上面 `@deepseek-ai/dsh-memory/tool` 相同的发现缺口。`sessionTitle` 服务在宿主组合（`packages/bundle/base/cordis.patch.yml`）中挂载一次，先于任何预设加入；本条目使用宿主自身的配置在本地启动它，仅用于收集 schema。只有正在运行的会话才能给自己命名：会话持有自己的单写者日志锁时，宿主 API 上的 `session.rename` 会针对该会话自身的 pid 返回 `agent-busy`。 |
@@ -1970,6 +1971,60 @@ todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为
 ```
 
 来源：[`packages/workflow/tool-workflow/src/index.ts`](../packages/workflow/tool-workflow/src/index.ts)
+
+<a id="deepseek-aidsh-tool-workflow-run"></a>
+
+## `@deepseek-ai/dsh-tool-workflow-run`
+
+### `workflow_run`
+
+运行定义为工作区工作流目录中 YAML 文件（默认 `.workflows/<name>.yaml`）的工作流。工作流是由节点（`prompt`、`bash`、`loop`、`approval`、`cancel`）组成的图，带有依赖关系、可选的 `when` 条件、重试以及硬性门禁（verifier、bash、approval、done_when、until_bash）。仅当用户要求运行某个具名工作流，或任务已有对应的工作流文件时才使用。
+
+下列参数必须且只能给出一个，用来选择要做什么：
+- `name`：不含 `.yaml` 的工作流文件名（小写单词以连字符连接）。`path` 是替代方式：指向工作流目录内某个 `<name>.yaml` 文件的工作区相对路径。
+- `resume`：运行 id。从该运行固定的源文件启动一次新运行，并跳过已成功且输出可恢复的节点。如果某个修改工作区的成功节点没有可恢复的输出，或它所依赖的节点没有可恢复的输出，则会拒绝并给出原因。
+- `cancel`：由本进程持有的运行 id。取消该运行。
+
+其他参数：`inputs`（对象，工作流声明的输入的取值；未知名称或缺少必填名称会在任何东西运行之前被拒绝）和 `dryRun`（为 true 时返回图、门禁清单以及工作流会运行的每条 shell 命令，且不启动任何东西）。
+
+运行是前台的：调用在整个工作流结束后返回。结果包括状态行、节点表和门禁报告（每个已声明的门禁一行：fired-pass、fired-block、skipped、not-reached 或 never-evaluated）。每个工作区同一时间只允许一个活动运行；第二次启动会被拒绝并指明持有者。首次运行未见过或被编辑过的工作流时，会请用户确认其中的 shell 命令。审批节点等待人工回答（最长到配置的上限），当会话为无人值守或审批被禁用时会立即被拒绝，并在报告中给出原因。运行固定为启动时的文件内容，因此在运行期间编辑文件不会改变该次运行。编译或校验错误以带 `行:列` 位置的诊断返回：修复 YAML 后再次调用。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Workflow file name without .yaml (lowercase words joined by hyphens)."
+    },
+    "path": {
+      "type": "string",
+      "description": "Alternative to name: a workspace-relative path to a <name>.yaml file in the workflows directory."
+    },
+    "inputs": {
+      "type": "object",
+      "description": "Values for the workflow's declared inputs.",
+      "additionalProperties": true
+    },
+    "dryRun": {
+      "type": "boolean",
+      "description": "Return the graph, gate manifest and shell commands without running anything."
+    },
+    "resume": {
+      "type": "string",
+      "description": "A run id to resume from its pinned source, skipping nodes that already succeeded."
+    },
+    "cancel": {
+      "type": "string",
+      "description": "A run id owned by this process to cancel."
+    }
+  }
+}
+```
+
+来源： [`packages/workflow/tool-workflow-run/src/index.ts`](../packages/workflow/tool-workflow-run/src/index.ts)
+
+从工作区工作流目录运行 YAML 工作流。`name`、`path`、`resume`、`cancel` 必须且只能给出一个；`dryRun` 返回图、门禁清单和 shell 命令，且不启动任何东西。每条 shell 命令都通过 ctx.shell 运行，挂载了限制型 shell 时受会话沙箱策略约束。用户尚未确认的工作流哈希会被拒绝，直到有人确认；当会话为无人值守、无人可回答或信任策略为 never 时，审批节点会立即被拒绝（并给出原因与处理办法）。
 
 <a id="deepseek-aidsh-tool-web"></a>
 

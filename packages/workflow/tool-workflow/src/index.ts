@@ -16,12 +16,13 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JsonValue, Session, SessionEventMap } from '@deepseek-ai/dsh-session'
+import { WorkflowRunId } from '@deepseek-ai/dsh-workflow'
 import type {
-  WorkflowResult, WorkflowRun, WorkflowRunId, WorkflowStopReason,
+  WorkflowResult, WorkflowRun, WorkflowStopReason,
 } from '@deepseek-ai/dsh-workflow'
 import type {
-  ToolWorkflowAgentEndData, ToolWorkflowAgentStartData,
-  ToolWorkflowRunEndData, ToolWorkflowRunStartData,
+  ToolWorkflowAgentEndData, ToolWorkflowAgentStartData, ToolWorkflowGateReportData, ToolWorkflowGateReportRow,
+  ToolWorkflowApprovalData, ToolWorkflowNodeEndData, ToolWorkflowNodeStartData, ToolWorkflowRunEndData, ToolWorkflowRunStartData,
 } from './types.ts'
 // Declaration merge only: makes ctx.systemPrompt visible for the section registration.
 import type {} from '@deepseek-ai/dsh-system-prompt'
@@ -44,9 +45,27 @@ export const Config: z<Config> = z.object({
 
 type ResolvedConfig = Required<Config>
 
-interface WorkflowRecorder {
-  start(session: Session, run: WorkflowRun): void
+/** Options for {@link WorkflowRecorder.start}. */
+export interface WorkflowRecorderStartOptions {
+  /** The id written into every record of this run (default: the engine run id). A YAML run passes its durable store id. */
+  readonly recordId?: string
+  /** Also project `workflow/node-end` into `tool-workflow/node-end` (YAML runs only). */
+  readonly nodes?: boolean
+}
+
+/** Projects active top-level workflow runs into their parent Sessions. Records never throw into the caller. */
+export interface WorkflowRecorder {
+  /** Open the record for a run and begin projecting its member events. */
+  start(session: Session, run: WorkflowRun, options?: WorkflowRecorderStartOptions): void
+  /** Append the end-of-run gate report for a started run (call before {@link WorkflowRecorder.finish}). */
+  gateReport(runId: WorkflowRunId, rows: readonly ToolWorkflowGateReportRow[]): void
+  /** Append a node-end record the engine event could not carry (an agent node whose output was cut at run end). */
+  nodeEnd(runId: WorkflowRunId, data: Omit<ToolWorkflowNodeEndData, 'runId'>): void
+  /** Append one approval transition. */
+  approval(runId: WorkflowRunId, data: Omit<ToolWorkflowApprovalData, 'runId'>): void
+  /** Close the record after the run reached quiescence. */
   finish(runId: WorkflowRunId, stopReason: WorkflowStopReason): void
+  /** Forget a run without writing anything further. */
   abandon(runId: WorkflowRunId): void
 }
 
@@ -54,6 +73,10 @@ interface ToolWorkflowRecordEventMap {
   'tool-workflow/run-start': ToolWorkflowRunStartData
   'tool-workflow/agent-start': ToolWorkflowAgentStartData
   'tool-workflow/agent-end': ToolWorkflowAgentEndData
+  'tool-workflow/node-start': ToolWorkflowNodeStartData
+  'tool-workflow/node-end': ToolWorkflowNodeEndData
+  'tool-workflow/approval': ToolWorkflowApprovalData
+  'tool-workflow/gate-report': ToolWorkflowGateReportData
   'tool-workflow/run-end': ToolWorkflowRunEndData
 }
 
@@ -66,18 +89,27 @@ function renderRecordingError(error: unknown): string {
   }
 }
 
+interface ActiveRecord {
+  readonly session: Session
+  readonly recordId: WorkflowRunId
+  readonly nodes: boolean
+}
+
 /**
  * Project active top-level workflow runs into their parent Sessions without
- * letting recording failure affect tool execution.
+ * letting recording failure affect tool execution. Every append goes through one
+ * never-throwing helper: the first failed append disables recording for that run.
+ * @param ctx - the context whose `workflow/*` events the recorder listens to.
+ * @returns the recorder.
  */
-function createWorkflowRecorder(ctx: Context): WorkflowRecorder {
-  const active = new Map<WorkflowRunId, Session>()
+export function createWorkflowRecorder(ctx: Context): WorkflowRecorder {
+  const active = new Map<WorkflowRunId, ActiveRecord>()
   const append = <Type extends keyof ToolWorkflowRecordEventMap>(
     session: Session,
     type: Type,
     data: SessionEventMap[Type],
   ): boolean => {
-    // These four package-owned events are all log-only. Narrowing the generic
+    // These package-owned events are all log-only. Narrowing the generic
     // append face here discharges Session.append's conditional options tuple.
     const appendRecord = session.append.bind(session) as <Event extends keyof ToolWorkflowRecordEventMap>(
       event: Event,
@@ -93,37 +125,75 @@ function createWorkflowRecorder(ctx: Context): WorkflowRecorder {
   }
 
   ctx.on('workflow/agent-start', (info, agent) => {
-    const session = active.get(info.id)
-    if (session === undefined) return
+    const record = active.get(info.id)
+    if (record === undefined) return
     const data: ToolWorkflowAgentStartData = {
-      runId: info.id,
+      runId: record.recordId,
       seq: agent.seq,
       label: agent.label,
       ...agent.phase === undefined ? {} : { phase: agent.phase },
       childId: agent.childId,
     }
-    if (!append(session, 'tool-workflow/agent-start', data)) active.delete(info.id)
+    if (!append(record.session, 'tool-workflow/agent-start', data)) active.delete(info.id)
   })
   ctx.on('workflow/agent-end', (info, agent) => {
-    const session = active.get(info.id)
-    if (session === undefined) return
+    const record = active.get(info.id)
+    if (record === undefined) return
     const data: ToolWorkflowAgentEndData = {
-      runId: info.id,
+      runId: record.recordId,
       seq: agent.seq,
       outcome: agent.outcome,
     }
-    if (!append(session, 'tool-workflow/agent-end', data)) active.delete(info.id)
+    if (!append(record.session, 'tool-workflow/agent-end', data)) active.delete(info.id)
+  })
+  ctx.on('workflow/node-start', (info, node) => {
+    const record = active.get(info.id)
+    if (record === undefined || !record.nodes) return
+    const data: ToolWorkflowNodeStartData = { runId: record.recordId, nodeId: node.nodeId, kind: node.kind, at: Date.now() }
+    if (!append(record.session, 'tool-workflow/node-start', data)) active.delete(info.id)
+  })
+  ctx.on('workflow/node-end', (info, node) => {
+    const record = active.get(info.id)
+    if (record === undefined || !record.nodes) return
+    const data: ToolWorkflowNodeEndData = {
+      runId: record.recordId,
+      nodeId: node.nodeId,
+      kind: node.kind,
+      status: node.status,
+      ...node.exitCode === undefined ? {} : { exitCode: node.exitCode },
+      ...node.durationMs === undefined ? {} : { durationMs: node.durationMs },
+      truncated: node.truncated === true,
+      ...node.attempts === undefined ? {} : { attempts: node.attempts },
+      ...node.failure === undefined ? {} : { failure: node.failure },
+    }
+    if (!append(record.session, 'tool-workflow/node-end', data)) active.delete(info.id)
   })
 
   return {
-    start(session, run) {
-      if (append(session, 'tool-workflow/run-start', { runId: run.id, name: run.meta.name })) {
-        active.set(run.id, session)
+    start(session, run, options = {}) {
+      const recordId = WorkflowRunId(options.recordId ?? run.id)
+      if (append(session, 'tool-workflow/run-start', { runId: recordId, name: run.meta.name })) {
+        active.set(run.id, { session, recordId, nodes: options.nodes === true })
       }
     },
+    gateReport(runId, rows) {
+      const record = active.get(runId)
+      if (record === undefined) return
+      if (!append(record.session, 'tool-workflow/gate-report', { runId: record.recordId, rows })) active.delete(runId)
+    },
+    nodeEnd(runId, data) {
+      const record = active.get(runId)
+      if (record === undefined || !record.nodes) return
+      if (!append(record.session, 'tool-workflow/node-end', { runId: record.recordId, ...data })) active.delete(runId)
+    },
+    approval(runId, data) {
+      const record = active.get(runId)
+      if (record === undefined) return
+      if (!append(record.session, 'tool-workflow/approval', { runId: record.recordId, ...data })) active.delete(runId)
+    },
     finish(runId, stopReason) {
-      const session = active.get(runId)
-      if (session !== undefined) append(session, 'tool-workflow/run-end', { runId, stopReason })
+      const record = active.get(runId)
+      if (record !== undefined) append(record.session, 'tool-workflow/run-end', { runId: record.recordId, stopReason })
       active.delete(runId)
     },
     abandon: (runId) => { active.delete(runId) },

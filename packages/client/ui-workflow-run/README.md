@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-The browser plugin that reconstructs durable top-level workflow runs as independent Chat nodes. It consumes the four `tool-workflow/*` Session events owned by [`dsh-tool-workflow`](../../workflow/tool-workflow/README.md), registers one `ConversationNodeDefinition`, and renders through the keyed `conversation.chat.node` slot without changing the existing workflow tool card.
+The browser plugin that reconstructs durable top-level workflow runs as independent Chat nodes. It consumes the `tool-workflow/*` Session events owned by [`dsh-tool-workflow`](../../workflow/tool-workflow/README.md), registers one `ConversationNodeDefinition`, and renders through the keyed `conversation.chat.node` slot without changing the existing workflow tool card.
 
 ## Durable state and replay
 
@@ -15,6 +15,29 @@ Phase groups come only from members that actually started. Exact phase strings s
 The run and each phase derive disclosure control from their current lifecycle facts. The run stays expanded while its own status is running, failed, cancelled, or interrupted, or while any phase contains such a member; each affected phase also stays expanded. Forced-open headers are static expanded rows without button, keyboard, or `aria-expanded` promises. A phase folds once when every member completes, and the run folds once when it and every phase complete. Each clean layer then exposes an ordinary disclosure control whose local choice survives clean rerenders; new activity takes control again, and a remount derives the initial state from current data. The run uses a 32-pixel `--dsw-alias-bg-module-platform` row with persistent right/down chevrons and an inline state dot plus status text, without a badge. Phases use 32-pixel disclosure rows with title and member count in the flexible main area and a fixed precise aggregate-status tail, without another dot. Members use a 16-pixel dot slot, a truncating name area, and a fixed 64-pixel status column.
 
 A member opens a child Session only while every current fact agrees: the member is running, the child id is in the ordinary Session list, the row has `origin: 'subagent'`, its `parentId` is the current Session, and the list row is still running. Underlined member text is the only visible navigation affordance; keyboard focus draws a two-pixel business-primary ring around the name area, while status copy remains `Running`. The component calls only the injected ordinary `sessions.open(id)` action; remote, addressed-only, wrong-parent, or terminal rows remain non-interactive.
+
+## YAML workflow nodes and the gate report
+
+For YAML workflow runs the node also folds `tool-workflow/node-start`, `tool-workflow/node-end`, `tool-workflow/approval` and `tool-workflow/gate-report`. A node-start makes a row `running` with its start time; a node-end settles it as `done`, `failed`, `skipped`, `cancelled` or `interrupted`, and a later node-end for the same node replaces the earlier one (agent-node truncation is only known at run end). A node still running when the run ends reads `interrupted`. Each row (`data-workflow-node`, `data-node-id`, `data-node-status`) shows status text, exit code, duration and an output-truncated marker from the event's `truncated` field. A node with an approval record carries `data-approval-state` (`pending`, `allowed`, `rejected`, `expired`, `unavailable` or `cancelled`) and a text badge taken from the latest `tool-workflow/approval` event; decisions are final, so a late `pending` never reverts one. The approval reason (else the gate-report reason) is shown verbatim, so a headless or no-answerer rejection reads with its remedy. Events whose run has no `run-start` are ignored. The gate report renders after the run disclosure as a captioned table (`data-gate-table`) with one row per gate: node, kind, a text outcome badge for `fired-pass`, `fired-block`, `skipped`, `not-reached` or `never-evaluated`, and the reason. It is collapsed by default and opens by default when a gate blocked; the toggle (`data-gate-toggle`, `aria-expanded`) is remembered per run id in component state only. Plain `workflow` tool runs render exactly as before.
+
+## Selectors
+
+Stable `data-*` hooks for tests and the pilot:
+
+| Selector | Meaning |
+| --- | --- |
+| `[data-workflow-node]` | One node row; `data-node-id`, `data-node-kind`, `data-node-status`, and `data-approval-state` when it has an approval |
+| `[data-node-attempt]` | The "attempt N of M" label, present only when the node ran more than one attempt |
+| `[data-node-earlier-toggle]` / `[data-node-earlier-attempt]` | Expander for earlier attempts of a retried node, and each earlier attempt once expanded; earlier attempts are never separate rows |
+| `[data-node-failure-code]` / `[data-node-failure-message]` / `[data-node-failure-remedy]` | The supervisor stop (`NODE_STALLED` or `NODE_TIMEOUT`), its message and its remedy, as plain text |
+| `[data-node-reason]` / `[data-node-truncated]` | The verbatim approval or failure reason, and the output-truncated marker |
+| `[data-gate-report]` / `[data-gate-toggle]` / `[data-gate-table]` / `[data-gate-row]` | The gate report, its toggle, table and rows; rows carry `data-gate-outcome` |
+
+## Embeddable run view
+
+The client entry (`@deepseek-ai/dsh-client-ui-workflow-run/client`) also exports the pieces the Workflows overlay embeds so it does not re-render the same facts: `NodeList` (`nodes`, `t`), `NodeRow` (`node`, `t`), `ApprovalBadge` (`state`, `t`), and the controlled `GateReport` (`rows`, `open`, `onToggle`, `t`), where `t` is the `workflowRun` namespace translate function. `runDetailToNodeData(detail)` is a pure mapper from the `runDetail` result body (`nodes`, `gates`, `approvals`) to `{ nodes, gateReport }`: node status `success` reads `done`, an unknown status `interrupted`, an unknown approval state `unavailable`; a node takes its latest approval, and its reason is the approval reason, else the node error, capped at 500 characters. The Chat projection from session events is unchanged.
+
+The same pieces are provided as the client service `ctx.workflowRunView` (injection key `workflowRunView`, contract type `WorkflowRunViewContract`) with the members `NodeList`, `NodeRow`, `ApprovalBadge`, `GateReport` and `runDetailToNodeData`. Another UI plugin lists `workflowRunView` in its `inject` array and imports only the type from the `/client` entry, because the client bundle purity gate forbids a value import of another plugin's entry. The service lives and dies with this plugin's fiber.
 
 ## Composition
 
@@ -32,4 +55,4 @@ None.
 
 - Only top-level calls through `dsh-tool-workflow` produce these records; nested Code Mode calls and direct `WorkflowEngine` consumers do not.
 - Navigation is intentionally live-only. Terminal members remain visible for review but never expose a cold-session opener from this node.
-- The node shows run, phase, member identity, and status only; scripts, outputs, errors, logs, usage, static topology, and controls remain outside this surface.
+- The node shows run, phase, member identity, node, approval, and gate-report facts only; scripts, outputs, errors, logs, usage, static topology, and controls remain outside this surface.

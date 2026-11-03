@@ -35,3 +35,9 @@ harness 的用途，且这两个包本来就在 Host 图中。另外，chat 场�
 偶然而非保证——一旦它离开该图，就像其余情形那样镜像该 helper。
 
 没有任何机制强制这条规则；靠 review 守住它。
+
+## 运行此测试通道
+
+这些场景需要已构建的前端：先执行 `pnpm run build:web`（会写入被 git 忽略的 `apps/web/dist`），再执行
+`pnpm exec vitest run --config vitest.web.config.ts <文件>`。它们属于 `test:web` 通道，而不是 `test:e2e`。
+重新录制快照请使用 `DSH_SNAPSHOT=refresh`。

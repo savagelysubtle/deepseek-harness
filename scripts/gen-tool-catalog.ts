@@ -70,6 +70,7 @@ import * as ToolWeb from '@deepseek-ai/dsh-tool-web'
 import VmWorkflowEngine from '@deepseek-ai/dsh-workflow-worker-thread'
 import * as ToolRalph from '@deepseek-ai/dsh-tool-ralph'
 import * as ToolWorkflow from '@deepseek-ai/dsh-tool-workflow'
+import * as ToolWorkflowRun from '@deepseek-ai/dsh-tool-workflow-run'
 import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import * as ToolCompact from '@deepseek-ai/dsh-tool-compact'
@@ -594,6 +595,23 @@ const TOOL_PACKAGES: ToolPackage[] = [
     },
   },
   {
+    pkg: '@deepseek-ai/dsh-tool-workflow-run',
+    dir: 'tool-workflow-run',
+    source: 'packages/workflow/tool-workflow-run/src/index.ts',
+    requires: ['ctx.tools', 'ctx.workflowEngine', 'ctx.shell (at run time)', 'a calling Agent (exec.agent parents the run)'],
+    writes: ['tool/call', 'tool/result', 'tool-workflow/run-start', 'tool-workflow/agent-start', 'tool-workflow/agent-end', 'tool-workflow/node-end', 'tool-workflow/gate-report', 'tool-workflow/run-end'],
+    async mount(ctx) {
+      // Only the engine and tool registry are needed to register the tool; the shell and approval
+      // services are read at run time, so the schema harvest does not mount them.
+      await ctx.plugin(SubagentRuntime)
+      registerCatalogSubagentProvider(ctx, 'mock')
+      await ctx.plugin(VmWorkflowEngine, { provider: 'mock' })
+      await ctx.plugin(ToolWorkflowRun)
+    },
+    note:
+      'Runs a YAML workflow from the workspace workflows directory. Exactly one of name, path, resume or cancel is given; dryRun returns the graph, gate manifest and shell commands and starts nothing. Every shell command runs through ctx.shell, under the session sandbox policy when a confining shell is mounted. A workflow hash the user has not confirmed is refused until a human confirms it, and an approval node is rejected immediately (with a reason and remedy) when the session is headless, nobody can answer, or the trust policy is never.',
+  },
+  {
     pkg: '@deepseek-ai/dsh-tool-web',
     dir: 'tool-web',
     source: 'packages/web/tool-web/src/index.ts',
@@ -700,7 +718,8 @@ function hasToolExportSubpath(manifestPath: string): boolean {
  * @param scanRoot - repo root (or a fixture tree root) to scan from.
  */
 function discoverToolPackageDirs(scanRoot: string): string[] {
-  const dirGlob = globSync('packages/*/tool-*', { cwd: scanRoot }).map(p => basename(p))
+  const dirGlob = globSync('packages/*/tool-*', { cwd: scanRoot })
+    .map(p => basename(p))
   const subpathDirs = globSync('packages/*/*/package.json', { cwd: scanRoot })
     .filter(manifestPath => hasToolExportSubpath(resolve(scanRoot, manifestPath)))
     .map(manifestPath => basename(dirname(manifestPath)))

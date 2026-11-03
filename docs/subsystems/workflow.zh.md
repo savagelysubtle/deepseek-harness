@@ -33,6 +33,35 @@ interface WorkflowStartRequest {
   parent: Agent
   /** Cancels the run when aborted. */
   signal?: AbortSignal
+  /**
+   * Workspace root: `bash()` working directories resolve (realpath) and must
+   * stay under it. Defaults to the host process cwd.
+   */
+  cwd?: string
+  /**
+   * Decides `approve()` questions. Absent means every `approve()` answers
+   * `'unavailable'` (fail closed); the engine never prompts by itself.
+   */
+  approver?: WorkflowApprover
+  /**
+   * Turns on the `bash()` hook and the `agent()` `doneWhen` option for this run. Off by default:
+   * both run host-side commands, so only an owner that vouches for the script (a compiled,
+   * trusted workflow) enables them.
+   */
+  bashEnabled?: boolean
+  /** Overrides the built-in local bash executor (e.g. a sandboxed one). */
+  bashExecutor?: WorkflowBashExecutor
+  /** Receives every `bash()` output chunk (the full streams) so the caller can spill what the in-memory cap dropped. */
+  onBashOutput?: (info: { nodeId?: string }, stream: 'stdout' | 'stderr', chunk: Uint8Array) => void
+  /** Tier label to model id, used for an `agent()` call that gives a `tier` but no `model`. */
+  tierModels?: Readonly<Record<string, string>>
+  /**
+   * The compiled workflow's declared gates. The engine owes one `workflow/gate` per entry on every
+   * terminal path: a node that never started reports `not-reached`.
+   */
+  gateManifest?: readonly { nodeId: string; gateKind: string }[]
+  /** Supervises `agent()` children: stall watchdog and done-when continuation (see {@link WorkflowChildSupervisor}). */
+  supervisor?: WorkflowChildSupervisor
 }
 ```
 
@@ -106,6 +135,14 @@ interface WorkflowRun {
   readonly result: Promise<WorkflowResult>
   /** Cancel the run and its children. */
   cancel(reason?: string): void
+  /** Approvals currently awaiting a decision (engines without `approve()` support omit this). */
+  pendingApprovals?(): readonly WorkflowPendingApproval[]
+  /**
+   * Decide a pending approval from outside the injected approver (a UI path).
+   * First decision wins by a single synchronous compare-and-set; the id is
+   * compared in constant time. A second call answers `already-decided`.
+   */
+  decideApproval?(approvalId: string, outcome: WorkflowApprovalOutcome): WorkflowApprovalDecision
   /** Cancel if needed and await bounded settlement and cleanup. */
   dispose(): Promise<void>
 }
@@ -151,7 +188,110 @@ Workflow Service Definition contract. Invalid requests throw before publication;
 abstract start(request: WorkflowStartRequest): WorkflowRun
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:157`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:171`](../../packages/workflow/workflow/src/index.ts)
+
+<a id="ctxworkflowruns--workflowrunsservice"></a>
+
+### `ctx.workflowRuns` — `WorkflowRunsService`
+
+The workflow runner service. See the module comment.
+
+```ts cordis-catalog
+/**
+ * Subscribe to run and approval changes.
+ * @param listener - called synchronously with each event; a throw is contained.
+ * @returns the unsubscribe function.
+ */
+subscribe(listener: (event: WorkflowRunsEvent) => void): () => void
+
+/**
+ * Declare that a human who can answer approvals is attached (the Workflows UI is open).
+ * While at least one attachment is held, an approval waits for an answer instead of being
+ * rejected at once; with none, an approval nobody can answer fails closed. Attaching is an
+ * explicit act, never inferred from {@link WorkflowRunsService.subscribe}.
+ * @returns the disposer that withdraws this attachment; calling it again does nothing.
+ */
+attachUi(): () => void
+
+/**
+ * The run store of a workspace: one handle per workspace per process.
+ * @param workspace - a workspace path; resolved through `realpath`.
+ * @returns the shared store handle, narrowed to its read methods (writes go through this service).
+ */
+async storeFor(workspace: string): Promise<WorkflowStoreReader>
+
+/**
+ * Workflows present in a workspace's workflows directory.
+ * @param workspace - the workspace path.
+ * @returns the sorted names.
+ */
+async listWorkflows(workspace: string): Promise<string[]>
+
+/**
+ * One run's stored detail with its pin facts.
+ * @param workspace - the workspace path.
+ * @param runId - the run.
+ * @returns the detail, the pinned hash and whether the live file changed.
+ */
+async getRunView(workspace: string, runId: string): Promise<RunView>
+
+/**
+ * Approvals waiting for an answer in this process.
+ * @param runId - restrict to one run.
+ * @returns the waiting approvals.
+ */
+pendingApprovals(runId?: string): PendingApprovalView[]
+
+/**
+ * Answer a waiting approval (the UI path).
+ * @param runId - the run.
+ * @param approvalId - the store approval id.
+ * @param answer - allow or reject.
+ * @param reason - optional human reason, recorded.
+ * @returns the winning state, or undefined when nothing is waiting under that id here.
+ */
+async answerApproval(runId: string, approvalId: string, answer: BrokerAnswer, reason?: string): Promise<string | undefined>
+
+/**
+ * The runs this process is executing now.
+ * @returns run id, name, hash, workspace realpath and parent session id of each.
+ */
+activeRuns(): { runId: string; name: string; hash: string; workspace: string; sessionId: string }[]
+
+/**
+ * The workspace-relative directory that holds workflow files.
+ * @returns the configured directory, default `.workflows`.
+ */
+workflowsDir(): string
+
+/**
+ * Cancel a run owned by this process, if it belongs to the caller's workspace (and session).
+ * A run outside the scope answers exactly like a run that does not exist.
+ * @param runId - the run.
+ * @param reason - why, recorded on the run.
+ * @param scope - the caller's workspace, and optionally its session.
+ * @returns whether this process owns a matching run, with its eventual outcome.
+ */
+async cancel(runId: string, reason: string, scope: CancelScope): Promise<{ found: boolean; outcome?: RunOutcome }>
+
+/**
+ * Describe a workflow without running anything: the DAG, the gate manifest and the trust facts.
+ * No store is opened and no process or agent is started.
+ * @param workspace - the workspace path.
+ * @param options - which workflow; `caller` (the calling session id) asks for a trust challenge.
+ * @returns the plan, or why none could be made.
+ */
+async dryRun(workspace: string, options: DryRunOptions): Promise<DryRunPlan | StartRefused>
+
+/**
+ * Start (or resume) a workflow run.
+ * @param options - which workflow, its inputs, the parent agent and the trust confirmation.
+ * @returns a started run whose `done` settles when the record is closed, or why the start was refused.
+ */
+async start(options: StartOptions): Promise<StartResult>
+```
+
+Source: [`packages/workflow/tool-workflow-run/src/runner.ts:229`](../../packages/workflow/tool-workflow-run/src/runner.ts)
 
 <a id="workflow-events"></a>
 
@@ -177,7 +317,7 @@ One `agent()` call settled (clean result, child failure, or run cancellation). P
 'workflow/agent-end'(info: WorkflowRunInfo, agent: WorkflowAgentEndInfo): void
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:79`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:111`](../../packages/workflow/workflow/src/index.ts)
 
 <a id="workflowagent-start--emit"></a>
 
@@ -198,7 +338,41 @@ One `agent()` call established a published child run. Paired with Events['workfl
 'workflow/agent-start'(info: WorkflowRunInfo, agent: WorkflowAgentInfo): void
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:68`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:100`](../../packages/workflow/workflow/src/index.ts)
+
+<a id="workflowapproval-decided--emit"></a>
+
+#### `workflow/approval-decided` — emit
+
+An approval left the pending state.
+
+```ts cordis-catalog
+/**
+ * An approval left the pending state.
+ * @param decision - the run and approval ids and the state it ended in.
+ * @mode emit
+ */
+'workflow/approval-decided'(decision: WorkflowApprovalDecided): void
+```
+
+Source: [`packages/workflow/workflow-remote/src/wire.ts:841`](../../packages/workflow/workflow-remote/src/wire.ts)
+
+<a id="workflowapproval-pending--emit"></a>
+
+#### `workflow/approval-pending` — emit
+
+An approval node is waiting for a human answer.
+
+```ts cordis-catalog
+/**
+ * An approval node is waiting for a human answer.
+ * @param approval - the run, approval and node ids; the question is read with `pendingApprovals`.
+ * @mode emit
+ */
+'workflow/approval-pending'(approval: WorkflowApprovalPending): void
+```
+
+Source: [`packages/workflow/workflow-remote/src/wire.ts:835`](../../packages/workflow/workflow-remote/src/wire.ts)
 
 <a id="workflowend--emit"></a>
 
@@ -219,7 +393,28 @@ A workflow run settled (any stop reason). Fired when WorkflowRun.result resolves
 'workflow/end'(info: WorkflowRunInfo, result: WorkflowResultInfo): void
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:89`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:121`](../../packages/workflow/workflow/src/index.ts)
+
+<a id="workflowgate--emit"></a>
+
+#### `workflow/gate` — emit
+
+A declared gate was evaluated. Exactly one per gate-declaring node on every terminal path: the script's own, or host-synthesized (`not-reached` for a stranded node, `never-evaluated` for one that ended without evaluating its gate).
+
+```ts cordis-catalog
+/**
+ * A declared gate was evaluated. Exactly one per gate-declaring node on
+ * every terminal path: the script's own, or host-synthesized
+ * (`not-reached` for a stranded node, `never-evaluated` for one that
+ * ended without evaluating its gate).
+ * @param info - the run's identity snapshot.
+ * @param gate - the node, gate kind and outcome.
+ * @mode emit
+ */
+'workflow/gate'(info: WorkflowRunInfo, gate: WorkflowGateInfo): void
+```
+
+Source: [`packages/workflow/workflow/src/index.ts:148`](../../packages/workflow/workflow/src/index.ts)
 
 <a id="workflowlog--emit"></a>
 
@@ -237,7 +432,46 @@ The script emitted a narration line (a `log(message)` call).
 'workflow/log'(info: WorkflowRunInfo, message: string): void
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:58`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:90`](../../packages/workflow/workflow/src/index.ts)
+
+<a id="workflownode-end--emit"></a>
+
+#### `workflow/node-end` — emit
+
+A workflow node settled. Exactly one end per started node on every terminal path: the script's own, or a host-synthesized one (`synthesized: true`, status `cancelled` after cancel else `interrupted`).
+
+```ts cordis-catalog
+/**
+ * A workflow node settled. Exactly one end per started node on every
+ * terminal path: the script's own, or a host-synthesized one
+ * (`synthesized: true`, status `cancelled` after cancel else `interrupted`).
+ * @param info - the run's identity snapshot.
+ * @param node - the node identity plus its status.
+ * @mode emit
+ */
+'workflow/node-end'(info: WorkflowRunInfo, node: WorkflowNodeEndInfo): void
+```
+
+Source: [`packages/workflow/workflow/src/index.ts:138`](../../packages/workflow/workflow/src/index.ts)
+
+<a id="workflownode-start--emit"></a>
+
+#### `workflow/node-start` — emit
+
+A workflow node started (the script's `nodeStart` hook). Paired with Events['workflow/node-end'] by `node.nodeId`.
+
+```ts cordis-catalog
+/**
+ * A workflow node started (the script's `nodeStart` hook). Paired with
+ * {@link Events['workflow/node-end']} by `node.nodeId`.
+ * @param info - the run's identity snapshot.
+ * @param node - the node id, kind and declared gate kind.
+ * @mode emit
+ */
+'workflow/node-start'(info: WorkflowRunInfo, node: WorkflowNodeInfo): void
+```
+
+Source: [`packages/workflow/workflow/src/index.ts:129`](../../packages/workflow/workflow/src/index.ts)
 
 <a id="workflowphase--emit"></a>
 
@@ -256,7 +490,26 @@ The script entered a phase (a `phase(title)` call) — progress grouping for obs
 'workflow/phase'(info: WorkflowRunInfo, title: string): void
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:51`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:83`](../../packages/workflow/workflow/src/index.ts)
+
+<a id="workflowrun-changed--emit"></a>
+
+#### `workflow/run-changed` — emit
+
+A workflow run started, advanced a node, or ended. Forwarded to clients verbatim once `packages/api/remotes/src/remote-events.ts`'s allowlist names it; the payload is ids and status only.
+
+```ts cordis-catalog
+/**
+ * A workflow run started, advanced a node, or ended. Forwarded to clients verbatim once
+ * `packages/api/remotes/src/remote-events.ts`'s allowlist names it; the payload is ids and
+ * status only.
+ * @param change - the run id, its status, and the node that changed.
+ * @mode emit
+ */
+'workflow/run-changed'(change: WorkflowRunChange): void
+```
+
+Source: [`packages/workflow/workflow-remote/src/wire.ts:829`](../../packages/workflow/workflow-remote/src/wire.ts)
 
 <a id="workflowstart--emit"></a>
 
@@ -274,5 +527,5 @@ A workflow run started — the script's meta block validated, the body about to 
 'workflow/start'(info: WorkflowRunInfo): void
 ```
 
-Source: [`packages/workflow/workflow/src/index.ts:43`](../../packages/workflow/workflow/src/index.ts)
+Source: [`packages/workflow/workflow/src/index.ts:75`](../../packages/workflow/workflow/src/index.ts)
 <!-- END GENERATED cordis-surface -->

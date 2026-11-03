@@ -3158,7 +3158,63 @@ export interface Config {
 }
 ```
 
-Source: [`packages/workflow/tool-workflow/src/index.ts:33`](../packages/workflow/tool-workflow/src/index.ts)
+Source: [`packages/workflow/tool-workflow/src/index.ts:34`](../packages/workflow/tool-workflow/src/index.ts)
+
+<a id="deepseek-aidsh-tool-workflow-run"></a>
+
+## `@deepseek-ai/dsh-tool-workflow-run`
+
+Requires: `tools`
+
+```ts config-catalog
+/** Config: every key is optional; the schema fills the defaults. */
+export interface Config {
+  /** The model-facing tool name to register (default `workflow_run`). */
+  toolName?: string
+  /**
+   * Register the model-facing tool (default true). False mounts only the `ctx.workflowRuns` service,
+   * which the Workflows UI uses, so a composition can serve the UI without giving every agent the tool.
+   */
+  exposeTool?: boolean
+  /**
+   * Build the `ctx.workflowRuns` service (default true). False mounts the tool only and resolves the
+   * service from the host plane, so a preset's model tool and the Workflows overlay share one runner,
+   * one store handle and one set of live events.
+   */
+  exposeService?: boolean
+  /** Workspace-relative directory holding `<name>.yaml` workflow files (default `.workflows`). */
+  workflowsDir?: string
+  /** How long an approval may wait for an answer before it expires and the node is rejected, in milliseconds (default 3600000). */
+  approvalWaitMs?: number
+  /** True in headless deployments: every approval node is rejected immediately with a reason and remedy (default false). */
+  headless?: boolean
+  /** `ask` confirms an untrusted workflow hash before its first run; `never` refuses any untrusted hash (default `ask`). */
+  trustPolicy?: TrustPolicy
+  /** Tier-to-model table; a model id containing the denied model family fails the plugin at startup. */
+  tierModels?: TierModels
+  /** Runs kept per workspace before the oldest finished ones are pruned (default 200). */
+  retention?: number
+  /** Harness home holding the run store; defaults to `$DSH_HOME`, else `~/.dsh`. */
+  dshHome?: string
+  /** Ceiling of the rendered tool-result text, in characters (default 50000). */
+  maxResultChars?: number
+}
+
+/** Trust policy for a workflow file whose content hash has not been trusted yet. */
+export type TrustPolicy = 'ask' | 'never'
+
+/** The tier-to-model table applied to `agent()` calls that name a tier. */
+export interface TierModels {
+  /** Model for `cheap` nodes (default `haiku`). */
+  cheap?: string
+  /** Model for `standard` nodes (default `sonnet`). */
+  standard?: string
+  /** Model for `premium` nodes (default `opus`; the workflow must also give a non-empty `justify`). */
+  premium?: string
+}
+```
+
+Source: [`packages/workflow/tool-workflow-run/src/config.ts:24`](../packages/workflow/tool-workflow-run/src/config.ts)
 
 <a id="deepseek-aidsh-tools"></a>
 
@@ -3419,7 +3475,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/workflow/workflow-worker-thread/src/index.ts:32`](../packages/workflow/workflow-worker-thread/src/index.ts)
+Source: [`packages/workflow/workflow-worker-thread/src/index.ts:37`](../packages/workflow/workflow-worker-thread/src/index.ts)
 
 ## Loadable plugins with no config
 
@@ -3464,6 +3520,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-client-ui-trajectory` ([`packages/client/ui-trajectory/src/index.ts`](../packages/client/ui-trajectory/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-user-questions` ([`packages/client/ui-user-questions/src/index.ts`](../packages/client/ui-user-questions/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-workflow-run` ([`packages/client/ui-workflow-run/src/index.ts`](../packages/client/ui-workflow-run/src/index.ts))
+- `@deepseek-ai/dsh-client-ui-workflows` ([`packages/client/ui-workflows/src/index.ts`](../packages/client/ui-workflows/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-workspace` ([`packages/client/ui-workspace/src/index.ts`](../packages/client/ui-workspace/src/index.ts))
 - `@deepseek-ai/dsh-command-compact` — requires `commands` · `compaction` ([`packages/compaction/command-compact/src/index.ts`](../packages/compaction/command-compact/src/index.ts))
 - `@deepseek-ai/dsh-command-feedback` — requires `commands` ([`packages/feedback/command-feedback/src/index.ts`](../packages/feedback/command-feedback/src/index.ts))
@@ -3496,6 +3553,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-tool-cordis` — requires `tools` · `systemPrompt` · `dynamicCordisRunner` · `cordisInspect` ([`packages/extensions/tool-cordis/src/index.ts`](../packages/extensions/tool-cordis/src/index.ts))
 - `@deepseek-ai/dsh-tool-subagent-control` — requires `tools` · `subagents` ([`packages/subagent/tool-subagent-control/src/index.ts`](../packages/subagent/tool-subagent-control/src/index.ts))
 - `@deepseek-ai/dsh-user-questions` ([`packages/interaction/user-questions/src/index.ts`](../packages/interaction/user-questions/src/index.ts))
+- `@deepseek-ai/dsh-workflow-remote` ([`packages/workflow/workflow-remote/src/index.ts`](../packages/workflow/workflow-remote/src/index.ts))
 - `@deepseek-ai/dsh-workspace` — requires `storageDomain` · `sessionPersistence` ([`packages/workspace/workspace/src/index.ts`](../packages/workspace/workspace/src/index.ts))
 
 ## Seam packages (not directly loadable)
@@ -3561,4 +3619,6 @@ Imported as libraries by other packages; a `cordis.yml` cannot load them.
 - `@deepseek-ai/dsh-typert-generator` ([`packages/typert/generator/src/index.ts`](../packages/typert/generator/src/index.ts))
 - `@deepseek-ai/dsh-typert-protocol` ([`packages/typert/protocol/src/index.ts`](../packages/typert/protocol/src/index.ts))
 - `@deepseek-ai/dsh-typert-registry` ([`packages/typert/registry/src/index.ts`](../packages/typert/registry/src/index.ts))
+- `@deepseek-ai/dsh-workflow-run-store` ([`packages/workflow/workflow-run-store/src/index.ts`](../packages/workflow/workflow-run-store/src/index.ts))
+- `@deepseek-ai/dsh-workflow-yaml` ([`packages/workflow/workflow-yaml/src/index.ts`](../packages/workflow/workflow-yaml/src/index.ts))
 - `@deepseek-ai/dsh-worktree` ([`packages/worktree/worktree/src/index.ts`](../packages/worktree/worktree/src/index.ts))

@@ -58,6 +58,7 @@ const EXPECTED_TOOLS = [
   'update_goal',
   'web_search',
   'workflow',
+  'workflow_run',
   'write',
 ]
 

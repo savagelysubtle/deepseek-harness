@@ -5,17 +5,35 @@
  */
 
 import { Context, Service } from '@deepseek-ai/cordis'
-import { HarnessError } from '@deepseek-ai/dsh-llm'
+export { isFatalWorkflowError, WorkflowError } from './errors.ts'
+export type { WorkflowErrorCode } from './errors.ts'
 import type {
   WorkflowAgentEndInfo,
   WorkflowAgentInfo,
+  WorkflowGateInfo,
+  WorkflowNodeEndInfo,
+  WorkflowNodeInfo,
   WorkflowResultInfo,
   WorkflowRunInfo,
 } from './types.ts'
 import type { WorkflowRun, WorkflowStartRequest } from './runtime-types.ts'
 
-export { WorkflowRunId } from './types.ts'
+export { WORKFLOW_BASH_OUTPUT_CAP_BYTES, WORKFLOW_CONTINUATION_CEILING, WORKFLOW_CONTINUATION_DEFAULT, WORKFLOW_EVIDENCE_TAIL_CHARS, WORKFLOW_NODE_ID_PATTERN, WorkflowRunId } from './types.ts'
+export * from './bash.ts'
+export { createLocalBashExecutor } from './local-bash.ts'
+export type { LocalBashExecutorOptions } from './local-bash.ts'
 export type {
+  WorkflowApprovalOutcome,
+  WorkflowBashOptions,
+  WorkflowBashResult,
+  WorkflowContinuationEvidence,
+  WorkflowDoneWhen,
+  WorkflowGateInfo,
+  WorkflowGateOutcome,
+  WorkflowNodeEndInfo,
+  WorkflowNodeFailure,
+  WorkflowNodeInfo,
+  WorkflowNodeStatus,
   WorkflowAgentEndInfo,
   WorkflowAgentInfo,
   WorkflowAgentOutcome,
@@ -26,7 +44,21 @@ export type {
   WorkflowRunInfo,
   WorkflowStopReason,
 } from './types.ts'
-export type { WorkflowRun, WorkflowStartRequest } from './runtime-types.ts'
+export type {
+  WorkflowApprovalDecision,
+  WorkflowApprovalRequest,
+  WorkflowApprover,
+  WorkflowBashExecRequest,
+  WorkflowBashExecutor,
+  WorkflowChildHandle,
+  WorkflowChildSupervisor,
+  WorkflowPendingApproval,
+  WorkflowRun,
+  WorkflowStartRequest,
+  WorkflowSupervisedChild,
+  WorkflowSupervisedOutcome,
+  WorkflowSupervisorTools,
+} from './runtime-types.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -87,6 +119,33 @@ declare module '@deepseek-ai/cordis' {
      * @mode emit
      */
     'workflow/end'(info: WorkflowRunInfo, result: WorkflowResultInfo): void
+    /**
+     * A workflow node started (the script's `nodeStart` hook). Paired with
+     * {@link Events['workflow/node-end']} by `node.nodeId`.
+     * @param info - the run's identity snapshot.
+     * @param node - the node id, kind and declared gate kind.
+     * @mode emit
+     */
+    'workflow/node-start'(info: WorkflowRunInfo, node: WorkflowNodeInfo): void
+    /**
+     * A workflow node settled. Exactly one end per started node on every
+     * terminal path: the script's own, or a host-synthesized one
+     * (`synthesized: true`, status `cancelled` after cancel else `interrupted`).
+     * @param info - the run's identity snapshot.
+     * @param node - the node identity plus its status.
+     * @mode emit
+     */
+    'workflow/node-end'(info: WorkflowRunInfo, node: WorkflowNodeEndInfo): void
+    /**
+     * A declared gate was evaluated. Exactly one per gate-declaring node on
+     * every terminal path: the script's own, or host-synthesized
+     * (`not-reached` for a stranded node, `never-evaluated` for one that
+     * ended without evaluating its gate).
+     * @param info - the run's identity snapshot.
+     * @param gate - the node, gate kind and outcome.
+     * @mode emit
+     */
+    'workflow/gate'(info: WorkflowRunInfo, gate: WorkflowGateInfo): void
   }
 }
 
@@ -98,54 +157,9 @@ export type WorkflowEventName =
   | 'workflow/agent-start'
   | 'workflow/agent-end'
   | 'workflow/end'
-
-/**
- * Machine-routable fatal workflow failures: parse/meta/argument/schema errors,
- * resource caps, subagent infrastructure failures, unserializable boundary
- * values, and cancellation. An ordinary child failure resolves its item to
- * `null` and is not one of these fatal codes.
- */
-export type WorkflowErrorCode =
-  | 'SCRIPT_PARSE'
-  | 'META_INVALID'
-  | 'INVALID_ARGUMENT'
-  | 'UNSUPPORTED_OPTION'
-  | 'UNSUPPORTED_SCHEMA'
-  | 'AGENT_CAP'
-  | 'ITEM_CAP'
-  | 'AGENT_START'
-  | 'AGENT_RESULT'
-  | 'RESULT_UNSERIALIZABLE'
-  | 'CANCELLED'
-
-/**
- * Typed error for workflow-seam failures. Extends {@link HarnessError}, so the
- * `code` is machine-routable taxonomy. `fatal` drives the combinator
- * discipline: `parallel()`/`pipeline()` re-throw a fatal error (a typo'd
- * option or a tripped cap must kill the script loudly), and reserve the
- * per-item `null` for child-run failures and ordinary in-stage script errors.
- * Every {@link WorkflowErrorCode} is fatal; the flag exists so the
- * distinction is explicit at every catch site rather than implied.
- */
-export class WorkflowError extends HarnessError {
-  /** Whether combinators must propagate this error instead of nulling the item. */
-  readonly fatal: boolean
-
-  constructor(message: string, code: WorkflowErrorCode, options?: ErrorOptions & { fatal?: boolean }) {
-    super(message, code, options)
-    this.name = 'WorkflowError'
-    this.fatal = options?.fatal ?? true
-  }
-}
-
-/**
- * Whether combinators must re-throw `error` instead of mapping the item to `null`.
- * @param error - any thrown value; fatality is host `instanceof` (unforgeable from a script realm).
- * @returns true iff `error` is a {@link WorkflowError} whose `fatal` flag is set.
- */
-export function isFatalWorkflowError(error: unknown): boolean {
-  return error instanceof WorkflowError && error.fatal
-}
+  | 'workflow/node-start'
+  | 'workflow/node-end'
+  | 'workflow/gate'
 
 /**
  * Workflow Service Definition contract. Invalid requests throw before publication; a live

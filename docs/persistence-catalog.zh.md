@@ -962,7 +962,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'tool-workflow/agent-end': ToolWorkflowAgentEndData
 ```
 
-来源：[`packages/workflow/tool-workflow/src/types.ts:57`](../packages/workflow/tool-workflow/src/types.ts)
+来源：[`packages/workflow/tool-workflow/src/types.ts:117`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowagent-start--log-only"></a>
 
@@ -976,7 +976,63 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'tool-workflow/agent-start': ToolWorkflowAgentStartData
 ```
 
-来源：[`packages/workflow/tool-workflow/src/types.ts:52`](../packages/workflow/tool-workflow/src/types.ts)
+来源：[`packages/workflow/tool-workflow/src/types.ts:112`](../packages/workflow/tool-workflow/src/types.ts)
+
+<a id="tool-workflowapproval--log-only"></a>
+
+#### `tool-workflow/approval` — log-only
+
+```ts persistence-catalog
+/**
+ * One approval transition of a YAML workflow run (pending, then each decision).
+ * @param data - run identity, node id and kind, approval id, state, optional reason, and time.
+ */
+'tool-workflow/approval': ToolWorkflowApprovalData
+```
+
+来源：[`packages/workflow/tool-workflow/src/types.ts:127`](../packages/workflow/tool-workflow/src/types.ts)
+
+<a id="tool-workflowgate-report--log-only"></a>
+
+#### `tool-workflow/gate-report` — log-only
+
+```ts persistence-catalog
+/**
+ * The gate report of a YAML workflow run, one row per declared gate.
+ * @param data - run identity and the report rows.
+ */
+'tool-workflow/gate-report': ToolWorkflowGateReportData
+```
+
+来源：[`packages/workflow/tool-workflow/src/types.ts:137`](../packages/workflow/tool-workflow/src/types.ts)
+
+<a id="tool-workflownode-end--log-only"></a>
+
+#### `tool-workflow/node-end` — log-only
+
+```ts persistence-catalog
+/**
+ * Settles one YAML workflow node; a later record for the same node replaces an earlier one.
+ * @param data - run identity, node id and kind, status, optional exit code and duration, and whether output was cut.
+ */
+'tool-workflow/node-end': ToolWorkflowNodeEndData
+```
+
+来源：[`packages/workflow/tool-workflow/src/types.ts:132`](../packages/workflow/tool-workflow/src/types.ts)
+
+<a id="tool-workflownode-start--log-only"></a>
+
+#### `tool-workflow/node-start` — log-only
+
+```ts persistence-catalog
+/**
+ * Opens one YAML workflow node.
+ * @param data - run identity, node id and kind, and start time.
+ */
+'tool-workflow/node-start': ToolWorkflowNodeStartData
+```
+
+来源：[`packages/workflow/tool-workflow/src/types.ts:122`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowrun-end--log-only"></a>
 
@@ -990,7 +1046,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'tool-workflow/run-end': ToolWorkflowRunEndData
 ```
 
-来源：[`packages/workflow/tool-workflow/src/types.ts:62`](../packages/workflow/tool-workflow/src/types.ts)
+来源：[`packages/workflow/tool-workflow/src/types.ts:142`](../packages/workflow/tool-workflow/src/types.ts)
 
 <a id="tool-workflowrun-start--log-only"></a>
 
@@ -1004,7 +1060,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'tool-workflow/run-start': ToolWorkflowRunStartData
 ```
 
-来源：[`packages/workflow/tool-workflow/src/types.ts:47`](../packages/workflow/tool-workflow/src/types.ts)
+来源：[`packages/workflow/tool-workflow/src/types.ts:107`](../packages/workflow/tool-workflow/src/types.ts)
 
 ### `turn/*`
 
