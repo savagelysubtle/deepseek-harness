@@ -34,7 +34,8 @@ import {
 import type {
   WorkflowAnswerResult, WorkflowApproveRequest, WorkflowAttachRequest, WorkflowAttachResult, WorkflowCancelRequest, WorkflowCancelResult,
   WorkflowDetachRequest, WorkflowDetachResult, WorkflowDryRunRequest, WorkflowDryRunResult, WorkflowFailure, WorkflowGateView,
-  WorkflowInputValues, WorkflowLastRun, WorkflowListResult, WorkflowNodeOutputRequest, WorkflowNodeOutputResult, WorkflowNodeView,
+  WorkflowInputValues, WorkflowLastRun, WorkflowListResult, WorkflowNodeOutputRequest, WorkflowNodeOutputResult,
+  WorkflowNodeFailure, WorkflowNodeView,
   WorkflowPendingApprovalsResult, WorkflowReadRequest, WorkflowReadResult, WorkflowRejectRequest, WorkflowResumeRequest,
   WorkflowRunDetailRequest, WorkflowRunDetailResult, WorkflowRunRequest, WorkflowRunsRequest, WorkflowRunsResult,
   WorkflowRunStartResult, WorkflowSaveRequest, WorkflowSaveResult, WorkflowValidateRequest, WorkflowValidateResult,
@@ -684,10 +685,30 @@ function inputsOf(raw: unknown): WorkflowInputValues | undefined {
   return out
 }
 
+/** Fixed remedy per supervisor-stop code. The store keeps the message (the node's error) but not the remedy. */
+const NODE_FAILURE_REMEDY = {
+  NODE_STALLED: "raise idleTimeoutMs for this node or check the agent's output",
+  NODE_TIMEOUT: 'raise timeoutMs (timeout_ms in YAML) for this node or split its work into smaller nodes',
+} as const
+
+/** Read the coded stop out of a stored node error, which begins with its code. */
+function failureOf(error: string | undefined): WorkflowNodeFailure | undefined {
+  if (error === undefined) return undefined
+  const code = error.startsWith('NODE_STALLED:') ? 'NODE_STALLED' : error.startsWith('NODE_TIMEOUT:') ? 'NODE_TIMEOUT' : undefined
+  return code === undefined ? undefined : { code, message: stripUnsafe(error, 500), remedy: NODE_FAILURE_REMEDY[code] }
+}
+
 function projectRun(detail: RunDetail, pinnedHash: string, fileChanged: boolean) {
+  // The row with the highest attempt per node carries the real attempt count and the stop reason.
+  const highest = new Map<string, number>()
+  for (const state of detail.nodeStates) highest.set(state.nodeId, Math.max(highest.get(state.nodeId) ?? 0, state.attempt))
   const nodes: WorkflowNodeView[] = detail.nodeStates.map((state) => {
     const r = state.record
+    const last = highest.get(state.nodeId) === state.attempt
+    const failure = last ? failureOf(r.error) : undefined
     return {
+      ...last && state.attempt > 1 ? { attempts: state.attempt } : {},
+      ...failure === undefined ? {} : { failure },
       nodeId: r.nodeId,
       kind: r.nodeKind,
       status: r.status,

@@ -292,6 +292,46 @@ describe('pushed events', () => {
 })
 
 describe('runDetail and nodeOutput', () => {
+  it('carries the real attempt count and the coded stop on the highest-attempt row only', async () => {
+    h = await setupRemote()
+    await h.writeWorkflow('demo', DEMO)
+    const agent = h.agent()
+    const plan = await h.service.dryRun(agent, { name: 'demo' })
+    if (!plan.ok) throw new Error(plan.message)
+    const started = await h.service.run(agent, { name: 'demo', trustHash: plan.trustKey, trustChallenge: plan.trustChallenge! })
+    if (!started.ok) throw new Error(started.message)
+    const run = h.engine.runs[0]!
+    run.nodeStart({ nodeId: 'think', kind: 'prompt' })
+    run.nodeEnd({
+      nodeId: 'think', kind: 'prompt', status: 'failed', attempts: 2,
+      error: 'NODE_STALLED: the agent produced no output for 5000 ms (idleTimeoutMs) after 2 attempts (1 retry)',
+      failure: {
+        code: 'NODE_STALLED', message: 'NODE_STALLED: the agent produced no output for 5000 ms (idleTimeoutMs) after 2 attempts (1 retry)',
+        remedy: "raise idleTimeoutMs for this node or check the agent's output",
+      },
+    })
+    run.nodeStart({ nodeId: 'build', kind: 'bash' })
+    run.nodeEnd({ nodeId: 'build', kind: 'bash', status: 'success', exitCode: 0 })
+    run.settle(COMPLETED)
+    await expect.poll(async () => (await h!.service.runDetail(agent, { runId: started.runId }) as { status?: string }).status).not.toBe('running')
+    const detail = await h.service.runDetail(agent, { runId: started.runId })
+    if (!detail.ok) throw new Error(detail.message)
+    const think = detail.nodes.filter(n => n.nodeId === 'think')
+    expect(think.map(n => n.attempt).sort()).toEqual([1, 2])
+    const last = think.find(n => n.attempt === 2)!
+    expect(last.attempts).toBe(2)
+    expect(last.failure).toMatchObject({ code: 'NODE_STALLED', remedy: "raise idleTimeoutMs for this node or check the agent's output" })
+    expect(last.failure!.message).toContain('5000 ms')
+    expect(last.failure!.message.length).toBeLessThanOrEqual(500)
+    const first = think.find(n => n.attempt === 1)!
+    expect(first).not.toHaveProperty('attempts')
+    expect(first).not.toHaveProperty('failure')
+    const build = detail.nodes.find(n => n.nodeId === 'build')!
+    expect(build).not.toHaveProperty('attempts')
+    expect(build).not.toHaveProperty('failure')
+    noLeak(detail)
+  })
+
   it('projects the run without raw output and serves output in bounded slices', async () => {
     h = await setupRemote()
     await h.writeWorkflow('demo', DEMO)
