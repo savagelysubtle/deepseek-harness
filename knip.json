@@ -693,7 +693,8 @@
       "entry": [
         "tests/**/*.spec.ts",
         "tests/**/*.e2e.ts",
-        "tests/fixture-server.ts"
+        "tests/fixture-server.ts",
+        "tests/fixtures/repeated-cursor-server.ts"
       ],
       "project": [
         "src/**/*.ts",
