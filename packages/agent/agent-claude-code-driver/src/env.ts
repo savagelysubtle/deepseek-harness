@@ -9,14 +9,11 @@
 import { scrubbedParentEnv } from '@deepseek-ai/dsh-subprocess'
 
 /**
- * Variables that would redirect the child off the operator's subscription
- * login or change which model it runs. Names confirmed in the SDK 0.3.263
- * bundle (`sdk.mjs`): the credential overrides, `ANTHROPIC_MODEL` and
- * `ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_CUSTOM_HEADERS`,
- * `CLAUDE_CONFIG_DIR` (a different login directory), and the provider
- * switches `CLAUDE_CODE_USE_BEDROCK`, `_VERTEX`, `_FOUNDRY`, `_MANTLE`, `_GATEWAY`.
- * The per-tier remaps `ANTHROPIC_DEFAULT_*_MODEL` are matched by
- * {@link FORBIDDEN_ENV_PATTERN}.
+ * Exact names that are always forbidden: the credential overrides, the model
+ * pins, custom headers, the login directory, and the provider switches. The
+ * patterns in {@link FORBIDDEN_ENV_PATTERNS} catch every other name of the
+ * same families (so a name the SDK adds later is refused too); this list keeps
+ * the well-known ones, including `CLAUDE_CONFIG_DIR` which no pattern covers.
  */
 export const CLAUDE_CODE_FORBIDDEN_ENV: readonly string[] = [
   'ANTHROPIC_API_KEY',
@@ -35,13 +32,41 @@ export const CLAUDE_CODE_FORBIDDEN_ENV: readonly string[] = [
   'CLAUDE_CODE_USE_GATEWAY',
 ]
 
-/** Per-tier model remaps (`ANTHROPIC_DEFAULT_OPUS_MODEL`, `_SONNET_`, `_HAIKU_`, `_FABLE_`, and any future tier). */
-const FORBIDDEN_ENV_PATTERN = /^ANTHROPIC_DEFAULT_[A-Z0-9_]+_MODEL$/
+/**
+ * Name families that are denied wholesale (matched case-insensitively):
+ * every `ANTHROPIC_*` (credentials, base URLs, models, profiles, identity
+ * federation, betas, sockets), every `CLAUDE_CODE_USE_*` (provider switches,
+ * including `_ANTHROPIC_AWS` and `_ANTHROPIC_GOOGLE_CLOUD`), every
+ * `CLAUDE_CODE_SKIP_*` (skipped auth checks), any `CLAUDE_CODE_*` naming a base
+ * URL, OAuth, auth, certificate, proxy or extra-body setting, and any
+ * `ANTHROPIC*` / `CLAUDE*` name that looks like a key, token, password or secret.
+ */
+export const FORBIDDEN_ENV_PATTERNS: readonly RegExp[] = [
+  /^ANTHROPIC_/,
+  /^CLAUDE_CODE_USE_/,
+  /^CLAUDE_CODE_SKIP_/,
+  /^CLAUDE_CODE_.*(?:BASE_URL|OAUTH|AUTH|CERT|PROXY|EXTRA_BODY)/,
+  /^(?:ANTHROPIC|CLAUDE)[A-Z0-9_]*(?:KEY|TOKEN|PASSWORD|SECRET)/,
+]
 
-/** Whether an environment variable name is on the forbidden list. */
+/**
+ * Names that match a denied family but are known to be benign, each checked in
+ * the SDK 0.3.263 bundle: `CLAUDE_CODE_USE_NATIVE_FILE_SEARCH` and
+ * `CLAUDE_CODE_USE_POWERSHELL_TOOL` only switch a local tool implementation,
+ * and `CLAUDE_CODE_SKIP_PROMPT_HISTORY` only stops local prompt-history writes.
+ * None changes the login, the endpoint, or the model.
+ */
+export const CLAUDE_CODE_ALLOWED_ENV: readonly string[] = [
+  'CLAUDE_CODE_USE_NATIVE_FILE_SEARCH',
+  'CLAUDE_CODE_USE_POWERSHELL_TOOL',
+  'CLAUDE_CODE_SKIP_PROMPT_HISTORY',
+]
+
+/** Whether an environment variable name is on the forbidden list (explicit allow wins over the patterns). */
 function isForbiddenName(name: string): boolean {
   const upper = name.toUpperCase()
-  return CLAUDE_CODE_FORBIDDEN_ENV.includes(upper) || FORBIDDEN_ENV_PATTERN.test(upper)
+  if (CLAUDE_CODE_ALLOWED_ENV.includes(upper)) return false
+  return CLAUDE_CODE_FORBIDDEN_ENV.includes(upper) || FORBIDDEN_ENV_PATTERNS.some(pattern => pattern.test(upper))
 }
 
 /**

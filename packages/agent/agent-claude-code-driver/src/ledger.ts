@@ -214,6 +214,8 @@ export class ProcessLedger {
    * whose owning host is still alive (another live host's child), an entry
    * with an unknown start time, or a dead leader whose group still has
    * members (reported, not killed). One failing kill does not stop the pass.
+   * Entries of live owners, failed kills and surviving groups stay in the file so
+   * the next start looks at them again.
    * @returns which seats were reaped, stale, skipped, left with survivors, or failed.
    */
   reapStale(): ReapReport {
@@ -239,9 +241,11 @@ export class ProcessLedger {
           report.reaped.push(entry.seat)
         } catch {
           report.failed.push(entry.seat)
+          keep.push(entry)
         }
       } else if (current === undefined && ops.groupAlive(entry.pid)) {
         report.survivors.push(entry.seat)
+        keep.push(entry)
       } else {
         report.stale.push(entry.seat)
       }

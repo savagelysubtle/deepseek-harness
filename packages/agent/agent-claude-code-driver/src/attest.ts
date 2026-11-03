@@ -25,6 +25,7 @@ export interface BinaryAttestation {
   /** Size, modification time and inode at attestation, for the cheap per-turn re-check. */
   readonly size: number
   readonly mtimeMs: number
+  readonly ctimeMs: number
   readonly ino: number
 }
 
@@ -57,7 +58,10 @@ export function sha256File(file: string): string {
  * Verify the pinned binary: a regular, executable file owned by the operator,
  * not group- or world-writable, with no script extension, in a directory chain
  * where no component is group- or world-writable (a sticky directory such as
- * `/tmp` is exempt: others there cannot replace the operator's files).
+ * `/tmp` is exempt: others there cannot replace the operator's files) and
+ * every component is owned by the operator or root. The chain of the CONFIGURED
+ * path is checked as well as the chain of the resolved file, because the
+ * directory holding a symlink decides where it can be retargeted.
  * @param path - the configured absolute path.
  * @param options - expected owner.
  * @returns the attestation (hash and stat signature).
@@ -86,24 +90,42 @@ export function attestClaudePath(path: string, options: AttestOptions = {}): Bin
   } catch {
     fail('it is not executable by the running user')
   }
-  for (let dir = dirname(realPath); ; dir = dirname(dir)) {
-    const dirStat = statSync(dir)
-    if ((dirStat.mode & 0o022) !== 0 && (dirStat.mode & 0o1000) === 0) {
-      fail(`its directory ${dir} is group- or world-writable (mode ${(dirStat.mode & 0o777).toString(8)}); someone else could swap the binary`)
+  for (const start of new Set([dirname(realPath), realpathSync(dirname(path))])) {
+    for (let dir = start; ; dir = dirname(dir)) {
+      const dirStat = statSync(dir)
+      if ((dirStat.mode & 0o022) !== 0 && (dirStat.mode & 0o1000) === 0) {
+        fail(`its directory ${dir} is group- or world-writable (mode ${(dirStat.mode & 0o777).toString(8)}); someone else could swap the binary`)
+      }
+      if (uid !== undefined && dirStat.uid !== 0 && dirStat.uid !== uid) {
+        fail(`its directory ${dir} is owned by uid ${dirStat.uid}, neither the running user ${uid} nor root; someone else could swap the binary`)
+      }
+      if (dirname(dir) === dir) break
     }
-    if (dirname(dir) === dir) break
   }
-  return { path, realPath, sha256: sha256File(realPath), size: stat.size, mtimeMs: stat.mtimeMs, ino: stat.ino }
+  return { path, realPath, sha256: sha256File(realPath), size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, ino: stat.ino }
 }
 
 /**
- * Cheap per-turn re-check that the attested file is still the same file.
+ * Cheap per-turn re-check that the attested file is still the same file: the
+ * configured path still resolves to the attested real path (a retargeted
+ * symlink, which is what the Claude Code auto-updater does, is refused), and
+ * the size, modification time, change time and inode are unchanged.
  * @param attestation - what {@link attestClaudePath} returned at start.
- * @throws when the size, modification time or inode changed since.
+ * @throws when the path now resolves elsewhere or the file changed since.
  */
 export function assertBinaryUnchanged(attestation: BinaryAttestation): void {
+  let resolved = ''
+  try {
+    resolved = realpathSync(attestation.path)
+  } catch {
+    // an unresolvable path counts as changed below
+  }
   const stat = statSync(attestation.realPath)
-  if (stat.size !== attestation.size || stat.mtimeMs !== attestation.mtimeMs || stat.ino !== attestation.ino) {
+  if (
+    resolved !== attestation.realPath
+    || stat.size !== attestation.size || stat.mtimeMs !== attestation.mtimeMs
+    || stat.ctimeMs !== attestation.ctimeMs || stat.ino !== attestation.ino
+  ) {
     throw new Error(
       `agent-claude-code-driver: claude binary ${attestation.path} changed since this host attested it; restart the host to re-attest it (set claude_code.claude_path_sha256 to the new hash to accept an upgrade)`,
     )

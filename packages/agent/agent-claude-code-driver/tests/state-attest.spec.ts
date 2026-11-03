@@ -1,4 +1,4 @@
-import { appendFileSync, chmodSync, copyFileSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -186,5 +186,44 @@ describe('binary pins', () => {
     pins.enforce('bad', sha('c'), undefined)
     chmodSync(file, 0o644)
     expect(() => new BinaryPins(dir)).toThrow(/accessible by group or others/)
+  })
+})
+
+describe('symlink retargeting and change time (review 5)', () => {
+  function linked() {
+    const target = fakeClaudeBinary('#!/bin/sh\necho one\n')
+    const other = fakeClaudeBinary('#!/bin/sh\necho two\n')
+    const linkDir = tempDir('cc-link-')
+    chmodSync(linkDir, 0o700)
+    const link = join(linkDir, 'claude')
+    symlinkSync(target, link)
+    return { target, other, link, linkDir }
+  }
+
+  it('attests the resolved file behind a symlink and refuses once the link points elsewhere', () => {
+    const { target, other, link, linkDir } = linked()
+    const attestation = attestClaudePath(link)
+    expect(attestation.realPath).toBe(target)
+    expect(attestation.path).toBe(link)
+    assertBinaryUnchanged(attestation)
+    rmSync(link)
+    symlinkSync(other, join(linkDir, 'claude'))
+    expect(() => { assertBinaryUnchanged(attestation) }).toThrow(/changed since this host attested it/)
+  })
+
+  it('refuses when the configured path no longer resolves at all', () => {
+    const { link } = linked()
+    const attestation = attestClaudePath(link)
+    rmSync(link)
+    expect(() => { assertBinaryUnchanged(attestation) }).toThrow(/changed since this host attested it/)
+  })
+
+  it('refuses when only the change time moved (a chmod keeps size, mtime and inode)', () => {
+    const file = fakeClaudeBinary()
+    const attestation = attestClaudePath(file)
+    chmodSync(file, 0o500)
+    chmodSync(file, 0o700)
+    expect(statSync(file).ctimeMs).not.toBe(attestation.ctimeMs)
+    expect(() => { assertBinaryUnchanged(attestation) }).toThrow(/changed since this host attested it/)
   })
 })

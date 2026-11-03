@@ -5,13 +5,13 @@
  */
 
 import { spawn as nodeSpawn } from 'node:child_process'
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { cleanTempDirs, FakeQuery, fakeChild, fakeClaudeBinary, resultMessage, seatRow, tempDir, tick, userMessage } from './fakes.ts'
+import { cleanHostEnv, cleanTempDirs, FakeQuery, fakeChild, fakeClaudeBinary, resultMessage, seatRow, tempDir, tick, userMessage } from './fakes.ts'
 
 const sdk = vi.hoisted(() => ({
   queries: [] as unknown[],
@@ -86,8 +86,11 @@ describe('sdkTranscriptState', () => {
 })
 
 describe('the plugin running a turn', () => {
+  beforeEach(() => { cleanHostEnv() })
+
   afterEach(() => {
     vi.restoreAllMocks()
+    vi.unstubAllEnvs()
     cleanTempDirs()
   })
 
@@ -239,6 +242,61 @@ describe('the plugin running a turn', () => {
     expect(sdk.queries.length).toBe(before)
     expect(JSON.stringify(handle.agent.session.events)).toContain('changed since this host attested it')
     await handle.dispose()
+    await fiber.dispose()
+  })
+
+  it('runs the attested real path behind a symlinked claude_path and refuses the next turn once the link is retargeted', async () => {
+    const ctx = await bootedContext()
+    const { dshHome, binary, cwd } = setup()
+    const other = fakeClaudeBinary('#!/bin/sh\necho other\n')
+    const linkDir = tempDir('cc-link-')
+    const link = join(linkDir, 'claude')
+    symlinkSync(binary, link)
+    const fiber = await ctx.plugin(Driver, Driver.Config({ stateDir: 'claude-code', dshHome, seats: { lk: seatRow({ claude_path: link }) } }))
+    const handle = await ctx.agents.create({ sessionId: SessionId('lk'), driver: 'claude-code', meta: { cwd } })
+    const before = sdk.queries.length
+    handle.agent.followup(userMessage('first'))
+    const query = await nthQuery(before)
+    expect(query.options.pathToClaudeCodeExecutable).toBe(binary)
+    query.spawn()
+    query.emit(resultMessage({ user_message_uuids: query.uuids() }))
+    await handle.agent.whenIdle()
+
+    // the Claude Code auto-updater retargets ~/.local/bin/claude exactly like this
+    rmSync(link)
+    symlinkSync(other, link)
+    handle.agent.followup(userMessage('second'))
+    await handle.agent.whenIdle()
+    expect(sdk.queries.length).toBe(before + 1)
+    expect(JSON.stringify(handle.agent.session.events)).toContain('changed since this host attested it')
+    await handle.dispose()
+    await fiber.dispose()
+  })
+
+  it('warns once when the session store has no durability listener, and stays quiet when one participates', async () => {
+    const ctx = await bootedContext()
+    const { dshHome, binary, cwd } = setup()
+    const warn = vi.spyOn(Object.getPrototypeOf(ctx.logger) as { warn: (...args: unknown[]) => void }, 'warn').mockImplementation(() => undefined)
+    const fiber = await ctx.plugin(Driver, Driver.Config({ stateDir: 'claude-code', dshHome, seats: { d1: seatRow({ claude_path: binary }) } }))
+    const turn = async (id: string): Promise<void> => {
+      const before = sdk.queries.length
+      const handle = await ctx.agents.create({ sessionId: SessionId(id), driver: 'claude-code', meta: { cwd, agentPreset: 'd1' } })
+      handle.agent.followup(userMessage('hello'))
+      const query = await nthQuery(before)
+      query.spawn()
+      query.emit(resultMessage({ user_message_uuids: query.uuids() }))
+      await handle.agent.whenIdle()
+      await handle.dispose()
+    }
+    await turn('d1')
+    await turn('d2')
+    const noListener = warn.mock.calls.flat().filter(line => String(line).includes('no durability listener'))
+    expect(noListener).toHaveLength(1)
+
+    vi.spyOn(ctx.sessions, 'flush').mockResolvedValue(true)
+    warn.mockClear()
+    await turn('d3')
+    expect(warn.mock.calls.flat().filter(line => String(line).includes('no durability listener'))).toHaveLength(0)
     await fiber.dispose()
   })
 })

@@ -19,13 +19,22 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
-import { buildChildEnv } from '../src/env.ts'
+import { buildChildEnv, forbiddenEnvPresent } from '../src/env.ts'
 import { ProcessLedger } from '../src/ledger.ts'
 import type { LedgerProcessOps } from '../src/ledger.ts'
 import { ClaudeCodeSeatAgent, SeatGate } from '../src/seat-agent.ts'
 import type { SeatAgentDeps, TranscriptState } from '../src/seat-agent.ts'
 import { parseSeatRow } from '../src/seat-config.ts'
 import type { ClaudeCodeSeatConfig, ClaudeCodeSeatRow } from '../src/seat-config.ts'
+
+/**
+ * Unset every variable the driver forbids in the host environment for the current test (undone by
+ * `vi.unstubAllEnvs()`): a developer shell or a Claude Code session carries some of them (for example
+ * `CLAUDE_CODE_MESSAGING_TOKEN`), and the plugin entry refuses to start with them set.
+ */
+export function cleanHostEnv(): void {
+  for (const name of forbiddenEnvPresent(process.env)) vi.stubEnv(name, undefined)
+}
 
 export const CLAUDE_PATH = '/opt/claude/versions/2.1.317/claude'
 

@@ -8,6 +8,7 @@
  * @module @deepseek-ai/dsh-agent-claude-code-driver/options
  */
 
+import { HOOK_EVENTS } from '@anthropic-ai/claude-agent-sdk'
 import type { Options, SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk'
 import { forbiddenEnvPresent } from './env.ts'
 import type { ClaudeCodeSeatConfig } from './seat-config.ts'
@@ -60,6 +61,8 @@ export interface BuildQueryOptionsInput {
   readonly abortController: AbortController
   readonly spawn: (options: SpawnOptions) => SpawnedProcess
   readonly extension?: QueryOptionsExtension | undefined
+  /** The attested real path of the binary to run; defaults to the configured `claude_path`. */
+  readonly executable?: string | undefined
   /** Receives one line per stripped settings key. */
   readonly warn?: ((message: string) => void) | undefined
 }
@@ -74,6 +77,45 @@ function stringList(value: unknown): string[] | undefined {
   return Array.isArray(value) && value.every((entry): entry is string => typeof entry === 'string') ? [...value] : undefined
 }
 
+const HOOK_EVENT_NAMES: ReadonlySet<string> = new Set(HOOK_EVENTS)
+
+/**
+ * Validate an extension's hook map: known event names only, and every handler
+ * a `{type: 'command', command: string, timeout?: number}` entry. `prompt`,
+ * `agent` and `http` handlers make model calls or send tool input off the
+ * machine, so anything else, or any extra key, refuses the whole settings
+ * object: a partially applied policy is worse than none.
+ * @param hooks - the extension's `hooks` object.
+ * @param seat - seat label for the error.
+ * @returns the same object when it is valid.
+ * @throws when any event or handler is outside the allowed shape.
+ */
+function validatedHooks(hooks: Record<string, unknown>, seat: string): Record<string, unknown> {
+  const refuse = (why: string): never => {
+    throw new Error(`agent-claude-code-driver: seat "${seat}": policy extension hooks refused (${why}); refusing to apply a partial policy`)
+  }
+  for (const [event, groups] of Object.entries(hooks)) {
+    if (!HOOK_EVENT_NAMES.has(event)) refuse(`unknown hook event "${event}"`)
+    if (!Array.isArray(groups)) refuse(`${event} must be a list`)
+    for (const group of groups as unknown[]) {
+      const shapeOk = isRecord(group) && Array.isArray(group['hooks'])
+        && Object.keys(group).every(key => key === 'matcher' || key === 'hooks')
+        && (group['matcher'] === undefined || typeof group['matcher'] === 'string')
+      if (!shapeOk) refuse(`${event} entries must be {matcher?: string, hooks: [...]}`)
+      for (const handler of (group as { hooks: unknown[] }).hooks) {
+        if (!isRecord(handler) || handler['type'] !== 'command' || typeof handler['command'] !== 'string') {
+          refuse(`${event} handlers must be {type: "command", command: string}; prompt, agent, http and other types are not allowed`)
+        }
+        const record = handler as Record<string, unknown>
+        const extra = Object.keys(record).find(key => key !== 'type' && key !== 'command' && key !== 'timeout')
+        if (extra !== undefined) refuse(`${event} handler carries "${extra}"`)
+        if (record['timeout'] !== undefined && typeof record['timeout'] !== 'number') refuse(`${event} handler timeout must be a number`)
+      }
+    }
+  }
+  return hooks
+}
+
 /**
  * Cut an extension's settings down to the allowlist: `hooks`,
  * `permissions.deny`, `permissions.ask`. A string (a file path or JSON text the
@@ -83,6 +125,7 @@ function stringList(value: unknown): string[] | undefined {
  * @param seat - seat label for the report.
  * @param warn - receives one line per stripped key.
  * @returns the settings object to pass to the SDK, or `undefined` when nothing survives.
+ * @throws when the hooks contain an unknown event or any handler that is not a plain command.
  */
 export function allowlistSettings(raw: unknown, seat: string, warn: (message: string) => void): Options['settings'] {
   const stripped = (what: string): void => {
@@ -95,7 +138,7 @@ export function allowlistSettings(raw: unknown, seat: string, warn: (message: st
   }
   const out: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(raw)) {
-    if (key === 'hooks' && isRecord(value)) out['hooks'] = value
+    if (key === 'hooks' && isRecord(value)) out['hooks'] = validatedHooks(value, seat)
     else if (key === 'permissions' && isRecord(value)) {
       const permissions: Record<string, string[]> = {}
       for (const [rule, entries] of Object.entries(value)) {
@@ -140,7 +183,7 @@ export function buildQueryOptions(input: BuildQueryOptionsInput): Options {
     model: config.model,
     ...config.effort === undefined ? {} : { effort: config.effort },
     cwd: input.cwd,
-    pathToClaudeCodeExecutable: config.claudePath,
+    pathToClaudeCodeExecutable: input.executable ?? config.claudePath,
     env: input.env,
     abortController: input.abortController,
     persistSession: true,

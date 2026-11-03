@@ -97,7 +97,7 @@ describe('binary re-check (review S4)', () => {
   it('refuses the turn before any query when the attested binary check throws', async () => {
     const h = await harness()
     const seen: string[] = []
-    ;(h.deps as { verifyBinary?: (seat: string) => void }).verifyBinary = (seat) => {
+    ;(h.deps as { attestedBinary?: (seat: string) => string }).attestedBinary = (seat) => {
       seen.push(seat)
       throw new Error('claude binary changed')
     }

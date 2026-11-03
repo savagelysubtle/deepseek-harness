@@ -108,8 +108,11 @@ export interface SeatAgentDeps {
   readonly ledger?: ProcessLedger | undefined
   /** Make everything appended to the session so far durable (the session store flush). */
   readonly flush: (session: Session) => Promise<void>
-  /** Re-check that the seat's attested binary is unchanged; throws when it is not. */
-  readonly verifyBinary?: ((seat: string) => void) | undefined
+  /**
+   * Re-check that the seat's attested binary is unchanged (throws when it is not) and return the attested
+   * real path the SDK must run; absent means no attestation, and the configured path is used.
+   */
+  readonly attestedBinary?: ((seat: string) => string) | undefined
   /** Optional S5 settings extension. */
   readonly extension?: QueryOptionsExtension | undefined
   /** Warning sink. */
@@ -288,7 +291,8 @@ export class ClaudeCodeSeatAgent implements Agent {
   private sdkSessionId: string | undefined
   private transcriptKnown = false
   private pausedUntil = 0
-  private bindingPending = false
+  /** True until this instance has flushed the session once: another instance's flush may have failed. */
+  private bindingPending = true
 
   /**
    * @param loopCtx - registration context carrying `agents`.
@@ -607,9 +611,11 @@ export class ClaudeCodeSeatAgent implements Agent {
       // `overageStatus` (allowed | allowed_warning | rejected) next to the window
       // that was rejected: a rejected five_hour/seven_day window with overage still
       // allowed (or in use) lets the CLI carry on, so it is not a pause. A rejected
-      // `overage` window itself, or a rejection with no overage allowance, is.
-      if (info.status !== 'rejected' || info.isUsingOverage === true) return
-      if (info.rateLimitType !== 'overage' && (info.overageStatus === 'allowed' || info.overageStatus === 'allowed_warning')) return
+      // `overage` window itself is a pause whatever `isUsingOverage` says, and so is
+      // a rejection with no overage allowance.
+      if (info.status !== 'rejected') return
+      const servedOnOverage = info.isUsingOverage === true || info.overageStatus === 'allowed' || info.overageStatus === 'allowed_warning'
+      if (info.rateLimitType !== 'overage' && servedOnOverage) return
       const exhausted = info.rateLimitType === 'overage' || info.errorCode === 'credits_required'
       this.notePause(live, { reason: exhausted ? 'usage-exhausted' : 'rate-limit', until: resetMs(info.resetsAt) })
       return
@@ -716,11 +722,12 @@ export class ClaudeCodeSeatAgent implements Agent {
     let stepOpen = false
     let holdsGate = false
     let binding: QueryBinding | undefined
+    let executable: string | undefined
     let reason: TurnEndReason | undefined
     try {
       // Preflight before anything is claimed, so a refusal leaves the mail queued.
       assertCleanHostEnv(this.deps.hostEnv())
-      this.deps.verifyBinary?.(this.seat)
+      executable = this.deps.attestedBinary?.(this.seat)
       if (this.pausedUntilMs > 0) {
         this.notePauseRefusal()
       }
@@ -745,6 +752,7 @@ export class ClaudeCodeSeatAgent implements Agent {
         abortController: phase.abort,
         spawn: this.makeSpawn(live),
         extension: this.deps.extension,
+        executable,
         warn: this.deps.warn,
       })
       for (const message of claimed) this.pushMessage(live, message)

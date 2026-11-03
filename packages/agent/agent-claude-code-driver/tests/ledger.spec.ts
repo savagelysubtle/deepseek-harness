@@ -118,6 +118,8 @@ describe('process ledger reaping', () => {
       reaped: ['ok'], stale: [], skipped: [], survivors: ['orphaned-members'], failed: ['denied'],
     })
     expect(killed).toEqual([14])
+    // a failed kill and a surviving group are live, so they stay for the next start to retry
+    expect(ledger.entries().map(row => row.seat)).toEqual(['denied', 'orphaned-members'])
   })
 })
 

@@ -1,6 +1,6 @@
 import { readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { DEFAULT_AGENT_DRIVER } from '@deepseek-ai/dsh-agent'
 import type { AgentHandle } from '@deepseek-ai/dsh-agent'
@@ -8,7 +8,7 @@ import { SessionId, SessionPreparation } from '@deepseek-ai/dsh-session'
 import * as Driver from '../src/index.ts'
 import { ClaudeCodeSeatFactory } from '../src/factory.ts'
 import type { ResolvedSeat } from '../src/factory.ts'
-import { cleanTempDirs, fakeClaudeBinary, harness, resultMessage, seatConfig, seatRow, tempDir, tick, userMessage } from './fakes.ts'
+import { cleanHostEnv, cleanTempDirs, fakeClaudeBinary, harness, resultMessage, seatConfig, seatRow, tempDir, tick, userMessage } from './fakes.ts'
 
 class FakeSubprocess extends Service {
   constructor(ctx: Context) {
@@ -173,6 +173,9 @@ describe('ClaudeCodeSeatFactory through the keyed registry', () => {
 })
 
 describe('plugin entry', () => {
+  beforeEach(() => { cleanHostEnv() })
+  afterEach(() => { vi.unstubAllEnvs() })
+
   it('declares a function plugin with the three injections', () => {
     expect(Driver.name).toBe('agent-claude-code-driver')
     expect(Driver.inject).toEqual(['agents', 'sessions', 'subprocess'])

@@ -1,13 +1,13 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { apply, Config } from '../src/index.ts'
 import {
-  assertCleanHostEnv, buildChildEnv, CLAUDE_CODE_FORBIDDEN_ENV, forbiddenEnvPresent,
+  assertCleanHostEnv, buildChildEnv, CLAUDE_CODE_ALLOWED_ENV, CLAUDE_CODE_FORBIDDEN_ENV, forbiddenEnvPresent,
 } from '../src/env.ts'
 import { allowlistSettings, buildQueryOptions } from '../src/options.ts'
 import { PromptStream } from '../src/prompt-stream.ts'
 import { foldModelId, isAllowedModel, isFableModel, parseSeatRow, toolPolicyFor } from '../src/seat-config.ts'
-import { seatConfig, seatRow, CLAUDE_PATH } from './fakes.ts'
+import { cleanHostEnv, seatConfig, seatRow, CLAUDE_PATH } from './fakes.ts'
 
 describe('seat row validation', () => {
   it('accepts a complete row and maps it to camelCase', () => {
@@ -216,16 +216,45 @@ describe('environment', () => {
       CLAUDE_CODE_OAUTH_TOKEN: 'd', anthropic_base_url: 'e', HOME: '/h', ANTHROPIC_MODEL: 'm', ANTHROPIC_DEFAULT_OPUS_MODEL: 'o',
       ANTHROPIC_DEFAULT_FABLE_MODEL: 'f', anthropic_default_sonnet_model: 's', ANTHROPIC_SMALL_FAST_MODEL: 'h', ANTHROPIC_CUSTOM_HEADERS: 'x',
       CLAUDE_CONFIG_DIR: '/other', CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_VERTEX: '1', CLAUDE_CODE_USE_FOUNDRY: '1',
-      ANTHROPIC_DEFAULT_MODEL_NAME: 'kept', CLAUDE_CODE_USE_ANTHROPIC: '1',
+      ANTHROPIC_DEFAULT_MODEL_NAME: 'n', CLAUDE_CODE_USE_ANTHROPIC: '1',
     })
-    expect(env).toEqual({ PATH: '/usr/bin', HOME: '/h', ANTHROPIC_DEFAULT_MODEL_NAME: 'kept', CLAUDE_CODE_USE_ANTHROPIC: '1' })
+    expect(env).toEqual({ PATH: '/usr/bin', HOME: '/h' })
     for (const name of [
       'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_MODEL',
       'ANTHROPIC_SMALL_FAST_MODEL', 'ANTHROPIC_CUSTOM_HEADERS', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX',
       'CLAUDE_CODE_USE_FOUNDRY',
     ]) expect(CLAUDE_CODE_FORBIDDEN_ENV).toContain(name)
     expect(forbiddenEnvPresent({ ANTHROPIC_DEFAULT_HAIKU_MODEL: 'x', ANTHROPIC_DEFAULT_NEWTIER_MODEL: 'y', ANTHROPIC_DEFAULT_MODEL_NAME: 'z' }))
-      .toEqual(['ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_NEWTIER_MODEL'])
+      .toEqual(['ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_NEWTIER_MODEL', 'ANTHROPIC_DEFAULT_MODEL_NAME'])
+  })
+
+  it('denies whole name families, including every name the SDK bundle holds that redirects, re-authenticates or skips a check', () => {
+    const names = [
+      // provider switches, including the longer names that merely start with USE_ANTHROPIC
+      'CLAUDE_CODE_USE_ANTHROPIC_AWS', 'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD', 'CLAUDE_CODE_USE_COWORK_PLUGINS',
+      // ANTHROPIC_* endpoints, identity, betas, sockets, profiles
+      'ANTHROPIC_AWS_BASE_URL', 'ANTHROPIC_BEDROCK_BASE_URL', 'ANTHROPIC_VERTEX_BASE_URL', 'ANTHROPIC_CONFIG_DIR', 'ANTHROPIC_PROFILE',
+      'ANTHROPIC_ORGANIZATION_ID', 'ANTHROPIC_WORKSPACE_ID', 'ANTHROPIC_SERVICE_ACCOUNT_ID', 'ANTHROPIC_FEDERATION_RULE_ID',
+      'ANTHROPIC_UNIX_SOCKET', 'ANTHROPIC_BETAS', 'ANTHROPIC_CUSTOM_MODEL_OPTION', 'ANTHROPIC_IDENTITY_TOKEN_FILE',
+      // CLAUDE_CODE_* naming a base URL, OAuth, auth, certificate, proxy or extra body
+      'CLAUDE_CODE_API_BASE_URL', 'CLAUDE_CODE_CUSTOM_OAUTH_URL', 'CLAUDE_CODE_OAUTH_CLIENT_ID', 'CLAUDE_CODE_OAUTH_REFRESH_TOKEN',
+      'CLAUDE_CODE_CLIENT_CERT', 'CLAUDE_CODE_CERT_STORE', 'CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER', 'CLAUDE_CODE_EXTRA_BODY',
+      'CLAUDE_CODE_MCP_SERVE_AUTH_TOKEN',
+      // skipped authentication checks
+      'CLAUDE_CODE_SKIP_BEDROCK_AUTH', 'CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH', 'CLAUDE_CODE_SKIP_REPO_UPLOAD',
+      // key/token/password/secret shaped names under either prefix
+      'CLAUDE_CODE_NEWTHING_API_KEY', 'CLAUDE_CODE_FOO_PASSWORD', 'CLAUDE_SECRET_THING', 'claude_code_bar_token',
+    ]
+    for (const name of names) expect(forbiddenEnvPresent({ [name]: 'x' }), name).toEqual([name])
+    expect(forbiddenEnvPresent(Object.fromEntries(names.map(name => [name, 'x'])))).toHaveLength(names.length)
+  })
+
+  it('lets only the named benign tool and history switches through, and leaves unrelated names alone', () => {
+    const benign = ['CLAUDE_CODE_USE_NATIVE_FILE_SEARCH', 'CLAUDE_CODE_USE_POWERSHELL_TOOL', 'CLAUDE_CODE_SKIP_PROMPT_HISTORY']
+    expect([...CLAUDE_CODE_ALLOWED_ENV]).toEqual(benign)
+    const env = Object.fromEntries([...benign, 'claude_code_use_powershell_tool', 'PATH', 'HTTPS_PROXY', 'NODE_OPTIONS', 'CLAUDE_ENV_FILE', 'CLAUDE_CODE_DISABLE_TERMINAL_TITLE'].map(name => [name, 'v']))
+    expect(forbiddenEnvPresent(env)).toEqual([])
+    expect(Object.keys(buildChildEnv(env as Record<string, string>))).toHaveLength(9)
   })
 
   it('defaults to the scrubbed host environment', () => {
@@ -241,7 +270,10 @@ describe('environment', () => {
       .toThrow(/ANTHROPIC_BASE_URL, CLAUDE_CODE_OAUTH_TOKEN are set/)
   })
 
+  afterEach(() => { vi.unstubAllEnvs() })
+
   it('refuses at plugin start when the host environment carries an override', () => {
+    cleanHostEnv()
     const saved = process.env['ANTHROPIC_AUTH_TOKEN']
     process.env['ANTHROPIC_AUTH_TOKEN'] = 'leaked'
     try {

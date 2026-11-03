@@ -137,6 +137,7 @@ export function apply(ctx: Context, config: Config): void {
   if (report.skipped.length > 0) {
     ctx.logger.warn(`agent-claude-code-driver: seats ${report.skipped.join(', ')} belong to another live host sharing this state directory; left alone`)
   }
+  let warnedNoDurability = false
   const deps: SeatAgentDeps = {
     query,
     spawnProcess: spec => ctx.subprocess.spawn(spec),
@@ -148,8 +149,17 @@ export function apply(ctx: Context, config: Config): void {
     graceMs: config.disposeGraceMs ?? DEFAULT_GRACE_MS,
     defaultPauseMs: config.defaultPauseMs ?? DEFAULT_PAUSE_MS,
     ledger,
-    flush: async (session) => { await ctx.sessions.flush(session) },
-    verifyBinary: (seat) => { assertBinaryUnchanged(attestedBySeat.get(seat) as BinaryAttestation) },
+    flush: async (session) => {
+      if (!await ctx.sessions.flush(session) && !warnedNoDurability) {
+        warnedNoDurability = true
+        ctx.logger.warn('agent-claude-code-driver: the session store has no durability listener (no persistence plugin), so the session binding is only in memory and a crash before the first reply can orphan the Claude session')
+      }
+    },
+    attestedBinary: (seat) => {
+      const attestation = attestedBySeat.get(seat) as BinaryAttestation
+      assertBinaryUnchanged(attestation)
+      return attestation.realPath
+    },
     warn: (message) => { ctx.logger.warn(message) },
   }
   const factory = new ClaudeCodeSeatFactory({
