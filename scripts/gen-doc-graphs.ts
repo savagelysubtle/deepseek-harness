@@ -106,6 +106,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'The host commits accepted images before session events; provider adapters resolve authorized durable references into provider-native content.',
   },
   {
+    key: 'claudeCodeMailHooks',
+    pkg: 'agent-claude-code-driver',
+    title: 'Optional mail admission and lease hooks for Claude Code seats',
+    mode: 'seam',
+    consumers: ['agent-claude-code-driver'],
+    note: 'An optional service a later slice provides: the admission check and the mailbox lease sink the Claude Code seat driver calls, read lazily; the driver falls back to its default-deny admission and no lease (see packages/agent/agent-claude-code-driver/README.md).',
+  },
+  {
     key: 'mailbox',
     pkg: 'mailbox',
     title: 'Durable agent-to-agent mailbox',

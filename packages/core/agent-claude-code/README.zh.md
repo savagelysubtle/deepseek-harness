@@ -8,18 +8,24 @@
 
 ## 持久事件
 
-八个仅写日志的事件(无 surface,永不进入模型上下文),均带 `version: 1`。浏览器安全的 `@deepseek-ai/dsh-agent-claude-code/types` 子路径拥有载荷类型与 `SessionEventMap` 声明;生成的[持久化目录](../../../docs/persistence-catalog.md)列出了它们。
+十四个仅写日志的事件(无 surface,永不进入模型上下文),均带 `version: 1`。浏览器安全的 `@deepseek-ai/dsh-agent-claude-code/types` 子路径拥有载荷类型与 `SessionEventMap` 声明;生成的[持久化目录](../../../docs/persistence-catalog.md)列出了它们。
 
 | 事件 | 写入时机 | 主要字段 |
 |---|---|---|
 | `claude-code/session-bound` | 席位首个提示之前,使崩溃不会丢失绑定 | dsh `sessionId`、`sdkSessionId`、`model`、`driver: 'claude-code'`、`at` |
 | `claude-code/turn-completed` | 一轮的 SDK `result` 消息 | `turnIndex`、`outcome`(`success` 或 SDK 错误子类型)、`isError`、`numTurns`、`durationMs`、`durationApiMs`、`estimatedCostUsd`、`usage`、按模型的 `modelUsage`、可选 `stopReason` |
 | `claude-code/steer` | 推送、中断后推送或恢复对席位进行了转向 | `kind`、经脱敏的简短 `reason`(最多 200 字符)、`at` |
-| `claude-code/compact` | Claude 侧的 `compact_boundary` | `preTokens`、`trigger`(`auto` 或 `manual`)、`at` |
+| `claude-code/compact` | Claude 侧的 `compact_boundary` | `preTokens`、可选 `postTokens`、`trigger`(`auto` 或 `manual`)、`at` |
 | `claude-code/rate-limited` | 观察到速率限制 | `source`(`sdk` 或 `http`)、可选 `retryAfterMs`、`breakerTripped`、`at` |
 | `claude-code/resume-failed` | 恢复时找不到可读的 Claude 转录;席位需要明确的重新播种 | `sdkSessionId`、`reason`(`transcript-missing`、`transcript-unreadable`)、`at` |
 | `claude-code/paused` | Claude 订阅窗口拒绝了工作(限流或用量耗尽):单席位暂停信号 | `reason`(`rate-limit`、`usage-exhausted`)、可选 `until`(纪元毫秒)、`at` |
 | `claude-code/fleet-refused` | 队列限流器拒绝了一轮 | `reason`(`concurrency`、`turns-per-hour`、`breaker`、`founder-reserve`)、`limit`、`observed`、`at` |
+| `claude-code/tool-call` | 一次工具调用结束(流映射器) | `name`、`ok`、`ms`、`argDigest`(大小或带密钥的摘要,绝不含参数或结果)、`at` |
+| `claude-code/thinking` | 一个助手思考块 | 仅 `length`、`at` |
+| `claude-code/unmapped` | 映射器不认识的流消息类型 | `type`、`at` |
+| `claude-code/mail-claimed` | 认领了一条邮箱消息,在其提示之前已刷盘 | `messageId`、`tainted`、`at` |
+| `claude-code/mail-outcome` | 已认领的邮箱消息结束 | `messageId`、`outcome`(`settled`、`failed`、`paused`)、`reason`、`at` |
+| `claude-code/refused` | 一个回合或消息在运行前被拒绝 | `reason`(`admission`、`kill-switch`、`call-window`、`duplicate-in-flight`)、可选 `messageId`、`detail`、`at` |
 
 `estimatedCostUsd` 是 SDK 给出的名义成本;在订阅下它只是用量信号,不是账单。
 
@@ -34,7 +40,7 @@
 
 ## 不变量
 
-`@deepseek-ai/dsh-agent-claude-code/invariant` 注册包伴随插件。冷加载与每次实时追加都要求:`version: 1`;各事件必需字段与枚举;`turn-completed`、`steer`、`compact`、`resume-failed` 之前必须已有 `session-bound`;`turnIndex` 严格递增。允许重复的 `session-bound`(重新绑定)。`rate-limited` 与 `fleet-refused` 可以早于绑定出现,因为拒绝可能发生在会话开始之前。它尚未挂入任何 bundle;组合随驱动一起落地。
+`@deepseek-ai/dsh-agent-claude-code/invariant` 注册包伴随插件。冷加载与每次实时追加都要求:`version: 1`;各事件必需字段与枚举;`turn-completed`、`steer`、`compact`、`resume-failed` 之前必须已有 `session-bound`;`turnIndex` 严格递增。允许重复的 `session-bound`(重新绑定)。`rate-limited`、`fleet-refused` 与 `refused` 可以早于绑定出现,因为拒绝可能发生在会话开始之前;一次性的 `turn-completed`(带 `throwaway: true`,为被污染邮件的回合而写)从不需要绑定。它尚未挂入任何 bundle;组合随驱动一起落地。
 
 ## Known Limitations and Deferred Work
 

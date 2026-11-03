@@ -4,16 +4,17 @@ import { snapshotJsonValue } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEventMap } from '@deepseek-ai/dsh-session'
 import {
   CLAUDE_CODE_COMPACT_TRIGGERS, CLAUDE_CODE_DRIVER_NAME, CLAUDE_CODE_EVENT_VERSION,
-  CLAUDE_CODE_FLEET_REFUSAL_REASONS, CLAUDE_CODE_MAX_MODEL_USAGE_ENTRIES,
+  CLAUDE_CODE_FLEET_REFUSAL_REASONS, CLAUDE_CODE_MAIL_OUTCOMES, CLAUDE_CODE_MAX_MODEL_USAGE_ENTRIES,
   CLAUDE_CODE_MAX_REASON_CHARS, CLAUDE_CODE_PAUSE_REASONS, CLAUDE_CODE_RATE_LIMIT_SOURCES,
-  CLAUDE_CODE_RESUME_FAILED_REASONS, CLAUDE_CODE_STEER_KINDS,
+  CLAUDE_CODE_REFUSAL_REASONS, CLAUDE_CODE_RESUME_FAILED_REASONS, CLAUDE_CODE_STEER_KINDS,
 } from './constants.ts'
 import type { ClaudeCodeEventType } from './constants.ts'
 import { sanitizeFreeText, sanitizeLabel } from './sanitize.ts'
 import type {
-  ClaudeCodeCompactData, ClaudeCodeFleetRefusedData, ClaudeCodeModelUsage,
-  ClaudeCodePausedData, ClaudeCodeRateLimitedData, ClaudeCodeResumeFailedData,
-  ClaudeCodeSessionBoundData, ClaudeCodeSteerData, ClaudeCodeUsage,
+  ClaudeCodeCompactData, ClaudeCodeFleetRefusedData, ClaudeCodeMailClaimedData,
+  ClaudeCodeMailOutcomeData, ClaudeCodeModelUsage, ClaudeCodePausedData, ClaudeCodeRateLimitedData,
+  ClaudeCodeRefusedData, ClaudeCodeResumeFailedData, ClaudeCodeSessionBoundData, ClaudeCodeSteerData,
+  ClaudeCodeThinkingData, ClaudeCodeToolCallData, ClaudeCodeUnmappedData, ClaudeCodeUsage,
 } from './types.ts'
 
 /** SDK-sourced counter that may be absent; absent or invalid values are recorded as 0. */
@@ -46,6 +47,7 @@ export interface ClaudeCodeTurnCompletedInput {
   readonly usage?: ClaudeCodeUsageInput | null
   readonly modelUsage?: { readonly [modelId: string]: ClaudeCodeModelUsageInput | null | undefined } | null
   readonly stopReason?: string | null
+  readonly throwaway?: boolean
 }
 
 type WithoutVersion<T> = Omit<T, 'version'>
@@ -60,6 +62,12 @@ export interface ClaudeCodeEventInputMap {
   'claude-code/fleet-refused': WithoutVersion<ClaudeCodeFleetRefusedData>
   'claude-code/resume-failed': WithoutVersion<ClaudeCodeResumeFailedData>
   'claude-code/paused': WithoutVersion<ClaudeCodePausedData>
+  'claude-code/tool-call': WithoutVersion<ClaudeCodeToolCallData>
+  'claude-code/thinking': WithoutVersion<ClaudeCodeThinkingData>
+  'claude-code/unmapped': WithoutVersion<ClaudeCodeUnmappedData>
+  'claude-code/mail-claimed': WithoutVersion<ClaudeCodeMailClaimedData>
+  'claude-code/mail-outcome': WithoutVersion<ClaudeCodeMailOutcomeData>
+  'claude-code/refused': WithoutVersion<ClaudeCodeRefusedData>
 }
 
 /** Optional sink for the one-line reason a record was dropped (the recorder itself has no logger). */
@@ -160,6 +168,7 @@ function normalize(type: ClaudeCodeEventType, data: unknown): Plain | undefined 
         usage: normalizeUsage(read(data, 'usage')),
         modelUsage: normalizeModelUsage(read(data, 'modelUsage')),
         ...stopReason === '' ? {} : { stopReason },
+        ...read(data, 'throwaway') === true ? { throwaway: true } : {},
       }
     }
     case 'claude-code/steer': {
@@ -174,7 +183,14 @@ function normalize(type: ClaudeCodeEventType, data: unknown): Plain | undefined 
     case 'claude-code/compact': {
       const trigger = oneOf(read(data, 'trigger'), CLAUDE_CODE_COMPACT_TRIGGERS)
       if (trigger === undefined) return undefined
-      return { version, preTokens: wholeCount(read(data, 'preTokens')), trigger, at: timestamp(read(data, 'at')) }
+      const postTokens = read(data, 'postTokens')
+      return {
+        version, preTokens: wholeCount(read(data, 'preTokens')),
+        ...typeof postTokens === 'number' && Number.isFinite(postTokens) && postTokens >= 0
+          ? { postTokens: Math.trunc(postTokens) }
+          : {},
+        trigger, at: timestamp(read(data, 'at')),
+      }
     }
     case 'claude-code/rate-limited': {
       const source = oneOf(read(data, 'source'), CLAUDE_CODE_RATE_LIMIT_SOURCES)
@@ -215,6 +231,45 @@ function normalize(type: ClaudeCodeEventType, data: unknown): Plain | undefined 
         at: timestamp(read(data, 'at')),
       }
     }
+    case 'claude-code/tool-call': {
+      const name = sanitizeLabel(read(data, 'name'))
+      const argDigest = sanitizeLabel(read(data, 'argDigest'))
+      if (name === '' || argDigest === '') return undefined
+      return { version, name, ok: read(data, 'ok') === true, ms: count(read(data, 'ms')), argDigest, at: timestamp(read(data, 'at')) }
+    }
+    case 'claude-code/thinking':
+      return { version, length: wholeCount(read(data, 'length')), at: timestamp(read(data, 'at')) }
+    case 'claude-code/unmapped': {
+      const kind = sanitizeLabel(read(data, 'type'))
+      if (kind === '') return undefined
+      return { version, type: kind, at: timestamp(read(data, 'at')) }
+    }
+    case 'claude-code/mail-claimed': {
+      const messageId = sanitizeLabel(read(data, 'messageId'))
+      if (messageId === '') return undefined
+      return { version, messageId, tainted: read(data, 'tainted') === true, at: timestamp(read(data, 'at')) }
+    }
+    case 'claude-code/mail-outcome': {
+      const messageId = sanitizeLabel(read(data, 'messageId'))
+      const outcome = oneOf(read(data, 'outcome'), CLAUDE_CODE_MAIL_OUTCOMES)
+      if (messageId === '' || outcome === undefined) return undefined
+      return {
+        version, messageId, outcome,
+        reason: sanitizeFreeText(read(data, 'reason'), CLAUDE_CODE_MAX_REASON_CHARS),
+        at: timestamp(read(data, 'at')),
+      }
+    }
+    case 'claude-code/refused': {
+      const reason = oneOf(read(data, 'reason'), CLAUDE_CODE_REFUSAL_REASONS)
+      if (reason === undefined) return undefined
+      const messageId = sanitizeLabel(read(data, 'messageId'))
+      return {
+        version, reason,
+        ...messageId === '' ? {} : { messageId },
+        detail: sanitizeFreeText(read(data, 'detail'), CLAUDE_CODE_MAX_REASON_CHARS),
+        at: timestamp(read(data, 'at')),
+      }
+    }
     default:
       return undefined
   }
@@ -230,7 +285,7 @@ function normalize(type: ClaudeCodeEventType, data: unknown): Plain | undefined 
  * append. Any failure (bad input, invariant rejection, closed session) is
  * contained and reported as `false`; the caller's turn is never affected.
  * @param session - the dsh Session to append to.
- * @param type - one of the eight `claude-code/*` event types.
+ * @param type - one of the `claude-code/*` event types.
  * @param data - caller input; `version` is stamped here.
  * @param warn - optional sink for the reason a record was dropped.
  * @returns whether the event was appended.
@@ -252,7 +307,7 @@ export function recordClaudeCodeEvent<Type extends ClaudeCodeEventType>(
       warn?.(`${type}: dropped event that is not lossless JSON`)
       return false
     }
-    // All eight events are log-only; narrowing the generic append face
+    // All events are log-only; narrowing the generic append face
     // discharges Session.append's conditional options tuple.
     const append = session.append.bind(session) as <Event extends ClaudeCodeEventType>(
       event: Event,

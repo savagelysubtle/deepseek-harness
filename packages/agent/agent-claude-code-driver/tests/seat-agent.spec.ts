@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { CLAUDE_CODE_TURN_ERROR_CODES } from '../src/seat-agent.ts'
-import { harness, resultMessage, seatConfig, tick, userMessage } from './fakes.ts'
+import { framed, harness, resultMessage, seatConfig, tick, userMessage } from './fakes.ts'
 import type { FakeQuery, Harness } from './fakes.ts'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -37,7 +37,7 @@ describe('session binding', () => {
     expect(query.options).not.toHaveProperty('resume')
     expect(query.options.persistSession).toBe(true)
     await tick(5)
-    expect(query.consumed.map(message => message.message.content)).toEqual(['hello'])
+    expect(query.consumed.map(message => message.message.content)).toEqual([framed('hello')])
     answer(query)
     await agent.whenIdle()
   })
@@ -205,7 +205,7 @@ describe('steering', () => {
 
     agent.steer(userMessage('actually, stop and report'))
     await tick(5)
-    expect(query.consumed.map(message => message.message.content)).toEqual(['start the long job', 'actually, stop and report'])
+    expect(query.consumed.map(message => message.message.content)).toEqual([framed('start the long job'), framed('actually, stop and report')])
     expect(query.promptEnded).toBe(false)
     expect(h.queries).toHaveLength(1) // one live query, not a second one
     expect(dataOf(agent.session, 'claude-code/steer')).toEqual([expect.objectContaining({ kind: 'push' })])
@@ -260,7 +260,7 @@ describe('steering', () => {
     const second = await h.query(1)
     answer(second)
     await agent.whenIdle()
-    expect(second.consumed.map(message => message.message.content)).toEqual(['later'])
+    expect(second.consumed.map(message => message.message.content)).toEqual([framed('later')])
     expect(second.options.resume).toBeDefined()
   })
 
@@ -277,7 +277,7 @@ describe('steering', () => {
     expect(first.closed).toBe(true)
     expect(second.options.resume).toBe(first.options.sessionId)
     await tick(5)
-    expect(second.consumed.map(message => message.message.content)).toEqual(['urgent change'])
+    expect(second.consumed.map(message => message.message.content)).toEqual([framed('urgent change')])
     expect(dataOf(agent.session, 'claude-code/steer')).toEqual([expect.objectContaining({ kind: 'interrupt-push' })])
     const ends = dataOf(agent.session, 'turn/end') as { reason: { kind: string } }[]
     expect(ends[0]?.reason.kind).toBe('aborted')

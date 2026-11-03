@@ -177,6 +177,14 @@ Admission is enforced at drain time: a sender must be one of the served addresse
 
 Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — this section is byte-identical in both language sides of the page. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
 
+<a id="ctxclaudecodemailhooks--claudecodemailhooks"></a>
+
+### `ctx.claudeCodeMailHooks` — `ClaudeCodeMailHooks`
+
+The mail seams a later slice (registry admission in S3, the mailbox bridge's lease in S8) plugs in by providing `ctx.claudeCodeMailHooks`. Both are optional and read at use time, so the provider may load after this plugin.
+
+Source: [`packages/agent/agent-claude-code-driver/src/index.ts:71`](../../packages/agent/agent-claude-code-driver/src/index.ts)
+
 <a id="ctxmailbox--mailboxregistry"></a>
 
 ### `ctx.mailbox` — `MailboxRegistry`

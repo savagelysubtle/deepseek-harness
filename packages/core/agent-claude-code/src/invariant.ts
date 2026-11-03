@@ -5,9 +5,9 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { InvariantFailure, InvariantInstaller } from '@deepseek-ai/dsh-invariants'
 import {
   CLAUDE_CODE_COMPACT_TRIGGERS, CLAUDE_CODE_DRIVER_NAME, CLAUDE_CODE_EVENT_PREFIX,
-  CLAUDE_CODE_EVENT_VERSION, CLAUDE_CODE_FLEET_REFUSAL_REASONS, CLAUDE_CODE_MAX_REASON_CHARS,
+  CLAUDE_CODE_EVENT_VERSION, CLAUDE_CODE_FLEET_REFUSAL_REASONS, CLAUDE_CODE_MAIL_OUTCOMES, CLAUDE_CODE_MAX_REASON_CHARS,
   CLAUDE_CODE_MAX_TEXT_CHARS, CLAUDE_CODE_PAUSE_REASONS, CLAUDE_CODE_RATE_LIMIT_SOURCES,
-  CLAUDE_CODE_RESUME_FAILED_REASONS, CLAUDE_CODE_STEER_KINDS,
+  CLAUDE_CODE_REFUSAL_REASONS, CLAUDE_CODE_RESUME_FAILED_REASONS, CLAUDE_CODE_STEER_KINDS,
 } from './constants.ts'
 import type {} from './types.ts'
 
@@ -121,7 +121,9 @@ function applyEvent(trace: DriverTrace, event: SessionEvent, fail: InvariantFail
       return
     }
     case 'claude-code/turn-completed': {
-      if (!trace.bound) fail(`${type} has no earlier claude-code/session-bound`)
+      const throwaway = data.throwaway === true
+      if (data.throwaway !== undefined && !throwaway) fail(`${type} throwaway must be true when present`)
+      if (!throwaway && !trace.bound) fail(`${type} has no earlier claude-code/session-bound`)
       const turnIndex = whole(data, 'turnIndex', type, fail)
       if (turnIndex < 1) fail(`${type} turnIndex must be at least 1`)
       if (turnIndex <= trace.lastTurnIndex) {
@@ -159,6 +161,7 @@ function applyEvent(trace: DriverTrace, event: SessionEvent, fail: InvariantFail
     case 'claude-code/compact': {
       if (!trace.bound) fail(`${type} has no earlier claude-code/session-bound`)
       whole(data, 'preTokens', type, fail)
+      if (data.postTokens !== undefined) whole(data, 'postTokens', type, fail)
       member(data, 'trigger', CLAUDE_CODE_COMPACT_TRIGGERS, type, fail)
       amount(data, 'at', type, fail)
       return
@@ -187,6 +190,44 @@ function applyEvent(trace: DriverTrace, event: SessionEvent, fail: InvariantFail
     case 'claude-code/paused': {
       member(data, 'reason', CLAUDE_CODE_PAUSE_REASONS, type, fail)
       if (data.until !== undefined) whole(data, 'until', type, fail)
+      amount(data, 'at', type, fail)
+      return
+    }
+    case 'claude-code/tool-call': {
+      text(data, 'name', type, fail)
+      flag(data, 'ok', type, fail)
+      amount(data, 'ms', type, fail)
+      text(data, 'argDigest', type, fail)
+      amount(data, 'at', type, fail)
+      return
+    }
+    case 'claude-code/thinking': {
+      whole(data, 'length', type, fail)
+      amount(data, 'at', type, fail)
+      return
+    }
+    case 'claude-code/unmapped': {
+      text(data, 'type', type, fail)
+      amount(data, 'at', type, fail)
+      return
+    }
+    case 'claude-code/mail-claimed': {
+      text(data, 'messageId', type, fail)
+      flag(data, 'tainted', type, fail)
+      amount(data, 'at', type, fail)
+      return
+    }
+    case 'claude-code/mail-outcome': {
+      text(data, 'messageId', type, fail)
+      member(data, 'outcome', CLAUDE_CODE_MAIL_OUTCOMES, type, fail)
+      optionalText(data, 'reason', type, fail, CLAUDE_CODE_MAX_REASON_CHARS)
+      amount(data, 'at', type, fail)
+      return
+    }
+    case 'claude-code/refused': {
+      member(data, 'reason', CLAUDE_CODE_REFUSAL_REASONS, type, fail)
+      if (data.messageId !== undefined) text(data, 'messageId', type, fail)
+      optionalText(data, 'detail', type, fail, CLAUDE_CODE_MAX_REASON_CHARS)
       amount(data, 'at', type, fail)
       return
     }

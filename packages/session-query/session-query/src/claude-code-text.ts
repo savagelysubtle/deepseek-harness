@@ -38,6 +38,39 @@ interface ClaudeCodePausedData {
   until?: number
 }
 
+interface ClaudeCodeCompactData {
+  preTokens?: number
+  postTokens?: number
+  trigger?: string
+}
+
+interface ClaudeCodeToolCallData {
+  name?: string
+  ok?: boolean
+  ms?: number
+}
+
+interface ClaudeCodeUnmappedData {
+  type?: string
+}
+
+interface ClaudeCodeMailClaimedData {
+  messageId?: string
+  tainted?: boolean
+}
+
+interface ClaudeCodeMailOutcomeData {
+  messageId?: string
+  outcome?: string
+  reason?: string
+}
+
+interface ClaudeCodeRefusedData {
+  reason?: string
+  messageId?: string
+  detail?: string
+}
+
 /** Render `label=value` when the value is present, else nothing. */
 function field(label: string, value: string | number | boolean | undefined): string[] {
   return value === undefined ? [] : [`${label}=${String(value)}`]
@@ -45,8 +78,9 @@ function field(label: string, value: string | number | boolean | undefined): str
 
 /**
  * Searchable text for one `claude-code/*` event, or `undefined` when the type
- * is not one this module owns. `steer` and `compact` stay non-searchable
- * (structural counters, no semantic text).
+ * is not one this module owns. `steer` and `thinking` stay non-searchable
+ * (structural counters, no semantic text); `compact` is searchable so the
+ * context-rot signal (pre/post token sizes per compaction) can be queried.
  * @param type - the session event type.
  * @param data - the event payload, read through loose mirrored shapes.
  * @returns newline-joined text, the empty string for a structural claude-code event, or `undefined`.
@@ -92,8 +126,47 @@ export function claudeCodeEventText(type: string, data: unknown): string | undef
       const d = data as ClaudeCodePausedData
       return ['claude-code paused', ...field('reason', d.reason), ...field('until', d.until)].join('\n')
     }
+    case 'claude-code/compact': {
+      const d = data as ClaudeCodeCompactData
+      return [
+        'claude-code compact',
+        ...field('trigger', d.trigger),
+        ...field('preTokens', d.preTokens),
+        ...field('postTokens', d.postTokens),
+      ].join('\n')
+    }
+    case 'claude-code/tool-call': {
+      const d = data as ClaudeCodeToolCallData
+      return ['claude-code tool-call', ...field('name', d.name), ...field('ok', d.ok), ...field('ms', d.ms)].join('\n')
+    }
+    case 'claude-code/unmapped': {
+      const d = data as ClaudeCodeUnmappedData
+      return ['claude-code unmapped', ...field('type', d.type)].join('\n')
+    }
+    case 'claude-code/mail-claimed': {
+      const d = data as ClaudeCodeMailClaimedData
+      return ['claude-code mail-claimed', ...field('messageId', d.messageId), ...field('tainted', d.tainted)].join('\n')
+    }
+    case 'claude-code/mail-outcome': {
+      const d = data as ClaudeCodeMailOutcomeData
+      return [
+        'claude-code mail-outcome',
+        ...field('messageId', d.messageId),
+        ...field('outcome', d.outcome),
+        ...d.reason === undefined || d.reason === '' ? [] : [d.reason],
+      ].join('\n')
+    }
+    case 'claude-code/refused': {
+      const d = data as ClaudeCodeRefusedData
+      return [
+        'claude-code refused',
+        ...field('reason', d.reason),
+        ...field('messageId', d.messageId),
+        ...d.detail === undefined || d.detail === '' ? [] : [d.detail],
+      ].join('\n')
+    }
     case 'claude-code/steer':
-    case 'claude-code/compact':
+    case 'claude-code/thinking':
       return ''
     default:
       return undefined

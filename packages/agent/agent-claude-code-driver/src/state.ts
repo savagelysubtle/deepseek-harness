@@ -96,3 +96,22 @@ export function writeAtomic(file: string, text: string): void {
   writeFileSync(temp, text, { flag: 'wx', mode: 0o600 })
   renameSync(temp, file)
 }
+
+/** File name of the kill-switch flag, inside the driver's state directory. */
+export const KILL_SWITCH_FILE_NAME = 'claude-code-kill-switch'
+
+/**
+ * Whether the kill-switch flag file exists. A file that cannot be examined
+ * (anything but "not there") counts as present: the switch fails closed.
+ * @param file - absolute path of the flag file.
+ * @returns true when the seats must stop.
+ */
+export function killSwitchPresent(file: string): boolean {
+  try {
+    lstatSync(file)
+    return true
+  } catch (error: unknown) {
+    const code = (error as NodeJS.ErrnoException).code
+    return code !== 'ENOENT' && code !== 'ENOTDIR'
+  }
+}

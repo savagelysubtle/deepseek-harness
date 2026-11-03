@@ -19,6 +19,8 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
+import { defaultAdmission, frameMailText } from '../src/admission.ts'
+import type { MailAdmission } from '../src/admission.ts'
 import { buildChildEnv, forbiddenEnvPresent } from '../src/env.ts'
 import { ProcessLedger } from '../src/ledger.ts'
 import type { LedgerProcessOps } from '../src/ledger.ts'
@@ -51,6 +53,19 @@ export function seatConfig(overrides: Partial<ClaudeCodeSeatRow['claude_code']> 
 
 export function userMessage(text: string): UserMessage {
   return createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
+}
+
+/** The prompt text the driver sends for a message body. */
+export function framed(text: string): string {
+  return frameMailText(text)
+}
+
+/** Mailbox mail as the bridge delivers it, with optional hop metadata. */
+export function mailMessage(text: string, messageId: string, extra: Record<string, unknown> = {}): UserMessage {
+  return createUserMessage({
+    content: [{ type: 'text', text }],
+    source: { kind: 'mailbox', form: 'relay', address: 'seat@dsh', from: 'peer@dsh', messageId, senderClass: 'seat', ...extra } as never,
+  })
 }
 
 export function resultMessage(overrides: Record<string, unknown> = {}): SDKResultMessage {
@@ -201,6 +216,14 @@ export interface Harness {
     flushError: Error | undefined
     /** Order in which the session flush and the SDK query ran. */
     calls: string[]
+    /** Whether the kill-switch flag file is "present". */
+    killSwitch: boolean
+    /** Custom admission check; absent uses the default. */
+    admit: MailAdmission | undefined
+    /** Every lease call: `settle:<id>` or `fail:<id>:<reason>`. */
+    leases: string[]
+    /** Make every lease call throw. */
+    leaseError: Error | undefined
   }
   readonly deps: SeatAgentDeps
   session(id?: string): Session
@@ -256,7 +279,8 @@ export async function harness(options: { childPid?: number; childExitsOnWait?: b
   const children: FakeChild[] = []
   const killed: number[] = []
   const warnings: string[] = []
-  const state: Harness['state'] = { transcript: 'ok', hostEnv: {}, failNextQuery: undefined, now: 1_800_000_000_000, flushError: undefined, calls: [] }
+  const state: Harness['state'] = { transcript: 'ok', hostEnv: {}, failNextQuery: undefined, now: 1_800_000_000_000, flushError: undefined, calls: [],
+    killSwitch: false, admit: undefined, leases: [], leaseError: undefined }
   const ledgerFile = join(tempDir(), 'pids.json')
   const ledger = new ProcessLedger(ledgerFile, ledgerOps(new Map([[options.childPid ?? 4242, 'tick-1'], [777, 'host-tick']]), []))
   const gate = new SeatGate()
@@ -291,6 +315,19 @@ export async function harness(options: { childPid?: number; childExitsOnWait?: b
     flush: () => {
       state.calls.push('flush')
       return state.flushError === undefined ? Promise.resolve() : Promise.reject(state.flushError)
+    },
+    killSwitchActive: () => state.killSwitch,
+    admit: request => (state.admit === undefined ? defaultAdmission(request) : state.admit(request)),
+    lease: {
+      settle: (id) => {
+        state.leases.push(`settle:${id}`)
+        if (state.leaseError !== undefined) throw state.leaseError
+      },
+      fail: (id, reason) => {
+        state.leases.push(`fail:${id}:${reason}`)
+        if (state.leaseError !== undefined) return Promise.reject(state.leaseError)
+        return Promise.resolve()
+      },
     },
     warn: (message) => { warnings.push(message) },
   }

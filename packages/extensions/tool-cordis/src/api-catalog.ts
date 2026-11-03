@@ -406,6 +406,23 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'claudeCodeMailHooks',
+    summary: 'The mail seams a later slice (registry admission in S3, the mailbox bridge\'s lease in S8) plugs in by providing `ctx.claudeCodeMailHooks`.',
+    description: 'The mail seams a later slice (registry admission in S3, the mailbox bridge\'s lease in S8) plugs in by providing `ctx.claudeCodeMailHooks`. Both are optional and read at use time, so the provider may load after this plugin.',
+    methods: [
+      {
+        signature: 'readonly admit?: MailAdmission | undefined',
+        description: 'Replaces the default admission (deny any external-class hop) on the send and steer paths.',
+        parameters: [],
+      },
+      {
+        signature: 'readonly lease?: MailLeaseSink | undefined',
+        description: 'The real mailbox lease: settled or failed once per mail, deterministically.',
+        parameters: [],
+      },
+    ],
+  },
+  {
     key: 'clientModules',
     summary: 'The web plugin table service: incremental `dsh.client` scan + wire composition + bundle route + index tap.',
     description: 'The web plugin table service: incremental `dsh.client` scan + wire composition + bundle route + index tap. Construction runs the activation scan synchronously — a malformed declaration or missing bundle among the already-loaded entries aggregates into one loud throw (FAILED fiber; the boot activation audit reports it).',
@@ -3825,6 +3842,22 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface LspRange {\n    readonly start: LspPosition;\n    readonly end: LspPosition;\n}',
   },
   {
+    name: 'MailAdmission',
+    declaration: 'export type MailAdmission = (request: MailAdmissionRequest) => MailAdmissionDecision;',
+  },
+  {
+    name: 'MailAdmissionDecision',
+    declaration: 'export type MailAdmissionDecision = {\n    readonly allow: true;\n} | {\n    readonly allow: false;\n    readonly reason: string;\n};',
+  },
+  {
+    name: 'MailAdmissionPath',
+    declaration: 'export type MailAdmissionPath = \'send\' | \'steer\';',
+  },
+  {
+    name: 'MailAdmissionRequest',
+    declaration: 'export interface MailAdmissionRequest {\n    readonly seat: string;\n    readonly messageId?: string | undefined;\n    readonly path: MailAdmissionPath;\n    readonly externalHops: readonly string[];\n    readonly tainted: boolean;\n    readonly turnTainted: boolean;\n}',
+  },
+  {
     name: 'MailboxAddress',
     declaration: 'export type MailboxAddress = Branded<\'mailbox-address\'>;',
   },
@@ -3887,6 +3920,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'MailboxTraceEntry',
     declaration: 'export interface MailboxTraceEntry {\n    readonly id: MailboxMessageId;\n    readonly from: string;\n    readonly to: MailboxAddress;\n    readonly sentAt: number;\n    readonly state: MailboxState;\n    readonly subject?: string;\n    readonly payload?: unknown;\n    readonly blocking?: boolean;\n    readonly claimedAt?: number;\n    readonly deliveredAt?: number;\n    readonly failureReason?: string;\n}',
+  },
+  {
+    name: 'MailLeaseSink',
+    declaration: 'export interface MailLeaseSink {\n    settle(messageId: string): void | Promise<void>;\n    fail(messageId: string, reason: string): void | Promise<void>;\n}',
   },
   {
     name: 'ManifestEntry',

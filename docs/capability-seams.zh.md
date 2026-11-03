@@ -14,6 +14,8 @@ flowchart LR
   pkg_attachment_local["attachment-local"]
   pkg_host_runtime["host-runtime"]
   pkg_llm_pi_ai["llm-pi-ai"]
+  pkg_agent_claude_code_driver["agent-claude-code-driver"]
+  svc_claudeCodeMailHooks["ctx.claudeCodeMailHooks<br/>Optional mail admission and lease hooks for Claude Code seats"]
   pkg_mailbox["mailbox"]
   svc_mailbox["ctx.mailbox<br/>Durable agent-to-agent mailbox"]
   pkg_local["local"]
@@ -207,6 +209,7 @@ flowchart LR
   svc_cordisInspect["ctx.cordisInspect<br/>Dynamic Cordis inspect registry"]
   pkg_acp --> svc_approval
   pkg_agent --> svc_agents
+  pkg_agent_claude_code_driver --> svc_claudeCodeMailHooks
   pkg_agent_default_model --> svc_agentDefaultModel
   pkg_agent_loop --> svc_agentLoop
   pkg_agent_presets --> svc_agentPresets
@@ -322,6 +325,7 @@ flowchart LR
   svc_approval --> pkg_tools
   svc_attachments --> pkg_host_runtime
   svc_attachments --> pkg_llm_pi_ai
+  svc_claudeCodeMailHooks --> pkg_agent_claude_code_driver
   svc_clientModules --> pkg_hmr
   svc_codeRuntime --> pkg_tools
   svc_compaction --> pkg_compaction_basic
@@ -432,6 +436,7 @@ flowchart LR
 | ctx 键 | 角色 | 所属包 | 实现 | 直接消费方 | 配套插件 | 说明 |
 | --- | --- | --- | --- | --- | --- | --- |
 | `ctx.attachments` | `seam` | [`attachment`](../packages/attachment/attachment) | [`attachment-local`](../packages/attachment/attachment-local) | `host-runtime`, [`llm-pi-ai`](../packages/llm/llm-pi-ai) | - | 宿主会在会话事件之前提交已接受的图片；提供方适配器将已授权的持久引用解析为提供方原生内容。 |
+| `ctx.claudeCodeMailHooks` | `seam` | [`agent-claude-code-driver`](../packages/agent/agent-claude-code-driver) | - | [`agent-claude-code-driver`](../packages/agent/agent-claude-code-driver) | - | 可选服务,由后续切片提供:Claude Code 席位驱动调用的准入检查与邮箱租约接收器,使用时才读取;缺省时驱动回退到默认拒绝的准入且不处理租约(见 packages/agent/agent-claude-code-driver/README.md)。 |
 | `ctx.mailbox` | `seam` | [`mailbox`](../packages/mailbox/mailbox) | `local` | `bridge` | - | Service Definition 为每个部署解析出唯一的存储提供方；SQLite 本地提供方拥有 lease 与 settle，投递 bridge 把已 claim 的消息导入指定收件方的 agent 轮次（见 docs/subsystems/mailbox.md）。 |
 | `ctx.memory` | `core` | [`memory`](../packages/memory/memory) | - | - | - | 同一个包交付 ctx.memory 服务、其背后项目作用域的本地提供方，以及共享 realm 中面向模型的工具消费方（见 docs/subsystems/memory.md）。 |
 | `ctx.llm` | `seam` | [`llm`](../packages/llm/llm) | [`llm-deepseek`](../packages/llm/llm-deepseek), [`llm-pi-ai`](../packages/llm/llm-pi-ai), [`llm-replay`](../packages/test-support/llm-replay) | [`agent-loop`](../packages/core/agent-loop), [`compaction-basic`](../packages/compaction/compaction-basic) | - | 适配器注册提供方实现；agent loop（智能体循环）与压缩功能调用提供方无关的流服务。 |

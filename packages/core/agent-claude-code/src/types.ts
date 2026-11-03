@@ -55,6 +55,8 @@ export interface ClaudeCodeTurnCompletedData {
   readonly usage: ClaudeCodeUsage
   readonly modelUsage: { readonly [modelId: string]: ClaudeCodeModelUsage }
   readonly stopReason?: string
+  /** True when the turn ran in a throwaway, tool-less Claude session (tainted mail), not the seat's own session. */
+  readonly throwaway?: true
 }
 
 /** How new input reached a live or resumed Claude session. */
@@ -76,6 +78,8 @@ export type ClaudeCodeCompactTrigger = 'auto' | 'manual'
 export interface ClaudeCodeCompactData {
   readonly version: ClaudeCodeEventVersion
   readonly preTokens: number
+  /** Context size after compaction, when the SDK reported it. */
+  readonly postTokens?: number
   readonly trigger: ClaudeCodeCompactTrigger
   readonly at: number
 }
@@ -132,6 +136,76 @@ export interface ClaudeCodePausedData {
   readonly at: number
 }
 
+/** One tool call observed in the stream: name, outcome, duration, and an argument digest; never bodies. */
+export interface ClaudeCodeToolCallData {
+  readonly version: ClaudeCodeEventVersion
+  /** Tool name (label-sanitized). */
+  readonly name: string
+  /** Whether the tool result was not an error. */
+  readonly ok: boolean
+  /** Milliseconds from the tool_use block to its tool_result. */
+  readonly ms: number
+  /** Argument size (`len:<n>`) or a keyed HMAC prefix (`hmac:<hex>`), never a plain hash. */
+  readonly argDigest: string
+  readonly at: number
+}
+
+/** One thinking block observed in the stream: its length only, never its text. */
+export interface ClaudeCodeThinkingData {
+  readonly version: ClaudeCodeEventVersion
+  readonly length: number
+  readonly at: number
+}
+
+/** A stream message the mapper does not understand, recorded by type name only. */
+export interface ClaudeCodeUnmappedData {
+  readonly version: ClaudeCodeEventVersion
+  /** SDK message `type` (or `type/subtype`), label-sanitized. */
+  readonly type: string
+  readonly at: number
+}
+
+/** A mailbox message claimed for a turn; written and flushed before the prompt is sent. */
+export interface ClaudeCodeMailClaimedData {
+  readonly version: ClaudeCodeEventVersion
+  /** Mailbox message id (the idempotency key). */
+  readonly messageId: string
+  /** Whether the mail ran in a throwaway tool-less session because it was externally tainted. */
+  readonly tainted: boolean
+  readonly at: number
+}
+
+/** How a claimed mailbox message ended. */
+export type ClaudeCodeMailOutcome = 'settled' | 'failed' | 'paused'
+
+/** The deterministic end of a claimed mailbox message. */
+export interface ClaudeCodeMailOutcomeData {
+  readonly version: ClaudeCodeEventVersion
+  readonly messageId: string
+  readonly outcome: ClaudeCodeMailOutcome
+  /** Control-stripped, redacted, at most 200 characters. */
+  readonly reason: string
+  readonly at: number
+}
+
+/** Why the driver refused to run a turn or accept a message (the budget cap is the SDK's own max-budget result, not a refusal). */
+export type ClaudeCodeRefusalReason =
+  | 'admission'
+  | 'kill-switch'
+  | 'call-window'
+  | 'duplicate-in-flight'
+
+/** A loud refusal record: the mail was not run, and a lease failure carries the same reason. */
+export interface ClaudeCodeRefusedData {
+  readonly version: ClaudeCodeEventVersion
+  readonly reason: ClaudeCodeRefusalReason
+  /** The mailbox message id, when the refused input was mail. */
+  readonly messageId?: string
+  /** Control-stripped, redacted, at most 200 characters. */
+  readonly detail: string
+  readonly at: number
+}
+
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     /**
@@ -174,5 +248,35 @@ declare module '@deepseek-ai/dsh-session/types' {
      * @param data - pause reason, optional reopen time, and time.
      */
     'claude-code/paused': ClaudeCodePausedData
+    /**
+     * Records one tool call (name, success, duration, argument digest; no bodies).
+     * @param data - tool name, ok flag, milliseconds, digest, and time.
+     */
+    'claude-code/tool-call': ClaudeCodeToolCallData
+    /**
+     * Records one thinking block by length only.
+     * @param data - thinking length and time.
+     */
+    'claude-code/thinking': ClaudeCodeThinkingData
+    /**
+     * Records a stream message the mapper does not understand.
+     * @param data - SDK message type name and time.
+     */
+    'claude-code/unmapped': ClaudeCodeUnmappedData
+    /**
+     * Records that a mailbox message was claimed; flushed before the prompt is sent.
+     * @param data - message id, taint flag, and time.
+     */
+    'claude-code/mail-claimed': ClaudeCodeMailClaimedData
+    /**
+     * Records the deterministic outcome of a claimed mailbox message.
+     * @param data - message id, outcome, short reason, and time.
+     */
+    'claude-code/mail-outcome': ClaudeCodeMailOutcomeData
+    /**
+     * Records a loud refusal (admission, kill switch, call window, duplicate).
+     * @param data - reason, optional message id, short detail, and time.
+     */
+    'claude-code/refused': ClaudeCodeRefusedData
   }
 }

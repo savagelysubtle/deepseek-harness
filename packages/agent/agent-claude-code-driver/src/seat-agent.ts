@@ -13,7 +13,7 @@
  * @module @deepseek-ai/dsh-agent-claude-code-driver/seat-agent
  */
 
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { USAGE_LIMIT_ERROR_PREFIXES } from '@anthropic-ai/claude-agent-sdk'
 import type {
   Options, Query, SDKMessage, SDKResultMessage, SDKUserMessage, SpawnOptions,
@@ -26,13 +26,18 @@ import type {
 import { recordClaudeCodeEvent } from '@deepseek-ai/dsh-agent-claude-code'
 import type { ClaudeCodeEventInputMap, ClaudeCodeEventType } from '@deepseek-ai/dsh-agent-claude-code'
 import { CLAUDE_CODE_DRIVER_NAME, sanitizeFreeText } from '@deepseek-ai/dsh-agent-claude-code'
-import { errorChain } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { claudeSpawnSpec, ManagedClaudeCodeProcess } from '@deepseek-ai/dsh-subagent-claude-code/src/process.ts'
 import type { SubprocessHandle, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
+import { defaultAdmission, externalHops, frameMailText, isTaintedMail, mailboxMessageId } from './admission.ts'
+import type { MailAdmission, MailAdmissionDecision, MailAdmissionPath } from './admission.ts'
 import { assertCleanHostEnv } from './env.ts'
+import { MailLog } from './mail-lease.ts'
+import type { MailLeaseSink, MailState } from './mail-lease.ts'
+import { StreamMapper } from './mapper.ts'
 import { buildQueryOptions } from './options.ts'
 import type { QueryBinding, QueryOptionsExtension } from './options.ts'
 import { PromptStream } from './prompt-stream.ts'
@@ -67,6 +72,12 @@ export const CLAUDE_CODE_TURN_ERROR_CODES = {
   environment: 'CLAUDE_CODE_ENVIRONMENT',
   /** The session binding could not be made durable, or the logged binding is not a valid session id. */
   binding: 'CLAUDE_CODE_BINDING',
+  /** The kill-switch flag file is present. */
+  killSwitch: 'CLAUDE_CODE_KILL_SWITCH',
+  /** The seat used up its calls for the current window. */
+  callWindow: 'CLAUDE_CODE_CALL_WINDOW',
+  /** A tainted turn was about to run with tools. */
+  tainted: 'CLAUDE_CODE_TAINTED_TOOLS',
 } as const
 
 /** A driver failure carrying a stable machine code for `turn/end`. */
@@ -115,6 +126,14 @@ export interface SeatAgentDeps {
   readonly attestedBinary?: ((seat: string) => string) | undefined
   /** Optional S5 settings extension. */
   readonly extension?: QueryOptionsExtension | undefined
+  /** Mail admission check for the send and steer paths; defaults to {@link defaultAdmission}. */
+  readonly admit?: MailAdmission | undefined
+  /** The mailbox bridge's lease, settled or failed deterministically per mail; absent means no lease calls. */
+  readonly lease?: MailLeaseSink | undefined
+  /** Whether the kill-switch flag file is present; checked before every turn and on every stream message. */
+  readonly killSwitchActive?: (() => boolean) | undefined
+  /** Secret keying tool-argument digests; a private random key is made when omitted. */
+  readonly digestKey?: Uint8Array | undefined
   /** Warning sink. */
   readonly warn: (message: string) => void
 }
@@ -122,6 +141,7 @@ export interface SeatAgentDeps {
 /** Holds the single live-query slot of each seat in this process. */
 export class SeatGate {
   private readonly held = new Map<string, unknown>()
+  private readonly calls = new Map<string, number[]>()
 
   /**
    * Whether a seat currently has a live query.
@@ -146,6 +166,28 @@ export class SeatGate {
       )
     }
     this.held.set(seat, holder)
+  }
+
+  /**
+   * How many queries a seat started inside the window ending now.
+   * @param seat - seat key.
+   * @param now - epoch milliseconds.
+   * @param windowMs - window length.
+   * @returns the number of queries noted in the window.
+   */
+  callsInWindow(seat: string, now: number, windowMs: number): number {
+    const kept = (this.calls.get(seat) ?? []).filter(at => at > now - windowMs)
+    this.calls.set(seat, kept)
+    return kept.length
+  }
+
+  /**
+   * Note that a seat started a query.
+   * @param seat - seat key.
+   * @param now - epoch milliseconds.
+   */
+  noteCall(seat: string, now: number): void {
+    this.calls.set(seat, [...this.calls.get(seat) ?? [], now])
   }
 
   /**
@@ -187,9 +229,26 @@ class LiveTurn {
   result: SDKResultMessage | undefined
   pause: PauseSignal | undefined
   interrupted = false
+  /** The kill switch aborted this query. */
+  killed = false
+  /** Files were read or content was fetched during this turn. */
+  tainted = false
+  /** Every mail in the turn was a duplicate, so no query ran. */
+  noQuery = false
+  /** Steered messages claimed but not yet pushed (waiting for their claim records to be durable). */
+  inflight = 0
+  mapper: StreamMapper | undefined
   private tearingDown: Promise<void> | undefined
 
-  constructor(readonly turn: number, readonly abort: AbortController, private readonly deps: SeatAgentDeps) {}
+  constructor(
+    readonly turn: number,
+    readonly abort: AbortController,
+    private readonly deps: SeatAgentDeps,
+    /** Tainted mail: a throwaway Claude session with no tools. */
+    readonly throwaway: boolean,
+    /** Mailbox ids of the mail this turn owns; the steer path appends to it. */
+    readonly mailIds: string[],
+  ) {}
 
   /** Re-read the exit flag; it can change across awaits, which control-flow narrowing cannot see. */
   private exitedNow(): boolean {
@@ -233,6 +292,14 @@ class LiveTurn {
   }
 }
 
+/** Normalize whatever an admission check returned to a verdict; anything but an explicit allow is a refusal. */
+function verdictOf(value: unknown): MailAdmissionDecision {
+  const allow: unknown = typeof value === 'object' && value !== null ? (value as { allow?: unknown }).allow : undefined
+  if (allow === true) return { allow: true }
+  const reason: unknown = allow === false ? (value as { reason?: unknown }).reason : undefined
+  return { allow: false, reason: typeof reason === 'string' && reason !== '' ? reason : 'admission check gave no verdict' }
+}
+
 /** Plain text of a dsh user message; non-text content is refused rather than dropped. */
 function messageText(message: UserMessage): string {
   const parts: string[] = []
@@ -242,8 +309,11 @@ function messageText(message: UserMessage): string {
     }
     parts.push(block.text)
   }
-  return parts.join('\n')
+  return frameMailText(parts.join('\n'))
 }
+
+/** Tools whose use means untrusted content (files, fetched pages) entered the context. */
+const TAINTING_TOOLS: ReadonlySet<string> = new Set(['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch'])
 
 /** Whether a CLI limit message says a usage limit was genuinely reached (the SDK's own prefix list). */
 function isUsageLimitText(text: string): boolean {
@@ -293,6 +363,13 @@ export class ClaudeCodeSeatAgent implements Agent {
   private pausedUntil = 0
   /** True until this instance has flushed the session once: another instance's flush may have failed. */
   private bindingPending = true
+  /** What the log says about each mailbox message; the idempotency record. */
+  private readonly mail: MailLog
+  /** Mailbox ids claimed by a turn of this instance that has not ended. */
+  private readonly mailInFlight = new Set<string>()
+  /** Lease calls still running; `whenIdle` waits for them. */
+  private readonly leaseWork = new Set<Promise<void>>()
+  private readonly digestKey: Uint8Array
 
   /**
    * @param loopCtx - registration context carrying `agents`.
@@ -323,6 +400,8 @@ export class ClaudeCodeSeatAgent implements Agent {
     })
     this.phase = { kind: 'idle', lastTurn: session.events.findLast(event => event.type === 'turn/start')?.data.turn ?? 0 }
     this.pausedUntil = restoredPause(session, deps)
+    this.mail = new MailLog(session)
+    this.digestKey = deps.digestKey ?? randomBytes(32)
     this.scope = createScope(loopCtx, this)
     this.ctx = this.scope.ctx.extend({ agent: this })
   }
@@ -334,6 +413,12 @@ export class ClaudeCodeSeatAgent implements Agent {
   /** Epoch milliseconds until which this seat refuses turns after a pause signal; 0 when not paused. */
   get pausedUntilMs(): number {
     return this.pausedUntil > this.deps.now() ? this.pausedUntil : 0
+  }
+
+  /** Whether the running turn is tainted: throwaway mail, or files read or content fetched. */
+  get turnTainted(): boolean {
+    const live = this.phase.kind === 'running' ? this.phase.live : undefined
+    return live !== undefined && (live.tainted || live.throwaway)
   }
 
   /** Lift a pause early (for example after the operator confirms the window reopened). */
@@ -355,9 +440,56 @@ export class ClaudeCodeSeatAgent implements Agent {
     if (wakeup && this.disposed) {
       this.throwError(new Error(`agent "${this.id}": send refused, agent is disposed`))
     }
+    const admitted = this.admitMail(message, target === 'next-step' ? 'steer' : 'send')
+    if (admitted === undefined) return
     const wakingAfterAbort = wakeup && this.phase.kind !== 'idle' && this.phase.abort.signal.aborted
-    this.inbox.splice(wakingAfterAbort ? 'next-turn' : target, Infinity, 0, [message])
+    // Tainted mail is never pushed into a live turn: it waits for its own throwaway turn.
+    this.inbox.splice(wakingAfterAbort || admitted.tainted ? 'next-turn' : target, Infinity, 0, [message])
     if (wakeup) this.wake()
+  }
+
+  /**
+   * Run the admission check for one arriving message. A refusal is loud: a
+   * `claude-code/refused` record, a warning, and a failed lease; the message
+   * is not queued. A check that throws or answers badly is a refusal.
+   * @returns the taint of an admitted message, or undefined when refused.
+   */
+  private admitMail(message: UserMessage, path: MailAdmissionPath): { tainted: boolean } | undefined {
+    const messageId = mailboxMessageId(message)
+    const tainted = isTaintedMail(message)
+    let decision: MailAdmissionDecision
+    try {
+      decision = verdictOf((this.deps.admit ?? defaultAdmission)({
+        seat: this.seat,
+        ...messageId === undefined ? {} : { messageId },
+        path,
+        externalHops: externalHops(message),
+        tainted,
+        turnTainted: this.turnTainted,
+      }))
+    } catch (error: unknown) {
+      decision = { allow: false, reason: `admission check failed: ${errText(error)}` }
+    }
+    if (decision.allow) return { tainted }
+    const reason = sanitizeFreeText(decision.reason, MAX_ERROR_TEXT_CHARS)
+    this.rec('claude-code/refused', { reason: 'admission', ...messageId === undefined ? {} : { messageId }, detail: reason, at: this.deps.now() })
+    this.deps.warn(`agent-claude-code-driver: seat "${this.seat}" refused ${path} mail${messageId === undefined ? '' : ` ${messageId}`}: ${reason}`)
+    if (messageId !== undefined) void this.leaseCall(() => this.deps.lease?.fail(messageId, `refused: ${reason}`))
+    return undefined
+  }
+
+  /** Run one lease call to completion in the background; a failure is a warning, never an exception. */
+  private leaseCall(call: () => void | Promise<void> | undefined): Promise<void> {
+    const work = (async () => {
+      try {
+        await call()
+      } catch (error: unknown) {
+        this.deps.warn(`agent-claude-code-driver: seat "${this.seat}" mailbox lease call failed: ${errText(error)}`)
+      }
+    })()
+    this.leaseWork.add(work)
+    void work.finally(() => this.leaseWork.delete(work))
+    return work
   }
 
   followup(message: UserMessage): void {
@@ -382,6 +514,7 @@ export class ClaudeCodeSeatAgent implements Agent {
     const activeWorkAborted = this.phase.kind !== 'idle'
     if (cause.kind === 'disposed') this.disposed = true
     if (options.keepInbox !== true) {
+      void this.failQueuedMail('cancelled before delivery')
       this.inbox.clear()
       if (this.phase.kind !== 'idle') this.phase.wakeRequested = false
     }
@@ -419,6 +552,7 @@ export class ClaudeCodeSeatAgent implements Agent {
     do {
       await (activity = this.activityDone)
     } while (activity !== this.activityDone)
+    await Promise.all([...this.leaseWork])
   }
 
   /**
@@ -429,6 +563,7 @@ export class ClaudeCodeSeatAgent implements Agent {
    */
   async interruptAndResume(message: UserMessage): Promise<void> {
     const live = this.phase.kind === 'running' ? this.phase.live : undefined
+    if (this.admitMail(message, 'steer') === undefined) return
     this.inbox.splice('next-turn', Infinity, 0, [message])
     if (live?.query === undefined) {
       this.wake()
@@ -481,15 +616,61 @@ export class ClaudeCodeSeatAgent implements Agent {
     }
   }
 
-  /** Claim queued next-step mail and push it into the live prompt stream. */
+  /**
+   * Claim queued next-step mail and push it into the live prompt stream. Each
+   * message is checked against the log, gets its claim record, and is pushed
+   * only after that record is durable. A throwaway turn takes no steering.
+   */
   private pumpSteer(phase: RunningPhase): void {
     const { live, turn } = phase
-    if (live === undefined || live.stream.closed || this.inbox.nextStep.length === 0) return
-    for (const message of this.inbox.claim('next-step', turn)) {
+    if (live === undefined || live.throwaway || live.stream.closed || this.inbox.nextStep.length === 0) return
+    const accepted = this.screenClaimed(this.inbox.claim('next-step', turn), live.mailIds)
+    if (accepted.length === 0) return
+    // Steering that carries no mailbox mail has no claim record to make durable, so it goes in at once.
+    if (!accepted.some(message => mailboxMessageId(message) !== undefined)) {
+      this.pushSteered(live, accepted)
+      return
+    }
+    live.inflight += accepted.length
+    void this.flushThenPush(live, accepted)
+  }
+
+  /** Log and push steered messages into the live prompt stream. */
+  private pushSteered(live: LiveTurn, accepted: readonly UserMessage[]): void {
+    for (const message of accepted) {
       this.session.append('user/message', message, { surfaceOp: 'append' })
       this.pushMessage(live, message)
       this.rec('claude-code/steer', { kind: 'push', reason: 'mail pushed into the live turn', at: this.deps.now() })
     }
+  }
+
+  /** Make the claim records durable, then push the steered messages (or fail their leases). */
+  private async flushThenPush(live: LiveTurn, accepted: readonly UserMessage[]): Promise<void> {
+    const ids = accepted.flatMap(message => mailboxMessageId(message) ?? [])
+    try {
+      await this.flushClaims()
+    } catch (error: unknown) {
+      live.inflight -= accepted.length
+      await Promise.all(ids.map(id => this.finishMail(id, 'failed', errText(error))))
+      this.maybeEndStream(live)
+      return
+    }
+    live.inflight -= accepted.length
+    if (live.stream.closed) {
+      await Promise.all(ids.map(id => this.finishMail(id, 'failed', 'turn ended before the steered mail was delivered')))
+      return
+    }
+    this.pushSteered(live, accepted)
+  }
+
+  /** End the prompt stream when every pushed message was answered and nothing more is on its way. */
+  private maybeEndStream(live: LiveTurn): void {
+    if (live.result !== undefined && live.unanswered.size === 0 && live.inflight === 0 && !this.steeringWaiting(live)) live.stream.end()
+  }
+
+  /** Steering is queued for this turn; a throwaway turn takes none, so queued steering never holds its stream open. */
+  private steeringWaiting(live: LiveTurn): boolean {
+    return !live.throwaway && this.inbox.nextStep.length > 0
   }
 
   private pushMessage(live: LiveTurn, message: UserMessage): void {
@@ -538,7 +719,9 @@ export class ClaudeCodeSeatAgent implements Agent {
       this.transcriptKnown = true
       return { kind: 'resume', sdkSessionId }
     }
-    const completedBefore = this.session.events.some(event => event.type === 'claude-code/turn-completed')
+    const completedBefore = this.session.events.some(
+      event => event.type === 'claude-code/turn-completed' && (event.data as { throwaway?: unknown }).throwaway !== true,
+    )
     if (state === 'missing' && !completedBefore) return { kind: 'first', sdkSessionId }
     this.rec('claude-code/resume-failed', {
       sdkSessionId, reason: state === 'missing' ? 'transcript-missing' : 'transcript-unreadable', at: this.deps.now(),
@@ -604,6 +787,8 @@ export class ClaudeCodeSeatAgent implements Agent {
 
   /** Inspect one SDK message for turn-level facts. */
   private observe(phase: RunningPhase, live: LiveTurn, message: SDKMessage): void {
+    if (this.deps.killSwitchActive?.() === true) this.tripKillSwitch(live)
+    live.mapper?.map(message)
     if (message.type === 'rate_limit_event') {
       const info = message.rate_limit_info
       // A rejection is a refusal only when it is unambiguous. SDK 0.3.263 reports
@@ -640,14 +825,190 @@ export class ClaudeCodeSeatAgent implements Agent {
     const matched = answered?.filter(uuid => live.unanswered.delete(uuid)).length ?? 0
     // A result that names none of our messages (older CLI, error result) answers everything pushed so far.
     if (matched === 0) live.unanswered.clear()
-    if (live.unanswered.size === 0 && this.inbox.nextStep.length === 0) live.stream.end()
+    if (live.unanswered.size === 0 && !this.steeringWaiting(live) && live.inflight === 0) live.stream.end()
     else this.pumpSteer(phase)
   }
 
+  /** The kill-switch file appeared mid-turn: record it, abort the running query. */
+  private tripKillSwitch(live: LiveTurn): void {
+    if (live.killed) return
+    live.killed = true
+    this.rec('claude-code/refused', { reason: 'kill-switch', detail: 'kill-switch flag file present; running query aborted', at: this.deps.now() })
+    live.abort.abort({ kind: 'hook', reason: 'claude-code kill switch' })
+    void live.teardown()
+  }
+
+  /** Refuse a turn while the kill-switch file is present. */
+  private assertKillSwitchOff(): void {
+    if (this.deps.killSwitchActive?.() !== true) return
+    this.rec('claude-code/refused', { reason: 'kill-switch', detail: 'kill-switch flag file present; turn refused', at: this.deps.now() })
+    throw new ClaudeCodeDriverError(
+      CLAUDE_CODE_TURN_ERROR_CODES.killSwitch,
+      `agent-claude-code-driver: seat "${this.seat}" refused a turn: the kill-switch flag file is present; remove it to resume (its mail stays queued).`,
+    )
+  }
+
+  /** Refuse a turn when the seat has used its calls for the window. */
+  private assertWithinCallWindow(): void {
+    const { maxCallsPerWindow, callWindowMs } = this.config
+    const used = this.gate.callsInWindow(this.seat, this.deps.now(), callWindowMs)
+    if (used < maxCallsPerWindow) return
+    this.rec('claude-code/refused', {
+      reason: 'call-window', detail: `${used} of ${maxCallsPerWindow} calls used in the current ${callWindowMs} ms window`, at: this.deps.now(),
+    })
+    throw new ClaudeCodeDriverError(
+      CLAUDE_CODE_TURN_ERROR_CODES.callWindow,
+      `agent-claude-code-driver: seat "${this.seat}" used ${used} of its ${maxCallsPerWindow} calls for this window; its mail stays queued until the window moves on.`,
+    )
+  }
+
+  /** Claude reported its session id; rebind only if it differs from what the log says (never for a throwaway). */
+  private noteSessionInit(live: LiveTurn, init: { readonly sdkSessionId: string; readonly model: string }): void {
+    if (live.throwaway || init.sdkSessionId === this.sdkSessionId || !SDK_SESSION_ID.test(init.sdkSessionId)) return
+    this.sdkSessionId = init.sdkSessionId
+    this.bindingPending = true
+    this.rec('claude-code/session-bound', {
+      sessionId: this.id,
+      sdkSessionId: init.sdkSessionId,
+      model: init.model || this.config.model,
+      driver: CLAUDE_CODE_DRIVER_NAME,
+      at: this.deps.now(),
+    })
+  }
+
+  /** Append one assistant text to the dsh log; never throws into the stream loop. */
+  private appendAssistant(turn: number, text: string): void {
+    try {
+      this.session.append('assistant/message', {
+        turn,
+        step: 1,
+        message: createAssistantMessage({
+          content: [{ type: 'text', text }],
+          source: { provider: CLAUDE_CODE_DRIVER_NAME, model: this.config.model },
+        }),
+      }, { surfaceOp: 'append' })
+    } catch (error: unknown) {
+      this.deps.warn(`agent-claude-code-driver: could not log an assistant message: ${errText(error)}`)
+    }
+  }
+
+  /**
+   * Check claimed mail against the log before anything is sent. Mail already
+   * settled is settled again and skipped; mail claimed earlier without an
+   * outcome (a crash, or a copy still running) is never run twice; new mail
+   * gets its `claude-code/mail-claimed` record. Non-mailbox messages pass.
+   * @returns the messages to send.
+   */
+  private screenClaimed(claimed: readonly UserMessage[], mailIds: string[]): UserMessage[] {
+    const run: UserMessage[] = []
+    for (const message of claimed) {
+      const id = mailboxMessageId(message)
+      if (id === undefined) {
+        run.push(message)
+        continue
+      }
+      const state = this.mail.get(id)
+      if (state === 'settled') {
+        void this.leaseCall(() => this.deps.lease?.settle(id))
+      } else if (state !== undefined) {
+        this.refuseDuplicate(id, state)
+      } else if (this.rec('claude-code/mail-claimed', { messageId: id, tainted: isTaintedMail(message), at: this.deps.now() })) {
+        this.mail.set(id, 'claimed')
+        this.mailInFlight.add(id)
+        mailIds.push(id)
+        run.push(message)
+      } else {
+        void this.leaseCall(() => this.deps.lease?.fail(id, 'the claim record could not be written; the mail was not run'))
+      }
+    }
+    return run
+  }
+
+  /** A redelivered message that must not run again: record it, and fail the lease unless its first copy is still running. */
+  private refuseDuplicate(id: string, state: MailState): void {
+    const running = this.mailInFlight.has(id)
+    const detail = running ? 'redelivered while its first copy is still running; dropped' : `redelivered after it was already ${state}; not run again`
+    this.rec('claude-code/refused', { reason: 'duplicate-in-flight', messageId: id, detail, at: this.deps.now() })
+    this.deps.warn(`agent-claude-code-driver: seat "${this.seat}" dropped mailbox message ${id}: ${detail}`)
+    if (!running) void this.leaseCall(() => this.deps.lease?.fail(id, detail))
+  }
+
+  /** Flush the session so claim records reach durable storage before any prompt is sent. */
+  private async flushClaims(): Promise<void> {
+    try {
+      await this.deps.flush(this.session)
+    } catch (error: unknown) {
+      throw new ClaudeCodeDriverError(
+        CLAUDE_CODE_TURN_ERROR_CODES.binding,
+        `agent-claude-code-driver: seat "${this.seat}": could not make the mail claim records durable (${errText(error)}); refusing to send a prompt a crash could replay`,
+      )
+    }
+    this.bindingPending = false
+  }
+
+  /** Write the outcome of one claimed (or cancelled-before-claim) mailbox message and settle or fail its lease. */
+  private async finishMail(id: string, outcome: 'settled' | 'failed' | 'paused', reason: string): Promise<void> {
+    const state = this.mail.get(id)
+    if (state === 'settled' || state === 'failed' || state === 'paused') return
+    this.mail.set(id, outcome)
+    this.mailInFlight.delete(id)
+    this.rec('claude-code/mail-outcome', { messageId: id, outcome, reason, at: this.deps.now() })
+    const text = sanitizeFreeText(reason, MAX_ERROR_TEXT_CHARS)
+    await this.leaseCall(() => (outcome === 'settled' ? this.deps.lease?.settle(id) : this.deps.lease?.fail(id, text)))
+  }
+
+  /**
+   * Fail the lease of every queued mailbox message and take it off the queue: the turn cannot be started
+   * for a reason that outlives this session (it needs a re-seed), or the agent was cancelled. Typed
+   * input is left alone.
+   */
+  private async failQueuedMail(why: string, remove = false): Promise<void> {
+    const work: Promise<void>[] = []
+    for (const message of [...this.inbox.nextStep, ...this.inbox.nextTurn]) {
+      const id = mailboxMessageId(message)
+      if (id === undefined) continue
+      if (remove) this.inbox.remove(message.id)
+      work.push(this.finishMail(id, 'failed', why))
+    }
+    await Promise.all(work)
+  }
+
+  /** Settle or fail every mailbox message the turn owned, from how the turn ended. */
+  private async finishTurnMail(ids: readonly string[], live: LiveTurn | undefined, reason: TurnEndReason): Promise<void> {
+    if (ids.length === 0) return
+    let outcome: 'settled' | 'failed' | 'paused' = 'failed'
+    let why = 'the turn was cancelled or interrupted before an answer'
+    if (reason.kind === 'completed') {
+      outcome = 'settled'
+      why = ''
+    } else if (live?.pause !== undefined) {
+      outcome = 'paused'
+      why = `the Claude subscription window refused work (${live.pause.reason}); seat paused until ${new Date(this.pausedUntil).toISOString()}`
+    } else if (reason.kind === 'error') {
+      why = reason.error.message
+    }
+    await Promise.all(ids.map(id => this.finishMail(id, outcome, why)))
+  }
+
+  /**
+   * Decide which queued mail the next turn takes and whether it is tainted.
+   * Tainted mail runs alone in a throwaway session, so a tainted head of the
+   * turn queue waits behind pending steering, and a tainted batch (never
+   * expected, since tainted mail is never queued as steering) is run as a whole.
+   */
+  private planClaim(): { target: InboxTarget; tainted: boolean } {
+    const head = this.inbox.nextTurn[0]
+    const headTainted = head !== undefined && isTaintedMail(head)
+    if (this.inbox.nextStep.some(isTaintedMail)) return { target: 'next-turn', tainted: true }
+    if (this.inbox.nextStep.length > 0) return { target: headTainted ? 'next-step' : 'next-turn', tainted: false }
+    return { target: 'next-turn', tainted: headTainted }
+  }
+
   /** Map the final result to the durable turn-completed record. */
-  private recordResult(turn: number, result: SDKResultMessage): void {
+  private recordResult(turn: number, result: SDKResultMessage, throwaway: boolean): void {
     const usage = result.usage
     this.rec('claude-code/turn-completed', {
+      ...throwaway ? { throwaway: true } : {},
       turnIndex: turn,
       outcome: result.subtype,
       isError: result.is_error,
@@ -686,6 +1047,12 @@ export class ClaudeCodeSeatAgent implements Agent {
         },
       }
     }
+    if (live?.killed === true) {
+      return {
+        kind: 'error',
+        error: { code: CLAUDE_CODE_TURN_ERROR_CODES.killSwitch, message: 'The kill-switch flag file appeared; the running query was aborted. Remove the file to resume.' },
+      }
+    }
     if (live?.interrupted === true) {
       return { kind: 'aborted', reason: { kind: 'hook', reason: 'claude-code steer interrupt' } }
     }
@@ -699,6 +1066,7 @@ export class ClaudeCodeSeatAgent implements Agent {
         },
       }
     }
+    if (live?.noQuery === true) return { kind: 'completed' }
     const result = live?.result
     if (result === undefined) {
       return { kind: 'error', error: { code: CLAUDE_CODE_TURN_ERROR_CODES.noResult, message: 'Claude Code ended without a result message' } }
@@ -724,57 +1092,88 @@ export class ClaudeCodeSeatAgent implements Agent {
     let binding: QueryBinding | undefined
     let executable: string | undefined
     let reason: TurnEndReason | undefined
+    const mailIds: string[] = []
     try {
       // Preflight before anything is claimed, so a refusal leaves the mail queued.
       assertCleanHostEnv(this.deps.hostEnv())
       executable = this.deps.attestedBinary?.(this.seat)
+      this.assertKillSwitchOff()
       if (this.pausedUntilMs > 0) {
         this.notePauseRefusal()
       }
+      this.assertWithinCallWindow()
       this.gate.acquire(this.seat, this)
       holdsGate = true
-      binding = await this.resolveBinding()
+      const plan = this.planClaim()
+      // Tainted mail never touches the seat's Claude session: a fresh id, nothing bound, nothing resumed.
+      binding = plan.tainted ? { kind: 'first', sdkSessionId: randomUUID() } : await this.resolveBinding()
       signal.throwIfAborted()
 
-      const claimed = this.inbox.claim('next-turn', turn)
+      const claimed = this.inbox.claim(plan.target, turn)
+      const run = this.screenClaimed(claimed, mailIds)
       this.session.append('step/start', { turn, step: 1 })
       stepOpen = true
-      for (const message of claimed) this.session.append('user/message', message, { surfaceOp: 'append' })
+      for (const message of run) this.session.append('user/message', message, { surfaceOp: 'append' })
+      // The claim records must be durable before the prompt is sent, like the binding.
+      if (mailIds.length > 0) await this.flushClaims()
 
-      live = new LiveTurn(turn, phase.abort, this.deps)
+      live = new LiveTurn(turn, phase.abort, this.deps, plan.tainted, mailIds)
       phase.live = live
-      const options = buildQueryOptions({
-        seat: this.seat,
-        config: this.config,
-        cwd: this.cwd,
-        binding,
-        env: this.deps.childEnv(),
-        abortController: phase.abort,
-        spawn: this.makeSpawn(live),
-        extension: this.deps.extension,
-        executable,
-        warn: this.deps.warn,
-      })
-      for (const message of claimed) this.pushMessage(live, message)
-      live.query = this.deps.query({ prompt: live.stream, options })
-      this.pumpSteer(phase)
-      try {
-        for await (const message of live.query) this.observe(phase, live, message)
-      } catch (error: unknown) {
-        // An interrupt, a cancel, or a pause makes the result iterator throw; that is the expected end.
-        if (!signal.aborted && !live.interrupted) throw error
+      if (run.length === 0) {
+        live.noQuery = true
+      } else {
+        const active = live
+        active.mapper = new StreamMapper({
+          record: (type, data) => { this.rec(type, data) },
+          assistantText: (text) => { this.appendAssistant(turn, text) },
+          sessionInit: (init) => { this.noteSessionInit(active, init) },
+          toolStarted: (name) => { if (TAINTING_TOOLS.has(name)) active.tainted = true },
+        }, this.deps.now, this.digestKey)
+        const options = buildQueryOptions({
+          seat: this.seat,
+          config: this.config,
+          cwd: this.cwd,
+          binding,
+          env: this.deps.childEnv(),
+          abortController: phase.abort,
+          spawn: this.makeSpawn(live),
+          extension: this.deps.extension,
+          executable,
+          throwaway: plan.tainted,
+          warn: this.deps.warn,
+        })
+        if (plan.tainted && !(Array.isArray(options.tools) && options.tools.length === 0)) {
+          throw new ClaudeCodeDriverError(
+            CLAUDE_CODE_TURN_ERROR_CODES.tainted,
+            `agent-claude-code-driver: seat "${this.seat}": tainted mail must run with an empty tool list; refusing to start the query`,
+          )
+        }
+        for (const message of run) this.pushMessage(live, message)
+        this.gate.noteCall(this.seat, this.deps.now())
+        live.query = this.deps.query({ prompt: live.stream, options })
+        this.pumpSteer(phase)
+        try {
+          for await (const message of live.query) this.observe(phase, live, message)
+        } catch (error: unknown) {
+          // An interrupt, a cancel, or a pause makes the result iterator throw; that is the expected end.
+          if (!signal.aborted && !live.interrupted) throw error
+        }
+        if (live.result !== undefined && !live.result.is_error && !plan.tainted) this.transcriptKnown = true
       }
-      if (live.result !== undefined && !live.result.is_error) this.transcriptKnown = true
     } catch (error: unknown) {
       failure = error
     } finally {
       await live?.teardown()
       if (holdsGate) this.gate.release(this.seat, this)
       phase.live = undefined
-      if (live?.result !== undefined && live.pause === undefined) this.recordResult(turn, live.result)
+      if (live?.result !== undefined && live.pause === undefined) this.recordResult(turn, live.result, live.throwaway)
       if (stepOpen) this.session.append('step/end', { turn, step: 1 })
       reason = this.endReason(signal, live, failure)
       this.session.append('turn/end', { turn, reason })
+      await this.finishTurnMail(mailIds, live, reason)
+      if (failure instanceof ClaudeCodeDriverError && failure.code === CLAUDE_CODE_TURN_ERROR_CODES.resumeFailed) {
+        await this.failQueuedMail(`${failure.message} The queued mail was not delivered.`, true)
+      }
     }
     if (failure !== undefined && !signal.aborted) {
       this.dispatch.emit('agent/error', { turn, step: 1, error: failure })

@@ -7,21 +7,25 @@
  * @module @deepseek-ai/dsh-agent-claude-code-driver
  */
 
+import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { getSessionInfo, query } from '@anthropic-ai/claude-agent-sdk'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
+import { defaultAdmission } from './admission.ts'
+import type { MailAdmission } from './admission.ts'
 import { assertBinaryUnchanged, attestClaudePath, BinaryPins } from './attest.ts'
 import type { BinaryAttestation } from './attest.ts'
 import { assertCleanHostEnv, buildChildEnv } from './env.ts'
 import { ClaudeCodeSeatFactory } from './factory.ts'
 import type { ResolvedSeat } from './factory.ts'
 import { killProcessGroup, ProcessLedger } from './ledger.ts'
+import type { MailLeaseSink } from './mail-lease.ts'
 import type { SeatAgentDeps, TranscriptState } from './seat-agent.ts'
 import { ClaudeCodeSeatRow, CLAUDE_CODE_DRIVER_KEY, parseSeatRow } from './seat-config.ts'
-import { ensurePrivateDir, resolveStateDir } from './state.ts'
+import { ensurePrivateDir, KILL_SWITCH_FILE_NAME, killSwitchPresent, resolveStateDir } from './state.ts'
 
 export { assertBinaryUnchanged, attestClaudePath, BinaryPins, sha256File } from './attest.ts'
 export type { AttestOptions, BinaryAttestation } from './attest.ts'
@@ -29,7 +33,17 @@ export { allowlistSettings, buildQueryOptions } from './options.ts'
 export type {
   BuildQueryOptionsInput, ExtensionSettings, QueryBinding, QueryOptionsContext, QueryOptionsExtension,
 } from './options.ts'
-export { assertPrivateFile, ensurePrivateDir, resolveStateDir, writeAtomic } from './state.ts'
+export {
+  defaultAdmission, externalHops, frameMailText, isTaintedMail, mailboxMessageId, MAIL_FRAME_FOOTER, MAIL_FRAME_HEADER,
+} from './admission.ts'
+export type { MailAdmission, MailAdmissionDecision, MailAdmissionPath, MailAdmissionRequest } from './admission.ts'
+export { MailLog } from './mail-lease.ts'
+export type { MailLeaseSink, MailState } from './mail-lease.ts'
+export { StreamMapper } from './mapper.ts'
+export type { MapperEventType, MapperSink } from './mapper.ts'
+export {
+  assertPrivateFile, ensurePrivateDir, KILL_SWITCH_FILE_NAME, killSwitchPresent, resolveStateDir, writeAtomic,
+} from './state.ts'
 export { assertCleanHostEnv, buildChildEnv, CLAUDE_CODE_FORBIDDEN_ENV, forbiddenEnvPresent } from './env.ts'
 export { ClaudeCodeSeatFactory } from './factory.ts'
 export type { FactoryInputs, ResolvedSeat, SeatResolver } from './factory.ts'
@@ -42,11 +56,30 @@ export {
 export type { SeatAgentDeps, TranscriptState } from './seat-agent.ts'
 export {
   CLAUDE_CODE_DRIVER_KEY, CLAUDE_CODE_EFFORTS, CLAUDE_CODE_ROLES, ClaudeCodeSeatBlock, ClaudeCodeSeatRow,
+  DEFAULT_CALL_WINDOW_MS, DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_CALLS_PER_WINDOW, DEFAULT_MAX_TURNS,
   foldModelId, isAllowedModel, isFableModel, parseSeatRow, toolPolicyFor,
 } from './seat-config.ts'
 export type {
   ClaudeCodeEffort, ClaudeCodeRole, ClaudeCodeSeatConfig, ClaudeCodeToolPolicy, ParseSeatRowOptions,
 } from './seat-config.ts'
+
+/**
+ * The mail seams a later slice (registry admission in S3, the mailbox bridge's lease in S8) plugs in by
+ * providing `ctx.claudeCodeMailHooks`. Both are optional and read at use time, so the provider may load
+ * after this plugin.
+ */
+export interface ClaudeCodeMailHooks {
+  /** Replaces the default admission (deny any external-class hop) on the send and steer paths. */
+  readonly admit?: MailAdmission | undefined
+  /** The real mailbox lease: settled or failed once per mail, deterministically. */
+  readonly lease?: MailLeaseSink | undefined
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    claudeCodeMailHooks: ClaudeCodeMailHooks
+  }
+}
 
 /** Cordis plugin name. */
 export const name = 'agent-claude-code-driver'
@@ -138,6 +171,8 @@ export function apply(ctx: Context, config: Config): void {
     ctx.logger.warn(`agent-claude-code-driver: seats ${report.skipped.join(', ')} belong to another live host sharing this state directory; left alone`)
   }
   let warnedNoDurability = false
+  const killSwitchFile = join(stateDir, KILL_SWITCH_FILE_NAME)
+  const digestKey = randomBytes(32)
   const deps: SeatAgentDeps = {
     query,
     spawnProcess: spec => ctx.subprocess.spawn(spec),
@@ -160,6 +195,13 @@ export function apply(ctx: Context, config: Config): void {
       assertBinaryUnchanged(attestation)
       return attestation.realPath
     },
+    admit: request => (ctx.get('claudeCodeMailHooks')?.admit ?? defaultAdmission)(request),
+    lease: {
+      settle: id => ctx.get('claudeCodeMailHooks')?.lease?.settle(id),
+      fail: (id, reason) => ctx.get('claudeCodeMailHooks')?.lease?.fail(id, reason),
+    },
+    killSwitchActive: () => killSwitchPresent(killSwitchFile),
+    digestKey,
     warn: (message) => { ctx.logger.warn(message) },
   }
   const factory = new ClaudeCodeSeatFactory({
