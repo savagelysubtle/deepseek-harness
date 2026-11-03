@@ -27,6 +27,7 @@ function ApprovalCommand({ commands, t }: { commands: readonly { command: string
   if (commands.length === 0) return <span className={css.muted} data-approval-command-none>{t('approvals.noShell')}</span>
   return (
     <span data-approval-commands>
+      <span className={css.muted} data-approval-command-label>{t('approvals.commandSource')}</span>
       {commands.map((entry, index) => <pre key={`${entry.field}:${index}`} className={css.pre} data-approval-command>{entry.command}</pre>)}
     </span>
   )
@@ -64,7 +65,7 @@ function commandsFor(
   state: WorkflowsState, workflow: string | undefined, nodeId: string,
 ): { command: string; field: string }[] | undefined {
   const plan = state.dryRun?.plan
-  if (plan === undefined || workflow === undefined || plan.name !== workflow) return undefined
+  if (state.dryRun?.stale === true || plan === undefined || workflow === undefined || plan.name !== workflow) return undefined
   return plan.trust.bashCommands.filter(entry => entry.nodeId === nodeId)
 }
 

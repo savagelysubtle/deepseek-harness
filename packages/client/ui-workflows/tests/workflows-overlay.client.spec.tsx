@@ -686,6 +686,24 @@ describe('approvals are fenced by the lease', () => {
     expect(q('[data-pending-approvals] [data-approval-command] b')).toBeNull()
   })
 
+  it('labels the shown command and hides it once the plan is stale', async () => {
+    const remote = makeRemote()
+    remote.dryRun.mockResolvedValue(hostValue({ ...PLAN, trust: { ...PLAN.trust, bashCommands: [{ nodeId: 'ship', field: 'approval', command: 'deploy', envKeys: [], env: {} }] } }))
+    await plan(remote)
+    click('[data-workflows-tab-button="runs"]')
+    await present('[data-run-row]')
+    expect(text('[data-pending-approvals] [data-approval-command-label]')).toContain('current file')
+    expect(text('[data-pending-approvals] [data-approval-command]')).toBe('deploy')
+    click('[data-workflows-tab-button="workflows"]')
+    await present('[data-editor-textarea]')
+    const area = q('[data-editor-textarea]') as HTMLTextAreaElement
+    fireEvent.change(area, { target: { value: `${area.value}# edited\n` } })
+    click('[data-workflows-tab-button="runs"]')
+    await present('[data-pending-approvals]')
+    expect(q('[data-pending-approvals] [data-approval-command]')).toBeNull()
+    expect(q('[data-pending-approvals] [data-approval-command-unknown]')).not.toBeNull()
+  })
+
   it('says the command is unknown when no plan of that workflow is open', async () => {
     await runsTab(makeRemote())
     expect(q('[data-pending-approvals] [data-approval-command-unknown]')).not.toBeNull()
