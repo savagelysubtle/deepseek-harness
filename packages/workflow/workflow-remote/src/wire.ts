@@ -494,11 +494,11 @@ export interface WorkflowNodeView {
   /** Real agent attempts the node ran, retries included. Only on the node's highest-attempt row, and only when more than one. */
   attempts?: number
   /** Why the supervisor stopped the node's agent. Only on the node's highest-attempt row; absent otherwise and in older runs. */
-  failure?: WorkflowNodeFailure
+  failure?: WorkflowNodeFailureView
 }
 
 /** A supervisor stop of a node's agent, as recorded with the node. */
-export interface WorkflowNodeFailure {
+export interface WorkflowNodeFailureView {
   /** `NODE_STALLED` (no output inside the idle window) or `NODE_TIMEOUT` (the hard per-node limit). */
   code: 'NODE_STALLED' | 'NODE_TIMEOUT'
   /** What happened, free of paths and stacks, at most 500 characters. */

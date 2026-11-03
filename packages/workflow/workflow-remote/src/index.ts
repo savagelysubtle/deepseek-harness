@@ -35,7 +35,7 @@ import type {
   WorkflowAnswerResult, WorkflowApproveRequest, WorkflowAttachRequest, WorkflowAttachResult, WorkflowCancelRequest, WorkflowCancelResult,
   WorkflowDetachRequest, WorkflowDetachResult, WorkflowDryRunRequest, WorkflowDryRunResult, WorkflowFailure, WorkflowGateView,
   WorkflowInputValues, WorkflowLastRun, WorkflowListResult, WorkflowNodeOutputRequest, WorkflowNodeOutputResult,
-  WorkflowNodeFailure, WorkflowNodeView,
+  WorkflowNodeFailureView, WorkflowNodeView,
   WorkflowPendingApprovalsResult, WorkflowReadRequest, WorkflowReadResult, WorkflowRejectRequest, WorkflowResumeRequest,
   WorkflowRunDetailRequest, WorkflowRunDetailResult, WorkflowRunRequest, WorkflowRunsRequest, WorkflowRunsResult,
   WorkflowRunStartResult, WorkflowSaveRequest, WorkflowSaveResult, WorkflowValidateRequest, WorkflowValidateResult,
@@ -686,7 +686,7 @@ function inputsOf(raw: unknown): WorkflowInputValues | undefined {
 }
 
 /** Read the persisted supervisor stop of a node record. Older records carry none: no field, no guess. */
-function failureOf(record: Pick<NodeRecord, 'failure'>): WorkflowNodeFailure | undefined {
+function failureOf(record: Pick<NodeRecord, 'failure'>): WorkflowNodeFailureView | undefined {
   const f = record.failure
   if (f === undefined || (f.code !== 'NODE_STALLED' && f.code !== 'NODE_TIMEOUT')) return undefined
   return { code: f.code, message: stripUnsafe(f.message, 500), remedy: stripUnsafe(f.remedy, 500) }

@@ -5381,6 +5381,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface WorkflowNodeEndInfo extends WorkflowNodeInfo {\n    status: WorkflowNodeStatus;\n    exitCode?: number;\n    durationMs?: number;\n    truncated?: boolean;\n    error?: string;\n    failure?: WorkflowNodeFailure;\n    attempts?: number;\n    synthesized?: boolean;\n}',
   },
   {
+    name: 'WorkflowNodeFailure',
+    declaration: 'export interface WorkflowNodeFailure {\n    code: \'NODE_STALLED\' | \'NODE_TIMEOUT\';\n    message: string;\n    remedy: string;\n}',
+  },
+  {
     name: 'WorkflowNodeInfo',
     declaration: 'export interface WorkflowNodeInfo {\n    nodeId: string;\n    kind: string;\n    gateKind?: string;\n}',
   },
