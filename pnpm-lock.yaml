@@ -3921,6 +3921,18 @@ importers:
         specifier: workspace:^
         version: link:../../typert/registry
 
+  packages/core/agent-claude-code:
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-invariants':
+        specifier: workspace:^
+        version: link:../../runtime-diagnostics/invariants
+      '@deepseek-ai/dsh-session':
+        specifier: workspace:^
+        version: link:../session
+
   packages/core/agent-default-model:
     dependencies:
       '@deepseek-ai/schemastery':

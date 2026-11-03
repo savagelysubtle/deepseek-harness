@@ -1,6 +1,7 @@
 /** First-party semantic text extraction for session-query consumers. */
 
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { claudeCodeEventText } from './claude-code-text.ts'
 
 /**
  * Loose shape of a `mailbox/await` event's data, mirrored from
@@ -76,9 +77,9 @@ export function extractSessionEventText(event: SessionEvent): string {
       return ''
     // SessionEventMap is merge-extensible. Unknown events remain
     // non-searchable until a concrete first-party consumer defines semantics
-    // — except `mailbox/await` and `subagent/settlement`, whose owning
-    // packages are outside session-query's dependency graph (see the
-    // interfaces above) and so cannot appear as typed `case` labels here.
+    // — except `mailbox/await`, `subagent/settlement`, `tool-workflow/node-end` and `claude-code/*`,
+    // whose owning packages are outside session-query's dependency graph (see
+    // the interfaces above) and so cannot appear as typed `case` labels here.
     default:
       if ((event.type as string) === 'mailbox/await') {
         return mailboxAwaitText(event.data as unknown as MailboxAwaitEventData)
@@ -89,7 +90,7 @@ export function extractSessionEventText(event: SessionEvent): string {
       if ((event.type as string) === 'tool-workflow/node-end') {
         return nodeEndText(event.data as unknown as ToolWorkflowNodeEndEventData)
       }
-      return ''
+      return claudeCodeEventText(event.type, event.data) ?? ''
   }
 }
 
