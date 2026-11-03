@@ -570,8 +570,14 @@ export class WorkerRun implements WorkflowRun {
         const info = await llm.resolveModelInfo(provider, final, this.controller.signal)
         candidates.push(info.id, info.name)
       } catch (error: unknown) {
-        this.ctx.logger.warn(`workflow-worker-thread: model catalog lookup failed: ${renderThrown(error)}`)
-        throw new Error(`model "${final}" could not be checked against the model catalog, so the node was not started`)
+        if ((error as { code?: unknown } | null)?.code === 'NO_ADAPTER') {
+          // No adapter for this provider (headless/replay configs): no catalog to consult, so only the
+          // string-level denylist below applies to the requested id. Every other failure stays closed.
+          this.ctx.logger.debug(`workflow-worker-thread: model catalog check skipped, no adapter registered for provider "${provider}"`)
+        } else {
+          this.ctx.logger.warn(`workflow-worker-thread: model catalog lookup failed: ${renderThrown(error)}`)
+          throw new Error(`model "${final}" could not be checked against the model catalog, so the node was not started`)
+        }
       }
     }
     if (candidates.some(namesDeniedModel)) {

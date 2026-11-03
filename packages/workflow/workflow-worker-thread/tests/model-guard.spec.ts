@@ -99,4 +99,13 @@ describe('spawn-time model guard', () => {
     expect(result.error ?? JSON.stringify(result.value)).toContain('could not be checked')
     expect(seen).toHaveLength(0)
   })
+
+  it('skips the catalog check but keeps the denylist when no adapter is registered', async () => {
+    const ok = await run(undefined, "return await agent('p', { provider: 'unregistered', model: 'sonnet' })")
+    expect(ok.result.stopReason).toBe('completed')
+    expect(ok.seen).toHaveLength(1)
+    const denied = await run(undefined, "return await agent('p', { provider: 'unregistered', model: 'claude-fable-5' })")
+    expect(denied.result.error ?? JSON.stringify(denied.result.value)).toContain('denied model family')
+    expect(denied.seen).toHaveLength(0)
+  })
 })
