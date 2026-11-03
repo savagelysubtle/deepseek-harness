@@ -23,6 +23,21 @@ export type ClaudeCodeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 /** Every accepted {@link ClaudeCodeEffort}. */
 export const CLAUDE_CODE_EFFORTS: readonly ClaudeCodeEffort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 
+/** Default hard cap on agentic turns for one query. */
+export const DEFAULT_MAX_TURNS = 25
+
+/** Default notional spend cap in USD for one query (a subscription is not billed per call; this bounds runaway loops). */
+export const DEFAULT_MAX_BUDGET_USD = 5
+
+/** Default number of queries a seat may start per call window. */
+export const DEFAULT_MAX_CALLS_PER_WINDOW = 120
+
+/** Default call window length: the five-hour subscription window. */
+export const DEFAULT_CALL_WINDOW_MS = 5 * 60 * 60 * 1000
+
+/** Shortest call window accepted: a window under a minute would make the per-seat cap meaningless. */
+export const MIN_CALL_WINDOW_MS = 60_000
+
 /** The `claude_code` block of a seat registry row, as written in config. */
 export interface ClaudeCodeSeatBlock {
   /** Model alias (`opus`, `sonnet`, `haiku`) or a full `claude-(opus|sonnet|haiku)-<version>` id; anything else is refused. */
@@ -31,12 +46,16 @@ export interface ClaudeCodeSeatBlock {
   effort?: ClaudeCodeEffort
   /** Tool surface of the seat. */
   role: ClaudeCodeRole
-  /** Hard cap on agentic turns for one query. */
-  max_turns: number
+  /** Hard cap on agentic turns for one query; defaults to 25. */
+  max_turns?: number
+  /** Notional spend cap in USD for one query; defaults to 5. */
+  max_budget_usd?: number
   /** Absolute path of the real `claude` binary; never resolved through PATH. */
   claude_path: string
-  /** Per-seat query cap per subscription window (enforced by a later slice). */
+  /** Per-seat cap on queries started per call window; defaults to 120. Refused turns leave a record. */
   max_calls_per_window?: number
+  /** Call window length in milliseconds, at least one minute; defaults to five hours. */
+  call_window_ms?: number
   /** Optional SHA-256 (hex) of the pinned binary; an explicit value re-pins the recorded first-seen hash. */
   claude_path_sha256?: string
 }
@@ -56,9 +75,11 @@ export const ClaudeCodeSeatBlock: z<ClaudeCodeSeatBlock> = z.object({
   model: z.string().required(),
   effort: z.union(CLAUDE_CODE_EFFORTS.map(level => z.const(level))),
   role: z.union(CLAUDE_CODE_ROLES.map(role => z.const(role))).required(),
-  max_turns: z.number().step(1).min(1).required(),
+  max_turns: z.number().step(1).min(1).default(DEFAULT_MAX_TURNS),
+  max_budget_usd: z.number().min(0.01).default(DEFAULT_MAX_BUDGET_USD),
   claude_path: z.string().required(),
-  max_calls_per_window: z.number().step(1).min(1),
+  max_calls_per_window: z.number().step(1).min(1).default(DEFAULT_MAX_CALLS_PER_WINDOW),
+  call_window_ms: z.number().step(1).min(MIN_CALL_WINDOW_MS).default(DEFAULT_CALL_WINDOW_MS),
   claude_path_sha256: z.string(),
 })
 
@@ -75,8 +96,13 @@ export interface ClaudeCodeSeatConfig {
   readonly effort?: ClaudeCodeEffort
   readonly role: ClaudeCodeRole
   readonly maxTurns: number
+  /** Notional spend cap in USD for one query. */
+  readonly maxBudgetUsd: number
   readonly claudePath: string
-  readonly maxCallsPerWindow?: number
+  /** Queries a seat may start per {@link ClaudeCodeSeatConfig.callWindowMs}. */
+  readonly maxCallsPerWindow: number
+  /** Length of the call window in milliseconds. */
+  readonly callWindowMs: number
   /** Lower-case hex SHA-256 pin of the binary, when the row carries one. */
   readonly claudePathSha256?: string
   /** Whether the row opted into fable models (founder only). */
@@ -165,16 +191,23 @@ export function parseSeatRow(row: ClaudeCodeSeatRow, seat: string, options: Pars
   if (block.effort !== undefined && !CLAUDE_CODE_EFFORTS.includes(block.effort)) {
     fail(`claude_code.effort must be one of ${CLAUDE_CODE_EFFORTS.join(', ')}`)
   }
-  if (!Number.isSafeInteger(block.max_turns) || block.max_turns < 1) {
+  const maxTurns = block.max_turns ?? DEFAULT_MAX_TURNS
+  if (!Number.isSafeInteger(maxTurns) || maxTurns < 1) {
     fail('claude_code.max_turns must be a positive integer')
+  }
+  const maxBudgetUsd = block.max_budget_usd ?? DEFAULT_MAX_BUDGET_USD
+  if (typeof maxBudgetUsd !== 'number' || !Number.isFinite(maxBudgetUsd) || maxBudgetUsd <= 0) {
+    fail('claude_code.max_budget_usd must be a positive number')
+  }
+  const callWindowMs = block.call_window_ms ?? DEFAULT_CALL_WINDOW_MS
+  if (!Number.isSafeInteger(callWindowMs) || callWindowMs < MIN_CALL_WINDOW_MS) {
+    fail(`claude_code.call_window_ms must be an integer of at least ${MIN_CALL_WINDOW_MS} (one minute)`)
   }
   if (typeof block.claude_path !== 'string' || !isAbsolute(block.claude_path) || block.claude_path.includes('\0')) {
     fail('claude_code.claude_path must be an absolute path to the real claude binary (no PATH lookup)')
   }
-  if (
-    block.max_calls_per_window !== undefined
-    && (!Number.isSafeInteger(block.max_calls_per_window) || block.max_calls_per_window < 1)
-  ) {
+  const maxCallsPerWindow = block.max_calls_per_window ?? DEFAULT_MAX_CALLS_PER_WINDOW
+  if (!Number.isSafeInteger(maxCallsPerWindow) || maxCallsPerWindow < 1) {
     fail('claude_code.max_calls_per_window must be a positive integer')
   }
   if (block.claude_path_sha256 !== undefined && !/^[0-9a-fA-F]{64}$/.test(block.claude_path_sha256)) {
@@ -184,9 +217,11 @@ export function parseSeatRow(row: ClaudeCodeSeatRow, seat: string, options: Pars
     model,
     ...block.effort === undefined ? {} : { effort: block.effort },
     role: block.role,
-    maxTurns: block.max_turns,
+    maxTurns,
+    maxBudgetUsd,
     claudePath: block.claude_path,
-    ...block.max_calls_per_window === undefined ? {} : { maxCallsPerWindow: block.max_calls_per_window },
+    maxCallsPerWindow,
+    callWindowMs,
     ...block.claude_path_sha256 === undefined ? {} : { claudePathSha256: block.claude_path_sha256.toLowerCase() },
     fableOk,
   }

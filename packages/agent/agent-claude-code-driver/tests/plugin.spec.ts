@@ -11,7 +11,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { cleanHostEnv, cleanTempDirs, FakeQuery, fakeChild, fakeClaudeBinary, resultMessage, seatRow, tempDir, tick, userMessage } from './fakes.ts'
+import {
+  cleanHostEnv, cleanTempDirs, FakeQuery, fakeChild, fakeClaudeBinary, mailMessage, resultMessage, seatRow, tempDir, tick, userMessage,
+} from './fakes.ts'
 
 const sdk = vi.hoisted(() => ({
   queries: [] as unknown[],
@@ -297,6 +299,80 @@ describe('the plugin running a turn', () => {
     warn.mockClear()
     await turn('d3')
     expect(warn.mock.calls.flat().filter(line => String(line).includes('no durability listener'))).toHaveLength(0)
+    await fiber.dispose()
+  })
+
+  it('routes mail through the claudeCodeMailHooks service when one is provided, and the default admission when not', async () => {
+    const ctx = await bootedContext()
+    const { dshHome, binary, cwd } = setup()
+    const fiber = await ctx.plugin(Driver, Driver.Config({ stateDir: 'claude-code', dshHome, seats: { mh: seatRow({ claude_path: binary }) } }))
+    const handle = await ctx.agents.create({ sessionId: SessionId('mh'), driver: 'claude-code', meta: { cwd } })
+    const before = sdk.queries.length
+    // no hooks service yet: the default admission refuses an external hop and there is no lease to fail
+    handle.agent.followup(mailMessage('portal', 'm-default', { chain: ['portal'] }))
+    expect(sdk.queries.length).toBe(before)
+    expect(handle.agent.session.events.filter(event => event.type === 'claude-code/refused')).toHaveLength(1)
+
+    const calls: string[] = []
+    ctx.provide('claudeCodeMailHooks', {
+      admit: () => ({ allow: true }),
+      lease: {
+        settle: (id: string) => { calls.push(`settle:${id}`) },
+        fail: (id: string, reason: string) => { calls.push(`fail:${id}:${reason}`) },
+      },
+    })
+    handle.agent.followup(mailMessage('portal again', 'm-allowed', { chain: ['portal'] }))
+    const query = await nthQuery(before)
+    expect(query.options.persistSession).toBe(false)
+    query.spawn()
+    query.emit(resultMessage({ user_message_uuids: query.uuids() }))
+    await handle.agent.whenIdle()
+    expect(calls).toEqual(['settle:m-allowed'])
+    handle.agent.followup(mailMessage('x', 'm-seat'))
+    const next = await nthQuery(before + 1)
+    next.emit(resultMessage({ user_message_uuids: next.uuids() }))
+    await handle.agent.whenIdle()
+    expect(calls).toEqual(['settle:m-allowed', 'settle:m-seat'])
+    await handle.dispose()
+    await fiber.dispose()
+  })
+
+  it('fails a lease through the hooks service on refusal', async () => {
+    const ctx = await bootedContext()
+    const { dshHome, binary, cwd } = setup()
+    const fiber = await ctx.plugin(Driver, Driver.Config({ stateDir: 'claude-code', dshHome, seats: { mf: seatRow({ claude_path: binary }) } }))
+    const calls: string[] = []
+    ctx.provide('claudeCodeMailHooks', { lease: { settle: () => undefined, fail: (id: string) => { calls.push(id) } } })
+    const handle = await ctx.agents.create({ sessionId: SessionId('mf'), driver: 'claude-code', meta: { cwd } })
+    handle.agent.followup(mailMessage('portal', 'm-refused', { chain: ['portal'] }))
+    await handle.agent.whenIdle()
+    expect(calls).toEqual(['m-refused'])
+    await handle.dispose()
+    await fiber.dispose()
+  })
+
+  it('stops seats while the kill-switch file exists in the state directory and resumes when it is removed', async () => {
+    const ctx = await bootedContext()
+    const { dshHome, stateDir, binary, cwd } = setup()
+    const fiber = await ctx.plugin(Driver, Driver.Config({ stateDir: 'claude-code', dshHome, seats: { ks: seatRow({ claude_path: binary }) } }))
+    const handle = await ctx.agents.create({ sessionId: SessionId('ks'), driver: 'claude-code', meta: { cwd } })
+    const before = sdk.queries.length
+    const flag = join(stateDir, Driver.KILL_SWITCH_FILE_NAME)
+    expect(Driver.KILL_SWITCH_FILE_NAME).toBe('claude-code-kill-switch')
+    writeFileSync(flag, '', { mode: 0o600 })
+    handle.agent.followup(userMessage('hello'))
+    await handle.agent.whenIdle()
+    expect(sdk.queries.length).toBe(before)
+    expect(handle.agent.session.events.some(event => event.type === 'claude-code/refused')).toBe(true)
+    rmSync(flag)
+    handle.agent.followup(userMessage('again'))
+    const query = await nthQuery(before)
+    query.emit(resultMessage({ user_message_uuids: query.uuids() }))
+    await tick(5)
+    const second = await nthQuery(before + 1)
+    second.emit(resultMessage({ user_message_uuids: second.uuids() }))
+    await handle.agent.whenIdle()
+    await handle.dispose()
     await fiber.dispose()
   })
 })

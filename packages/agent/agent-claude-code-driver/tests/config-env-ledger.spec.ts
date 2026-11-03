@@ -13,7 +13,8 @@ describe('seat row validation', () => {
   it('accepts a complete row and maps it to camelCase', () => {
     const config = parseSeatRow(seatRow({ model: 'opus', effort: 'high', role: 'lead', max_calls_per_window: 30 }), 'lead-seat')
     expect(config).toEqual({
-      model: 'opus', effort: 'high', role: 'lead', maxTurns: 20, claudePath: CLAUDE_PATH, maxCallsPerWindow: 30, fableOk: false,
+      model: 'opus', effort: 'high', role: 'lead', maxTurns: 20, maxBudgetUsd: 5, claudePath: CLAUDE_PATH,
+      maxCallsPerWindow: 30, callWindowMs: 18_000_000, fableOk: false,
     })
     expect(parseSeatRow(seatRow(), 's')).not.toHaveProperty('effort')
     const pinned = parseSeatRow(seatRow({ claude_path_sha256: 'AB'.repeat(32) }), 's')

@@ -160,12 +160,16 @@ export interface ClaudeCodeSeatBlock {
   effort?: ClaudeCodeEffort
   /** Tool surface of the seat. */
   role: ClaudeCodeRole
-  /** Hard cap on agentic turns for one query. */
-  max_turns: number
+  /** Hard cap on agentic turns for one query; defaults to 25. */
+  max_turns?: number
+  /** Notional spend cap in USD for one query; defaults to 5. */
+  max_budget_usd?: number
   /** Absolute path of the real `claude` binary; never resolved through PATH. */
   claude_path: string
-  /** Per-seat query cap per subscription window (enforced by a later slice). */
+  /** Per-seat cap on queries started per call window; defaults to 120. Refused turns leave a record. */
   max_calls_per_window?: number
+  /** Call window length in milliseconds, at least one minute; defaults to five hours. */
+  call_window_ms?: number
   /** Optional SHA-256 (hex) of the pinned binary; an explicit value re-pins the recorded first-seen hash. */
   claude_path_sha256?: string
 }
@@ -177,7 +181,7 @@ export type ClaudeCodeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 export type ClaudeCodeRole = 'coder' | 'lead' | 'mail-only'
 ```
 
-来源： [`packages/agent/agent-claude-code-driver/src/index.ts:64`](../packages/agent/agent-claude-code-driver/src/index.ts)
+来源： [`packages/agent/agent-claude-code-driver/src/index.ts:98`](../packages/agent/agent-claude-code-driver/src/index.ts)
 
 <a id="deepseek-aidsh-agent-default-model"></a>
 

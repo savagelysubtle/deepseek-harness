@@ -61,6 +61,11 @@ export interface BuildQueryOptionsInput {
   readonly abortController: AbortController
   readonly spawn: (options: SpawnOptions) => SpawnedProcess
   readonly extension?: QueryOptionsExtension | undefined
+  /**
+   * A throwaway query (tainted mail): the tool list is forced empty, nothing is persisted, and the
+   * binding must be a fresh `first` id that is never written to the seat's log.
+   */
+  readonly throwaway?: boolean | undefined
   /** The attested real path of the binary to run; defaults to the configured `claude_path`. */
   readonly executable?: string | undefined
   /** Receives one line per stripped settings key. */
@@ -173,7 +178,10 @@ export function allowlistSettings(raw: unknown, seat: string, warn: (message: st
 export function buildQueryOptions(input: BuildQueryOptionsInput): Options {
   const { config, binding } = input
   const policy = toolPolicyFor(config.role)
-  const extension = input.extension?.({ seat: input.seat, config, cwd: input.cwd, binding }) ?? {}
+  // A throwaway (tainted-mail) query takes no policy extension at all: no hooks, no settings, nothing but the fences.
+  const extension: { readonly settings?: ExtensionSettings } = input.throwaway === true
+    ? {}
+    : input.extension?.({ seat: input.seat, config, cwd: input.cwd, binding }) ?? {}
   const settings = allowlistSettings(extension.settings, input.seat, input.warn ?? (() => undefined))
   // Re-check after the extension ran: the fences must hold whatever it did.
   const leaked = forbiddenEnvPresent(input.env)
@@ -189,16 +197,17 @@ export function buildQueryOptions(input: BuildQueryOptionsInput): Options {
     settingSources: [],
     strictMcpConfig: true,
     permissionMode: 'dontAsk',
-    tools: [...policy.tools],
+    tools: input.throwaway === true ? [] : [...policy.tools],
     disallowedTools: [...policy.disallowedTools],
     maxTurns: config.maxTurns,
+    maxBudgetUsd: config.maxBudgetUsd,
     model: config.model,
     ...config.effort === undefined ? {} : { effort: config.effort },
     cwd: input.cwd,
     pathToClaudeCodeExecutable: input.executable ?? config.claudePath,
     env: input.env,
     abortController: input.abortController,
-    persistSession: true,
+    persistSession: input.throwaway !== true,
     ...binding.kind === 'first' ? { sessionId: binding.sdkSessionId } : { resume: binding.sdkSessionId },
     spawnClaudeCodeProcess: input.spawn,
   }

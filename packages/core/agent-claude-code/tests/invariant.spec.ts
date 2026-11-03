@@ -43,6 +43,15 @@ describe('claude-code durable record invariants', () => {
     raw(session, 'claude-code/turn-completed', { ...turn(2), stopReason: 'end_turn' })
     raw(session, 'claude-code/resume-failed', { version: 1, sdkSessionId: 'sdk', reason: 'transcript-missing', at: 5 })
     raw(session, 'claude-code/paused', { version: 1, reason: 'rate-limit', until: 9, at: 6 })
+    raw(session, 'claude-code/compact', { version: 1, preTokens: 10, postTokens: 4, trigger: 'auto', at: 7 })
+    raw(session, 'claude-code/tool-call', { version: 1, name: 'Bash', ok: true, ms: 3, argDigest: 'len:4', at: 8 })
+    raw(session, 'claude-code/thinking', { version: 1, length: 5, at: 9 })
+    raw(session, 'claude-code/unmapped', { version: 1, type: 'system/x', at: 10 })
+    raw(session, 'claude-code/mail-claimed', { version: 1, messageId: 'm', tainted: false, at: 11 })
+    raw(session, 'claude-code/mail-outcome', { version: 1, messageId: 'm', outcome: 'settled', reason: '', at: 12 })
+    raw(session, 'claude-code/refused', { version: 1, reason: 'admission', messageId: 'm', detail: 'd', at: 13 })
+    raw(session, 'claude-code/refused', { version: 1, reason: 'kill-switch', detail: '', at: 14 })
+    raw(session, 'claude-code/throwaway-turn', { version: 1, turnIndex: 3, at: 15 })
   })
 
   const cases: readonly [string, string, unknown, RegExp][] = [
@@ -65,6 +74,18 @@ describe('claude-code durable record invariants', () => {
     ['paused bad reason', 'claude-code/paused', { version: 1, reason: 'nope', at: 1 }, /reason nope is invalid/],
     ['paused fractional until', 'claude-code/paused', { version: 1, reason: 'rate-limit', until: 1.5, at: 1 }, /until must be a non-negative safe integer/],
     ['fleet-refused missing observed', 'claude-code/fleet-refused', { version: 1, reason: 'breaker', limit: 1, at: 1 }, /observed must be a finite non-negative number/],
+    ['tool-call missing name', 'claude-code/tool-call', { version: 1, name: '', ok: true, ms: 1, argDigest: 'len:1', at: 1 }, /name must be a non-empty string/],
+    ['tool-call missing ok', 'claude-code/tool-call', { version: 1, name: 'x', ms: 1, argDigest: 'len:1', at: 1 }, /ok must be a boolean/],
+    ['tool-call missing digest', 'claude-code/tool-call', { version: 1, name: 'x', ok: true, ms: 1, at: 1 }, /argDigest must be a non-empty string/],
+    ['thinking fractional length', 'claude-code/thinking', { version: 1, length: 1.5, at: 1 }, /length must be a non-negative safe integer/],
+    ['unmapped missing type', 'claude-code/unmapped', { version: 1, at: 1 }, /type must be a non-empty string/],
+    ['mail-claimed missing id', 'claude-code/mail-claimed', { version: 1, tainted: false, at: 1 }, /messageId must be a non-empty string/],
+    ['mail-claimed missing taint', 'claude-code/mail-claimed', { version: 1, messageId: 'm', at: 1 }, /tainted must be a boolean/],
+    ['mail-outcome bad outcome', 'claude-code/mail-outcome', { version: 1, messageId: 'm', outcome: 'nope', reason: '', at: 1 }, /outcome nope is invalid/],
+    ['mail-outcome non-string reason', 'claude-code/mail-outcome', { version: 1, messageId: 'm', outcome: 'failed', at: 1 }, /reason must be a string/],
+    ['refused bad reason', 'claude-code/refused', { version: 1, reason: 'nope', detail: '', at: 1 }, /reason nope is invalid/],
+    ['throwaway-turn without a turn', 'claude-code/throwaway-turn', { version: 1, turnIndex: 0, at: 1 }, /turnIndex must be at least 1/],
+    ['refused empty message id', 'claude-code/refused', { version: 1, reason: 'admission', messageId: '', detail: '', at: 1 }, /messageId must be a non-empty string/],
   ]
   for (const [label, type, data, message] of cases) {
     it(`rejects ${label} before commit and keeps the fold reusable`, async () => {
@@ -106,6 +127,24 @@ describe('claude-code durable record invariants', () => {
       expect(() => { raw(session, 'claude-code/turn-completed', data) }).toThrow(message)
     })
   }
+
+  it('rejects a fractional post-compaction size once the session is bound', async () => {
+    const ctx = await setup()
+    const session = ctx.sessions.create(SessionId('cc-post'))
+    raw(session, 'claude-code/session-bound', bound)
+    expect(() => {
+      raw(session, 'claude-code/compact', { version: 1, preTokens: 1, postTokens: 0.5, trigger: 'auto', at: 1 })
+    }).toThrow(/postTokens must be a non-negative safe integer/)
+  })
+
+  it('lets a throwaway turn-completed precede any binding but only when the flag is true', async () => {
+    const ctx = await setup()
+    const session = ctx.sessions.create(SessionId('cc-throwaway'))
+    raw(session, 'claude-code/turn-completed', { ...turn(1), throwaway: true })
+    expect(() => { raw(session, 'claude-code/turn-completed', { ...turn(2), throwaway: false }) })
+      .toThrow(/throwaway must be true when present/)
+    expect(() => { raw(session, 'claude-code/turn-completed', turn(2)) }).toThrow(/no earlier claude-code\/session-bound/)
+  })
 
   it('rejects a repeated or backwards turn index', async () => {
     const ctx = await setup()

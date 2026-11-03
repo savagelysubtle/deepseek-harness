@@ -2,7 +2,8 @@
 
 import type {
   ClaudeCodeCompactTrigger, ClaudeCodeEventVersion, ClaudeCodeFleetRefusalReason,
-  ClaudeCodePauseReason, ClaudeCodeRateLimitSource, ClaudeCodeResumeFailedReason, ClaudeCodeSteerKind,
+  ClaudeCodeMailOutcome, ClaudeCodePauseReason, ClaudeCodeRefusalReason, ClaudeCodeRateLimitSource,
+  ClaudeCodeResumeFailedReason, ClaudeCodeSteerKind,
 } from './types.ts'
 
 /** Payload schema version stamped on every driver event. */
@@ -21,6 +22,13 @@ export const CLAUDE_CODE_EVENT_TYPES = [
   'claude-code/fleet-refused',
   'claude-code/resume-failed',
   'claude-code/paused',
+  'claude-code/tool-call',
+  'claude-code/thinking',
+  'claude-code/unmapped',
+  'claude-code/mail-claimed',
+  'claude-code/mail-outcome',
+  'claude-code/refused',
+  'claude-code/throwaway-turn',
 ] as const
 
 /** One of {@link CLAUDE_CODE_EVENT_TYPES}. */
@@ -50,6 +58,14 @@ export const CLAUDE_CODE_RESUME_FAILED_REASONS: readonly ClaudeCodeResumeFailedR
 
 /** Allowed `claude-code/paused` reasons. */
 export const CLAUDE_CODE_PAUSE_REASONS: readonly ClaudeCodePauseReason[] = ['rate-limit', 'usage-exhausted']
+
+/** Allowed `claude-code/mail-outcome` outcomes. */
+export const CLAUDE_CODE_MAIL_OUTCOMES: readonly ClaudeCodeMailOutcome[] = ['settled', 'failed', 'paused']
+
+/** Allowed `claude-code/refused` reasons. */
+export const CLAUDE_CODE_REFUSAL_REASONS: readonly ClaudeCodeRefusalReason[] = [
+  'admission', 'kill-switch', 'call-window', 'duplicate-in-flight',
+]
 
 /** Maximum length of any recorded string (identifiers, models, outcomes). */
 export const CLAUDE_CODE_MAX_TEXT_CHARS = 500

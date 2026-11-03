@@ -260,7 +260,7 @@ Source: [`packages/core/session/src/types.ts:277`](../packages/core/session/src/
 'claude-code/compact': ClaudeCodeCompactData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:156`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:238`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codefleet-refused--log-only"></a>
 
@@ -274,7 +274,35 @@ Source: [`packages/core/agent-claude-code/src/types.ts:156`](../packages/core/ag
 'claude-code/fleet-refused': ClaudeCodeFleetRefusedData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:166`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:248`](../packages/core/agent-claude-code/src/types.ts)
+
+<a id="claude-codemail-claimed--log-only"></a>
+
+#### `claude-code/mail-claimed` — log-only
+
+```ts persistence-catalog
+/**
+ * Records that a mailbox message was claimed; flushed before the prompt is sent.
+ * @param data - message id, taint flag, and time.
+ */
+'claude-code/mail-claimed': ClaudeCodeMailClaimedData
+```
+
+Source: [`packages/core/agent-claude-code/src/types.ts:278`](../packages/core/agent-claude-code/src/types.ts)
+
+<a id="claude-codemail-outcome--log-only"></a>
+
+#### `claude-code/mail-outcome` — log-only
+
+```ts persistence-catalog
+/**
+ * Records the deterministic outcome of a claimed mailbox message.
+ * @param data - message id, outcome, short reason, and time.
+ */
+'claude-code/mail-outcome': ClaudeCodeMailOutcomeData
+```
+
+Source: [`packages/core/agent-claude-code/src/types.ts:283`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codepaused--log-only"></a>
 
@@ -288,7 +316,7 @@ Source: [`packages/core/agent-claude-code/src/types.ts:166`](../packages/core/ag
 'claude-code/paused': ClaudeCodePausedData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:176`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:258`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-coderate-limited--log-only"></a>
 
@@ -302,7 +330,21 @@ Source: [`packages/core/agent-claude-code/src/types.ts:176`](../packages/core/ag
 'claude-code/rate-limited': ClaudeCodeRateLimitedData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:161`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:243`](../packages/core/agent-claude-code/src/types.ts)
+
+<a id="claude-coderefused--log-only"></a>
+
+#### `claude-code/refused` — log-only
+
+```ts persistence-catalog
+/**
+ * Records a loud refusal (admission, kill switch, call window, duplicate).
+ * @param data - reason, optional message id, short detail, and time.
+ */
+'claude-code/refused': ClaudeCodeRefusedData
+```
+
+Source: [`packages/core/agent-claude-code/src/types.ts:288`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-coderesume-failed--log-only"></a>
 
@@ -316,7 +358,7 @@ Source: [`packages/core/agent-claude-code/src/types.ts:161`](../packages/core/ag
 'claude-code/resume-failed': ClaudeCodeResumeFailedData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:171`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:253`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codesession-bound--log-only"></a>
 
@@ -330,7 +372,7 @@ Source: [`packages/core/agent-claude-code/src/types.ts:171`](../packages/core/ag
 'claude-code/session-bound': ClaudeCodeSessionBoundData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:141`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:223`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codesteer--log-only"></a>
 
@@ -344,7 +386,49 @@ Source: [`packages/core/agent-claude-code/src/types.ts:141`](../packages/core/ag
 'claude-code/steer': ClaudeCodeSteerData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:151`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:233`](../packages/core/agent-claude-code/src/types.ts)
+
+<a id="claude-codethinking--log-only"></a>
+
+#### `claude-code/thinking` — log-only
+
+```ts persistence-catalog
+/**
+ * Records one thinking block by length only.
+ * @param data - thinking length and time.
+ */
+'claude-code/thinking': ClaudeCodeThinkingData
+```
+
+Source: [`packages/core/agent-claude-code/src/types.ts:268`](../packages/core/agent-claude-code/src/types.ts)
+
+<a id="claude-codethrowaway-turn--log-only"></a>
+
+#### `claude-code/throwaway-turn` — log-only
+
+```ts persistence-catalog
+/**
+ * Marks a turn as a throwaway (tainted-mail) turn, before any of its messages are logged.
+ * @param data - the dsh turn number and time.
+ */
+'claude-code/throwaway-turn': ClaudeCodeThrowawayTurnData
+```
+
+Source: [`packages/core/agent-claude-code/src/types.ts:293`](../packages/core/agent-claude-code/src/types.ts)
+
+<a id="claude-codetool-call--log-only"></a>
+
+#### `claude-code/tool-call` — log-only
+
+```ts persistence-catalog
+/**
+ * Records one tool call (name, success, duration, argument digest; no bodies).
+ * @param data - tool name, ok flag, milliseconds, digest, and time.
+ */
+'claude-code/tool-call': ClaudeCodeToolCallData
+```
+
+Source: [`packages/core/agent-claude-code/src/types.ts:263`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codeturn-completed--log-only"></a>
 
@@ -358,7 +442,21 @@ Source: [`packages/core/agent-claude-code/src/types.ts:151`](../packages/core/ag
 'claude-code/turn-completed': ClaudeCodeTurnCompletedData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:146`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:228`](../packages/core/agent-claude-code/src/types.ts)
+
+<a id="claude-codeunmapped--log-only"></a>
+
+#### `claude-code/unmapped` — log-only
+
+```ts persistence-catalog
+/**
+ * Records a stream message the mapper does not understand.
+ * @param data - SDK message type name and time.
+ */
+'claude-code/unmapped': ClaudeCodeUnmappedData
+```
+
+Source: [`packages/core/agent-claude-code/src/types.ts:273`](../packages/core/agent-claude-code/src/types.ts)
 
 ### `command/*`
 

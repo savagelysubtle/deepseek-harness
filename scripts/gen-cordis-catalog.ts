@@ -75,6 +75,7 @@ export const SERVICE_PAGE: Record<string, string> = {
   llm: 'llm-streaming.md',
   lsp: 'lsp.md',
   messageFeedback: 'feedback.md',
+  claudeCodeMailHooks: 'mailbox.md',
   mailbox: 'mailbox.md',
   memory: 'memory.md',
   permissionPresets: 'permission-presets.md',

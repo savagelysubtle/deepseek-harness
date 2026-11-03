@@ -17,10 +17,12 @@ async function newSession(): Promise<Session> {
 const TOKEN = 'sk-ant-oat01-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-abcdef'
 
 describe('claude-code event vocabulary', () => {
-  it('lists all eight event types and every one is a known session event type', () => {
+  it('lists every event type and every one is a known session event type', () => {
     expect([...CLAUDE_CODE_EVENT_TYPES].sort()).toEqual([
-      'claude-code/compact', 'claude-code/fleet-refused', 'claude-code/paused', 'claude-code/rate-limited',
-      'claude-code/resume-failed', 'claude-code/session-bound', 'claude-code/steer', 'claude-code/turn-completed',
+      'claude-code/compact', 'claude-code/fleet-refused', 'claude-code/mail-claimed', 'claude-code/mail-outcome',
+      'claude-code/paused', 'claude-code/rate-limited', 'claude-code/refused', 'claude-code/resume-failed',
+      'claude-code/session-bound', 'claude-code/steer', 'claude-code/thinking', 'claude-code/throwaway-turn', 'claude-code/tool-call',
+      'claude-code/turn-completed', 'claude-code/unmapped',
     ])
     for (const type of CLAUDE_CODE_EVENT_TYPES) expect(KNOWN_SESSION_EVENT_TYPES.has(type)).toBe(true)
   })
@@ -109,6 +111,83 @@ describe('recordClaudeCodeEvent', () => {
     expect(bare).toEqual({ version: 1, reason: 'rate-limit', at: 3 })
   })
 
+  it('marks a throwaway turn-completed and omits the flag otherwise', async () => {
+    const session = await newSession()
+    const base = { turnIndex: 1, outcome: 'success', isError: false, model: 'm' }
+    expect(recordClaudeCodeEvent(session, 'claude-code/turn-completed', { ...base, throwaway: true })).toBe(true)
+    recordClaudeCodeEvent(session, 'claude-code/session-bound', {
+      sessionId: 'dsh-1', sdkSessionId: 'sdk-1', model: 'm', driver: 'claude-code', at: 1,
+    })
+    expect(recordClaudeCodeEvent(session, 'claude-code/turn-completed', { ...base, turnIndex: 2, throwaway: false })).toBe(true)
+    const turns = session.events.filter(event => event.type === 'claude-code/turn-completed')
+    expect((turns[0]!.data as { throwaway?: boolean }).throwaway).toBe(true)
+    expect('throwaway' in (turns[1]!.data as object)).toBe(false)
+  })
+
+  it('records compact with an optional post-compaction size', async () => {
+    const session = await newSession()
+    recordClaudeCodeEvent(session, 'claude-code/session-bound', {
+      sessionId: 'dsh-1', sdkSessionId: 'sdk-1', model: 'm', driver: 'claude-code', at: 1,
+    })
+    expect(recordClaudeCodeEvent(session, 'claude-code/compact', { preTokens: 9, postTokens: 3.7, trigger: 'manual', at: 2 })).toBe(true)
+    expect(recordClaudeCodeEvent(session, 'claude-code/compact', {
+      preTokens: 9, postTokens: -1, trigger: 'manual', at: 3,
+    })).toBe(true)
+    expect(recordClaudeCodeEvent(session, 'claude-code/compact', { preTokens: 9, trigger: 'nope' as never, at: 3 })).toBe(false)
+    const [withPost, withoutPost] = session.events.slice(-2).map(event => event.data)
+    expect(withPost).toEqual({ version: 1, preTokens: 9, postTokens: 3, trigger: 'manual', at: 2 })
+    expect(withoutPost).toEqual({ version: 1, preTokens: 9, trigger: 'manual', at: 3 })
+  })
+
+  it('records tool-call, thinking and unmapped by named fields only', async () => {
+    const session = await newSession()
+    expect(recordClaudeCodeEvent(session, 'claude-code/tool-call', {
+      name: 'Bash', ok: true, ms: 12.5, argDigest: 'len:42', at: 1, result: 'leak', input: { command: 'rm' },
+    } as never)).toBe(true)
+    expect(recordClaudeCodeEvent(session, 'claude-code/tool-call', {
+      name: 'Read', ok: false, ms: Number.NaN, argDigest: 'hmac:abc123', at: 2,
+    })).toBe(true)
+    expect(recordClaudeCodeEvent(session, 'claude-code/tool-call', { name: '', ok: true, ms: 1, argDigest: 'len:1', at: 1 })).toBe(false)
+    expect(recordClaudeCodeEvent(session, 'claude-code/tool-call', { name: 'X', ok: true, ms: 1, argDigest: '', at: 1 })).toBe(false)
+    expect(recordClaudeCodeEvent(session, 'claude-code/thinking', { length: 120.9, at: 3, text: 'leak' } as never)).toBe(true)
+    expect(recordClaudeCodeEvent(session, 'claude-code/unmapped', { type: 'system/hook_started', at: 4 })).toBe(true)
+    expect(recordClaudeCodeEvent(session, 'claude-code/unmapped', { type: '', at: 4 })).toBe(false)
+    const events = session.events.map(event => event.data)
+    expect(events).toEqual([
+      { version: 1, name: 'Bash', ok: true, ms: 12.5, argDigest: 'len:42', at: 1 },
+      { version: 1, name: 'Read', ok: false, ms: 0, argDigest: 'hmac:abc123', at: 2 },
+      { version: 1, length: 120, at: 3 },
+      { version: 1, type: 'system/hook_started', at: 4 },
+    ])
+  })
+
+  it('records mail-claimed, mail-outcome and refused and drops invalid ones', async () => {
+    const session = await newSession()
+    expect(recordClaudeCodeEvent(session, 'claude-code/mail-claimed', { messageId: 'm-1', tainted: true, at: 1, body: 'x' } as never)).toBe(true)
+    expect(recordClaudeCodeEvent(session, 'claude-code/mail-claimed', { messageId: 'm-2', tainted: false, at: 2 })).toBe(true)
+    expect(recordClaudeCodeEvent(session, 'claude-code/mail-claimed', { messageId: '', tainted: false, at: 2 })).toBe(false)
+    expect(recordClaudeCodeEvent(session, 'claude-code/mail-outcome', { messageId: 'm-1', outcome: 'failed', reason: 'boom\nline', at: 3 })).toBe(true)
+    expect(recordClaudeCodeEvent(session, 'claude-code/mail-outcome', { messageId: '', outcome: 'settled', reason: '', at: 3 })).toBe(false)
+    expect(recordClaudeCodeEvent(session, 'claude-code/mail-outcome', { messageId: 'm', outcome: 'nope' as never, reason: '', at: 3 })).toBe(false)
+    expect(recordClaudeCodeEvent(session, 'claude-code/refused', { reason: 'admission', messageId: 'm-3', detail: 'external hop: portal', at: 4 })).toBe(true)
+    expect(recordClaudeCodeEvent(session, 'claude-code/refused', { reason: 'kill-switch', detail: 'flag present', at: 5 })).toBe(true)
+    expect(recordClaudeCodeEvent(session, 'claude-code/refused', { reason: 'nope' as never, detail: '', at: 5 })).toBe(false)
+    expect(session.events.map(event => event.data)).toEqual([
+      { version: 1, messageId: 'm-1', tainted: true, at: 1 },
+      { version: 1, messageId: 'm-2', tainted: false, at: 2 },
+      { version: 1, messageId: 'm-1', outcome: 'failed', reason: 'boom line', at: 3 },
+      { version: 1, reason: 'admission', messageId: 'm-3', detail: 'external hop: portal', at: 4 },
+      { version: 1, reason: 'kill-switch', detail: 'flag present', at: 5 },
+    ])
+  })
+
+  it('records a throwaway-turn marker and drops one without a turn number', async () => {
+    const session = await newSession()
+    expect(recordClaudeCodeEvent(session, 'claude-code/throwaway-turn', { turnIndex: 3, at: 1, body: 'x' } as never)).toBe(true)
+    expect(recordClaudeCodeEvent(session, 'claude-code/throwaway-turn', { turnIndex: 0, at: 1 })).toBe(false)
+    expect(session.events.map(event => event.data)).toEqual([{ version: 1, turnIndex: 3, at: 1 }])
+  })
+
   it('redacts tokens and paths, strips control characters, and caps free text', async () => {
     const session = await newSession()
     recordClaudeCodeEvent(session, 'claude-code/session-bound', {
@@ -124,6 +203,39 @@ describe('recordClaudeCodeEvent', () => {
     expect(reason.length).toBeLessThanOrEqual(200)
     expect(reason).toContain('[redacted]')
     expect(reason).toContain('[path]')
+  })
+
+  it('redacts more vendor shapes, whatever their case', () => {
+    const hex32 = '0123456789abcdef0123456789abcdef'
+    for (const secret of [
+      'sk_live_AbCdEfGhIjKlMnOp1234', 'rk_live_AbCdEfGhIjKlMnOp1234', 'sk_test_AbCdEfGhIjKlMnOp1234', 'whsec_AbCdEfGhIjKlMnOp1234',
+      `SK${hex32}`, `AC${hex32}`, 'ASIAIOSFODNN7EXAMPLE', `AIza${'A1b2C3d4E5'.repeat(4)}`, `ya29.${'a1B2c3D4e5'.repeat(3)}`,
+      `glpat-${'abcDEF123456'.repeat(2)}`, `npm_${'aB3dE6gH9jK2mN5pQ8sT'.repeat(2)}`, 'SK-ANT-OAT01-AbCdEfGhIjKlMnOpQrStUvWx',
+      'GHP_abcdefghijklmnopqrstuvwxyz0123456789', 'BEARER abcdefghijklmnop1234',
+      '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\nabc\n-----END RSA PRIVATE KEY-----',
+      '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC',
+    ]) {
+      expect(redactTokens(`before ${secret} after`)).toMatch(/^before \[redacted\]( after)?$/)
+    }
+    expect(redactTokens('ordinary words, a-b-c, and sk and ac and ya29 stay')).toBe('ordinary words, a-b-c, and sk and ac and ya29 stay')
+  })
+
+  it('leaves an ordinary lower-case 34-character hex word alone: only upper-case SK and AC SIDs are Twilio', () => {
+    const hex32 = '0123456789abcdef0123456789abcdef'
+    for (const word of [`ac${hex32}`, `sk${hex32}`, `Ac${hex32}`]) expect(redactTokens(`id ${word} end`)).toBe(`id ${word} end`)
+    expect(sanitizeLabel(`ac${hex32}`)).toBe(`ac${hex32}`)
+    expect(redactTokens(`id AC${hex32} end`)).toBe('id [redacted] end')
+  })
+
+  it('redacts key=value pairs including the whole key name and quote, in linear time on a long word run', () => {
+    expect(redactTokens('x my-api_key: "abcd1234" y')).toBe('x [redacted] y')
+    expect(redactTokens("see 'secret'='hunter2hunter2' then token=abcdefgh and auth: wxyz1234")).toBe('see [redacted] then [redacted] and [redacted]')
+    expect(redactTokens('before"token":"abc123def456"')).toBe('before[redacted]')
+    const started = performance.now()
+    const run = 'a-'.repeat(8000)
+    expect(redactTokens(run)).toBe(run)
+    expect(redactTokens(`${run}token=abcdefgh`)).toBe('[redacted]')
+    expect(performance.now() - started).toBeLessThan(100)
   })
 
   it('redacts credential-shaped strings of several vendors', () => {
