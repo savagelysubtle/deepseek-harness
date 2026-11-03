@@ -281,7 +281,29 @@ function nodeDot(status: WorkflowRunNodeData['status']): StateDotState {
   }
 }
 
-function NodeRow({ node, t }: { readonly node: WorkflowRunNodeData; readonly t: WorkflowRunPanelProps['t'] }) {
+/** Translate function of the `workflowRun` namespace, as the embeddable components take it. */
+export type WorkflowRunTranslate = WorkflowRunPanelProps['t']
+
+/**
+ * The text badge of one approval state (`data-approval-text`); the state is also spelled out in words.
+ * @param props - the approval state and the namespace translate function.
+ * @returns the badge element.
+ */
+export function ApprovalBadge({ state, t }: {
+  readonly state: NonNullable<WorkflowRunNodeData['approval']>
+  readonly t: WorkflowRunTranslate
+}) {
+  return <span className={css.approvalBadge} data-approval-text data-approval-badge={state}>{t(APPROVAL_KEYS[state])}</span>
+}
+
+/**
+ * One node row: status dot and text, exit code and duration, truncation marker, approval badge and the
+ * verbatim reason. The row carries `data-workflow-node`, `data-node-id` and `data-node-status`, plus
+ * `data-approval-state` when the node has an approval.
+ * @param props - the node record and the namespace translate function.
+ * @returns the list item.
+ */
+export function NodeRow({ node, t }: { readonly node: WorkflowRunNodeData; readonly t: WorkflowRunPanelProps['t'] }) {
   const meta = [
     node.exitCode === undefined ? undefined : t('node.exit', { code: node.exitCode }),
     node.durationMs === undefined ? undefined : t('node.duration', { ms: node.durationMs }),
@@ -298,9 +320,7 @@ function NodeRow({ node, t }: { readonly node: WorkflowRunNodeData; readonly t: 
       <span className={css.dotSlot}><StateDot state={nodeDot(node.status)} /></span>
       <span className={css.nodeLabel}>{node.nodeId}</span>
       <span className={css.nodeStatus} data-node-status-text>{t(NODE_STATUS_KEYS[node.status])}</span>
-      {node.approval === undefined
-        ? null
-        : <span className={css.approvalBadge} data-approval-text>{t(APPROVAL_KEYS[node.approval])}</span>}
+      {node.approval === undefined ? null : <ApprovalBadge state={node.approval} t={t} />}
       {meta.length === 0 ? null : <span className={css.nodeMeta} data-node-meta>{meta.join(' · ')}</span>}
       {node.truncated === true
         ? <span className={css.nodeMeta} data-node-truncated>{t('node.truncated')}</span>
@@ -312,7 +332,12 @@ function NodeRow({ node, t }: { readonly node: WorkflowRunNodeData; readonly t: 
   )
 }
 
-function NodeList({ nodes, t }: {
+/**
+ * The node list of one run (`data-workflow-nodes`).
+ * @param props - the node records in display order and the namespace translate function.
+ * @returns the node section.
+ */
+export function NodeList({ nodes, t }: {
   readonly nodes: readonly WorkflowRunNodeData[]
   readonly t: WorkflowRunPanelProps['t']
 }) {
@@ -326,7 +351,12 @@ function NodeList({ nodes, t }: {
   )
 }
 
-function GateReport({ rows, open, onToggle, t }: {
+/**
+ * The collapsible gate-report table. Controlled: the caller remembers `open` per run.
+ * @param props - the rows, the open flag, the toggle callback and the namespace translate function.
+ * @returns the gate-report section.
+ */
+export function GateReport({ rows, open, onToggle, t }: {
   readonly rows: readonly WorkflowRunGateRow[]
   readonly open: boolean
   readonly onToggle: () => void

@@ -20,6 +20,12 @@
 
 对 YAML 工作流运行，节点还会折叠 `tool-workflow/node-start`、`tool-workflow/node-end`、`tool-workflow/approval` 与 `tool-workflow/gate-report`。node-start 使该行变为 `running` 并记录开始时间；node-end 将其结算为 `done`、`failed`、`skipped`、`cancelled` 或 `interrupted`，同一节点后到的 node-end 会替换先前的记录（agent 节点的截断要到运行结束才知道）。运行结束时仍在运行的节点显示为 `interrupted`。每行（`data-workflow-node`、`data-node-id`、`data-node-status`）显示状态文字、退出码、耗时，以及来自事件 `truncated` 字段的输出截断标记。有审批记录的节点带 `data-approval-state`（`pending`、`allowed`、`rejected`、`expired`、`unavailable` 或 `cancelled`）及文字徽标，取自最新的 `tool-workflow/approval` 事件；决定是终局的，晚到的 `pending` 不会回退。审批原因（否则取门禁报告原因）原样显示，因此无头或无人应答的拒绝会连同补救办法一起呈现。没有 `run-start` 的运行所对应的事件会被忽略。门禁报告渲染在运行 disclosure 之后，是带标题的表格（`data-gate-table`），每个门禁一行：节点、类型、`fired-pass`、`fired-block`、`skipped`、`not-reached` 或 `never-evaluated` 的文字结果徽标，以及原因。默认折叠，若有门禁阻止则默认展开；切换按钮（`data-gate-toggle`、`aria-expanded`）仅在组件状态中按运行 id 记忆。普通 `workflow` 工具运行的渲染保持不变。
 
+## 可嵌入的运行视图
+
+客户端入口（`@deepseek-ai/dsh-client-ui-workflow-run/client`）还导出 Workflows 浮层嵌入的组件，避免重复渲染相同事实：`NodeList`（`nodes`、`t`）、`NodeRow`（`node`、`t`）、`ApprovalBadge`（`state`、`t`）以及受控的 `GateReport`（`rows`、`open`、`onToggle`、`t`），其中 `t` 是 `workflowRun` 命名空间的翻译函数。`runDetailToNodeData(detail)` 是纯映射函数，把 `runDetail` 结果体（`nodes`、`gates`、`approvals`）转换为 `{ nodes, gateReport }`：节点状态 `success` 显示为 `done`，未知状态为 `interrupted`，未知审批状态为 `unavailable`；节点取其最新审批，原因取审批原因，否则取节点错误，并限制在 500 个字符内。由会话事件生成的 Chat 投影保持不变。
+
+这些组件同时以客户端服务 `ctx.workflowRunView`（注入键 `workflowRunView`，契约类型 `WorkflowRunViewContract`）提供，成员为 `NodeList`、`NodeRow`、`ApprovalBadge`、`GateReport` 与 `runDetailToNodeData`。其他 UI 插件把 `workflowRunView` 写入自己的 `inject` 数组，并且只从 `/client` 入口导入类型，因为客户端 bundle 纯净性检查禁止对其他插件入口做值导入。该服务随本插件的 fiber 存亡。
+
 ## 装配
 
 本包把 Definition、locale 字典和 `workflow-run` renderer 都注册为 Cordis effect；移除客户端 entry 会撤销三者。shipped Web bundle 在 `ui-conversation` 与 `ui-tool` 之后装配该插件。

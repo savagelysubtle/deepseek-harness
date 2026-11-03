@@ -136,8 +136,12 @@ function statusFromOutcome(outcome: WorkflowAgentOutcome): WorkflowRunStatus {
 
 const REASON_CAP = 500
 
-/** Cap a reason for display: at most 500 characters plus an ellipsis. Always rendered as a text node. */
-function capReason(reason: string): string {
+/**
+ * Cap a reason for display: at most 500 characters plus an ellipsis. Always rendered as a text node.
+ * @param reason - the recorded reason text.
+ * @returns the reason, clipped when longer than 500 characters.
+ */
+export function capReason(reason: string): string {
   return reason.length > REASON_CAP ? `${reason.slice(0, REASON_CAP)}…` : reason
 }
 
