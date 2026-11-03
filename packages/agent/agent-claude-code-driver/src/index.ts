@@ -13,19 +13,27 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
+import { assertBinaryUnchanged, attestClaudePath, BinaryPins } from './attest.ts'
+import type { BinaryAttestation } from './attest.ts'
 import { assertCleanHostEnv, buildChildEnv } from './env.ts'
 import { ClaudeCodeSeatFactory } from './factory.ts'
 import type { ResolvedSeat } from './factory.ts'
 import { killProcessGroup, ProcessLedger } from './ledger.ts'
 import type { SeatAgentDeps, TranscriptState } from './seat-agent.ts'
 import { ClaudeCodeSeatRow, CLAUDE_CODE_DRIVER_KEY, parseSeatRow } from './seat-config.ts'
+import { ensurePrivateDir, resolveStateDir } from './state.ts'
 
-export { buildQueryOptions } from './options.ts'
-export type { BuildQueryOptionsInput, QueryBinding, QueryOptionsContext, QueryOptionsExtension } from './options.ts'
+export { assertBinaryUnchanged, attestClaudePath, BinaryPins, sha256File } from './attest.ts'
+export type { AttestOptions, BinaryAttestation } from './attest.ts'
+export { allowlistSettings, buildQueryOptions } from './options.ts'
+export type {
+  BuildQueryOptionsInput, ExtensionSettings, QueryBinding, QueryOptionsContext, QueryOptionsExtension,
+} from './options.ts'
+export { assertPrivateFile, ensurePrivateDir, resolveStateDir, writeAtomic } from './state.ts'
 export { assertCleanHostEnv, buildChildEnv, CLAUDE_CODE_FORBIDDEN_ENV, forbiddenEnvPresent } from './env.ts'
 export { ClaudeCodeSeatFactory } from './factory.ts'
 export type { FactoryInputs, ResolvedSeat, SeatResolver } from './factory.ts'
-export { killProcessGroup, ProcessLedger, readProcessStartTime, SYSTEM_PROCESS_OPS } from './ledger.ts'
+export { isGroupAlive, killProcessGroup, ProcessLedger, readBootId, readProcessStartTime, SYSTEM_PROCESS_OPS } from './ledger.ts'
 export type { LedgerEntry, LedgerProcessOps, ReapReport } from './ledger.ts'
 export { PromptStream } from './prompt-stream.ts'
 export {
@@ -34,10 +42,10 @@ export {
 export type { SeatAgentDeps, TranscriptState } from './seat-agent.ts'
 export {
   CLAUDE_CODE_DRIVER_KEY, CLAUDE_CODE_EFFORTS, CLAUDE_CODE_ROLES, ClaudeCodeSeatBlock, ClaudeCodeSeatRow,
-  isFableModel, parseSeatRow, toolPolicyFor,
+  foldModelId, isAllowedModel, isFableModel, parseSeatRow, toolPolicyFor,
 } from './seat-config.ts'
 export type {
-  ClaudeCodeEffort, ClaudeCodeRole, ClaudeCodeSeatConfig, ClaudeCodeToolPolicy,
+  ClaudeCodeEffort, ClaudeCodeRole, ClaudeCodeSeatConfig, ClaudeCodeToolPolicy, ParseSeatRowOptions,
 } from './seat-config.ts'
 
 /** Cordis plugin name. */
@@ -54,8 +62,13 @@ const DEFAULT_PAUSE_MS = 15 * 60_000
 
 /** Deployment configuration of the driver. */
 export interface Config {
-  /** Absolute directory where the driver keeps host state (the pid ledger). */
+  /**
+   * Directory where the driver keeps host state (the pid ledger and binary pins): a subdirectory name
+   * under the harness home, or an absolute path already inside it. Created with mode 0700.
+   */
   stateDir: string
+  /** Harness home the state directory must live in; defaults to `$DSH_HOME` or `~/.dsh`. */
+  dshHome?: string
   /** Claude Code seat rows keyed by seat name (`meta.agentPreset`, else the session id). */
   seats: Record<string, ClaudeCodeSeatRow>
   /** Process-tree termination grace in milliseconds. */
@@ -67,6 +80,7 @@ export interface Config {
 /** Schema of {@link Config}. */
 export const Config: z<Config> = z.object({
   stateDir: z.string().required(),
+  dshHome: z.string(),
   seats: z.dict(ClaudeCodeSeatRow).default({}),
   disposeGraceMs: z.number().step(1).min(1).default(DEFAULT_GRACE_MS),
   defaultPauseMs: z.number().step(1).min(1).default(DEFAULT_PAUSE_MS),
@@ -94,14 +108,34 @@ export async function sdkTranscriptState(sdkSessionId: string, cwd: string): Pro
  */
 export function apply(ctx: Context, config: Config): void {
   assertCleanHostEnv()
+  const stateDir = resolveStateDir(config.stateDir, config.dshHome)
+  ensurePrivateDir(stateDir)
+  const pins = new BinaryPins(stateDir)
+  const attestations = new Map<string, BinaryAttestation>()
+  const attestedBySeat = new Map<string, BinaryAttestation>()
   const seats = new Map<string, ResolvedSeat>()
   for (const [seat, row] of Object.entries(config.seats)) {
-    seats.set(seat, { seat, config: parseSeatRow(row, seat) })
+    // No permission-policy extension exists yet (slice S5), so `coder` rows are refused here.
+    const seatConfig = parseSeatRow(row, seat, { policyExtension: false })
+    const attestation = attestations.get(seatConfig.claudePath) ?? attestClaudePath(seatConfig.claudePath)
+    pins.enforce(seat, attestation.sha256, seatConfig.claudePathSha256)
+    attestations.set(seatConfig.claudePath, attestation)
+    attestedBySeat.set(seat, attestation)
+    seats.set(seat, { seat, config: seatConfig })
   }
-  const ledger = new ProcessLedger(join(config.stateDir, 'claude-code-seat-pids.json'))
-  const reaped = ledger.reapStale()
-  if (reaped.reaped.length > 0) {
-    ctx.logger.warn(`agent-claude-code-driver: killed orphaned Claude Code children of seats: ${reaped.reaped.join(', ')}`)
+  const ledger = new ProcessLedger(join(stateDir, 'claude-code-seat-pids.json'))
+  const report = ledger.reapStale()
+  if (report.reaped.length > 0) {
+    ctx.logger.warn(`agent-claude-code-driver: killed orphaned Claude Code children of seats: ${report.reaped.join(', ')}`)
+  }
+  if (report.survivors.length > 0) {
+    ctx.logger.warn(`agent-claude-code-driver: seats ${report.survivors.join(', ')} left process-group members behind after their leader died; they were not killed (ownership cannot be proven). Inspect with pgrep -f claude`)
+  }
+  if (report.failed.length > 0) {
+    ctx.logger.warn(`agent-claude-code-driver: could not kill the orphaned children of seats ${report.failed.join(', ')}; continuing`)
+  }
+  if (report.skipped.length > 0) {
+    ctx.logger.warn(`agent-claude-code-driver: seats ${report.skipped.join(', ')} belong to another live host sharing this state directory; left alone`)
   }
   const deps: SeatAgentDeps = {
     query,
@@ -114,6 +148,8 @@ export function apply(ctx: Context, config: Config): void {
     graceMs: config.disposeGraceMs ?? DEFAULT_GRACE_MS,
     defaultPauseMs: config.defaultPauseMs ?? DEFAULT_PAUSE_MS,
     ledger,
+    flush: async (session) => { await ctx.sessions.flush(session) },
+    verifyBinary: (seat) => { assertBinaryUnchanged(attestedBySeat.get(seat) as BinaryAttestation) },
     warn: (message) => { ctx.logger.warn(message) },
   }
   const factory = new ClaudeCodeSeatFactory({

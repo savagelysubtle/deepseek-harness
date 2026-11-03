@@ -127,8 +127,13 @@ Requires: `agents` · `sessions` · `subprocess`
 ```ts config-catalog
 /** Deployment configuration of the driver. */
 export interface Config {
-  /** Absolute directory where the driver keeps host state (the pid ledger). */
+  /**
+   * Directory where the driver keeps host state (the pid ledger and binary pins): a subdirectory name
+   * under the harness home, or an absolute path already inside it. Created with mode 0700.
+   */
   stateDir: string
+  /** Harness home the state directory must live in; defaults to `$DSH_HOME` or `~/.dsh`. */
+  dshHome?: string
   /** Claude Code seat rows keyed by seat name (`meta.agentPreset`, else the session id). */
   seats: Record<string, ClaudeCodeSeatRow>
   /** Process-tree termination grace in milliseconds. */
@@ -149,7 +154,7 @@ export interface ClaudeCodeSeatRow {
 
 /** The `claude_code` block of a seat registry row, as written in config. */
 export interface ClaudeCodeSeatBlock {
-  /** Model alias (`opus`, `sonnet`, `haiku`) or full id. */
+  /** Model alias (`opus`, `sonnet`, `haiku`) or a full `claude-(opus|sonnet|haiku)-<version>` id; anything else is refused. */
   model: string
   /** Optional reasoning effort. */
   effort?: ClaudeCodeEffort
@@ -161,6 +166,8 @@ export interface ClaudeCodeSeatBlock {
   claude_path: string
   /** Per-seat query cap per subscription window (enforced by a later slice). */
   max_calls_per_window?: number
+  /** Optional SHA-256 (hex) of the pinned binary; an explicit value re-pins the recorded first-seen hash. */
+  claude_path_sha256?: string
 }
 
 /** Reasoning effort levels the SDK accepts. */
@@ -170,7 +177,7 @@ export type ClaudeCodeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 export type ClaudeCodeRole = 'coder' | 'lead' | 'mail-only'
 ```
 
-来源： [`packages/agent/agent-claude-code-driver/src/index.ts:56`](../packages/agent/agent-claude-code-driver/src/index.ts)
+来源： [`packages/agent/agent-claude-code-driver/src/index.ts:64`](../packages/agent/agent-claude-code-driver/src/index.ts)
 
 <a id="deepseek-aidsh-agent-default-model"></a>
 

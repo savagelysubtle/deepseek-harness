@@ -373,7 +373,7 @@ describe('cancel and process ownership', () => {
     const query = await h.query(0)
     expect(query.options.pathToClaudeCodeExecutable).toBe('/opt/claude/versions/2.1.317/claude')
     const process = query.spawn()
-    expect(h.ledger.entries()).toEqual([{ seat: 'tester', pid: 4242, startTime: 'tick-1' }])
+    expect(h.ledger.entries()).toEqual([{ seat: 'tester', pid: 4242, startTime: 'tick-1', hostPid: 777, hostStartTime: 'host-tick', bootId: 'boot-1' }])
     expect(process).toBeDefined()
     h.children[0]?.finish()
     await tick(10)

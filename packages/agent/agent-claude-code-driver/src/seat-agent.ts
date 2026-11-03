@@ -25,7 +25,7 @@ import type {
 } from '@deepseek-ai/dsh-agent'
 import { recordClaudeCodeEvent } from '@deepseek-ai/dsh-agent-claude-code'
 import type { ClaudeCodeEventInputMap, ClaudeCodeEventType } from '@deepseek-ai/dsh-agent-claude-code'
-import { CLAUDE_CODE_DRIVER_NAME } from '@deepseek-ai/dsh-agent-claude-code'
+import { CLAUDE_CODE_DRIVER_NAME, sanitizeFreeText } from '@deepseek-ai/dsh-agent-claude-code'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import type { Scope } from '@deepseek-ai/dsh-scope'
@@ -39,6 +39,20 @@ import { PromptStream } from './prompt-stream.ts'
 import type { ClaudeCodeSeatConfig } from './seat-config.ts'
 import type { ProcessLedger } from './ledger.ts'
 
+/** Longest error text the driver lets into a durable record or a warning. */
+const MAX_ERROR_TEXT_CHARS = 400
+
+/** Longest a pause may last, whatever reset time the CLI reports. */
+const MAX_PAUSE_MS = 24 * 60 * 60 * 1000
+
+/** A session id as the CLI writes it (8-4-4-4-12 hexadecimal). */
+const SDK_SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** An error chain with paths, tokens and control characters redacted and the length capped. */
+function errText(error: unknown): string {
+  return sanitizeFreeText(errorChain(error), MAX_ERROR_TEXT_CHARS)
+}
+
 /** Error codes the driver puts on a failed turn's `turn/end` reason. */
 export const CLAUDE_CODE_TURN_ERROR_CODES = {
   /** The Claude transcript for a bound session is missing or unreadable. */
@@ -51,6 +65,8 @@ export const CLAUDE_CODE_TURN_ERROR_CODES = {
   busy: 'CLAUDE_CODE_SEAT_BUSY',
   /** The host environment carries a forbidden credential override. */
   environment: 'CLAUDE_CODE_ENVIRONMENT',
+  /** The session binding could not be made durable, or the logged binding is not a valid session id. */
+  binding: 'CLAUDE_CODE_BINDING',
 } as const
 
 /** A driver failure carrying a stable machine code for `turn/end`. */
@@ -90,6 +106,10 @@ export interface SeatAgentDeps {
   readonly defaultPauseMs: number
   /** Pid ledger for orphan reaping; absent disables recording. */
   readonly ledger?: ProcessLedger | undefined
+  /** Make everything appended to the session so far durable (the session store flush). */
+  readonly flush: (session: Session) => Promise<void>
+  /** Re-check that the seat's attested binary is unchanged; throws when it is not. */
+  readonly verifyBinary?: ((seat: string) => void) | undefined
   /** Optional S5 settings extension. */
   readonly extension?: QueryOptionsExtension | undefined
   /** Warning sink. */
@@ -185,26 +205,26 @@ class LiveTurn {
       try {
         this.query?.close()
       } catch (error: unknown) {
-        this.deps.warn(`agent-claude-code-driver: query.close() failed: ${errorChain(error)}`)
+        this.deps.warn(`agent-claude-code-driver: query.close() failed: ${errText(error)}`)
       }
       const child = this.child
       if (child === undefined || child.pid <= 0 || this.childExited) return
       try {
         child.terminate()
       } catch (error: unknown) {
-        this.deps.warn(`agent-claude-code-driver: terminate failed: ${errorChain(error)}`)
+        this.deps.warn(`agent-claude-code-driver: terminate failed: ${errText(error)}`)
       }
       let exited = false
       try {
         exited = await child.waitForExit(AbortSignal.timeout(this.deps.graceMs * 2 + 1_000))
       } catch (error: unknown) {
-        this.deps.warn(`agent-claude-code-driver: waiting for child exit failed: ${errorChain(error)}`)
+        this.deps.warn(`agent-claude-code-driver: waiting for child exit failed: ${errText(error)}`)
       }
       if (exited || this.exitedNow()) return
       try {
         this.deps.killProcessGroup(child.pid)
       } catch (error: unknown) {
-        this.deps.warn(`agent-claude-code-driver: killing process group ${child.pid} failed: ${errorChain(error)}`)
+        this.deps.warn(`agent-claude-code-driver: killing process group ${child.pid} failed: ${errText(error)}`)
       }
     })())
   }
@@ -242,7 +262,15 @@ function resetMs(value: number | undefined): number | undefined {
 
 /** Clamp a pause end into a sane future window. */
 function untilOf(deps: SeatAgentDeps, reset: number | undefined): number {
-  return reset !== undefined && reset > deps.now() ? reset : deps.now() + deps.defaultPauseMs
+  const now = deps.now()
+  return Math.min(reset !== undefined && reset > now ? reset : now + deps.defaultPauseMs, now + MAX_PAUSE_MS)
+}
+
+/** The pause still in force according to the last `claude-code/paused` record of a session; 0 when none. */
+function restoredPause(session: Session, deps: SeatAgentDeps): number {
+  const until = (session.events.findLast(event => event.type === 'claude-code/paused')?.data as { until?: unknown } | undefined)?.until
+  const now = deps.now()
+  return typeof until === 'number' && until > now ? Math.min(until, now + MAX_PAUSE_MS) : 0
 }
 
 /** Drives one Session through streaming-input Claude Code queries. */
@@ -260,6 +288,7 @@ export class ClaudeCodeSeatAgent implements Agent {
   private sdkSessionId: string | undefined
   private transcriptKnown = false
   private pausedUntil = 0
+  private bindingPending = false
 
   /**
    * @param loopCtx - registration context carrying `agents`.
@@ -289,6 +318,7 @@ export class ClaudeCodeSeatAgent implements Agent {
       claimed: (message, turn) => { this.dispatch.emit('agent/inbox/claimed', { message, turn }) },
     })
     this.phase = { kind: 'idle', lastTurn: session.events.findLast(event => event.type === 'turn/start')?.data.turn ?? 0 }
+    this.pausedUntil = restoredPause(session, deps)
     this.scope = createScope(loopCtx, this)
     this.ctx = this.scope.ctx.extend({ agent: this })
   }
@@ -405,7 +435,7 @@ export class ClaudeCodeSeatAgent implements Agent {
     try {
       await live.query.interrupt()
     } catch (error: unknown) {
-      this.deps.warn(`agent-claude-code-driver: interrupt failed: ${errorChain(error)}`)
+      this.deps.warn(`agent-claude-code-driver: interrupt failed: ${errText(error)}`)
     }
     await live.teardown()
   }
@@ -440,7 +470,7 @@ export class ClaudeCodeSeatAgent implements Agent {
     try {
       while (await this.turn(phase)) {}
     } catch (error: unknown) {
-      this.deps.warn(`agent "${this.id}": turn failed: ${errorChain(error)}`)
+      this.deps.warn(`agent "${this.id}": turn failed: ${errText(error)}`)
     } finally {
       this.setPhase({ kind: 'idle', lastTurn: phase.turn })
       if (phase.wakeRequested && !this.disposed && this.inbox.hasPending) this.wake()
@@ -477,6 +507,14 @@ export class ClaudeCodeSeatAgent implements Agent {
   private async resolveBinding(): Promise<QueryBinding> {
     const bound = this.session.events.findLast(event => event.type === 'claude-code/session-bound')
     this.sdkSessionId ??= (bound?.data as { sdkSessionId?: string } | undefined)?.sdkSessionId
+    if (this.sdkSessionId !== undefined && !SDK_SESSION_ID.test(this.sdkSessionId)) {
+      const bad = sanitizeFreeText(this.sdkSessionId, 80)
+      this.sdkSessionId = undefined
+      throw new ClaudeCodeDriverError(
+        CLAUDE_CODE_TURN_ERROR_CODES.binding,
+        `agent-claude-code-driver: seat "${this.seat}": the logged claude-code/session-bound id "${bad}" is not a session UUID; the log is damaged, re-seed the seat from a digest of it`,
+      )
+    }
     if (this.sdkSessionId === undefined) {
       const sdkSessionId = randomUUID()
       const written = this.rec('claude-code/session-bound', {
@@ -484,8 +522,11 @@ export class ClaudeCodeSeatAgent implements Agent {
       })
       if (!written) throw new Error(`agent "${this.id}": could not record claude-code/session-bound; refusing to send a prompt without a durable binding`)
       this.sdkSessionId = sdkSessionId
+      this.bindingPending = true
+      await this.ensureBindingDurable()
       return { kind: 'first', sdkSessionId }
     }
+    await this.ensureBindingDurable()
     const sdkSessionId = this.sdkSessionId
     if (this.transcriptKnown) return { kind: 'resume', sdkSessionId }
     const state = await this.deps.transcriptState(sdkSessionId, this.cwd)
@@ -505,6 +546,23 @@ export class ClaudeCodeSeatAgent implements Agent {
     )
   }
 
+  /**
+   * Flush the session so a binding appended in memory reaches durable storage
+   * before any prompt is sent; a failed flush refuses the prompt and is retried next turn.
+   */
+  private async ensureBindingDurable(): Promise<void> {
+    if (!this.bindingPending) return
+    try {
+      await this.deps.flush(this.session)
+    } catch (error: unknown) {
+      throw new ClaudeCodeDriverError(
+        CLAUDE_CODE_TURN_ERROR_CODES.binding,
+        `agent-claude-code-driver: seat "${this.seat}": could not make claude-code/session-bound durable (${errText(error)}); refusing to send a prompt that a crash could orphan`,
+      )
+    }
+    this.bindingPending = false
+  }
+
   private makeSpawn(live: LiveTurn): (options: SpawnOptions) => ManagedClaudeCodeProcess {
     return (spawnOptions) => {
       const child = this.deps.spawnProcess(claudeSpawnSpec(spawnOptions, this.deps.graceMs))
@@ -513,7 +571,7 @@ export class ClaudeCodeSeatAgent implements Agent {
         try {
           this.deps.ledger?.record(this.seat, child.pid)
         } catch (error: unknown) {
-          this.deps.warn(`agent-claude-code-driver: could not record child pid in the ledger: ${errorChain(error)}`)
+          this.deps.warn(`agent-claude-code-driver: could not record child pid in the ledger: ${errText(error)}`)
         }
       }
       void child.done.then(() => undefined, () => undefined).then(() => {
@@ -522,7 +580,7 @@ export class ClaudeCodeSeatAgent implements Agent {
         try {
           this.deps.ledger?.clear(this.seat, child.pid)
         } catch (error: unknown) {
-          this.deps.warn(`agent-claude-code-driver: could not clear child pid in the ledger: ${errorChain(error)}`)
+          this.deps.warn(`agent-claude-code-driver: could not clear child pid in the ledger: ${errText(error)}`)
         }
       })
       return new ManagedClaudeCodeProcess(child)
@@ -544,7 +602,14 @@ export class ClaudeCodeSeatAgent implements Agent {
   private observe(phase: RunningPhase, live: LiveTurn, message: SDKMessage): void {
     if (message.type === 'rate_limit_event') {
       const info = message.rate_limit_info
-      if (info.status !== 'rejected') return
+      // A rejection is a refusal only when it is unambiguous. SDK 0.3.263 reports
+      // `isUsingOverage` (the request is being served on overage credit) and
+      // `overageStatus` (allowed | allowed_warning | rejected) next to the window
+      // that was rejected: a rejected five_hour/seven_day window with overage still
+      // allowed (or in use) lets the CLI carry on, so it is not a pause. A rejected
+      // `overage` window itself, or a rejection with no overage allowance, is.
+      if (info.status !== 'rejected' || info.isUsingOverage === true) return
+      if (info.rateLimitType !== 'overage' && (info.overageStatus === 'allowed' || info.overageStatus === 'allowed_warning')) return
       const exhausted = info.rateLimitType === 'overage' || info.errorCode === 'credits_required'
       this.notePause(live, { reason: exhausted ? 'usage-exhausted' : 'rate-limit', until: resetMs(info.resetsAt) })
       return
@@ -624,7 +689,7 @@ export class ClaudeCodeSeatAgent implements Agent {
         kind: 'error',
         error: {
           code: failure instanceof ClaudeCodeDriverError ? failure.code : 'UNKNOWN',
-          message: errorChain(failure),
+          message: errText(failure),
         },
       }
     }
@@ -633,7 +698,7 @@ export class ClaudeCodeSeatAgent implements Agent {
       return { kind: 'error', error: { code: CLAUDE_CODE_TURN_ERROR_CODES.noResult, message: 'Claude Code ended without a result message' } }
     }
     if (result.is_error || result.subtype !== 'success') {
-      const detail = result.subtype === 'success' ? 'success result marked as an error' : result.errors.join('; ') || result.subtype
+      const detail = result.subtype === 'success' ? 'success result marked as an error' : sanitizeFreeText(result.errors.join('; '), MAX_ERROR_TEXT_CHARS) || result.subtype
       return { kind: 'error', error: { code: `CLAUDE_CODE_${result.subtype.toUpperCase()}`, message: `Claude Code failed: ${detail}` } }
     }
     return { kind: 'completed' }
@@ -655,6 +720,7 @@ export class ClaudeCodeSeatAgent implements Agent {
     try {
       // Preflight before anything is claimed, so a refusal leaves the mail queued.
       assertCleanHostEnv(this.deps.hostEnv())
+      this.deps.verifyBinary?.(this.seat)
       if (this.pausedUntilMs > 0) {
         this.notePauseRefusal()
       }
@@ -679,6 +745,7 @@ export class ClaudeCodeSeatAgent implements Agent {
         abortController: phase.abort,
         spawn: this.makeSpawn(live),
         extension: this.deps.extension,
+        warn: this.deps.warn,
       })
       for (const message of claimed) this.pushMessage(live, message)
       live.query = this.deps.query({ prompt: live.stream, options })

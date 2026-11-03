@@ -4,7 +4,7 @@
  * store and agent registry. The real binary is never spawned.
  */
 
-import { mkdtempSync } from 'node:fs'
+import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -32,12 +32,12 @@ export const CLAUDE_PATH = '/opt/claude/versions/2.1.317/claude'
 export function seatRow(overrides: Partial<ClaudeCodeSeatRow['claude_code']> = {}): ClaudeCodeSeatRow {
   return {
     driver: 'claude-code',
-    claude_code: { model: 'sonnet', role: 'coder', max_turns: 20, claude_path: CLAUDE_PATH, ...overrides },
+    claude_code: { model: 'sonnet', role: 'lead', max_turns: 20, claude_path: CLAUDE_PATH, ...overrides },
   }
 }
 
 export function seatConfig(overrides: Partial<ClaudeCodeSeatRow['claude_code']> = {}): ClaudeCodeSeatConfig {
-  return parseSeatRow(seatRow(overrides), 'tester')
+  return parseSeatRow(seatRow(overrides), 'tester', { policyExtension: true })
 }
 
 export function userMessage(text: string): UserMessage {
@@ -184,7 +184,15 @@ export interface Harness {
   readonly ledger: ProcessLedger
   readonly ledgerFile: string
   readonly gate: SeatGate
-  readonly state: { transcript: TranscriptState; hostEnv: NodeJS.ProcessEnv; failNextQuery: Error | undefined; now: number }
+  readonly state: {
+    transcript: TranscriptState
+    hostEnv: NodeJS.ProcessEnv
+    failNextQuery: Error | undefined
+    now: number
+    flushError: Error | undefined
+    /** Order in which the session flush and the SDK query ran. */
+    calls: string[]
+  }
   readonly deps: SeatAgentDeps
   session(id?: string): Session
   agent(options?: { session?: Session; seat?: string; config?: ClaudeCodeSeatConfig }): ClaudeCodeSeatAgent
@@ -192,11 +200,43 @@ export interface Harness {
   query(index: number): Promise<FakeQuery>
 }
 
-export function ledgerOps(table: Map<number, string>, killed: number[]): LedgerProcessOps {
+export function ledgerOps(
+  table: Map<number, string>,
+  killed: number[],
+  extra: Partial<LedgerProcessOps> = {},
+): LedgerProcessOps {
   return {
     readStartTime: pid => table.get(pid),
     killGroup: (pid) => { killed.push(pid) },
+    groupAlive: () => false,
+    bootId: () => 'boot-1',
+    hostPid: 777,
+    ...extra,
   }
+}
+
+const tempDirs: string[] = []
+
+/** A fresh private temporary directory, removed by {@link cleanTempDirs}. */
+export function tempDir(prefix = 'cc-driver-'): string {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)))
+  tempDirs.push(dir)
+  return dir
+}
+
+/** Remove every directory {@link tempDir} made. */
+export function cleanTempDirs(): void {
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+}
+
+/** A private executable file standing in for the claude binary; returns its path. */
+export function fakeClaudeBinary(content = '#!/bin/sh\nexit 0\n'): string {
+  const dir = tempDir('cc-bin-')
+  chmodSync(dir, 0o700)
+  const file = join(dir, 'claude')
+  writeFileSync(file, content, { mode: 0o700 })
+  chmodSync(file, 0o700)
+  return file
 }
 
 export async function harness(options: { childPid?: number; childExitsOnWait?: boolean; childWaitFails?: boolean } = {}): Promise<Harness> {
@@ -207,13 +247,14 @@ export async function harness(options: { childPid?: number; childExitsOnWait?: b
   const children: FakeChild[] = []
   const killed: number[] = []
   const warnings: string[] = []
-  const state: Harness['state'] = { transcript: 'ok', hostEnv: {}, failNextQuery: undefined, now: 1_800_000_000_000 }
-  const ledgerFile = join(mkdtempSync(join(tmpdir(), 'cc-driver-')), 'pids.json')
-  const ledger = new ProcessLedger(ledgerFile, ledgerOps(new Map([[options.childPid ?? 4242, 'tick-1']]), []))
+  const state: Harness['state'] = { transcript: 'ok', hostEnv: {}, failNextQuery: undefined, now: 1_800_000_000_000, flushError: undefined, calls: [] }
+  const ledgerFile = join(tempDir(), 'pids.json')
+  const ledger = new ProcessLedger(ledgerFile, ledgerOps(new Map([[options.childPid ?? 4242, 'tick-1'], [777, 'host-tick']]), []))
   const gate = new SeatGate()
   const waiters: Array<{ index: number; resolve: (query: FakeQuery) => void }> = []
   const deps: SeatAgentDeps = {
     query: ({ prompt, options: queryOptions }) => {
+      state.calls.push('query')
       if (state.failNextQuery !== undefined) {
         const error = state.failNextQuery
         state.failNextQuery = undefined
@@ -238,6 +279,10 @@ export async function harness(options: { childPid?: number; childExitsOnWait?: b
     graceMs: 10,
     defaultPauseMs: 60_000,
     ledger,
+    flush: () => {
+      state.calls.push('flush')
+      return state.flushError === undefined ? Promise.resolve() : Promise.reject(state.flushError)
+    },
     warn: (message) => { warnings.push(message) },
   }
   let counter = 0

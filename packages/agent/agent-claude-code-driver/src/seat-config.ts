@@ -25,7 +25,7 @@ export const CLAUDE_CODE_EFFORTS: readonly ClaudeCodeEffort[] = ['low', 'medium'
 
 /** The `claude_code` block of a seat registry row, as written in config. */
 export interface ClaudeCodeSeatBlock {
-  /** Model alias (`opus`, `sonnet`, `haiku`) or full id. */
+  /** Model alias (`opus`, `sonnet`, `haiku`) or a full `claude-(opus|sonnet|haiku)-<version>` id; anything else is refused. */
   model: string
   /** Optional reasoning effort. */
   effort?: ClaudeCodeEffort
@@ -37,6 +37,8 @@ export interface ClaudeCodeSeatBlock {
   claude_path: string
   /** Per-seat query cap per subscription window (enforced by a later slice). */
   max_calls_per_window?: number
+  /** Optional SHA-256 (hex) of the pinned binary; an explicit value re-pins the recorded first-seen hash. */
+  claude_path_sha256?: string
 }
 
 /** One seat row as the registry writes it. */
@@ -57,6 +59,7 @@ export const ClaudeCodeSeatBlock: z<ClaudeCodeSeatBlock> = z.object({
   max_turns: z.number().step(1).min(1).required(),
   claude_path: z.string().required(),
   max_calls_per_window: z.number().step(1).min(1),
+  claude_path_sha256: z.string(),
 })
 
 /** Schema of {@link ClaudeCodeSeatRow}. */
@@ -74,28 +77,69 @@ export interface ClaudeCodeSeatConfig {
   readonly maxTurns: number
   readonly claudePath: string
   readonly maxCallsPerWindow?: number
+  /** Lower-case hex SHA-256 pin of the binary, when the row carries one. */
+  readonly claudePathSha256?: string
+  /** Whether the row opted into fable models (founder only). */
+  readonly fableOk: boolean
 }
 
 /**
- * Whether a model id names a fable model after Unicode compatibility folding.
- * Format characters (zero-width joiners and the like) are dropped first so a
- * hidden character cannot split the word.
+ * Fold a model id for comparison: Unicode compatibility folding (so
+ * full-width letters fold), format characters (zero-width joiners and the
+ * like) dropped so a hidden character cannot split a word, then lower case.
+ * @param model - the configured model id.
+ * @returns the folded id.
+ */
+export function foldModelId(model: string): string {
+  return model.normalize('NFKC').replace(/\p{Cf}/gu, '').toLowerCase()
+}
+
+/**
+ * Whether a model id names a fable model after folding.
  * @param model - the configured model id.
  * @returns true when the folded id contains `fable`.
  */
 export function isFableModel(model: string): boolean {
-  return model.normalize('NFKC').replace(/\p{Cf}/gu, '').toLowerCase().includes('fable')
+  return foldModelId(model).includes('fable')
+}
+
+/** The accepted model spellings: the three aliases, and full ids of those families. */
+const ALLOWED_MODEL = /^(?:opus|sonnet|haiku|claude-(?:opus|sonnet|haiku)-[0-9][0-9-]*)$/
+
+/**
+ * Whether a model may run on a seat: an allowlist, not a denylist, so an alias
+ * the CLI would resolve to something else (`best`, `default`, `opusplan`,
+ * `opus[1m]`) is refused. A fable id passes only for a `fable_ok` row.
+ * @param model - the folded model id (see {@link foldModelId}).
+ * @param fableOk - whether the row opted into fable models.
+ * @returns true when the id may be used.
+ */
+export function isAllowedModel(model: string, fableOk: boolean): boolean {
+  if (model.includes('fable')) return fableOk
+  return ALLOWED_MODEL.test(model)
+}
+
+/** Options of {@link parseSeatRow}. */
+export interface ParseSeatRowOptions {
+  /**
+   * Whether a permission-policy extension is registered (slice S5).
+   * Without one a `coder` row is refused: its edit tools would run with no
+   * generated deny entries.
+   */
+  readonly policyExtension?: boolean
 }
 
 /**
  * Validate one seat row and return its resolved configuration.
  * @param row - the registry row for the seat.
  * @param seat - seat label used in error messages.
+ * @param options - whether a policy extension is registered.
  * @returns the validated configuration.
  * @throws when the driver is wrong, a field is malformed, the binary path is
- *   not absolute, or the model is a fable id without `fable_ok: true`.
+ *   not absolute, the model is not on the allowlist (or is a fable id without
+ *   `fable_ok: true`), or the role is `coder` and no policy extension exists.
  */
-export function parseSeatRow(row: ClaudeCodeSeatRow, seat: string): ClaudeCodeSeatConfig {
+export function parseSeatRow(row: ClaudeCodeSeatRow, seat: string, options: ParseSeatRowOptions = {}): ClaudeCodeSeatConfig {
   const fail = (message: string): never => {
     throw new Error(`agent-claude-code-driver: seat "${seat}": ${message}`)
   }
@@ -104,11 +148,19 @@ export function parseSeatRow(row: ClaudeCodeSeatRow, seat: string): ClaudeCodeSe
   const block = row.claude_code as ClaudeCodeSeatBlock | null | undefined
   if (block === undefined || block === null) return fail('claude_code block is required')
   if (typeof block.model !== 'string' || block.model.trim() === '') fail('claude_code.model must be a non-empty string')
-  if (isFableModel(block.model) && row.fable_ok !== true) {
+  const model = foldModelId(block.model)
+  const fableOk = row.fable_ok === true
+  if (isFableModel(model) && !fableOk) {
     fail(`model "${block.model}" is a fable model; fable seats need an explicit fable_ok: true row (founder only)`)
+  }
+  if (!isAllowedModel(model, fableOk)) {
+    fail(`model "${block.model}" is not allowed: use opus, sonnet, haiku, or a full claude-(opus|sonnet|haiku)-<version> id (aliases such as best, default, opusplan or opus[1m] resolve elsewhere)`)
   }
   if (!CLAUDE_CODE_ROLES.includes(block.role)) {
     fail(`claude_code.role must be one of ${CLAUDE_CODE_ROLES.join(', ')}`)
+  }
+  if (block.role === 'coder' && options.policyExtension !== true) {
+    fail('role "coder" is refused until the permission-policy extension (slice S5) is registered; use "lead" or "mail-only"')
   }
   if (block.effort !== undefined && !CLAUDE_CODE_EFFORTS.includes(block.effort)) {
     fail(`claude_code.effort must be one of ${CLAUDE_CODE_EFFORTS.join(', ')}`)
@@ -125,13 +177,18 @@ export function parseSeatRow(row: ClaudeCodeSeatRow, seat: string): ClaudeCodeSe
   ) {
     fail('claude_code.max_calls_per_window must be a positive integer')
   }
+  if (block.claude_path_sha256 !== undefined && !/^[0-9a-fA-F]{64}$/.test(block.claude_path_sha256)) {
+    fail('claude_code.claude_path_sha256 must be 64 hexadecimal characters')
+  }
   return {
-    model: block.model,
+    model,
     ...block.effort === undefined ? {} : { effort: block.effort },
     role: block.role,
     maxTurns: block.max_turns,
     claudePath: block.claude_path,
     ...block.max_calls_per_window === undefined ? {} : { maxCallsPerWindow: block.max_calls_per_window },
+    ...block.claude_path_sha256 === undefined ? {} : { claudePathSha256: block.claude_path_sha256.toLowerCase() },
+    fableOk,
   }
 }
 

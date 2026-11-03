@@ -5,14 +5,13 @@
  */
 
 import { spawn as nodeSpawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { appendFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { FakeQuery, fakeChild, resultMessage, seatRow, tick, userMessage } from './fakes.ts'
+import { cleanTempDirs, FakeQuery, fakeChild, fakeClaudeBinary, resultMessage, seatRow, tempDir, tick, userMessage } from './fakes.ts'
 
 const sdk = vi.hoisted(() => ({
   queries: [] as unknown[],
@@ -40,6 +39,9 @@ vi.mock('@anthropic-ai/claude-agent-sdk', async (importOriginal) => {
 sdk.make = (prompt, options) => new FakeQuery(prompt, options)
 
 const Driver = await import('../src/index.ts')
+const { ProcessLedger, readBootId } = await import('../src/ledger.ts')
+const { ensurePrivateDir } = await import('../src/state.ts')
+const { sha256File } = await import('../src/attest.ts')
 
 class FakeSubprocess extends Service {
   readonly children: SubprocessHandle[] = []
@@ -84,38 +86,65 @@ describe('sdkTranscriptState', () => {
 })
 
 describe('the plugin running a turn', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    cleanTempDirs()
+  })
+
+  /** A harness home with a state directory, an attested fake binary, and a real working directory. */
+  function setup() {
+    const dshHome = tempDir('cc-home-')
+    const stateDir = join(dshHome, 'claude-code')
+    return { dshHome, stateDir, binary: fakeClaudeBinary(), cwd: tempDir('cc-work-') }
+  }
+
   it('reaps a recorded orphan and runs a turn through the real wiring', async () => {
     const ctx = await bootedContext()
-    const stateDir = mkdtempSync(join(tmpdir(), 'cc-driver-plugin-'))
+    const { dshHome, stateDir, binary, cwd } = setup()
+    ensurePrivateDir(stateDir)
     // A real, live process in its own group with a matching start time is a genuine orphan to reap.
     const orphan = nodeSpawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' })
-    const gone = new Promise<void>((resolve) => { orphan.once('exit', () => { resolve() }) })
-    const { readProcessStartTime } = await import('../src/ledger.ts')
-    await tick(50)
-    const startTime = readProcessStartTime(orphan.pid as number)
-    expect(startTime).toBeDefined()
-    writeFileSync(join(stateDir, 'claude-code-seat-pids.json'), JSON.stringify([{ seat: 'orphan', pid: orphan.pid, startTime }]))
-    const fiber = await ctx.plugin(Driver, Driver.Config({ stateDir, seats: { s1: seatRow() } }))
-    await gone
+    try {
+      const gone = new Promise<void>((resolve) => { orphan.once('exit', () => { resolve() }) })
+      const { readProcessStartTime } = await import('../src/ledger.ts')
+      await tick(50)
+      const startTime = readProcessStartTime(orphan.pid as number)
+      expect(startTime).toBeDefined()
+      writeFileSync(
+        join(stateDir, 'claude-code-seat-pids.json'),
+        JSON.stringify([{ seat: 'orphan', pid: orphan.pid, startTime, hostPid: 1, hostStartTime: '', bootId: readBootId() }]),
+        { mode: 0o600 },
+      )
+      const warn = vi.spyOn(Object.getPrototypeOf(ctx.logger) as { warn: (...args: unknown[]) => void }, 'warn').mockImplementation(() => undefined)
+      const fiber = await ctx.plugin(Driver, Driver.Config({ stateDir: 'claude-code', dshHome, seats: { s1: seatRow({ claude_path: binary }) } }))
+      await gone
+      expect(warn.mock.calls.flat().join('\n')).toContain('killed orphaned Claude Code children of seats: orphan')
 
-    const handle = await ctx.agents.create({ sessionId: SessionId('s1'), driver: 'claude-code', meta: { cwd: '/w' } })
-    handle.agent.followup(userMessage('hello'))
-    const query = await nthQuery(0)
-    expect(query.options.cwd).toBe('/w')
-    query.spawn()
-    query.emit(resultMessage({ user_message_uuids: query.uuids() }))
-    await handle.agent.whenIdle()
-    expect(handle.agent.session.events.some(event => event.type === 'claude-code/turn-completed')).toBe(true)
-    await handle.dispose()
-    await fiber.dispose()
+      const handle = await ctx.agents.create({ sessionId: SessionId('s1'), driver: 'claude-code', meta: { cwd } })
+      handle.agent.followup(userMessage('hello'))
+      const query = await nthQuery(0)
+      expect(query.options.cwd).toBe(cwd)
+      query.spawn()
+      query.emit(resultMessage({ user_message_uuids: query.uuids() }))
+      await handle.agent.whenIdle()
+      expect(handle.agent.session.events.some(event => event.type === 'claude-code/turn-completed')).toBe(true)
+      await handle.dispose()
+      await fiber.dispose()
+    } finally {
+      try {
+        process.kill(-(orphan.pid as number), 'SIGKILL')
+      } catch {
+        // already reaped
+      }
+    }
   })
 
   it('reports a pid-ledger write failure through the logger and keeps the turn alive', async () => {
     const ctx = await bootedContext()
-    const stateDir = mkdtempSync(join(tmpdir(), 'cc-driver-plugin-'))
-    const fiber = await ctx.plugin(Driver, Driver.Config({ stateDir, seats: { s2: seatRow() } }))
+    const { dshHome, stateDir, binary, cwd } = setup()
+    const fiber = await ctx.plugin(Driver, Driver.Config({ stateDir: 'claude-code', dshHome, seats: { s2: seatRow({ claude_path: binary }) } }))
     const warn = vi.spyOn(Object.getPrototypeOf(ctx.logger) as { warn: (...args: unknown[]) => void }, 'warn').mockImplementation(() => undefined)
-    const handle = await ctx.agents.create({ sessionId: SessionId('s2'), driver: 'claude-code', meta: { cwd: '/w' } })
+    const handle = await ctx.agents.create({ sessionId: SessionId('s2'), driver: 'claude-code', meta: { cwd } })
     const before = sdk.queries.length
     handle.agent.followup(userMessage('hello'))
     const query = await nthQuery(before)
@@ -126,26 +155,90 @@ describe('the plugin running a turn', () => {
     query.emit(resultMessage({ user_message_uuids: query.uuids() }))
     await handle.agent.whenIdle()
     expect(warn.mock.calls.flat().join('\n')).toContain('could not record child pid in the ledger')
-    warn.mockRestore()
     await handle.dispose()
     await fiber.dispose()
   })
 
   it('refuses resume without persistence and names the configured seats when a seat is unknown', async () => {
     const ctx = await bootedContext()
-    const stateDir = mkdtempSync(join(tmpdir(), 'cc-driver-plugin-'))
-    const fiber = await ctx.plugin(Driver, Driver.Config({ stateDir, seats: {} }))
+    const { dshHome, cwd } = setup()
+    const fiber = await ctx.plugin(Driver, Driver.Config({ stateDir: 'claude-code', dshHome, seats: {} }))
     await expect(ctx.agents.resume({ resumeSessionId: SessionId('r'), driver: 'claude-code' })).rejects.toThrow(/persistence is not configured/)
-    await expect(ctx.agents.create({ sessionId: SessionId('nobody'), driver: 'claude-code', meta: { cwd: '/w' } }))
+    await expect(ctx.agents.create({ sessionId: SessionId('nobody'), driver: 'claude-code', meta: { cwd } }))
       .rejects.toThrow(/\(configured seats: none\)/)
     await fiber.dispose()
   })
 
   it('applies the built-in timing defaults when the config object omits them', async () => {
     const ctx = await bootedContext()
-    const stateDir = mkdtempSync(join(tmpdir(), 'cc-driver-plugin-'))
-    const fiber = await ctx.plugin(Object.assign((inner: Context) => { Driver.apply(inner, { stateDir, seats: {} }) }, { inject: ['agents', 'sessions', 'subprocess'] }))
+    const { dshHome } = setup()
+    const fiber = await ctx.plugin(Object.assign((inner: Context) => { Driver.apply(inner, { stateDir: 'claude-code', dshHome, seats: {} }) }, { inject: ['agents', 'sessions', 'subprocess'] }))
     expect(ctx.agents.listDrivers()).toEqual(['claude-code'])
+    await fiber.dispose()
+  })
+
+  it('refuses a coder row at start because no permission-policy extension exists yet', async () => {
+    const ctx = await bootedContext()
+    const { dshHome, binary } = setup()
+    await expect(ctx.plugin(Driver, Driver.Config({ stateDir: 'claude-code', dshHome, seats: { c: seatRow({ role: 'coder', claude_path: binary }) } })))
+      .rejects.toThrow(/coder/)
+  })
+
+  it('refuses a state directory outside the harness home and an unattestable binary', async () => {
+    const ctx = await bootedContext()
+    const { dshHome, binary } = setup()
+    await expect(ctx.plugin(Driver, Driver.Config({ stateDir: '/tmp/elsewhere', dshHome, seats: {} })))
+      .rejects.toThrow(/must name a subdirectory of the harness home/)
+    await expect(ctx.plugin(Driver, Driver.Config({ stateDir: 'claude-code', dshHome, seats: { x: seatRow({ claude_path: `${binary}.sh` }) } })))
+      .rejects.toThrow(/refused/)
+  })
+
+  it('attests a binary shared by several seats once and refuses it when it changes, until the new hash is pinned', async () => {
+    const { dshHome, binary } = setup()
+    const seats = { a: seatRow({ claude_path: binary }), b: seatRow({ claude_path: binary }) }
+    const first = await bootedContext()
+    const fiber = await first.plugin(Driver, Driver.Config({ stateDir: 'claude-code', dshHome, seats }))
+    await fiber.dispose()
+    appendFileSync(binary, '# upgraded\n')
+    const second = await bootedContext()
+    await expect(second.plugin(Driver, Driver.Config({ stateDir: 'claude-code', dshHome, seats })))
+      .rejects.toThrow(/the claude binary changed .*claude_path_sha256/)
+    const pin = sha256File(binary)
+    const pinnedRow = seatRow({ claude_path: binary, claude_path_sha256: pin })
+    const pinned = { a: pinnedRow, b: pinnedRow }
+    const third = await bootedContext()
+    const repinned = await third.plugin(Driver, Driver.Config({ stateDir: 'claude-code', dshHome, seats: pinned }))
+    await repinned.dispose()
+    const fourth = await bootedContext()
+    const accepted = await fourth.plugin(Driver, Driver.Config({ stateDir: 'claude-code', dshHome, seats }))
+    await accepted.dispose()
+  })
+
+  it('warns about survivors, failed kills and entries of another live host', async () => {
+    const ctx = await bootedContext()
+    const { dshHome } = setup()
+    vi.spyOn(ProcessLedger.prototype, 'reapStale').mockReturnValue({ reaped: [], stale: [], skipped: ['theirs'], survivors: ['left'], failed: ['denied'] })
+    const warn = vi.spyOn(Object.getPrototypeOf(ctx.logger) as { warn: (...args: unknown[]) => void }, 'warn').mockImplementation(() => undefined)
+    const fiber = await ctx.plugin(Driver, Driver.Config({ stateDir: 'claude-code', dshHome, seats: {} }))
+    const text = warn.mock.calls.flat().join('\n')
+    expect(text).toContain('seats left left process-group members behind')
+    expect(text).toContain('could not kill the orphaned children of seats denied')
+    expect(text).toContain('seats theirs belong to another live host')
+    await fiber.dispose()
+  })
+
+  it('refuses a turn when the attested binary changed on disk after start', async () => {
+    const ctx = await bootedContext()
+    const { dshHome, binary, cwd } = setup()
+    const fiber = await ctx.plugin(Driver, Driver.Config({ stateDir: 'claude-code', dshHome, seats: { sw: seatRow({ claude_path: binary }) } }))
+    const handle = await ctx.agents.create({ sessionId: SessionId('sw'), driver: 'claude-code', meta: { cwd } })
+    const before = sdk.queries.length
+    appendFileSync(binary, '# swapped\n')
+    handle.agent.followup(userMessage('hello'))
+    await handle.agent.whenIdle()
+    expect(sdk.queries.length).toBe(before)
+    expect(JSON.stringify(handle.agent.session.events)).toContain('changed since this host attested it')
+    await handle.dispose()
     await fiber.dispose()
   })
 })

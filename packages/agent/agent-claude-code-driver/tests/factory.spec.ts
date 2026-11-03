@@ -1,7 +1,6 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { DEFAULT_AGENT_DRIVER } from '@deepseek-ai/dsh-agent'
 import type { AgentHandle } from '@deepseek-ai/dsh-agent'
@@ -9,7 +8,7 @@ import { SessionId, SessionPreparation } from '@deepseek-ai/dsh-session'
 import * as Driver from '../src/index.ts'
 import { ClaudeCodeSeatFactory } from '../src/factory.ts'
 import type { ResolvedSeat } from '../src/factory.ts'
-import { harness, resultMessage, seatConfig, seatRow, tick, userMessage } from './fakes.ts'
+import { cleanTempDirs, fakeClaudeBinary, harness, resultMessage, seatConfig, seatRow, tempDir, tick, userMessage } from './fakes.ts'
 
 class FakeSubprocess extends Service {
   constructor(ctx: Context) {
@@ -34,6 +33,7 @@ describe('ClaudeCodeSeatFactory through the keyed registry', () => {
       deps: h.deps,
       persistence: () => undefined,
       gate: h.gate,
+      realpath: path => path,
     })
     h.ctx.agents.setFactory(factory, 'claude-code')
     return { h, factory }
@@ -159,6 +159,7 @@ describe('ClaudeCodeSeatFactory through the keyed registry', () => {
       deps: h.deps,
       ...prepare(header)(),
       gate: h.gate,
+      realpath: path => path,
     })
     const resumed = await make({ cwd: '/work/seat' }).resume(h.ctx, { resumeSessionId: SessionId('r2') })
     expect(resumed.agent.session.header.cwd).toBe('/work/seat')
@@ -185,15 +186,19 @@ describe('plugin entry', () => {
     await ctx.plugin(SessionStore)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(FakeSubprocess)
-    const stateDir = mkdtempSync(join(tmpdir(), 'cc-driver-state-'))
-    const fiber = await ctx.plugin(Driver, Driver.Config({ stateDir, seats: { 'seat-a': seatRow({ model: 'haiku' }) } }))
+    const dshHome = tempDir('cc-home-')
+    const cwd = tempDir()
+    const fiber = await ctx.plugin(Driver, Driver.Config({
+      stateDir: 'claude-code', dshHome, seats: { 'seat-a': seatRow({ model: 'haiku', claude_path: fakeClaudeBinary() }) },
+    }))
     expect(ctx.agents.listDrivers()).toEqual(['claude-code'])
-    await expect(ctx.agents.create({ sessionId: SessionId('x'), driver: 'claude-code', meta: { cwd: '/w', agentPreset: 'nobody' } }))
+    await expect(ctx.agents.create({ sessionId: SessionId('x'), driver: 'claude-code', meta: { cwd, agentPreset: 'nobody' } }))
       .rejects.toThrow(/no claude-code seat row for "nobody" \(configured seats: seat-a\)/)
-    const handle = await ctx.agents.create({ sessionId: SessionId('y'), driver: 'claude-code', meta: { cwd: '/w', agentPreset: 'seat-a' } })
+    const handle = await ctx.agents.create({ sessionId: SessionId('y'), driver: 'claude-code', meta: { cwd, agentPreset: 'seat-a' } })
     expect(handle.agent.options.model).toBe('haiku')
     await fiber.dispose()
     expect(ctx.agents.listDrivers()).toEqual([])
+    cleanTempDirs()
   })
 
   it('rejects an invalid or fable seat row at start, and reaps a stale recorded child', async () => {
@@ -203,17 +208,68 @@ describe('plugin entry', () => {
     await ctx.plugin(SessionStore)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(FakeSubprocess)
-    const stateDir = mkdtempSync(join(tmpdir(), 'cc-driver-state-'))
-    await expect(ctx.plugin(Driver, Driver.Config({ stateDir, seats: { f: seatRow({ model: 'claude-fable-1' }) } })))
+    const dshHome = tempDir('cc-home-')
+    const stateDir = join(dshHome, 'claude-code')
+    await expect(ctx.plugin(Driver, Driver.Config({ stateDir, dshHome, seats: { f: seatRow({ model: 'claude-fable-1' }) } })))
       .rejects.toThrow(/fable model/)
     // A recorded child with a start time that cannot match this host's pid is stale, never killed.
-    writeFileSync(join(stateDir, 'claude-code-seat-pids.json'), JSON.stringify([{ seat: 'old', pid: 2 ** 30, startTime: '1' }]))
-    const fiber = await ctx.plugin(Driver, Driver.Config({ stateDir, seats: {} }))
+    writeFileSync(
+      join(stateDir, 'claude-code-seat-pids.json'),
+      JSON.stringify([{ seat: 'old', pid: 2 ** 30, startTime: '1', hostPid: 1, hostStartTime: '', bootId: 'another-boot' }]),
+      { mode: 0o600 },
+    )
+    const fiber = await ctx.plugin(Driver, Driver.Config({ stateDir, dshHome, seats: {} }))
     expect(readFileSync(join(stateDir, 'claude-code-seat-pids.json'), 'utf8').trim()).toBe('[]')
     await fiber.dispose()
+    cleanTempDirs()
   })
 
   it('maps SDK transcript lookups to ok, missing, and unreadable', async () => {
     expect(await Driver.sdkTranscriptState('00000000-0000-4000-8000-000000000000', '/nonexistent/dir')).toBe('missing')
+  })
+})
+
+describe('canonical working directory', () => {
+  afterEach(() => { cleanTempDirs() })
+
+  async function real(header: { cwd?: string } = {}) {
+    const h = await harness()
+    const factory = new ClaudeCodeSeatFactory({
+      ctx: h.ctx,
+      resolveSeat: () => ({ seat: 'seat-a', config: seatConfig() }),
+      deps: h.deps,
+      persistence: () => ({
+        prepare: (id: SessionId) => Promise.resolve(SessionPreparation.create(h.ctx.sessions.prepare(id, { meta: header }))),
+      }) as never,
+      gate: h.gate,
+    })
+    h.ctx.agents.setFactory(factory, 'claude-code')
+    return { h, factory }
+  }
+
+  it('accepts a real directory and refuses a symlinked one, naming the realpath', async () => {
+    const dir = tempDir()
+    const link = join(tempDir(), 'link')
+    symlinkSync(dir, link)
+    const { h } = await real()
+    const ok = await h.ctx.agents.create({ sessionId: SessionId('c1'), driver: 'claude-code', meta: { cwd: dir } })
+    await ok.dispose()
+    await expect(h.ctx.agents.create({ sessionId: SessionId('c2'), driver: 'claude-code', meta: { cwd: link } }))
+      .rejects.toThrow(new RegExp(`cwd ${link} is not canonical; pass its realpath ${dir}`))
+    expect(h.ctx.agents.get(SessionId('c2'))).toBeUndefined()
+  })
+
+  it('refuses a directory that does not exist', async () => {
+    const { h } = await real()
+    await expect(h.ctx.agents.create({ sessionId: SessionId('c3'), driver: 'claude-code', meta: { cwd: join(tempDir(), 'gone') } }))
+      .rejects.toThrow(/cannot be resolved \(ENOENT\)/)
+  })
+
+  it('applies the same check on resume', async () => {
+    const dir = tempDir()
+    const link = join(tempDir(), 'link')
+    symlinkSync(dir, link)
+    const { h, factory } = await real({ cwd: link })
+    await expect(factory.resume(h.ctx, { resumeSessionId: SessionId('c4') })).rejects.toThrow(/is not canonical/)
   })
 })

@@ -6,6 +6,7 @@
  * @module @deepseek-ai/dsh-agent-claude-code-driver/factory
  */
 
+import { realpathSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { emitAgentEvent } from '@deepseek-ai/dsh-agent'
@@ -41,6 +42,8 @@ export interface FactoryInputs {
   readonly deps: SeatAgentDeps
   /** Persistence lookup for resume; absent means resume is unavailable. */
   readonly persistence: () => SessionPersistence | undefined
+  /** Resolve symlinks of a working directory; defaults to the filesystem's `realpath`. Injectable for tests. */
+  readonly realpath?: ((path: string) => string) | undefined
   /** Process-wide single-live-query gate; a private one is made when omitted. */
   readonly gate?: SeatGate | undefined
 }
@@ -82,6 +85,7 @@ export class ClaudeCodeSeatFactory implements AgentFactory {
     if (meta === undefined || cwd === undefined || !isAbsolute(cwd)) {
       throw new Error(`agent-claude-code-driver: seat "${seat}" needs an absolute meta.cwd to start`)
     }
+    this.assertCanonicalCwd(seat, cwd)
     this.assertSeatFree(seat)
     using preparation = SessionPreparation.create(this.inputs.ctx.sessions.prepare(options.sessionId, {
       ...options.seed === undefined ? {} : { seed: options.seed },
@@ -103,8 +107,26 @@ export class ClaudeCodeSeatFactory implements AgentFactory {
     if (header.cwd === undefined || !isAbsolute(header.cwd)) {
       throw new Error(`agent-claude-code-driver: persisted session "${id}" has no absolute cwd; seat "${seat}" cannot resume`)
     }
+    this.assertCanonicalCwd(seat, header.cwd)
     this.assertSeatFree(seat)
     return await this.publish(ownerCtx, preparation.session, seat, config, header.cwd, options.setup, options.signal, 'resume')
+  }
+
+  /**
+   * The working directory must already be its own realpath: a symlinked cwd
+   * would let the transcript lookup and the future permission entries disagree
+   * about where the seat works. (Row-sourced cwd belongs to the registry slice, S3.)
+   */
+  private assertCanonicalCwd(seat: string, cwd: string): void {
+    let real: string
+    try {
+      real = (this.inputs.realpath ?? realpathSync.native)(cwd)
+    } catch (error: unknown) {
+      throw new Error(`agent-claude-code-driver: seat "${seat}" cwd ${cwd} cannot be resolved (${String((error as NodeJS.ErrnoException).code)})`, { cause: error })
+    }
+    if (real !== cwd) {
+      throw new Error(`agent-claude-code-driver: seat "${seat}" cwd ${cwd} is not canonical; pass its realpath ${real}`)
+    }
   }
 
   private assertAccepting(): void {

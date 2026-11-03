@@ -8,13 +8,41 @@
 
 import { scrubbedParentEnv } from '@deepseek-ai/dsh-subprocess'
 
-/** Variables that would redirect the child off the operator's subscription login. */
+/**
+ * Variables that would redirect the child off the operator's subscription
+ * login or change which model it runs. Names confirmed in the SDK 0.3.263
+ * bundle (`sdk.mjs`): the credential overrides, `ANTHROPIC_MODEL` and
+ * `ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_CUSTOM_HEADERS`,
+ * `CLAUDE_CONFIG_DIR` (a different login directory), and the provider
+ * switches `CLAUDE_CODE_USE_BEDROCK`, `_VERTEX`, `_FOUNDRY`, `_MANTLE`, `_GATEWAY`.
+ * The per-tier remaps `ANTHROPIC_DEFAULT_*_MODEL` are matched by
+ * {@link FORBIDDEN_ENV_PATTERN}.
+ */
 export const CLAUDE_CODE_FORBIDDEN_ENV: readonly string[] = [
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
   'ANTHROPIC_BASE_URL',
   'CLAUDE_CODE_OAUTH_TOKEN',
+  'ANTHROPIC_MODEL',
+  'ANTHROPIC_DEFAULT_MODEL',
+  'ANTHROPIC_SMALL_FAST_MODEL',
+  'ANTHROPIC_CUSTOM_HEADERS',
+  'CLAUDE_CONFIG_DIR',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CODE_USE_FOUNDRY',
+  'CLAUDE_CODE_USE_MANTLE',
+  'CLAUDE_CODE_USE_GATEWAY',
 ]
+
+/** Per-tier model remaps (`ANTHROPIC_DEFAULT_OPUS_MODEL`, `_SONNET_`, `_HAIKU_`, `_FABLE_`, and any future tier). */
+const FORBIDDEN_ENV_PATTERN = /^ANTHROPIC_DEFAULT_[A-Z0-9_]+_MODEL$/
+
+/** Whether an environment variable name is on the forbidden list. */
+function isForbiddenName(name: string): boolean {
+  const upper = name.toUpperCase()
+  return CLAUDE_CODE_FORBIDDEN_ENV.includes(upper) || FORBIDDEN_ENV_PATTERN.test(upper)
+}
 
 /**
  * The forbidden variable names present in an environment (case-insensitive).
@@ -22,8 +50,7 @@ export const CLAUDE_CODE_FORBIDDEN_ENV: readonly string[] = [
  * @returns the offending names as they appear in `env`.
  */
 export function forbiddenEnvPresent(env: NodeJS.ProcessEnv = process.env): string[] {
-  const wanted = new Set(CLAUDE_CODE_FORBIDDEN_ENV)
-  return Object.keys(env).filter(key => wanted.has(key.toUpperCase()) && env[key] !== undefined)
+  return Object.keys(env).filter(key => isForbiddenName(key) && env[key] !== undefined)
 }
 
 /**
@@ -48,10 +75,9 @@ export function assertCleanHostEnv(env: NodeJS.ProcessEnv = process.env): void {
  * @returns a fresh environment object for the SDK `env` option.
  */
 export function buildChildEnv(base: Record<string, string> = scrubbedParentEnv()): Record<string, string> {
-  const wanted = new Set(CLAUDE_CODE_FORBIDDEN_ENV)
   const env: Record<string, string> = {}
   for (const [key, value] of Object.entries(base)) {
-    if (!wanted.has(key.toUpperCase())) env[key] = value
+    if (!isForbiddenName(key)) env[key] = value
   }
   return env
 }

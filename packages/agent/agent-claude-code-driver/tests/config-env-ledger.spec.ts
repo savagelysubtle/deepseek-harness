@@ -1,25 +1,24 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { apply, Config } from '../src/index.ts'
 import {
   assertCleanHostEnv, buildChildEnv, CLAUDE_CODE_FORBIDDEN_ENV, forbiddenEnvPresent,
 } from '../src/env.ts'
-import { killProcessGroup, ProcessLedger, readProcessStartTime } from '../src/ledger.ts'
-import { buildQueryOptions } from '../src/options.ts'
+import { allowlistSettings, buildQueryOptions } from '../src/options.ts'
 import { PromptStream } from '../src/prompt-stream.ts'
-import { isFableModel, parseSeatRow, toolPolicyFor } from '../src/seat-config.ts'
-import { ledgerOps, seatConfig, seatRow, CLAUDE_PATH } from './fakes.ts'
+import { foldModelId, isAllowedModel, isFableModel, parseSeatRow, toolPolicyFor } from '../src/seat-config.ts'
+import { seatConfig, seatRow, CLAUDE_PATH } from './fakes.ts'
 
 describe('seat row validation', () => {
   it('accepts a complete row and maps it to camelCase', () => {
     const config = parseSeatRow(seatRow({ model: 'opus', effort: 'high', role: 'lead', max_calls_per_window: 30 }), 'lead-seat')
     expect(config).toEqual({
-      model: 'opus', effort: 'high', role: 'lead', maxTurns: 20, claudePath: CLAUDE_PATH, maxCallsPerWindow: 30,
+      model: 'opus', effort: 'high', role: 'lead', maxTurns: 20, claudePath: CLAUDE_PATH, maxCallsPerWindow: 30, fableOk: false,
     })
     expect(parseSeatRow(seatRow(), 's')).not.toHaveProperty('effort')
+    const pinned = parseSeatRow(seatRow({ claude_path_sha256: 'AB'.repeat(32) }), 's')
+    expect(pinned.claudePathSha256).toBe('ab'.repeat(32))
+    expect(parseSeatRow(seatRow({ model: 'ｏｐｕｓ' }), 's').model).toBe('opus')
   })
 
   it.each([
@@ -30,9 +29,29 @@ describe('seat row validation', () => {
   })
 
   it('lets a fable model through only when the row sets fable_ok: true', () => {
-    expect(parseSeatRow(Object.assign(seatRow({ model: 'claude-fable-1' }), { fable_ok: true }), 'x').model).toBe('claude-fable-1')
+    const allowed = parseSeatRow(Object.assign(seatRow({ model: 'claude-fable-1' }), { fable_ok: true }), 'x')
+    expect(allowed.model).toBe('claude-fable-1')
+    expect(allowed.fableOk).toBe(true)
     expect(() => parseSeatRow(Object.assign(seatRow({ model: 'claude-fable-1' }), { fable_ok: false }), 'x')).toThrow(/fable_ok/)
     expect(isFableModel('claude-sonnet-4-5')).toBe(false)
+  })
+
+  it.each([
+    'best', 'default', 'opusplan', 'opus[1m]', 'sonnet[1m]', 'claude-opus', 'claude-3-opus', 'gpt-5', 'opus ', 'claude-sonnet-x', 'claude-haiku-',
+  ])('rejects the model %j because it is not on the allowlist', (model) => {
+    expect(isAllowedModel(foldModelId(model), false)).toBe(false)
+    expect(() => parseSeatRow(seatRow({ model: model === 'opus ' ? 'opus x' : model }), 'x')).toThrow(/is not allowed: use opus, sonnet, haiku/)
+  })
+
+  it.each(['opus', 'sonnet', 'haiku', 'claude-opus-4-1', 'claude-sonnet-4-5-20250929', 'claude-haiku-4-5', 'SONNET'])('accepts the model %j', (model) => {
+    expect(parseSeatRow(seatRow({ model }), 'x').model).toBe(model.toLowerCase())
+  })
+
+  it('refuses a coder row until a policy extension is registered', () => {
+    expect(() => parseSeatRow(seatRow({ role: 'coder' }), 'x')).toThrow(/role "coder" is refused until the permission-policy extension/)
+    expect(() => parseSeatRow(seatRow({ role: 'coder' }), 'x', { policyExtension: false })).toThrow(/refused/)
+    expect(parseSeatRow(seatRow({ role: 'coder' }), 'x', { policyExtension: true }).role).toBe('coder')
+    for (const role of ['lead', 'mail-only'] as const) expect(parseSeatRow(seatRow({ role }), 'x').role).toBe(role)
   })
 
   it.each([
@@ -46,6 +65,7 @@ describe('seat row validation', () => {
     ['relative claude path', seatRow({ claude_path: 'claude' }), /absolute path to the real claude binary/],
     ['NUL in claude path', seatRow({ claude_path: '/opt/cla\0ude' }), /absolute path/],
     ['bad window cap', seatRow({ max_calls_per_window: 0 }), /max_calls_per_window must be a positive integer/],
+    ['bad sha pin', seatRow({ claude_path_sha256: 'xyz' }), /claude_path_sha256 must be 64 hexadecimal characters/],
   ])('rejects %s', (_label, row, message) => {
     expect(() => parseSeatRow(row, 'seat-x')).toThrow(message)
     expect(() => parseSeatRow(row, 'seat-x')).toThrow(/seat "seat-x"/)
@@ -62,7 +82,7 @@ describe('seat row validation', () => {
   })
 
   it('exposes a Config schema that applies defaults and rejects a bad driver', () => {
-    const parsed = Config({ stateDir: '/var/state', seats: { a: seatRow() } })
+    const parsed = Config({ stateDir: 'claude-code', seats: { a: seatRow() } })
     expect(parsed.disposeGraceMs).toBe(3000)
     expect(parsed.defaultPauseMs).toBe(900_000)
     expect(parsed.seats['a']?.fable_ok).toBe(false)
@@ -108,8 +128,10 @@ describe('query options', () => {
 
   it('lets the extension add settings but never loosen a fence', () => {
     const seen: string[] = []
+    const warned: string[] = []
     const options = buildQueryOptions({
       ...base('mail-only', 'first'),
+      warn: (message) => { warned.push(message) },
       extension: (context) => {
         seen.push(context.seat, context.binding.kind)
         return {
@@ -123,6 +145,7 @@ describe('query options', () => {
     })
     expect(seen).toEqual(['s', 'first'])
     expect(options.settings).toEqual({ hooks: {} })
+    expect(warned).toEqual([])
     expect(options.permissionMode).toBe('dontAsk')
     expect(options.settingSources).toEqual([])
     expect(options.tools).toEqual([])
@@ -130,14 +153,79 @@ describe('query options', () => {
   })
 })
 
+describe('extension settings allowlist', () => {
+  const run = (raw: unknown) => {
+    const warned: string[] = []
+    return { settings: allowlistSettings(raw, 'seat', (message) => { warned.push(message) }), warned }
+  }
+
+  it('keeps hooks and permission deny/ask entries and nothing else', () => {
+    const { settings, warned } = run({
+      hooks: { PreToolUse: [] },
+      permissions: { deny: ['Read(~/.claude/**)'], ask: ['Edit'], allow: ['Bash(*)'], additionalDirectories: ['/'], defaultMode: 'bypassPermissions' },
+      env: { ANTHROPIC_API_KEY: 'x' },
+      apiKeyHelper: 'echo key',
+      model: 'fable',
+      disableAllHooks: true,
+      enableAllProjectMcpServers: true,
+    })
+    expect(settings).toEqual({ hooks: { PreToolUse: [] }, permissions: { deny: ['Read(~/.claude/**)'], ask: ['Edit'] } })
+    expect(warned.join('\n')).toMatch(/"env".*stripped/)
+    for (const key of ['apiKeyHelper', 'model', 'disableAllHooks', 'enableAllProjectMcpServers', 'permissions.allow', 'permissions.additionalDirectories', 'permissions.defaultMode']) {
+      expect(warned.join('\n')).toContain(`"${key}"`)
+    }
+  })
+
+  it('drops a string (a settings path or JSON text) and any non-object shape', () => {
+    expect(run('/etc/evil.json').settings).toBeUndefined()
+    expect(run('/etc/evil.json').warned[0]).toContain('<string settings (path or JSON)>')
+    expect(run(['hooks']).warned[0]).toContain('<non-object settings>')
+    expect(run(7).settings).toBeUndefined()
+    expect(run(undefined)).toEqual({ settings: undefined, warned: [] })
+  })
+
+  it('drops permission lists that hold non-strings and malformed hooks, and returns nothing when nothing survives', () => {
+    const bad = run({ hooks: 'echo', permissions: { deny: ['ok', 3], ask: 'Edit' } })
+    expect(bad.settings).toBeUndefined()
+    expect(bad.warned.join('\n')).toMatch(/"hooks"[\s\S]*"permissions.deny"[\s\S]*"permissions.ask"/)
+    expect(run({ permissions: 'deny' }).warned[0]).toContain('"permissions"')
+  })
+
+  it('strips content through buildQueryOptions and re-checks the child environment and model afterwards', () => {
+    const input = {
+      seat: 's', config: seatConfig({ role: 'lead' }), cwd: '/w', binding: { kind: 'first', sdkSessionId: 'x' } as const,
+      env: { PATH: '/usr/bin' }, abortController: new AbortController(), spawn: () => { throw new Error('unused') },
+    }
+    const warned: string[] = []
+    const options = buildQueryOptions({
+      ...input, warn: (message) => { warned.push(message) }, extension: () => ({ settings: { env: { ANTHROPIC_BASE_URL: 'http://evil' } } as never }),
+    })
+    expect(options).not.toHaveProperty('settings')
+    expect(warned[0]).toContain('"env"')
+    expect(buildQueryOptions({ ...input, extension: () => ({ settings: '/tmp/x.json' as never }) })).not.toHaveProperty('settings')
+    expect(() => buildQueryOptions({ ...input, env: { ANTHROPIC_API_KEY: 'k', anthropic_model: 'fable' } }))
+      .toThrow(/forbidden variable\(s\) ANTHROPIC_API_KEY, anthropic_model/)
+    expect(() => buildQueryOptions({ ...input, config: { ...input.config, model: 'best' } })).toThrow(/model "best" is not allowed/)
+  })
+})
+
 describe('environment', () => {
-  it('removes the four credential overrides from the child environment, case-insensitively', () => {
+  it('removes every credential, model-remap, config-dir, and provider override from the child environment, case-insensitively', () => {
     const env = buildChildEnv({
       PATH: '/usr/bin', ANTHROPIC_API_KEY: 'a', ANTHROPIC_AUTH_TOKEN: 'b', ANTHROPIC_BASE_URL: 'c',
-      CLAUDE_CODE_OAUTH_TOKEN: 'd', anthropic_base_url: 'e', HOME: '/h',
+      CLAUDE_CODE_OAUTH_TOKEN: 'd', anthropic_base_url: 'e', HOME: '/h', ANTHROPIC_MODEL: 'm', ANTHROPIC_DEFAULT_OPUS_MODEL: 'o',
+      ANTHROPIC_DEFAULT_FABLE_MODEL: 'f', anthropic_default_sonnet_model: 's', ANTHROPIC_SMALL_FAST_MODEL: 'h', ANTHROPIC_CUSTOM_HEADERS: 'x',
+      CLAUDE_CONFIG_DIR: '/other', CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_VERTEX: '1', CLAUDE_CODE_USE_FOUNDRY: '1',
+      ANTHROPIC_DEFAULT_MODEL_NAME: 'kept', CLAUDE_CODE_USE_ANTHROPIC: '1',
     })
-    expect(env).toEqual({ PATH: '/usr/bin', HOME: '/h' })
-    expect(CLAUDE_CODE_FORBIDDEN_ENV).toHaveLength(4)
+    expect(env).toEqual({ PATH: '/usr/bin', HOME: '/h', ANTHROPIC_DEFAULT_MODEL_NAME: 'kept', CLAUDE_CODE_USE_ANTHROPIC: '1' })
+    for (const name of [
+      'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_MODEL',
+      'ANTHROPIC_SMALL_FAST_MODEL', 'ANTHROPIC_CUSTOM_HEADERS', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX',
+      'CLAUDE_CODE_USE_FOUNDRY',
+    ]) expect(CLAUDE_CODE_FORBIDDEN_ENV).toContain(name)
+    expect(forbiddenEnvPresent({ ANTHROPIC_DEFAULT_HAIKU_MODEL: 'x', ANTHROPIC_DEFAULT_NEWTIER_MODEL: 'y', ANTHROPIC_DEFAULT_MODEL_NAME: 'z' }))
+      .toEqual(['ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_NEWTIER_MODEL'])
   })
 
   it('defaults to the scrubbed host environment', () => {
@@ -157,89 +245,12 @@ describe('environment', () => {
     const saved = process.env['ANTHROPIC_AUTH_TOKEN']
     process.env['ANTHROPIC_AUTH_TOKEN'] = 'leaked'
     try {
-      expect(() => { apply(new Context(), Config({ stateDir: '/s', seats: {} })) })
+      expect(() => { apply(new Context(), Config({ stateDir: 'claude-code', seats: {} })) })
         .toThrow(/refusing to run: ANTHROPIC_AUTH_TOKEN/)
     } finally {
       if (saved === undefined) delete process.env['ANTHROPIC_AUTH_TOKEN']
       else process.env['ANTHROPIC_AUTH_TOKEN'] = saved
     }
-  })
-})
-
-describe('process ledger', () => {
-  const fresh = (ops: ReturnType<typeof ledgerOps>) => {
-    const file = join(mkdtempSync(join(tmpdir(), 'cc-ledger-')), 'nested', 'pids.json')
-    return { file, ledger: new ProcessLedger(file, ops) }
-  }
-
-  it('records, replaces per seat, and clears only the matching pid', () => {
-    const { ledger } = fresh(ledgerOps(new Map([[10, 'a'], [11, 'b']]), []))
-    expect(ledger.entries()).toEqual([])
-    ledger.record('seat-a', 10)
-    ledger.record('seat-b', 11)
-    ledger.record('seat-a', 11)
-    expect(ledger.entries().map(entry => [entry.seat, entry.pid])).toEqual([['seat-b', 11], ['seat-a', 11]])
-    ledger.clear('seat-a', 10)
-    expect(ledger.entries()).toHaveLength(2)
-    ledger.clear('seat-a', 11)
-    expect(ledger.entries().map(entry => entry.seat)).toEqual(['seat-b'])
-  })
-
-  it('reaps a recorded child whose start time still matches and leaves recycled pids alone', () => {
-    const killed: number[] = []
-    const live = new Map([[10, 'tick-1'], [11, 'tick-1'], [12, 'tick-1']])
-    const { ledger } = fresh(ledgerOps(live, killed))
-    ledger.record('same', 10)
-    ledger.record('recycled', 11)
-    ledger.record('gone', 12)
-    live.set(11, 'tick-999')
-    live.delete(12)
-    expect(ledger.reapStale()).toEqual({ reaped: ['same'], stale: ['recycled', 'gone'] })
-    expect(killed).toEqual([10])
-    expect(ledger.entries()).toEqual([])
-  })
-
-  it('never kills an entry whose start time could not be read at record time', () => {
-    const killed: number[] = []
-    const { ledger } = fresh(ledgerOps(new Map(), killed))
-    ledger.record('unknown', 77)
-    expect(ledger.entries()[0]?.startTime).toBe('')
-    expect(ledger.reapStale().stale).toEqual(['unknown'])
-    expect(killed).toEqual([])
-  })
-
-  it('ignores malformed entries, and refuses a ledger that is not a list', () => {
-    const { file, ledger } = fresh(ledgerOps(new Map(), []))
-    ledger.record('x', 1)
-    writeFileSync(file, JSON.stringify([{ seat: 'ok', pid: 5, startTime: 't' }, { seat: 1 }, null, 'str']))
-    expect(ledger.entries()).toEqual([{ seat: 'ok', pid: 5, startTime: 't' }])
-    writeFileSync(file, '{}')
-    expect(() => ledger.entries()).toThrow(/not a list/)
-    writeFileSync(file, '{not json')
-    expect(() => ledger.entries()).toThrow()
-    expect(readFileSync(file, 'utf8')).toBe('{not json')
-  })
-
-  it('reads this process start time from /proc and tolerates missing pids and bad group kills', () => {
-    if (process.platform === 'linux') expect(readProcessStartTime(process.pid)).toMatch(/^\d+$/)
-    expect(readProcessStartTime(2 ** 30)).toBeUndefined()
-    expect(() => { killProcessGroup(2 ** 30) }).not.toThrow()
-    expect(() => { killProcessGroup(0) }).not.toThrow()
-    expect(() => { killProcessGroup(1) }).not.toThrow()
-  })
-
-  it('rethrows a group-kill failure that is not "already gone"', () => {
-    const kill = vi.spyOn(process, 'kill').mockImplementation(() => { throw Object.assign(new Error('not permitted'), { code: 'EPERM' }) })
-    try {
-      expect(() => { killProcessGroup(4242) }).toThrow('not permitted')
-    } finally {
-      kill.mockRestore()
-    }
-  })
-
-  it('rethrows a ledger read failure that is not a missing file', () => {
-    const directory = mkdtempSync(join(tmpdir(), 'cc-ledger-dir-'))
-    expect(() => new ProcessLedger(directory).entries()).toThrow(/EISDIR/)
   })
 })
 
