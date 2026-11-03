@@ -1,0 +1,149 @@
+# feature-loop: plan a feature, implement it until the checks pass, review the
+# change, and ask a human before declaring it done.
+#
+# Copy this file to `<your workspace>/.workflows/feature-loop.yaml` (the file
+# name without `.yaml` must equal `name:` below). Run it from the Workflows
+# overlay in the web app, or with the `workflow_run` tool. The first run of any
+# new or edited file asks you to confirm every shell command listed here.
+
+# `version` (required): the schema version. Only 1 exists; any other value is
+# rejected with a located error.
+version: 1
+
+# `name` (required): lowercase words joined by hyphens. It must equal the file
+# name without `.yaml`.
+name: feature-loop
+
+# `description` (required): one line shown in the workflow list.
+description: Plan, implement until the checks pass, review, and ask for approval.
+
+# `when_to_use` (optional): guidance the model sees when it picks a workflow.
+when_to_use: Use for a self-contained feature that has a typecheck and a test command.
+
+# `inputs` (optional): values the caller supplies. Refer to one as
+# `$inputs.<name>` in prompts and in bash commands.
+inputs:
+  # The input's name.
+  feature:
+    # `type`: string, number or boolean.
+    type: string
+    # `required`: the run is refused before anything starts when it is missing.
+    required: true
+    # `description`: shown beside the input field in the Workflows overlay.
+    description: What to build.
+
+# `defaults` (optional): settings every node inherits unless it sets its own.
+defaults:
+  # `tier`: which model class a node uses. cheap = haiku, standard = sonnet,
+  # premium = opus (premium also needs a non-empty `justify`).
+  tier: standard
+  # `timeout_ms`: absolute deadline for one agent node, in milliseconds.
+  timeout_ms: 900000
+  # `idle_timeout_ms`: how long an agent may stay silent before it is stopped
+  # as stalled (minimum 1000). A tool call in flight pauses this clock.
+  idle_timeout_ms: 120000
+  # `retry`: re-run a node after a transient failure only (a stall, a
+  # timeout, a provider start failure or a shell timeout).
+  retry:
+    # `max_attempts`: 1 to 5 tries in total.
+    max_attempts: 2
+    # `delay_ms`: wait between tries.
+    delay_ms: 1000
+
+# `nodes` (required): the steps, run in dependency order; independent steps
+# may run side by side. Each node has an `id`, a `kind` and the keys for that kind.
+nodes:
+  # --- 1. plan: one agent writes a short plan -------------------------------
+  - # `id`: unique, lowercase words joined by hyphens; other nodes refer to it.
+    id: plan
+    # `kind`: prompt (one agent), bash (one shell command), loop (agent until a
+    # command passes), approval (wait for a human) or cancel (stop the run).
+    kind: prompt
+    # `label`: the name shown in the graph and the run view.
+    label: Plan the work
+    # `phase`: groups nodes under one heading in the run view.
+    phase: Plan
+    # `prompt`: the instruction. `$inputs.feature` is replaced by the input.
+    prompt: |
+      Write a short implementation plan for: $inputs.feature
+    # `mutates_checkout`: false says this node does not change files, so it is
+    # safe to skip when a run is resumed and needs no verify step after it.
+    mutates_checkout: false
+
+  # --- 2. implement: a done_when loop ---------------------------------------
+  - id: implement
+    kind: prompt
+    # `depends_on`: this node starts only after the listed nodes finish.
+    depends_on: [plan]
+    phase: Implement
+    # `$plan.output` is the final text of the `plan` node, passed as data.
+    prompt: |
+      Implement the plan below. Run the checks before you stop.
+      $plan.output
+    # `done_when`: after every agent turn the host runs this command. Exit 0
+    # ends the node; any other exit starts another turn with the failure
+    # output shown to the agent. It is also a hard gate in the gate report.
+    done_when: pnpm run typecheck && pnpm run test
+    # `max_iterations`: how many turns at most (default 3, ceiling 8). When
+    # the cap is reached the node fails and keeps the last failure as evidence.
+    max_iterations: 4
+
+  # --- 3. gate-tests: a bash gate -------------------------------------------
+  - id: gate-tests
+    kind: bash
+    depends_on: [implement]
+    # `bash`: the command, run by the host shell (not by an agent) under the
+    # session sandbox policy. Exit 0 passes the gate.
+    bash: pnpm run test
+    # `timeout_ms`: deadline for this command (minimum 100).
+    timeout_ms: 300000
+    # `gate`: true lists this node in the gate report as a hard gate.
+    gate: true
+
+  # --- 4. review: a cheap reviewer returns structured output ----------------
+  - id: review
+    kind: prompt
+    depends_on: [gate-tests]
+    # `tier`: overrides the default for this node.
+    tier: cheap
+    gate: true
+    mutates_checkout: false
+    # `output_format`: a JSON schema; the agent must answer in this shape and
+    # later nodes read fields as `$review.output.pass`.
+    output_format:
+      type: object
+      properties:
+        pass: { type: boolean }
+        reasons: { type: string }
+    prompt: |
+      Review the change. Quote the command you ran and its exit code.
+
+  # --- 5. pass-check: runs only when the review passed ----------------------
+  - id: pass-check
+    kind: bash
+    depends_on: [review]
+    # `when`: run this node only if the condition holds, otherwise it is
+    # skipped. Supports ==, !=, &&, || and field paths such as $review.output.pass.
+    when: $review.output.pass == true
+    bash: echo "review passed"
+
+  # --- 6. approve: wait for a human -----------------------------------------
+  - id: approve
+    kind: approval
+    depends_on: [pass-check]
+    # `message`: the question shown on the approval card. Approve or reject it
+    # in the Workflows overlay; a headless session rejects it at once.
+    message: Review passed. Merge the change?
+
+  # --- 7. stop-on-reject: ends the run when the human said no ---------------
+  - id: stop-on-reject
+    # `cancel` stops the whole run.
+    kind: cancel
+    depends_on: [approve]
+    # `trigger_rule`: all_success (default), one_success,
+    # none_failed_min_one_success or all_done. all_done runs it even though
+    # `approve` failed, which is the point here.
+    trigger_rule: all_done
+    when: $approve.status == 'failed'
+    # `reason`: recorded as the run's cancel reason.
+    reason: The reviewer rejected the change.

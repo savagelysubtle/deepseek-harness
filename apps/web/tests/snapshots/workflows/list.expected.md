@@ -1,0 +1,10 @@
+- complementary:
+  - heading "Workflow files" [level=3]
+  - button "Refresh"
+  - textbox "New workflow name"
+  - button "Create"
+  - list:
+    - listitem:
+      - button "feature-loop Valid Plan, implement until the checks pass, review, and ask for approval. 7 nodes"
+    - listitem:
+      - button "mail-triage Valid Fetch mail, classify it, draft replies to urgent items, and ask before sending. 5 nodes"

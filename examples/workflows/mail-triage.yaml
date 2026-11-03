@@ -1,0 +1,106 @@
+# mail-triage: fetch mail, classify it, draft replies to the urgent messages,
+# and ask a human before anything is sent.
+#
+# Copy this file to `<your workspace>/.workflows/mail-triage.yaml`. It assumes a
+# `mail-cli` program on the PATH; replace the commands with your own tool.
+# Every shell command below is shown to you for confirmation on the first run.
+
+# `version` (required): schema version, always 1.
+version: 1
+
+# `name` (required): must equal the file name without `.yaml`.
+name: mail-triage
+
+# `description` (required): one line shown in the workflow list.
+description: Fetch mail, classify it, draft replies to urgent items, and ask before sending.
+
+# `inputs` (optional): values the caller supplies, used as `$inputs.<name>`.
+inputs:
+  folder:
+    # `type`: string, number or boolean.
+    type: string
+    # `default`: used when the caller gives no value; an input with a default
+    # is not required.
+    default: inbox
+
+# `defaults` (optional): settings every node inherits.
+defaults:
+  # `idle_timeout_ms`: an agent silent for this many milliseconds is stopped
+  # as stalled (minimum 1000).
+  idle_timeout_ms: 90000
+  # `retry`: re-run a node after a transient failure (stall, timeout, provider
+  # start failure, shell timeout) only.
+  retry:
+    # `max_attempts`: 1 to 5 tries in total.
+    max_attempts: 2
+    # `delay_ms`: wait between tries.
+    delay_ms: 2000
+
+# `nodes` (required): the steps, run in dependency order; independent steps
+# may run side by side. Each node has an `id`, a `kind` and the keys for that kind.
+nodes:
+  # --- 1. fetch: a plain shell command --------------------------------------
+  - id: fetch
+    kind: bash
+    # `bash`: the command. Its output becomes `$fetch.output` for later nodes.
+    bash: mail-cli list --folder "$inputs.folder" --json
+    # `env`: extra environment variables for the command (names only appear in
+    # the confirmation text, never the values).
+    env:
+      MAIL_PAGER: cat
+    # `allow_failure`: false (default) means a non-zero exit fails the node.
+    allow_failure: false
+
+  # --- 2. classify: a cheap agent returns structured output -----------------
+  - id: classify
+    kind: prompt
+    # `depends_on`: this node starts only after the listed nodes have finished.
+    depends_on: [fetch]
+    # `tier`: cheap = haiku.
+    tier: cheap
+    # `mutates_checkout`: false because this agent only reads and answers.
+    mutates_checkout: false
+    # `output_format`: a JSON schema for the answer.
+    output_format:
+      type: object
+      properties:
+        urgent: { type: array }
+    # `prompt`: `$fetch.output` is the mail list, passed as labelled data.
+    prompt: |
+      Classify these messages and list the urgent ones.
+      $fetch.output
+
+  # --- 3. draft: a done_when loop -------------------------------------------
+  - id: draft
+    kind: prompt
+    depends_on: [classify]
+    # `when`: skipped when there is nothing urgent.
+    when: $classify.output.urgent
+    mutates_checkout: false
+    prompt: |
+      Write a reply for each urgent message into the drafts folder.
+      $classify.output.urgent
+    # `done_when`: the host runs this after each turn; exit 0 ends the node,
+    # anything else starts another turn with the failure output shown.
+    done_when: mail-cli verify-drafts
+    # `max_iterations`: at most this many turns (default 3, ceiling 8). The
+    # node fails with the last failure output when the cap is reached.
+    max_iterations: 3
+
+  # --- 4. approve-send: nothing is sent without a human ---------------------
+  - id: approve-send
+    kind: approval
+    depends_on: [draft]
+    # `message`: the question on the approval card.
+    message: Send the drafted replies?
+    # `timeout_ms`: how long to wait for an answer (here 30 minutes); on expiry
+    # the approval is rejected and the report says why.
+    timeout_ms: 1800000
+
+  # --- 5. send: runs only after the human approved --------------------------
+  - id: send
+    kind: bash
+    depends_on: [approve-send]
+    bash: mail-cli send --drafts "$draft.output"
+    # `gate`: true makes this command a hard gate in the gate report.
+    gate: true
