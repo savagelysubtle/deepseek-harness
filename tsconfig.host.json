@@ -194,6 +194,7 @@
     { "path": "./packages/interaction/tool-ask-user" },
     { "path": "./packages/context/agent-instructions" },
     { "path": "./packages/core/agent-loop" },
+    { "path": "./packages/core/agent-claude-code" },
     { "path": "./packages/llm/llm-retry" },
     { "path": "./packages/examples/agent-spine-demo" },
     { "path": "./packages/subprocess/subprocess" },

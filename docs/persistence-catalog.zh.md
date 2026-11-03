@@ -248,6 +248,92 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 
 来源：[`packages/core/session/src/types.ts:277`](../packages/core/session/src/types.ts)
 
+### `claude-code/*`
+
+<a id="claude-codecompact--log-only"></a>
+
+#### `claude-code/compact` — log-only
+
+```ts persistence-catalog
+/**
+ * Records one Claude Code context compaction boundary.
+ * @param data - pre-compaction token count, trigger, and time.
+ */
+'claude-code/compact': ClaudeCodeCompactData
+```
+
+来源：[`packages/core/agent-claude-code/src/types.ts:132`](../packages/core/agent-claude-code/src/types.ts)
+
+<a id="claude-codefleet-refused--log-only"></a>
+
+#### `claude-code/fleet-refused` — log-only
+
+```ts persistence-catalog
+/**
+ * Records a fleet-limit refusal.
+ * @param data - refusal reason, configured limit, observed value, and time.
+ */
+'claude-code/fleet-refused': ClaudeCodeFleetRefusedData
+```
+
+来源：[`packages/core/agent-claude-code/src/types.ts:142`](../packages/core/agent-claude-code/src/types.ts)
+
+<a id="claude-coderate-limited--log-only"></a>
+
+#### `claude-code/rate-limited` — log-only
+
+```ts persistence-catalog
+/**
+ * Records a rate-limit observation and whether the fleet breaker tripped.
+ * @param data - source, optional retry-after, breaker state, and time.
+ */
+'claude-code/rate-limited': ClaudeCodeRateLimitedData
+```
+
+来源：[`packages/core/agent-claude-code/src/types.ts:137`](../packages/core/agent-claude-code/src/types.ts)
+
+<a id="claude-codesession-bound--log-only"></a>
+
+#### `claude-code/session-bound` — log-only
+
+```ts persistence-catalog
+/**
+ * Binds the dsh Session to its Claude SDK session; written before the first prompt.
+ * @param data - dsh session id, SDK session id, model, driver name, and time.
+ */
+'claude-code/session-bound': ClaudeCodeSessionBoundData
+```
+
+来源：[`packages/core/agent-claude-code/src/types.ts:117`](../packages/core/agent-claude-code/src/types.ts)
+
+<a id="claude-codesteer--log-only"></a>
+
+#### `claude-code/steer` — log-only
+
+```ts persistence-catalog
+/**
+ * Records one steering action (push, interrupt-then-push, or resume).
+ * @param data - steering kind, short redacted reason, and time.
+ */
+'claude-code/steer': ClaudeCodeSteerData
+```
+
+来源：[`packages/core/agent-claude-code/src/types.ts:127`](../packages/core/agent-claude-code/src/types.ts)
+
+<a id="claude-codeturn-completed--log-only"></a>
+
+#### `claude-code/turn-completed` — log-only
+
+```ts persistence-catalog
+/**
+ * Records one completed Claude turn with its usage and estimated cost.
+ * @param data - turn index, outcome, durations, token usage, and per-model usage.
+ */
+'claude-code/turn-completed': ClaudeCodeTurnCompletedData
+```
+
+来源：[`packages/core/agent-claude-code/src/types.ts:122`](../packages/core/agent-claude-code/src/types.ts)
+
 ### `command/*`
 
 <a id="commanddone--log-only"></a>
