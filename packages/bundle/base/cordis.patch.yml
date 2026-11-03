@@ -60,7 +60,9 @@
         targetWords: 5
         targetCjkCharacters: 10
         maxInputBytes: 4096
-        maxOutputTokens: 64
+        # Leaves room for reasoning a model cannot switch off, which counts
+        # as output even at the lowest level its adapter dispatches.
+        maxOutputTokens: 256
         timeoutMs: 60000
 
     - id: user-questions
