@@ -167,12 +167,13 @@ registerProvider(provider: UserQuestionProvider): () => void
  *
  * @param request Questions, owner agent, and abort signal.
  * @returns The answer chosen or typed by the human.
- * @throws {UserQuestionError} code `CALLER_NOT_LIVE` when a supplied
- *   agent is not the registry's exact live instance, or `DELEGATED_CALLER`
- *   when that live agent is owned by another agent.
+ * @throws {UserQuestionError} code `ASK_ABORTED` when the supplied signal
+ *   is already or becomes aborted, `CALLER_NOT_LIVE` when a supplied agent
+ *   is not the registry's exact live instance, or `DELEGATED_CALLER` when
+ *   that live agent is owned by another agent.
  */
 async ask(request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer>
 ```
 
-Source: [`packages/interaction/user-questions/src/index.ts:51`](../../packages/interaction/user-questions/src/index.ts)
+Source: [`packages/interaction/user-questions/src/index.ts:59`](../../packages/interaction/user-questions/src/index.ts)
 <!-- END GENERATED cordis-surface -->
