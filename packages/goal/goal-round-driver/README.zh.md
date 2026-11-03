@@ -29,7 +29,7 @@
 
 ## Idle 检查点
 
-整个 agent 进入 idle 时，持久 goal phase 和 revision 具有权威性。phase 为 active、已启用续行且仍有容量的 goal 会预留下一 Round；完成、暂停、阻塞和编辑都会阻止续行。驱动器不会通过关联 goal 消息与 `turn/end` 来对前一段活动分类，因此提供方错误和 token 上限不属于提示词级 goal 结果。
+整个 agent 进入 idle 时，持久 goal phase 和 revision 具有权威性。phase 为 active、已启用续行且仍有容量的 goal 会预留下一 Round；完成、暂停、阻塞和编辑都会阻止续行。驱动器不会通过关联 goal 消息与 `turn/end` 来对前一段活动分类，因此提供方错误和 token 上限不属于提示词级 goal 结果。宿主发起的暂停还会中止正在运行的轮次，而模型在自己轮次内发起的暂停会正常结束。
 
 ## 生命周期与持久性
 
