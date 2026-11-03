@@ -2242,6 +2242,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the unsubscribe function.',
       },
       {
+        signature: 'attachUi(): () => void',
+        description: 'Declare that a human who can answer approvals is attached (the Workflows UI is open). While at least one attachment is held, an approval waits for an answer instead of being rejected at once; with none, an approval nobody can answer fails closed. Attaching is an explicit act, never inferred from WorkflowRunsService.subscribe.',
+        parameters: [],
+        returns: 'the disposer that withdraws this attachment; calling it again does nothing.',
+      },
+      {
         signature: 'async storeFor(workspace: string): Promise<WorkflowStoreReader>',
         description: 'The run store of a workspace: one handle per workspace per process.',
         parameters: [{ name: 'workspace', description: 'a workspace path; resolved through `realpath`.' }],
@@ -2272,21 +2278,27 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the winning state, or undefined when nothing is waiting under that id here.',
       },
       {
-        signature: 'activeRuns(): { runId: string; name: string; hash: string }[]',
+        signature: 'activeRuns(): { runId: string; name: string; hash: string; workspace: string; sessionId: string }[]',
         description: 'The runs this process is executing now.',
         parameters: [],
-        returns: 'run id, name and hash of each.',
+        returns: 'run id, name, hash, workspace realpath and parent session id of each.',
       },
       {
-        signature: 'async cancel(runId: string, reason: string = \'cancelled by request\'): Promise<{ found: boolean; outcome?: RunOutcome }>',
-        description: 'Cancel a run owned by this process.',
-        parameters: [{ name: 'runId', description: 'the run.' }, { name: 'reason', description: 'why, recorded on the run.' }],
-        returns: 'whether this process owns the run, with its eventual outcome.',
+        signature: 'workflowsDir(): string',
+        description: 'The workspace-relative directory that holds workflow files.',
+        parameters: [],
+        returns: 'the configured directory, default `.workflows`.',
       },
       {
-        signature: 'async dryRun(workspace: string, options: Pick<StartOptions, \'name\' | \'path\' | \'inputs\'>): Promise<DryRunPlan | StartRefused>',
+        signature: 'async cancel(runId: string, reason: string, scope: CancelScope): Promise<{ found: boolean; outcome?: RunOutcome }>',
+        description: 'Cancel a run owned by this process, if it belongs to the caller\'s workspace (and session). A run outside the scope answers exactly like a run that does not exist.',
+        parameters: [{ name: 'runId', description: 'the run.' }, { name: 'reason', description: 'why, recorded on the run.' }, { name: 'scope', description: 'the caller\'s workspace, and optionally its session.' }],
+        returns: 'whether this process owns a matching run, with its eventual outcome.',
+      },
+      {
+        signature: 'async dryRun(workspace: string, options: DryRunOptions): Promise<DryRunPlan | StartRefused>',
         description: 'Describe a workflow without running anything: the DAG, the gate manifest and the trust facts. No store is opened and no process or agent is started.',
-        parameters: [{ name: 'workspace', description: 'the workspace path.' }, { name: 'options', description: 'which workflow.' }],
+        parameters: [{ name: 'workspace', description: 'the workspace path.' }, { name: 'options', description: 'which workflow; `caller` (the calling session id) asks for a trust challenge.' }],
         returns: 'the plan, or why none could be made.',
       },
       {
@@ -2883,6 +2895,22 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'info', description: 'the run\'s identity snapshot.' }, { name: 'agent', description: 'the call\'s sequence number, label, phase, and child id.' }],
   },
   {
+    name: 'workflow/approval-decided',
+    mode: 'emit',
+    signature: '\'workflow/approval-decided\'(decision: WorkflowApprovalDecided): void',
+    summary: 'An approval left the pending state.',
+    description: 'An approval left the pending state.',
+    parameters: [{ name: 'decision', description: 'the run and approval ids and the state it ended in.' }],
+  },
+  {
+    name: 'workflow/approval-pending',
+    mode: 'emit',
+    signature: '\'workflow/approval-pending\'(approval: WorkflowApprovalPending): void',
+    summary: 'An approval node is waiting for a human answer.',
+    description: 'An approval node is waiting for a human answer.',
+    parameters: [{ name: 'approval', description: 'the run, approval and node ids; the question is read with `pendingApprovals`.' }],
+  },
+  {
     name: 'workflow/end',
     mode: 'emit',
     signature: '\'workflow/end\'(info: WorkflowRunInfo, result: WorkflowResultInfo): void',
@@ -2929,6 +2957,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     summary: 'The script entered a phase (a `phase(title)` call) — progress grouping for observers; no execution semantics.',
     description: 'The script entered a phase (a `phase(title)` call) — progress grouping for observers; no execution semantics.',
     parameters: [{ name: 'info', description: 'the run\'s identity snapshot.' }, { name: 'title', description: 'the phase title, verbatim.' }],
+  },
+  {
+    name: 'workflow/run-changed',
+    mode: 'emit',
+    signature: '\'workflow/run-changed\'(change: WorkflowRunChange): void',
+    summary: 'A workflow run started, advanced a node, or ended.',
+    description: 'A workflow run started, advanced a node, or ended. Forwarded to clients verbatim once `packages/api/remotes/src/remote-events.ts`\'s allowlist names it; the payload is ids and status only.',
+    parameters: [{ name: 'change', description: 'the run id, its status, and the node that changed.' }],
   },
   {
     name: 'workflow/start',
@@ -3109,6 +3145,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'CancelOptions',
     declaration: 'export interface CancelOptions {\n    keepInbox?: boolean | undefined;\n}',
+  },
+  {
+    name: 'CancelScope',
+    declaration: 'export interface CancelScope {\n    readonly workspace: string;\n    readonly sessionId?: string;\n}',
   },
   {
     name: 'ClientResponse',
@@ -3375,8 +3415,12 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface DownloadsApi {\n    sessionLog(request: {\n        sessionId: SessionId;\n        includeDescendants?: boolean;\n    }, signal: AbortSignal): Promise<Response>;\n}',
   },
   {
+    name: 'DryRunOptions',
+    declaration: 'export interface DryRunOptions extends Pick<StartOptions, \'name\' | \'path\' | \'inputs\'> {\n    readonly caller?: string;\n}',
+  },
+  {
     name: 'DryRunPlan',
-    declaration: 'export interface DryRunPlan {\n    readonly ok: true;\n    readonly name: string;\n    readonly hash: string;\n    readonly trusted: boolean;\n    readonly trustKey: string;\n    readonly graph: unknown;\n    readonly manifest: readonly {\n        nodeId: string;\n        gateKind: string;\n    }[];\n    readonly trust: TrustFacts;\n    readonly plan: readonly string[];\n    readonly warnings: readonly Diagnostic[];\n}',
+    declaration: 'export interface DryRunPlan {\n    readonly ok: true;\n    readonly name: string;\n    readonly hash: string;\n    readonly trusted: boolean;\n    readonly trustKey: string;\n    readonly trustChallenge?: string;\n    readonly confirmText?: string;\n    readonly graph: WorkflowGraph;\n    readonly manifest: readonly {\n        nodeId: string;\n        gateKind: string;\n    }[];\n    readonly trust: TrustFacts;\n    readonly plan: readonly string[];\n    readonly warnings: readonly Diagnostic[];\n}',
   },
   {
     name: 'DshEnvironment',
@@ -3475,6 +3519,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface FsWriteOutcome {\n    operation: \'create\' | \'update\';\n    version: FsVersion;\n    before: string | null;\n    after: string;\n}',
   },
   {
+    name: 'GateKind',
+    declaration: 'export type GateKind = \'bash\' | \'approval\' | \'done_when\' | \'until_bash\' | \'verifier\';',
+  },
+  {
     name: 'GateRecord',
     declaration: 'export interface GateRecord {\n    readonly v: 1;\n    readonly kind: \'gate\';\n    readonly runId: string;\n    readonly nodeId: string;\n    readonly gateKind: string;\n    readonly outcome: WorkflowGateOutcome;\n}',
   },
@@ -3523,6 +3571,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface GoalView extends GoalSnapshot {\n    readonly roundsStarted: number;\n    readonly createdAt: number;\n    readonly updatedAt: number;\n    readonly activation: GoalActivation;\n}',
   },
   {
+    name: 'GraphEdge',
+    declaration: 'export interface GraphEdge {\n    from: string;\n    to: string;\n    when?: string;\n}',
+  },
+  {
+    name: 'GraphNode',
+    declaration: 'export interface GraphNode {\n    id: string;\n    kind: WorkflowNodeKind;\n    layer: number;\n    order: number;\n    gate: boolean;\n    when?: string;\n    triggerRule: TriggerRule;\n    dependsOn: string[];\n    tier?: WorkflowTier;\n    label: string;\n}',
+  },
+  {
     name: 'ImageAttachmentLimits',
     declaration: 'export interface ImageAttachmentLimits {\n    maxImageBytes: number;\n    maxImagesPerMessage: number;\n    maxMessageImageBytes: number;\n    maxImagePixels: number;\n    mediaTypes: readonly ImageMediaType[];\n}',
   },
@@ -3549,6 +3605,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'InboxTarget',
     declaration: 'export type InboxTarget = \'next-turn\' | \'next-step\';',
+  },
+  {
+    name: 'InputSpec',
+    declaration: 'export interface InputSpec {\n    name: string;\n    type: \'string\' | \'number\' | \'boolean\';\n    required: boolean;\n    default?: string | number | boolean;\n    description?: string;\n}',
   },
   {
     name: 'InvariantFailure',
@@ -3823,6 +3883,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface MailboxTraceEntry {\n    readonly id: MailboxMessageId;\n    readonly from: string;\n    readonly to: MailboxAddress;\n    readonly sentAt: number;\n    readonly state: MailboxState;\n    readonly subject?: string;\n    readonly payload?: unknown;\n    readonly blocking?: boolean;\n    readonly claimedAt?: number;\n    readonly deliveredAt?: number;\n    readonly failureReason?: string;\n}',
   },
   {
+    name: 'ManifestEntry',
+    declaration: 'export interface ManifestEntry {\n    nodeId: string;\n    gateKind: GateKind;\n}',
+  },
+  {
     name: 'ManualCompactAgentContext',
     declaration: 'export interface ManualCompactAgentContext extends CompactionAgentContext {\n    runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>;\n}',
   },
@@ -4013,6 +4077,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'OrgServedRosterTokenResult',
     declaration: 'export type OrgServedRosterTokenResult = {\n    readonly ok: true;\n    readonly token: string;\n} | {\n    readonly ok: false;\n    readonly reason: string;\n};',
+  },
+  {
+    name: 'OutputSlice',
+    declaration: 'export interface OutputSlice {\n    readonly text: string;\n    readonly nextOffset?: number;\n    readonly totalBytes: number;\n    readonly truncated: boolean;\n}',
   },
   {
     name: 'PendingApprovalView',
@@ -4668,7 +4736,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'StartOptions',
-    declaration: 'export interface StartOptions {\n    readonly parent: Agent;\n    readonly name?: string;\n    readonly path?: string;\n    readonly resume?: string;\n    readonly inputs?: Readonly<Record<string, unknown>>;\n    readonly trustHash?: string;\n    readonly signal?: AbortSignal;\n}',
+    declaration: 'export interface StartOptions {\n    readonly parent: Agent;\n    readonly name?: string;\n    readonly path?: string;\n    readonly resume?: string;\n    readonly inputs?: Readonly<Record<string, unknown>>;\n    readonly trustHash?: string;\n    readonly trustChallenge?: string;\n    readonly signal?: AbortSignal;\n}',
   },
   {
     name: 'StartRefused',
@@ -5055,6 +5123,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface ToolSchema {\n    name: string;\n    description: string;\n    parameters: Record<string, unknown>;\n}',
   },
   {
+    name: 'TriggerRule',
+    declaration: 'export type TriggerRule = \'all_success\' | \'one_success\' | \'none_failed_min_one_success\' | \'all_done\';',
+  },
+  {
     name: 'TrustFacts',
     declaration: 'export interface TrustFacts {\n    name: string;\n    bashCommands: {\n        nodeId: string;\n        field: string;\n        command: string;\n        workdir?: string;\n        envKeys: string[];\n        env: Record<string, string>;\n    }[];\n    promptFiles: string[];\n    agents: {\n        nodeId: string;\n        tier?: string;\n        model?: string;\n        provider?: string;\n    }[];\n    approvalNodes: number;\n}',
   },
@@ -5219,12 +5291,20 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type WorkflowAgentOutcome = \'completed\' | \'failed\' | \'cancelled\';',
   },
   {
+    name: 'WorkflowApprovalDecided',
+    declaration: 'export interface WorkflowApprovalDecided {\n    runId: string;\n    approvalId: string;\n    state: string;\n    workspaceKey?: string;\n}',
+  },
+  {
     name: 'WorkflowApprovalDecision',
     declaration: 'export type WorkflowApprovalDecision = \'decided\' | \'already-decided\' | \'unknown\';',
   },
   {
     name: 'WorkflowApprovalOutcome',
     declaration: 'export type WorkflowApprovalOutcome = \'allowed-once\' | \'rejected\' | \'cancelled\' | \'unavailable\';',
+  },
+  {
+    name: 'WorkflowApprovalPending',
+    declaration: 'export interface WorkflowApprovalPending {\n    runId: string;\n    approvalId: string;\n    nodeId: string;\n    workspaceKey?: string;\n}',
   },
   {
     name: 'WorkflowApprovalRequest',
@@ -5275,6 +5355,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface WorkflowGateRow {\n    readonly nodeId: string;\n    readonly gateKind: string;\n    readonly outcome: WorkflowGateOutcome;\n}',
   },
   {
+    name: 'WorkflowGraph',
+    declaration: 'export interface WorkflowGraph {\n    nodes: GraphNode[];\n    edges: GraphEdge[];\n    layers: number;\n    manifest: ManifestEntry[];\n    inputs: InputSpec[];\n}',
+  },
+  {
     name: 'WorkflowManifestGate',
     declaration: 'export interface WorkflowManifestGate {\n    readonly nodeId: string;\n    readonly gateKind: string;\n}',
   },
@@ -5291,8 +5375,8 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface WorkflowNodeInfo {\n    nodeId: string;\n    kind: string;\n    gateKind?: string;\n}',
   },
   {
-    name: 'WorkflowPendingApproval',
-    declaration: 'export interface WorkflowPendingApproval {\n    readonly approvalId: string;\n    readonly nodeId: string;\n    readonly message: string;\n}',
+    name: 'WorkflowNodeKind',
+    declaration: 'export type WorkflowNodeKind = \'prompt\' | \'bash\' | \'loop\' | \'approval\' | \'cancel\';',
   },
   {
     name: 'WorkflowPhase',
@@ -5309,6 +5393,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'WorkflowRun',
     declaration: 'export interface WorkflowRun {\n    readonly id: WorkflowRunId;\n    readonly meta: WorkflowMeta;\n    readonly result: Promise<WorkflowResult>;\n    cancel(reason?: string): void;\n    pendingApprovals?(): readonly WorkflowPendingApproval[];\n    decideApproval?(approvalId: string, outcome: WorkflowApprovalOutcome): WorkflowApprovalDecision;\n    dispose(): Promise<void>;\n}',
+  },
+  {
+    name: 'WorkflowRunChange',
+    declaration: 'export interface WorkflowRunChange {\n    runId: string;\n    status: string;\n    nodeId?: string;\n    nodeStatus?: string;\n    workspaceKey?: string;\n}',
   },
   {
     name: 'WorkflowRunEndStatus',
@@ -5328,7 +5416,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'WorkflowRunsEvent',
-    declaration: 'export type WorkflowRunsEvent = {\n    readonly type: \'run-changed\';\n    readonly runId: string;\n    readonly status: \'running\' | WorkflowRunEndStatus;\n    readonly nodeId?: string;\n    readonly nodeStatus?: string;\n} | {\n    readonly type: \'approval-pending\';\n    readonly runId: string;\n    readonly approvalId: string;\n    readonly nodeId: string;\n    readonly message: string;\n} | {\n    readonly type: \'approval-decided\';\n    readonly runId: string;\n    readonly approvalId: string;\n    readonly state: string;\n};',
+    declaration: 'export type WorkflowRunsEvent = {\n    readonly type: \'run-changed\';\n    readonly runId: string;\n    readonly status: \'running\' | WorkflowRunEndStatus;\n    readonly nodeId?: string;\n    readonly nodeStatus?: string;\n    readonly workspace?: string;\n} | {\n    readonly type: \'approval-pending\';\n    readonly runId: string;\n    readonly approvalId: string;\n    readonly nodeId: string;\n    readonly message: string;\n    readonly workspace?: string;\n} | {\n    readonly type: \'approval-decided\';\n    readonly workspace?: string;\n    readonly runId: string;\n    readonly approvalId: string;\n    readonly nodeId: string;\n    readonly state: string;\n    readonly reason?: string;\n};',
   },
   {
     name: 'WorkflowStartRequest',
@@ -5340,7 +5428,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'WorkflowStoreReader',
-    declaration: 'export interface WorkflowStoreReader {\n    readonly dir: string;\n    getRun(runId: string): Promise<RunDetail>;\n    listRuns(options?: {\n        name?: string;\n        limit?: number;\n        cursor?: string;\n    }): Promise<ListRunsResult>;\n    readSource(runId: string): Promise<string>;\n}',
+    declaration: 'export interface WorkflowStoreReader {\n    readonly dir: string;\n    getRun(runId: string): Promise<RunDetail>;\n    listRuns(options?: {\n        name?: string;\n        limit?: number;\n        cursor?: string;\n    }): Promise<ListRunsResult>;\n    readSource(runId: string): Promise<string>;\n    readOutput(runId: string, nodeId: string, offset: number, limit: number): Promise<OutputSlice>;\n}',
   },
   {
     name: 'WorkflowSupervisedChild',
@@ -5353,6 +5441,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'WorkflowSupervisorTools',
     declaration: 'export interface WorkflowSupervisorTools {\n    runBash(command: string, options?: {\n        workdir?: string;\n        timeoutMs?: number;\n    }): Promise<WorkflowBashResult>;\n    readonly signal: AbortSignal;\n}',
+  },
+  {
+    name: 'WorkflowTier',
+    declaration: 'export type WorkflowTier = \'cheap\' | \'standard\' | \'premium\';',
   },
   {
     name: 'WorktreeAddSpec',

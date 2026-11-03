@@ -57,6 +57,9 @@
     },
     {
       "path": "../../typert/protocol"
+    },
+    {
+      "path": "../../workflow/workflow-remote"
     }
   ]
 }

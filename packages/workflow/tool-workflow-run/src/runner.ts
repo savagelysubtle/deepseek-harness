@@ -7,7 +7,7 @@
  * @module @deepseek-ai/dsh-tool-workflow-run/runner
  */
 
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { realpath } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -18,7 +18,7 @@ import type { WorkflowRecorder } from '@deepseek-ai/dsh-tool-workflow'
 import { WORKFLOW_NODE_ID_PATTERN, WorkflowRunId } from '@deepseek-ai/dsh-workflow'
 import type { WorkflowRun, WorkflowStartRequest, WorkflowResult } from '@deepseek-ai/dsh-workflow'
 import { openStore, WorkflowStoreError, workflowStoreDir } from '@deepseek-ai/dsh-workflow-run-store'
-import type { ListRunsResult, RunDetail, WorkflowRunEndStatus, WorkflowRunStore } from '@deepseek-ai/dsh-workflow-run-store'
+import type { ListRunsResult, OutputSlice, RunDetail, WorkflowRunEndStatus, WorkflowRunStore } from '@deepseek-ai/dsh-workflow-run-store'
 import {
   analyze, compile, describeGraph, describeTrustFacts, sha256Hex, WorkflowCompileError,
 } from '@deepseek-ai/dsh-workflow-yaml'
@@ -55,6 +55,40 @@ export interface WorkflowStoreReader {
   listRuns(options?: { name?: string; limit?: number; cursor?: string }): Promise<ListRunsResult>
   /** The pinned workflow source text of a run. */
   readSource(runId: string): Promise<string>
+  /** A bounded byte range of one node's output. */
+  readOutput(runId: string, nodeId: string, offset: number, limit: number): Promise<OutputSlice>
+}
+
+/** How long a server-issued trust challenge stays redeemable. */
+export const TRUST_CHALLENGE_TTL_MS = 5 * 60 * 1000
+/** Most unredeemed trust challenges held at once; the oldest is dropped beyond it. */
+const MAX_TRUST_CHALLENGES = 64
+
+/** Open trust challenges one caller session may hold; a further `dryRun` drops that caller's oldest. */
+const MAX_TRUST_CHALLENGES_PER_CALLER = 4
+
+/** Who may cancel a run: the run must belong to this workspace (and, when given, this session). */
+export interface CancelScope {
+  /** The caller's workspace path; resolved through `realpath`. */
+  readonly workspace: string
+  /** When set, only a run started from this parent session matches. */
+  readonly sessionId?: string
+}
+
+interface TrustChallenge {
+  readonly key: string
+  readonly workspace: string
+  readonly caller: string
+  readonly expiresAt: number
+}
+
+/** Options of {@link WorkflowRunsService.dryRun}. */
+export interface DryRunOptions extends Pick<StartOptions, 'name' | 'path' | 'inputs'> {
+  /**
+   * The calling session id. When set and the content is untrusted, the plan carries a single-use
+   * `trustChallenge` bound to this caller, the workspace and the trust key.
+   */
+  readonly caller?: string
 }
 
 /** Largest serialized `inputs` accepted (the store keeps up to this much, so resume stays sound). */
@@ -181,6 +215,8 @@ export class WorkflowRunsService extends Service {
   private readonly byEngineId = new Map<string, ActiveRun>()
   private readonly active = new Map<string, ActiveRun>()
   private readonly listeners = new Set<(event: WorkflowRunsEvent) => void>()
+  private readonly challenges = new Map<string, TrustChallenge>()
+  private uiAttached = 0
   private readonly recorder: WorkflowRecorder
   private readonly broker: ApprovalBroker
   private readonly home: string
@@ -194,8 +230,8 @@ export class WorkflowRunsService extends Service {
       approvalWaitMs: config.approvalWaitMs,
       headless: config.headless,
       getApproval: () => ctx.get('approval'),
-      hasListeners: () => this.listeners.size > 0,
-      emit: (event) => { this.publish(event) },
+      hasListeners: () => this.uiAttached > 0,
+      emit: (event) => { this.recordApproval(event); this.publish(event) },
       warn: (message) => { ctx.logger.warn(`tool-workflow-run: ${message}`) },
     })
     ctx.on('workflow/node-start', (info, node) => {
@@ -226,10 +262,52 @@ export class WorkflowRunsService extends Service {
     return () => { this.listeners.delete(listener) }
   }
 
+  /**
+   * Declare that a human who can answer approvals is attached (the Workflows UI is open).
+   * While at least one attachment is held, an approval waits for an answer instead of being
+   * rejected at once; with none, an approval nobody can answer fails closed. Attaching is an
+   * explicit act, never inferred from {@link WorkflowRunsService.subscribe}.
+   * @returns the disposer that withdraws this attachment; calling it again does nothing.
+   */
+  attachUi(): () => void {
+    this.uiAttached += 1
+    let held = true
+    return () => {
+      if (!held) return
+      held = false
+      this.uiAttached -= 1
+    }
+  }
+
+  /** Project an approval transition into the parent session's durable log; never throws. */
+  private recordApproval(event: WorkflowRunsEvent): void {
+    if (event.type === 'run-changed') return
+    const run = this.active.get(event.runId)
+    if (run?.engineRun === undefined) return
+    const at = Date.now()
+    const kind = run.nodes.get(event.nodeId)?.kind ?? 'approval'
+    if (event.type === 'approval-pending') {
+      this.recorder.approval(WorkflowRunId(run.engineRun.id), { nodeId: event.nodeId, kind, approvalId: event.approvalId, state: 'pending', at })
+      return
+    }
+    const known = ['allowed', 'rejected', 'expired', 'unavailable', 'cancelled'] as const
+    const state = known.find(candidate => candidate === event.state) ?? 'unavailable'
+    this.recorder.approval(WorkflowRunId(run.engineRun.id), {
+      nodeId: event.nodeId,
+      kind,
+      approvalId: event.approvalId,
+      state,
+      ...event.reason === undefined ? {} : { reason: event.reason },
+      at,
+    })
+  }
+
   private publish(event: WorkflowRunsEvent): void {
+    const workspace = event.workspace ?? this.active.get(event.runId)?.workspace
+    const stamped = workspace === undefined ? event : { ...event, workspace }
     for (const listener of this.listeners) {
       try {
-        listener(event)
+        listener(stamped)
       } catch (error: unknown) {
         this.ctx.logger.warn(`tool-workflow-run: a run listener threw: ${describeError(error)}`)
       }
@@ -317,25 +395,82 @@ export class WorkflowRunsService extends Service {
 
   /**
    * The runs this process is executing now.
-   * @returns run id, name and hash of each.
+   * @returns run id, name, hash, workspace realpath and parent session id of each.
    */
-  activeRuns(): { runId: string; name: string; hash: string }[] {
-    return [...this.active.values()].map(r => ({ runId: r.runId, name: r.name, hash: r.hash }))
+  activeRuns(): { runId: string; name: string; hash: string; workspace: string; sessionId: string }[] {
+    return [...this.active.values()].map(r => ({
+      runId: r.runId, name: r.name, hash: r.hash, workspace: r.workspace, sessionId: r.parent.session.id,
+    }))
   }
 
   /**
-   * Cancel a run owned by this process.
+   * The workspace-relative directory that holds workflow files.
+   * @returns the configured directory, default `.workflows`.
+   */
+  workflowsDir(): string {
+    return this.config.workflowsDir
+  }
+
+  /**
+   * Cancel a run owned by this process, if it belongs to the caller's workspace (and session).
+   * A run outside the scope answers exactly like a run that does not exist.
    * @param runId - the run.
    * @param reason - why, recorded on the run.
-   * @returns whether this process owns the run, with its eventual outcome.
+   * @param scope - the caller's workspace, and optionally its session.
+   * @returns whether this process owns a matching run, with its eventual outcome.
    */
-  async cancel(runId: string, reason: string = 'cancelled by request'): Promise<{ found: boolean; outcome?: RunOutcome }> {
+  async cancel(runId: string, reason: string, scope: CancelScope): Promise<{ found: boolean; outcome?: RunOutcome }> {
     const run = this.active.get(runId)
     if (run === undefined) return { found: false }
+    let workspace: string
+    try {
+      workspace = await realpath(scope.workspace)
+    } catch {
+      return { found: false }
+    }
+    if (run.workspace !== workspace) return { found: false }
+    if (scope.sessionId !== undefined && run.parent.session.id !== scope.sessionId) return { found: false }
     run.cancelReason = reason
     run.engineRun?.cancel(reason)
     run.controller.abort()
     return { found: true, outcome: await run.done }
+  }
+
+  // ------------------------------------------------------------ trust challenge
+
+  /** Mint a single-use token that proves a plan was served to this caller for this exact content. */
+  private issueChallenge(key: string, workspace: string, caller: string): string {
+    const now = Date.now()
+    for (const [token, entry] of this.challenges) {
+      if (entry.expiresAt <= now) this.challenges.delete(token)
+    }
+    // A caller can only displace its own challenges: the per-caller cap is applied before the
+    // global one, so one session cannot evict a human's live confirmation in another.
+    const own = [...this.challenges].filter(([, entry]) => entry.caller === caller).map(([token]) => token)
+    for (const token of own.slice(0, Math.max(0, own.length - (MAX_TRUST_CHALLENGES_PER_CALLER - 1)))) {
+      this.challenges.delete(token)
+    }
+    while (this.challenges.size >= MAX_TRUST_CHALLENGES) {
+      const oldest = this.challenges.keys().next().value
+      if (oldest === undefined) break
+      this.challenges.delete(oldest)
+    }
+    const token = randomBytes(24).toString('hex')
+    this.challenges.set(token, { key, workspace, caller, expiresAt: now + TRUST_CHALLENGE_TTL_MS })
+    return token
+  }
+
+  /**
+   * Look a presented challenge up and spend it. A challenge is consumed by any presentation, so a
+   * replay (or a guess after a miss) never finds it.
+   */
+  private redeemChallenge(token: string | undefined, workspace: string, caller: string): TrustChallenge | undefined {
+    if (token === undefined) return undefined
+    const entry = this.challenges.get(token)
+    if (entry === undefined) return undefined
+    this.challenges.delete(token)
+    if (entry.expiresAt <= Date.now() || entry.workspace !== workspace || entry.caller !== caller) return undefined
+    return entry
   }
 
   // ---------------------------------------------------------------- loading
@@ -407,10 +542,10 @@ export class WorkflowRunsService extends Service {
    * Describe a workflow without running anything: the DAG, the gate manifest and the trust facts.
    * No store is opened and no process or agent is started.
    * @param workspace - the workspace path.
-   * @param options - which workflow.
+   * @param options - which workflow; `caller` (the calling session id) asks for a trust challenge.
    * @returns the plan, or why none could be made.
    */
-  async dryRun(workspace: string, options: Pick<StartOptions, 'name' | 'path' | 'inputs'>): Promise<DryRunPlan | StartRefused> {
+  async dryRun(workspace: string, options: DryRunOptions): Promise<DryRunPlan | StartRefused> {
     try {
       return await this.dryRunInner(workspace, options)
     } catch (error: unknown) {
@@ -428,8 +563,7 @@ export class WorkflowRunsService extends Service {
     return refused('START_FAILED', INTERNAL_ERROR_TEXT)
   }
 
-  private async dryRunInner(workspace: string, options: Pick<StartOptions,
-    'name' | 'path' | 'inputs'>): Promise<DryRunPlan | StartRefused> {
+  private async dryRunInner(workspace: string, options: DryRunOptions): Promise<DryRunPlan | StartRefused> {
     const real = await realpath(workspace)
     const file = await this.load(real, options)
     if ('ok' in file) return file
@@ -452,12 +586,30 @@ export class WorkflowRunsService extends Service {
     if (inputProblem !== undefined) return inputProblem
     const key = trustKey(analysis.hash, digestsOf(promptFiles))
     const trusted = await (await this.trustStoreFor(real)).isTrusted(key)
+    let confirmText: string | undefined
+    if (!trusted) {
+      try {
+        confirmText = renderTrustReason(describeTrustFacts(analysis.doc), analysis.hash, {
+          workspace: real, promptDigests: digestsOf(promptFiles), tierModels: this.config.tierModels,
+        })
+      } catch (error: unknown) {
+        if (error instanceof TrustTextError) {
+          return refused('TRUST_DENIED', `workflow '${escapeUnsafe(analysis.doc.name)}' cannot be trusted: ${error.message}`, {
+            remedy: 'Shorten the command (move the logic into a script file in the workspace) and run again.',
+          })
+        }
+        throw error
+      }
+    }
+    const challenge = !trusted && options.caller !== undefined ? this.issueChallenge(key, real, options.caller) : undefined
     return {
       ok: true,
       name: analysis.doc.name,
       hash: analysis.hash,
       trusted,
       trustKey: key,
+      ...challenge === undefined ? {} : { trustChallenge: challenge },
+      ...confirmText === undefined ? {} : { confirmText },
       graph: describeGraph(analysis.doc),
       manifest: compiled.manifest.map(m => ({ nodeId: m.nodeId, gateKind: m.gateKind })),
       trust: describeTrustFacts(analysis.doc),
@@ -729,7 +881,13 @@ export class WorkflowRunsService extends Service {
       throw error
     }
     if (options.trustHash !== undefined) {
-      if (options.trustHash !== key) {
+      const challenge = this.redeemChallenge(options.trustChallenge, content.workspace, options.parent.session.id)
+      if (challenge === undefined) {
+        return refused('TRUST_REQUIRED', 'the trust confirmation is missing, expired, already used, or was issued to another caller', {
+          remedy: 'Open the Run dialog again, review the commands, and confirm.',
+        })
+      }
+      if (options.trustHash !== key || challenge.key !== key) {
         return refused('TRUST_REQUIRED', 'the workflow or one of its prompt files changed after you confirmed it', {
           remedy: 'Review the commands again and confirm the new content.',
         })
@@ -890,6 +1048,14 @@ export class WorkflowRunsService extends Service {
         if (entry === undefined || (entry.kind !== 'prompt' && entry.kind !== 'loop')) continue
         const output = item.output
         const exitCode = typeof item.exitCode === 'number' ? item.exitCode : undefined
+        if (output.length >= SCRIPT_OUTPUT_TAIL) {
+          // The cut is known only now; a later node-end record replaces the earlier one for this node.
+          this.recorder.nodeEnd(WorkflowRunId(engineRun.id), {
+            nodeId: item.id, kind: entry.kind, status: 'success', truncated: true,
+            ...exitCode === undefined ? {} : { exitCode },
+            ...entry.durationMs === undefined ? {} : { durationMs: entry.durationMs },
+          })
+        }
         await run.queue.run(() => run.store.recordNode(run.runId, {
           nodeId: item.id as string, nodeKind: entry.kind, status: 'success', startedAt: entry.startedAt, endedAt: Date.now(), attempt: 1,
           ...exitCode === undefined ? {} : { exitCode },
@@ -935,7 +1101,7 @@ export class WorkflowRunsService extends Service {
       }
     })
     const reasons = Object.fromEntries(run.reasons)
-    this.publish({ type: 'run-changed', runId: run.runId, status })
+    this.publish({ type: 'run-changed', runId: run.runId, status, workspace: run.workspace })
     return {
       runId: run.runId, name: run.name, hash: run.hash, status,
       ...error === undefined ? {} : { error },

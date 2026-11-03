@@ -88,7 +88,10 @@ export function registerWorkflowRunTool(ctx: Context, config: ResolvedConfig): v
       if (selectors.length !== 1) throw new Error('give exactly one of name, path, resume or cancel')
       const runs = ctx.workflowRuns
       if (args.cancel !== undefined) {
-        const result = await runs.cancel(args.cancel, 'cancelled by workflow_run')
+        const result = await runs.cancel(args.cancel, 'cancelled by workflow_run', {
+          workspace: parent.session.header.cwd ?? process.cwd(),
+          sessionId: parent.session.id,
+        })
         if (!result.found || result.outcome === undefined) {
           throw new Error(`run '${args.cancel.slice(0, 80)}' is not running in this process, so it cannot be cancelled here`)
         }

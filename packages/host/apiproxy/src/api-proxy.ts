@@ -18,6 +18,8 @@ import type {} from '@deepseek-ai/dsh-agent-presets/types'
 // lives in `@deepseek-ai/dsh-mcp-status` now, not mcp-client (SWD-164 round
 // 5, defect 2).
 import type {} from '@deepseek-ai/dsh-mcp-status/status'
+// Same for the `workflow/*` events the Workflows UI subscribes to.
+import type {} from '@deepseek-ai/dsh-workflow-remote/wire'
 import { AttachmentError } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { contentHasImage, createUserMessage, freezeMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'

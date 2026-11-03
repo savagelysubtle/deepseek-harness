@@ -16,6 +16,21 @@
     },
     {
       "path": "../../runtime-diagnostics/invariants"
+    },
+    {
+      "path": "../../core/agent"
+    },
+    {
+      "path": "../../core/session"
+    },
+    {
+      "path": "../tool-workflow-run"
+    },
+    {
+      "path": "../workflow-run-store"
+    },
+    {
+      "path": "../workflow-yaml"
     }
   ]
 }

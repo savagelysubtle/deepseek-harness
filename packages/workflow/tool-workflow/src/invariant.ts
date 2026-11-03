@@ -72,6 +72,8 @@ function openRun(trace: WorkflowTrace, runId: string, eventType: string, fail: I
   return run
 }
 
+const APPROVAL_STATES: ReadonlySet<string> = new Set(['pending', 'allowed', 'rejected', 'expired', 'unavailable', 'cancelled'])
+
 /** Advance the workflow-record fold with one relevant Session event. */
 function applyEvent(trace: WorkflowTrace, event: SessionEvent, fail: InvariantFailure): void {
   const data = recordOf(event, fail)
@@ -110,11 +112,32 @@ function applyEvent(trace: WorkflowTrace, event: SessionEvent, fail: InvariantFa
       run.members.set(seq, true)
       return
     }
+    case 'tool-workflow/node-start': {
+      openRun(trace, runId, event.type, fail)
+      stringId(data.nodeId, 'tool-workflow/node-start nodeId', fail)
+      stringId(data.kind, 'tool-workflow/node-start kind', fail)
+      if (typeof data.at !== 'number' || !Number.isFinite(data.at)) fail('tool-workflow/node-start at must be a finite number')
+      return
+    }
+    case 'tool-workflow/approval': {
+      openRun(trace, runId, event.type, fail)
+      stringId(data.nodeId, 'tool-workflow/approval nodeId', fail)
+      stringId(data.kind, 'tool-workflow/approval kind', fail)
+      stringId(data.approvalId, 'tool-workflow/approval approvalId', fail)
+      if (!APPROVAL_STATES.has(String(data.state))) fail(`tool-workflow/approval state ${String(data.state)} is invalid`)
+      if (data.reason !== undefined && (typeof data.reason !== 'string' || data.reason.length > 500)) {
+        fail('tool-workflow/approval reason must be a string of at most 500 characters when present')
+      }
+      if (typeof data.at !== 'number' || !Number.isFinite(data.at)) fail('tool-workflow/approval at must be a finite number')
+      return
+    }
     case 'tool-workflow/node-end': {
       openRun(trace, runId, event.type, fail)
       stringId(data.nodeId, 'tool-workflow/node-end nodeId', fail)
       stringId(data.kind, 'tool-workflow/node-end kind', fail)
       stringId(data.status, 'tool-workflow/node-end status', fail)
+      // Absent in records written before the field existed.
+      if (data.truncated !== undefined && typeof data.truncated !== 'boolean') fail('tool-workflow/node-end truncated must be a boolean when present')
       return
     }
     case 'tool-workflow/gate-report': {

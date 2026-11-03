@@ -10,9 +10,14 @@ import type { Harness } from './harness.ts'
 let h: Harness | undefined
 afterEach(async () => { await h?.cleanup(); h = undefined })
 
-async function startDemo(trustHash?: string) {
+async function startDemo(trustHash?: string, trustChallenge?: string) {
   const harness = h!
-  return await harness.ctx.workflowRuns.start({ parent: harness.parent, name: 'demo', ...trustHash === undefined ? {} : { trustHash } })
+  return await harness.ctx.workflowRuns.start({
+    parent: harness.parent,
+    name: 'demo',
+    ...trustHash === undefined ? {} : { trustHash },
+    ...trustChallenge === undefined ? {} : { trustChallenge },
+  })
 }
 
 describe('workflow trust', () => {
@@ -74,10 +79,10 @@ describe('workflow trust', () => {
     await h.writeWorkflow('demo', DEMO)
     const wrong = await startDemo('0'.repeat(64))
     expect(wrong).toMatchObject({ ok: false, error: 'TRUST_REQUIRED' })
-    const dry = await h.ctx.workflowRuns.dryRun(h.workspace, { name: 'demo' })
+    const dry = await h.ctx.workflowRuns.dryRun(h.workspace, { name: 'demo', caller: h.parent.session.id })
     if (!dry.ok) throw new Error('dry run failed')
     expect(dry.trusted).toBe(false)
-    const ok = await startDemo(dry.trustKey)
+    const ok = await startDemo(dry.trustKey, dry.trustChallenge)
     expect(ok.ok).toBe(true)
     h.engine.runs[0]!.settle({ value: { status: 'completed', nodes: [] }, stopReason: 'completed', agentsStarted: 0 })
     if (ok.ok) await ok.done
@@ -145,10 +150,12 @@ describe('trust key covers the prompt files and the workspace', () => {
     await h.writeWorkflow('filed', WITH_FILE)
     await mkdir(join(h.workspace, 'notes'))
     await writeFile(join(h.workspace, 'notes', 'guide.md'), 'v1')
-    const dry = await h.ctx.workflowRuns.dryRun(h.workspace, { name: 'filed' })
+    const dry = await h.ctx.workflowRuns.dryRun(h.workspace, { name: 'filed', caller: h.parent.session.id })
     if (!dry.ok) throw new Error(dry.message)
     await writeFile(join(h.workspace, 'notes', 'guide.md'), 'v2')
-    const result = await h.ctx.workflowRuns.start({ parent: h.parent, name: 'filed', trustHash: dry.trustKey })
+    const result = await h.ctx.workflowRuns.start({
+      parent: h.parent, name: 'filed', trustHash: dry.trustKey, ...dry.trustChallenge === undefined ? {} : { trustChallenge: dry.trustChallenge },
+    })
     expect(result).toMatchObject({ ok: false, error: 'TRUST_REQUIRED' })
     expect(h.engine.runs).toHaveLength(0)
   })

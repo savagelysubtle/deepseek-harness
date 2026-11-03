@@ -526,6 +526,11 @@ export const FOUNDATION_TYPE_NAMES: ReadonlySet<string> = new Set([
 
 /** Project types deliberately documented outside the subsystems catalog. */
 export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
+  CancelScope: 'workflow cancel scope (workspace and session) is owned by packages/workflow/tool-workflow-run/README.md',
+  DryRunOptions: 'workflow dry-run options are owned by packages/workflow/tool-workflow-run/README.md',
+  WorkflowRunChange: 'workflow run-changed event payload is owned by packages/workflow/workflow-remote/README.md',
+  WorkflowApprovalPending: 'workflow approval-pending event payload is owned by packages/workflow/workflow-remote/README.md',
+  WorkflowApprovalDecided: 'workflow approval-decided event payload is owned by packages/workflow/workflow-remote/README.md',
   MailboxProvider: 'mailbox storage provider contract is owned by packages/mailbox/mailbox/README.md',
   MailboxMessage: 'mailbox durable message record is owned by packages/mailbox/mailbox/README.md',
   MailboxMessageId: 'provider-assigned mailbox message identity is owned by packages/mailbox/mailbox/README.md',

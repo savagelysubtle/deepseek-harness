@@ -22,7 +22,7 @@ import type {
 } from '@deepseek-ai/dsh-workflow'
 import type {
   ToolWorkflowAgentEndData, ToolWorkflowAgentStartData, ToolWorkflowGateReportData, ToolWorkflowGateReportRow,
-  ToolWorkflowNodeEndData, ToolWorkflowRunEndData, ToolWorkflowRunStartData,
+  ToolWorkflowApprovalData, ToolWorkflowNodeEndData, ToolWorkflowNodeStartData, ToolWorkflowRunEndData, ToolWorkflowRunStartData,
 } from './types.ts'
 // Declaration merge only: makes ctx.systemPrompt visible for the section registration.
 import type {} from '@deepseek-ai/dsh-system-prompt'
@@ -59,6 +59,10 @@ export interface WorkflowRecorder {
   start(session: Session, run: WorkflowRun, options?: WorkflowRecorderStartOptions): void
   /** Append the end-of-run gate report for a started run (call before {@link WorkflowRecorder.finish}). */
   gateReport(runId: WorkflowRunId, rows: readonly ToolWorkflowGateReportRow[]): void
+  /** Append a node-end record the engine event could not carry (an agent node whose output was cut at run end). */
+  nodeEnd(runId: WorkflowRunId, data: Omit<ToolWorkflowNodeEndData, 'runId'>): void
+  /** Append one approval transition. */
+  approval(runId: WorkflowRunId, data: Omit<ToolWorkflowApprovalData, 'runId'>): void
   /** Close the record after the run reached quiescence. */
   finish(runId: WorkflowRunId, stopReason: WorkflowStopReason): void
   /** Forget a run without writing anything further. */
@@ -69,7 +73,9 @@ interface ToolWorkflowRecordEventMap {
   'tool-workflow/run-start': ToolWorkflowRunStartData
   'tool-workflow/agent-start': ToolWorkflowAgentStartData
   'tool-workflow/agent-end': ToolWorkflowAgentEndData
+  'tool-workflow/node-start': ToolWorkflowNodeStartData
   'tool-workflow/node-end': ToolWorkflowNodeEndData
+  'tool-workflow/approval': ToolWorkflowApprovalData
   'tool-workflow/gate-report': ToolWorkflowGateReportData
   'tool-workflow/run-end': ToolWorkflowRunEndData
 }
@@ -140,6 +146,12 @@ export function createWorkflowRecorder(ctx: Context): WorkflowRecorder {
     }
     if (!append(record.session, 'tool-workflow/agent-end', data)) active.delete(info.id)
   })
+  ctx.on('workflow/node-start', (info, node) => {
+    const record = active.get(info.id)
+    if (record === undefined || !record.nodes) return
+    const data: ToolWorkflowNodeStartData = { runId: record.recordId, nodeId: node.nodeId, kind: node.kind, at: Date.now() }
+    if (!append(record.session, 'tool-workflow/node-start', data)) active.delete(info.id)
+  })
   ctx.on('workflow/node-end', (info, node) => {
     const record = active.get(info.id)
     if (record === undefined || !record.nodes) return
@@ -150,6 +162,7 @@ export function createWorkflowRecorder(ctx: Context): WorkflowRecorder {
       status: node.status,
       ...node.exitCode === undefined ? {} : { exitCode: node.exitCode },
       ...node.durationMs === undefined ? {} : { durationMs: node.durationMs },
+      truncated: node.truncated === true,
     }
     if (!append(record.session, 'tool-workflow/node-end', data)) active.delete(info.id)
   })
@@ -165,6 +178,16 @@ export function createWorkflowRecorder(ctx: Context): WorkflowRecorder {
       const record = active.get(runId)
       if (record === undefined) return
       if (!append(record.session, 'tool-workflow/gate-report', { runId: record.recordId, rows })) active.delete(runId)
+    },
+    nodeEnd(runId, data) {
+      const record = active.get(runId)
+      if (record === undefined || !record.nodes) return
+      if (!append(record.session, 'tool-workflow/node-end', { runId: record.recordId, ...data })) active.delete(runId)
+    },
+    approval(runId, data) {
+      const record = active.get(runId)
+      if (record === undefined) return
+      if (!append(record.session, 'tool-workflow/approval', { runId: record.recordId, ...data })) active.delete(runId)
     },
     finish(runId, stopReason) {
       const record = active.get(runId)

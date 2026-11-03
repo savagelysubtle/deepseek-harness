@@ -209,6 +209,9 @@ describe('connection node half', () => {
       // the apiproxy RPC map above: starting an OAuth flow, forcing a
       // reconnect, and editing the live mount roster all stay loopback-only.
       'mcp/authorize-start', 'mcp/reconnect', 'mcp/set-enabled',
+      // Workflow writes, run control, approvals and the human-present claim.
+      'workflow/save', 'workflow/run', 'workflow/resume', 'workflow/cancel', 'workflow/nodeOutput',
+      'workflow/approve', 'workflow/reject', 'workflow/attachUi', 'workflow/detachUi',
     ]) {
       const denied = fakeResponse()
       await routes[0]!.handler(
@@ -221,6 +224,32 @@ describe('connection node half', () => {
     const read = fakeResponse()
     await routes[0]!.handler(fakeRequest({ host: 'harness.example' }), read.response)
     expect(read.state.status).not.toBe(403)
+    // The workflow reads stay reachable for a declared authority.
+    for (const method of ['workflow/list', 'workflow/read', 'workflow/dryRun', 'workflow/runs', 'workflow/runDetail', 'workflow/pendingApprovals']) {
+      const open = fakeResponse()
+      await routes[0]!.handler(fakeRequest({ host: 'harness.example', origin: 'http://harness.example', 'sec-fetch-site': 'same-origin' }, `${API_PATH}/${method}`), open.response)
+      expect(open.state.status).not.toBe(403)
+    }
+    await dispose()
+  })
+
+  it('refuses a privileged method from a non-loopback peer that spoofs a loopback Host header', async () => {
+    const { routes, dispose } = await mounted({ trustedHosts: ['10.0.0.1'] })
+    for (const peer of ['10.0.0.9', '203.0.113.5', '::ffff:10.0.0.9', '2001:db8::1', '']) {
+      for (const method of ['workflow/run', 'workflow/approve', 'workflow/nodeOutput', 'settings.update']) {
+        const denied = fakeResponse()
+        await routes[0]!.handler(
+          fakeRequest({ host: 'localhost', 'x-forwarded-for': '127.0.0.1' }, `${API_PATH}/${method}`, peer),
+          denied.response,
+        )
+        expect([peer, method, denied.state.status]).toEqual([peer, method, 403])
+      }
+    }
+    for (const peer of ['127.0.0.1', '127.9.9.9', '::1', '::ffff:127.0.0.1']) {
+      const allowed = fakeResponse()
+      await routes[0]!.handler(fakeRequest({ host: 'localhost' }, `${API_PATH}/workflow/run`, peer), allowed.response)
+      expect([peer, allowed.state.status === 403]).toEqual([peer, false])
+    }
     await dispose()
   })
 

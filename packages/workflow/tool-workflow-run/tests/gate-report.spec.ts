@@ -37,7 +37,8 @@ describe('gate report on every terminal path', () => {
     expect(detail.end?.report).toEqual(outcome.report)
     const types = hh.session.events.map(e => e.type).filter(t => t.startsWith('tool-workflow/'))
     expect(types).toEqual([
-      'tool-workflow/run-start', 'tool-workflow/node-end', 'tool-workflow/node-end', 'tool-workflow/gate-report', 'tool-workflow/run-end',
+      'tool-workflow/run-start', 'tool-workflow/node-start', 'tool-workflow/node-end', 'tool-workflow/node-start', 'tool-workflow/node-end',
+      'tool-workflow/gate-report', 'tool-workflow/run-end',
     ])
     const report = hh.session.events.find(e => e.type === 'tool-workflow/gate-report')!.data as unknown as { runId: string; rows: unknown[] }
     expect(report.runId).toBe(started.runId)
@@ -61,7 +62,7 @@ describe('gate report on every terminal path', () => {
 
   it('cancelled: cancel() ends the run cancelled with a complete report', async () => {
     const { started, run, store } = await begin()
-    const { found, outcome } = await h!.ctx.workflowRuns.cancel(started.runId, 'stop please')
+    const { found, outcome } = await h!.ctx.workflowRuns.cancel(started.runId, 'stop please', { workspace: h!.workspace })
     expect(found).toBe(true)
     expect(outcome?.status).toBe('cancelled')
     expect(run.cancels).toContain('stop please')

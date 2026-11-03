@@ -44,9 +44,11 @@ describe('writer guard', () => {
     await h.writeWorkflow('demo', DEMO)
     const store = await h.ctx.workflowRuns.storeFor(h.workspace)
     await writeFile(join(store.dir, 'writer.lock'), 'not a lock record')
-    const dry = await h.ctx.workflowRuns.dryRun(h.workspace, { name: 'demo' })
+    const dry = await h.ctx.workflowRuns.dryRun(h.workspace, { name: 'demo', caller: h.parent.session.id })
     if (!dry.ok) throw new Error(dry.message)
-    const result = await h.ctx.workflowRuns.start({ parent: h.parent, name: 'demo', trustHash: dry.trustKey })
+    const result = await h.ctx.workflowRuns.start({
+      parent: h.parent, name: 'demo', trustHash: dry.trustKey, ...dry.trustChallenge === undefined ? {} : { trustChallenge: dry.trustChallenge },
+    })
     expect(result).toMatchObject({ ok: false, error: 'WRITER_BUSY' })
     if (result.ok) return
     const text = `${result.message}\n${result.remedy ?? ''}`

@@ -42,6 +42,9 @@
       "path": "../../mcp/mcp-status"
     },
     {
+      "path": "../../workflow/workflow-remote"
+    },
+    {
       "path": "../../core/agent"
     },
     {

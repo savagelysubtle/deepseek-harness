@@ -6,6 +6,11 @@ describe('API_REMOTE_FORWARDED_EVENTS', () => {
     expect(API_REMOTE_FORWARDED_EVENTS).toContain('mcp/status-changed')
   })
 
+  it('forwards the three workflow events the Workflows UI subscribes to, and no other workflow/* name', () => {
+    const workflow = API_REMOTE_FORWARDED_EVENTS.filter(name => name.startsWith('workflow/')).sort()
+    expect(workflow).toEqual(['workflow/approval-decided', 'workflow/approval-pending', 'workflow/run-changed'])
+  })
+
   it('declares no duplicate event names', () => {
     expect(new Set(API_REMOTE_FORWARDED_EVENTS).size).toBe(API_REMOTE_FORWARDED_EVENTS.length)
   })

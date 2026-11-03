@@ -60,9 +60,11 @@ describe('workflow_run over the real stack with an idle parent', () => {
     ctx.llm.registerAdapter(['mock'], new MockAdapter([textResponse('summary: all good')]))
     const parent = ctx.agentLoop.create(SessionId('idle-parent'), { provider: 'mock', model: 'mock' }, { cwd: workspace })
 
-    const dry = await ctx.workflowRuns.dryRun(workspace, { name: 'real' })
+    const dry = await ctx.workflowRuns.dryRun(workspace, { name: 'real', caller: parent.session.id })
     if (!dry.ok) throw new Error(dry.message)
-    const started = await ctx.workflowRuns.start({ parent, name: 'real', trustHash: dry.trustKey })
+    const started = await ctx.workflowRuns.start({
+      parent, name: 'real', trustHash: dry.trustKey, ...dry.trustChallenge === undefined ? {} : { trustChallenge: dry.trustChallenge },
+    })
     if (!started.ok) throw new Error(`${started.error}: ${started.message}`)
     const outcome = await started.done
 
@@ -72,6 +74,10 @@ describe('workflow_run over the real stack with an idle parent', () => {
     expect(types[0]).toBe('tool-workflow/run-start')
     expect(types).toContain('tool-workflow/agent-start')
     expect(types).toContain('tool-workflow/gate-report')
+    expect(types).toContain('tool-workflow/node-start')
+    const ends = parent.session.events.filter(e => e.type === 'tool-workflow/node-end').map(e => e.data as { nodeId: string; truncated: boolean })
+    expect(ends.map(e => e.nodeId)).toContain('build')
+    expect(ends.every(e => typeof e.truncated === 'boolean')).toBe(true)
     expect(types.at(-1)).toBe('tool-workflow/run-end')
     expect(parent.session.events.some(e => e.type === 'turn/start')).toBe(false)
   }, 30_000)

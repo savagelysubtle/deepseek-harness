@@ -13,7 +13,8 @@
 - **审批。** 先询问存储；仅当调用方 agent 有打开的回合时，才同时通过 `ctx.approval` 询问（由界面启动、父 agent 空闲的运行不会进入聊天）。先到的回答生效，另一路被取消。等待在 `approvalWaitMs` 到期后结束：审批标记为过期，节点被拒绝。无人值守会话、信任策略 `never`，或无人可回答的会话（没有打开的回合且没有连接的界面）会立即拒绝；原因与处理办法同时出现在工具结果、存储的审批记录和会话的门禁报告行中。
 - **门禁报告。** 在每条终止路径（完成、失败、取消、worker 死亡、释放）上，运行器根据清单加存储记录为每个已声明的门禁生成一行（`fired-pass`、`fired-block`、`skipped`、`not-reached`、`never-evaluated`），并在存储中结束该运行。
 - **恢复。** 只读取存储。仅当某节点成功、输出可恢复（完整输出或其溢写文件）且其所有依赖也被跳过时才跳过它。当某个会修改工作区的成功节点（bash、loop，或标记了 `mutatesCheckout` 的 prompt）输出不可恢复时，恢复会拒绝并指明该节点；若这样的节点已成功、但它依赖的节点没有可恢复输出（它将不得不再次运行），同样拒绝。恢复后的运行到达审批节点时，会重新创建待处理审批。
-- **会话记录。** 通过 [`@deepseek-ai/dsh-tool-workflow`](../tool-workflow/README.md) 导出的记录器写入：`tool-workflow/run-start`、`agent-start`、`agent-end`、`node-end`、`gate-report`、`run-end`，均为仅日志事件，以存储运行 id 为键。这些事件在回合之间合法，因此空闲的父 agent 无需打开的回合即可记录。
+- **界面控制。** `attachUi()` 是显式的有人在场信号（返回释放函数；订阅并不算），`cancel(runId, reason, scope)` 接受 `CancelScope`（工作区，给定时还包括会话），对范围之外的运行与未知运行作出完全相同的应答；`dryRun(workspace, options)` 接受 `DryRunOptions`（`name`、`path`、`inputs`、`caller`），对不受信任的内容返回一次性 `trustChallenge`（五分钟，绑定调用方、工作区与信任键；每个调用方最多同时持有四个），`start` 必须将其与 `trustHash` 一同提交。已受信任的内容会忽略两者。
+- **会话记录。** 通过 [`@deepseek-ai/dsh-tool-workflow`](../tool-workflow/README.md) 导出的记录器写入：`tool-workflow/run-start`、`agent-start`、`agent-end`、`node-start`、`node-end`（带 `truncated`）、`approval`（待定及每次决定，原因去除控制字符并限 500 字符）、`gate-report`、`run-end`，均为仅日志事件，以存储运行 id 为键。这些事件在回合之间合法，因此空闲的父 agent 无需打开的回合即可记录。
 
 ## 配置
 

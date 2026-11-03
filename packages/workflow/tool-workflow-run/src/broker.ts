@@ -193,7 +193,7 @@ export class ApprovalBroker {
       const reason = immediateRejectionReason(nodeId, cause)
       run.reasons.set(nodeId, reason)
       await run.queue.run(() => store.decideApproval(runId, approvalId, { state: 'rejected', reason }))
-      this.options.emit({ type: 'approval-decided', runId, approvalId, state: 'rejected' })
+      this.options.emit({ type: 'approval-decided', runId, approvalId, nodeId, state: 'rejected', reason: stripUnsafe(reason, MAX_REASON_CHARS) })
       return 'rejected'
     }
 
@@ -225,7 +225,15 @@ export class ApprovalBroker {
         finalState = 'cancelled'
         this.options.warn(`workflow approval ${approvalId} could not be recorded: ${error instanceof Error ? error.message : String(error)}`)
       }
-      this.options.emit({ type: 'approval-decided', runId, approvalId, state: finalState })
+      const why = run.reasons.get(nodeId) ?? reason
+      this.options.emit({
+        type: 'approval-decided',
+        runId,
+        approvalId,
+        nodeId,
+        state: unrecorded ? 'unavailable' : finalState,
+        ...why === undefined ? {} : { reason: stripUnsafe(why, MAX_REASON_CHARS) },
+      })
       done.resolve(finalState)
       return finalState
     }

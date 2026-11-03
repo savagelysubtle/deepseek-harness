@@ -18,6 +18,7 @@ import type {} from '@deepseek-ai/dsh-llm/types'
 import type {} from '@deepseek-ai/dsh-mcp-status/status'
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
 import type {} from '@deepseek-ai/dsh-settings/types'
+import type {} from '@deepseek-ai/dsh-workflow-remote/wire'
 
 export {
   ApiRemoteSessionNotFound,

@@ -6,7 +6,7 @@
 
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { WorkflowGateRow, WorkflowRunEndStatus } from '@deepseek-ai/dsh-workflow-run-store'
-import type { Diagnostic, TrustFacts } from '@deepseek-ai/dsh-workflow-yaml'
+import type { Diagnostic, TrustFacts, WorkflowGraph } from '@deepseek-ai/dsh-workflow-yaml'
 
 /** One gate-report row; `reason` explains a block (for example a headless approval rejection). */
 export interface GateReportRow extends WorkflowGateRow {
@@ -90,8 +90,13 @@ export interface StartOptions {
   readonly resume?: string
   /** Values for the workflow's declared inputs. */
   readonly inputs?: Readonly<Record<string, unknown>>
-  /** The `trustKey` a human confirmed in the UI; accepted only when it equals the current key. */
+  /** The `trustKey` a human confirmed in the UI; accepted only when it equals the current key and `trustChallenge` is valid. */
   readonly trustHash?: string
+  /**
+   * The single-use `trustChallenge` the host issued with the dry run the human reviewed. Without
+   * a live challenge bound to this caller, workspace and key, `trustHash` is refused.
+   */
+  readonly trustChallenge?: string
   /** Cancels the run when aborted. */
   readonly signal?: AbortSignal
 }
@@ -104,7 +109,11 @@ export interface DryRunPlan {
   readonly trusted: boolean
   /** The key a human confirms: the YAML hash plus every prompt file digest. Pass it back as `trustHash`. */
   readonly trustKey: string
-  readonly graph: unknown
+  /** Single-use token proving this plan was served to the calling session; present only when untrusted and a caller was given. */
+  readonly trustChallenge?: string
+  /** The exact confirmation text a human reviews (every command verbatim); present only when untrusted. */
+  readonly confirmText?: string
+  readonly graph: WorkflowGraph
   readonly manifest: readonly { nodeId: string; gateKind: string }[]
   readonly trust: TrustFacts
   readonly plan: readonly string[]
@@ -113,6 +122,33 @@ export interface DryRunPlan {
 
 /** Change events a subscriber (the Host Remote service) receives. */
 export type WorkflowRunsEvent =
-  | { readonly type: 'run-changed'; readonly runId: string; readonly status: 'running' | WorkflowRunEndStatus; readonly nodeId?: string; readonly nodeStatus?: string }
-  | { readonly type: 'approval-pending'; readonly runId: string; readonly approvalId: string; readonly nodeId: string; readonly message: string }
-  | { readonly type: 'approval-decided'; readonly runId: string; readonly approvalId: string; readonly state: string }
+  | {
+    readonly type: 'run-changed'
+    readonly runId: string
+    readonly status: 'running' | WorkflowRunEndStatus
+    readonly nodeId?: string
+    readonly nodeStatus?: string
+    /** Realpath of the workspace the run belongs to; stamped by the runner, never forwarded raw. */
+    readonly workspace?: string
+  }
+  | {
+    readonly type: 'approval-pending'
+    readonly runId: string
+    readonly approvalId: string
+    readonly nodeId: string
+    readonly message: string
+    /** Realpath of the workspace the run belongs to; stamped by the runner, never forwarded raw. */
+    readonly workspace?: string
+  }
+  | {
+    readonly type: 'approval-decided'
+    /** Realpath of the workspace the run belongs to; stamped by the runner, never forwarded raw. */
+    readonly workspace?: string
+    readonly runId: string
+    readonly approvalId: string
+    readonly nodeId: string
+    /** `allowed`, `rejected`, `expired`, `cancelled`, or `unavailable` when the decision could not be recorded. */
+    readonly state: string
+    /** Control-stripped reason, at most 500 characters. */
+    readonly reason?: string
+  }

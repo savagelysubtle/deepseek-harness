@@ -943,6 +943,9 @@ importers:
       '@deepseek-ai/dsh-typert-registry':
         specifier: workspace:^
         version: link:../../typert/registry
+      '@deepseek-ai/dsh-workflow-remote':
+        specifier: workspace:^
+        version: link:../../workflow/workflow-remote
 
   packages/attachment/attachment:
     devDependencies:
@@ -5279,6 +5282,9 @@ importers:
       '@deepseek-ai/dsh-typert-registry':
         specifier: workspace:^
         version: link:../../typert/registry
+      '@deepseek-ai/dsh-workflow-remote':
+        specifier: workspace:^
+        version: link:../../workflow/workflow-remote
 
   packages/host/directory-picker:
     devDependencies:
@@ -9084,12 +9090,27 @@ importers:
       '@deepseek-ai/cordis':
         specifier: workspace:^
         version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-agent':
+        specifier: workspace:^
+        version: link:../../core/agent
       '@deepseek-ai/dsh-invariants':
         specifier: workspace:^
         version: link:../../runtime-diagnostics/invariants
+      '@deepseek-ai/dsh-session':
+        specifier: workspace:^
+        version: link:../../core/session
+      '@deepseek-ai/dsh-tool-workflow-run':
+        specifier: workspace:^
+        version: link:../tool-workflow-run
       '@deepseek-ai/dsh-typert-protocol':
         specifier: workspace:^
         version: link:../../typert/protocol
+      '@deepseek-ai/dsh-workflow-run-store':
+        specifier: workspace:^
+        version: link:../workflow-run-store
+      '@deepseek-ai/dsh-workflow-yaml':
+        specifier: workspace:^
+        version: link:../workflow-yaml
 
   packages/workflow/workflow-run-store:
     devDependencies:

@@ -182,8 +182,8 @@ export async function setup(
     approval = ctx.get('approval') as unknown as FakeApproval
   }
   await ctx.plugin(toolWorkflowRun, Object.assign({ dshHome: home }, options.config))
-  // A connected Workflows UI listens for run events; `ui: false` models a host where nobody does.
-  if (options.ui !== false) ctx.workflowRuns.subscribe(() => undefined)
+  // An attached Workflows UI can answer approvals; `ui: false` models a host where nobody can.
+  if (options.ui !== false) ctx.workflowRuns.attachUi()
   const id = SessionId('parent')
   const session = Session.create(id, [], { version: 0, id, createdAt: 0, cwd: workspace })
   const parent = { id, options: { model: 'test-model' }, session } as unknown as Agent
@@ -197,8 +197,8 @@ export async function setup(
     session,
     parent,
     async cleanup() {
-      await rm(workspace, { recursive: true, force: true })
-      await rm(home, { recursive: true, force: true })
+      await rm(workspace, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 })
+      await rm(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 })
     },
     async writeWorkflow(name, text) {
       await writeFile(join(workspace, '.workflows', `${name}.yaml`), text)
@@ -222,12 +222,12 @@ export async function setup(
 
 /** Start `name` as a human-confirmed (trusted) run and return the started handle. */
 export async function startTrusted(h: Harness, name = 'demo', extra: { inputs?: Record<string, unknown>; resume?: string } = {}) {
-  const dry = extra.resume === undefined ? await h.ctx.workflowRuns.dryRun(h.workspace, { name }) : undefined
+  const dry = extra.resume === undefined ? await h.ctx.workflowRuns.dryRun(h.workspace, { name, caller: h.parent.session.id }) : undefined
   if (dry !== undefined && !dry.ok) throw new Error(`dry run failed: ${dry.message}`)
   const result = await h.ctx.workflowRuns.start({
     parent: h.parent,
     ...extra.resume === undefined ? { name } : { resume: extra.resume },
-    ...dry?.ok ? { trustHash: dry.trustKey } : {},
+    ...dry?.ok ? { trustHash: dry.trustKey, ...dry.trustChallenge === undefined ? {} : { trustChallenge: dry.trustChallenge } } : {},
     ...extra.inputs === undefined ? {} : { inputs: extra.inputs },
   })
   if (!result.ok) throw new Error(`start refused: ${result.error}: ${result.message}`)
