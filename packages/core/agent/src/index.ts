@@ -81,6 +81,13 @@ export interface CreateAgentOptions {
   /** The live agent/session identity. */
   readonly sessionId: SessionId
   /**
+   * Which registered factory driver serves this call (see
+   * {@link AgentRegistry.setFactory}). Omitted means {@link DEFAULT_AGENT_DRIVER},
+   * so every driver-less caller behaves exactly as before keyed drivers existed.
+   * Must match {@link AGENT_DRIVER_PATTERN}; an unregistered key rejects loudly.
+   */
+  readonly driver?: string
+  /**
    * Session creation metadata: validated absolute `cwd`, `parentSession`
    * fork lineage, the `seedLength` seed boundary, the coarse `origin`
    * classification, and the `delegationDepth` recursion budget. Mirrors the
@@ -139,6 +146,13 @@ export interface CreateAgentOptions {
 export interface ResumeAgentOptions {
   /** The persisted session id to load and use as the live agent/session identity. */
   readonly resumeSessionId: SessionId
+  /**
+   * Which registered factory driver serves this call (see
+   * {@link AgentRegistry.setFactory}). Omitted means {@link DEFAULT_AGENT_DRIVER},
+   * so every driver-less caller behaves exactly as before keyed drivers existed.
+   * Must match {@link AGENT_DRIVER_PATTERN}; an unregistered key rejects loudly.
+   */
+  readonly driver?: string
   /** Per-agent options (model, …). */
   readonly agentOptions?: AgentOptions
   /** Optional creation-only cancellation signal for persistence load/setup; detached before return. */
@@ -213,10 +227,24 @@ export interface AgentFactory {
   resume(ownerCtx: Context, options: ResumeAgentOptions): Promise<AgentHandle>
 }
 
+/** The driver key every driver-less create/resume/setFactory call resolves to. */
+export const DEFAULT_AGENT_DRIVER = 'default'
+
+/** Shape a factory driver key must have: lowercase, starts with a letter, at most 32 characters. */
+export const AGENT_DRIVER_PATTERN = /^[a-z][a-z0-9-]{0,31}$/
+
 /** Thrown when create/resume is called before an agent factory is registered. */
 const NO_FACTORY_MESSAGE = 'no agent factory registered (load an agent-loop plugin)'
+
 const NO_INITIATOR_MESSAGE = 'no initiating agent is active'
 const DISPOSED_INITIATOR_MESSAGE = 'agent initiator scope is disposed'
+
+/** Reject a malformed driver key before it can reach the factory map. */
+function assertDriverKey(driver: string): void {
+  if (!AGENT_DRIVER_PATTERN.test(driver)) {
+    throw new Error(`invalid agent driver ${JSON.stringify(driver)} (expected ${String(AGENT_DRIVER_PATTERN)})`)
+  }
+}
 
 /** All mutable lifecycle state for one exact registry entry. */
 interface AgentEntry {
@@ -255,7 +283,7 @@ interface FactorySlot {
  */
 export class AgentRegistry extends Service {
   private store = new Map<SessionId, AgentEntry>()
-  private factory: FactorySlot | undefined
+  private readonly factories = new Map<string, FactorySlot>()
   private readonly initiators = new AsyncLocalStorage<Agent | undefined>()
   private readonly initiatorRuns = new AsyncLocalStorage<InitiatorRun>()
   private initiatorState: 'active' | 'closing' | 'disposed' = 'active'
@@ -362,22 +390,26 @@ export class AgentRegistry extends Service {
    * effect-scoped). A traced Cordis service is canonicalized to its concrete
    * target; each create/resume call is then traced through that caller's
    * context so ownership follows the caller without stacking proxy layers.
-   * Throws if a factory is already registered. Returns the disposer; on
-   * dispose the factory slot is cleared.
+   * Factories are keyed by `driver`; the loop registers under
+   * {@link DEFAULT_AGENT_DRIVER}. Throws if that key is already registered or the
+   * key is malformed. Returns the disposer; on dispose only this key's slot is cleared.
    * @param factory - the loop-owned factory {@link create}/{@link resume} delegate to.
+   * @param driver - registration key matching {@link AGENT_DRIVER_PATTERN}; defaults to `'default'`.
    * @returns the disposer that clears the factory slot. The exact
    *   Cordis effect disposer (single-shot): composite (generator) effects may
    *   yield it directly — exact identity nests the teardown in order.
    */
-  setFactory(factory: AgentFactory): () => void {
+  setFactory(factory: AgentFactory, driver: string = DEFAULT_AGENT_DRIVER): () => void {
+    assertDriverKey(driver)
     const dispose = this.ctx.effect(() => {
-      if (this.factory !== undefined) throw new Error('an agent factory is already registered')
+      if (this.factories.has(driver)) throw new Error('an agent factory is already registered')
       // Avoid stacking two Cordis shadow layers when a caller passes a Service
       // already read through a context. Calls are re-traced through their
       // actual owner context below.
       const target = (factory as AgentFactory & { [symbols.original]?: AgentFactory })[symbols.original] ?? factory
-      this.factory = { target }
-      return () => { this.factory = undefined }
+      const slot: FactorySlot = { target }
+      this.factories.set(driver, slot)
+      return () => { if (this.factories.get(driver) === slot) this.factories.delete(driver) }
     }, 'agents.setFactory()')
     // The exact cordis effect disposer (the agents.register() convention): a
     // caller's composite effect can yield it for in-order teardown; the
@@ -387,10 +419,25 @@ export class AgentRegistry extends Service {
     return dispose
   }
 
-  /** Return the active creation factory. */
-  private requireFactory(): FactorySlot {
-    if (this.factory === undefined) throw new Error(NO_FACTORY_MESSAGE)
-    return this.factory
+  /**
+   * Read-only list of the driver keys that currently have a registered
+   * factory, sorted. Empty when no factory is registered.
+   * @returns the registered driver keys.
+   */
+  listDrivers(): readonly string[] {
+    return [...this.factories.keys()].sort()
+  }
+
+  /** Return the creation factory for a driver (default when omitted), or throw a specific error. */
+  private requireFactory(driver: string = DEFAULT_AGENT_DRIVER): FactorySlot {
+    assertDriverKey(driver)
+    const slot = this.factories.get(driver)
+    if (slot !== undefined) return slot
+    const registered = this.listDrivers()
+    if (driver === DEFAULT_AGENT_DRIVER && registered.length === 0) throw new Error(NO_FACTORY_MESSAGE)
+    throw new Error(
+      `no agent factory registered for driver '${driver}' (registered drivers: ${registered.length === 0 ? 'none' : registered.join(', ')})`,
+    )
   }
 
   /**
@@ -408,7 +455,7 @@ export class AgentRegistry extends Service {
     // explicitly. This preserves AgentLoop's dependency origin while binding
     // its effects to ownerCtx; plain factories receive ownerCtx as an explicit
     // capability and need no Cordis tracker magic.
-    const { target } = this.requireFactory()
+    const { target } = this.requireFactory(options.driver)
     const receiver = getTraceable(ownerCtx, target)
     // oxlint-disable-next-line typescript/unbound-method -- Reflect.apply intentionally supplies the caller-traced receiver
     return Reflect.apply(target.createAgent, receiver, [ownerCtx, options])
@@ -423,7 +470,7 @@ export class AgentRegistry extends Service {
    */
   async resume(options: ResumeAgentOptions): Promise<AgentHandle> {
     const ownerCtx = this.ctx
-    const { target } = this.requireFactory()
+    const { target } = this.requireFactory(options.driver)
     const receiver = getTraceable(ownerCtx, target)
     // oxlint-disable-next-line typescript/unbound-method -- Reflect.apply intentionally supplies the caller-traced receiver
     return Reflect.apply(target.resume, receiver, [ownerCtx, options])

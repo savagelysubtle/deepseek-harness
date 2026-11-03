@@ -436,3 +436,95 @@ describe('AgentRegistry factory seam', () => {
     expect(states.get(raw!)).toEqual(['create', 'resume'])
   })
 })
+
+describe('AgentRegistry keyed factory drivers', () => {
+  function tagged(tag: string, seen: string[]): AgentFactory {
+    return {
+      async createAgent(_ownerCtx, options) {
+        seen.push(`${tag}:create`)
+        return { agent: stubAgent(options.sessionId), dispose: () => Promise.resolve() }
+      },
+      async resume(_ownerCtx, options) {
+        seen.push(`${tag}:resume`)
+        return { agent: stubAgent(options.resumeSessionId), dispose: () => Promise.resolve() }
+      },
+    }
+  }
+
+  it('resolves default for driver-less calls while a second driver is registered', async () => {
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    const seen: string[] = []
+    ctx.agents.setFactory(tagged('default', seen))
+    ctx.agents.setFactory(tagged('claude-code', seen), 'claude-code')
+    expect(ctx.agents.listDrivers()).toEqual(['claude-code', 'default'])
+    await ctx.agents.create({ sessionId: SessionId('a') })
+    await ctx.agents.resume({ resumeSessionId: SessionId('b') })
+    await ctx.agents.create({ sessionId: SessionId('c'), driver: 'default' })
+    await ctx.agents.create({ sessionId: SessionId('d'), driver: 'claude-code' })
+    expect(seen).toEqual(['default:create', 'default:resume', 'default:create', 'claude-code:create'])
+  })
+
+  it('resumes through the named driver', async () => {
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    const seen: string[] = []
+    ctx.agents.setFactory(tagged('default', seen))
+    ctx.agents.setFactory(tagged('claude-code', seen), 'claude-code')
+    await ctx.agents.resume({ resumeSessionId: SessionId('r'), driver: 'claude-code' })
+    expect(seen).toEqual(['claude-code:resume'])
+  })
+
+  it('rejects an unknown driver naming it and listing the registered ones', async () => {
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    ctx.agents.setFactory(tagged('default', []))
+    await expect(ctx.agents.create({ sessionId: SessionId('x'), driver: 'claude-code' }))
+      .rejects.toThrow(/driver 'claude-code'.*registered drivers: default/)
+    await expect(ctx.agents.resume({ resumeSessionId: SessionId('x'), driver: 'nope' }))
+      .rejects.toThrow(/driver 'nope'.*registered drivers: default/)
+  })
+
+  it('rejects a duplicate key but allows distinct keys, and disposal clears only its own key', async () => {
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    ctx.agents.setFactory(tagged('default', []))
+    expect(() => ctx.agents.setFactory(tagged('again', []))).toThrow(/already registered/)
+    const off = ctx.agents.setFactory(tagged('cc', []), 'claude-code')
+    expect(() => ctx.agents.setFactory(tagged('cc2', []), 'claude-code')).toThrow(/already registered/)
+    off()
+    expect(ctx.agents.listDrivers()).toEqual(['default'])
+  })
+
+  it('rejects an invalid driver string', async () => {
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    ctx.agents.setFactory(tagged('default', []))
+    for (const bad of ['', 'Claude', '1cc', 'a_b', 'a'.repeat(33)]) {
+      await expect(ctx.agents.create({ sessionId: SessionId('x'), driver: bad })).rejects.toThrow(/invalid agent driver/)
+      expect(() => ctx.agents.setFactory(tagged('x', []), bad)).toThrow(/invalid agent driver/)
+    }
+  })
+
+  it('leaves a re-registered slot alone when a stale disposer runs again', async () => {
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    const seen: string[] = []
+    const oldOff = ctx.agents.setFactory(tagged('old', seen), 'claude-code')
+    oldOff()
+    ctx.agents.setFactory(tagged('new', seen), 'claude-code')
+    oldOff()
+    expect(ctx.agents.listDrivers()).toEqual(['claude-code'])
+    await ctx.agents.create({ sessionId: SessionId('s'), driver: 'claude-code' })
+    expect(seen).toEqual(['new:create'])
+  })
+
+  it('names the missing default and lists others when only other drivers are registered', async () => {
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    ctx.agents.setFactory(tagged('cc', []), 'claude-code')
+    const failure = ctx.agents.create({ sessionId: SessionId('s') })
+    await expect(failure).rejects.toThrow(/driver 'default'.*registered drivers: claude-code/)
+    await expect(failure).rejects.not.toThrow(/load an agent-loop plugin/)
+  })
+})
