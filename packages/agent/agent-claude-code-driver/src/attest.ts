@@ -8,7 +8,7 @@
 
 import { createHash } from 'node:crypto'
 import { accessSync, closeSync, constants, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { assertPrivateFile, currentUid, writeAtomic } from './state.ts'
 
 /** Script extensions that would make the SDK resolve `node` or a shell through PATH. */
@@ -60,8 +60,10 @@ export function sha256File(file: string): string {
  * where no component is group- or world-writable (a sticky directory such as
  * `/tmp` is exempt: others there cannot replace the operator's files) and
  * every component is owned by the operator or root. The chain of the CONFIGURED
- * path is checked as well as the chain of the resolved file, because the
- * directory holding a symlink decides where it can be retargeted.
+ * path (every directory prefix as written, so a symlinked intermediate
+ * directory and the directory holding the symlink are both covered) is
+ * checked as well as the chain of the resolved file, because the directory
+ * holding a symlink decides where it can be retargeted.
  * @param path - the configured absolute path.
  * @param options - expected owner.
  * @returns the attestation (hash and stat signature).
@@ -90,7 +92,7 @@ export function attestClaudePath(path: string, options: AttestOptions = {}): Bin
   } catch {
     fail('it is not executable by the running user')
   }
-  for (const start of new Set([dirname(realPath), realpathSync(dirname(path))])) {
+  for (const start of new Set([dirname(realPath), dirname(resolve(path))])) {
     for (let dir = start; ; dir = dirname(dir)) {
       const dirStat = statSync(dir)
       if ((dirStat.mode & 0o022) !== 0 && (dirStat.mode & 0o1000) === 0) {

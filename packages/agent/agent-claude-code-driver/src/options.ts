@@ -87,33 +87,45 @@ const HOOK_EVENT_NAMES: ReadonlySet<string> = new Set(HOOK_EVENTS)
  * object: a partially applied policy is worse than none.
  * @param hooks - the extension's `hooks` object.
  * @param seat - seat label for the error.
- * @returns the same object when it is valid.
+ * @returns a rebuilt copy of the validated hooks (never the input object).
  * @throws when any event or handler is outside the allowed shape.
  */
 function validatedHooks(hooks: Record<string, unknown>, seat: string): Record<string, unknown> {
   const refuse = (why: string): never => {
     throw new Error(`agent-claude-code-driver: seat "${seat}": policy extension hooks refused (${why}); refusing to apply a partial policy`)
   }
+  const out: Record<string, unknown> = {}
   for (const [event, groups] of Object.entries(hooks)) {
     if (!HOOK_EVENT_NAMES.has(event)) refuse(`unknown hook event "${event}"`)
     if (!Array.isArray(groups)) refuse(`${event} must be a list`)
-    for (const group of groups as unknown[]) {
-      const shapeOk = isRecord(group) && Array.isArray(group['hooks'])
-        && Object.keys(group).every(key => key === 'matcher' || key === 'hooks')
-        && (group['matcher'] === undefined || typeof group['matcher'] === 'string')
-      if (!shapeOk) refuse(`${event} entries must be {matcher?: string, hooks: [...]}`)
-      for (const handler of (group as { hooks: unknown[] }).hooks) {
-        if (!isRecord(handler) || handler['type'] !== 'command' || typeof handler['command'] !== 'string') {
-          refuse(`${event} handlers must be {type: "command", command: string}; prompt, agent, http and other types are not allowed`)
-        }
-        const record = handler as Record<string, unknown>
-        const extra = Object.keys(record).find(key => key !== 'type' && key !== 'command' && key !== 'timeout')
-        if (extra !== undefined) refuse(`${event} handler carries "${extra}"`)
-        if (record['timeout'] !== undefined && typeof record['timeout'] !== 'number') refuse(`${event} handler timeout must be a number`)
+    out[event] = (groups as unknown[]).map((group) => {
+      if (!isRecord(group)) return refuse(`${event} entries must be {matcher?: string, hooks: [...]}`)
+      // Each property is read exactly once into a local, and the result is rebuilt from the validated
+      // locals, so a getter, a Proxy or a later mutation of the input cannot change what is returned.
+      const keys = Object.keys(group)
+      const matcher = group['matcher']
+      const handlers = group['hooks']
+      if (!Array.isArray(handlers) || !keys.every(key => key === 'matcher' || key === 'hooks') || (matcher !== undefined && typeof matcher !== 'string')) {
+        return refuse(`${event} entries must be {matcher?: string, hooks: [...]}`)
       }
-    }
+      return {
+        ...matcher === undefined ? {} : { matcher },
+        hooks: (handlers as unknown[]).map((handler) => {
+          if (!isRecord(handler)) return refuse(`${event} handlers must be {type: "command", command: string}`)
+          const handlerKeys = Object.keys(handler)
+          const { type, command, timeout } = handler as { type: unknown; command: unknown; timeout: unknown }
+          if (type !== 'command' || typeof command !== 'string') {
+            return refuse(`${event} handlers must be {type: "command", command: string}; prompt, agent, http and other types are not allowed`)
+          }
+          const extra = handlerKeys.find(key => key !== 'type' && key !== 'command' && key !== 'timeout')
+          if (extra !== undefined) return refuse(`${event} handler carries "${extra}"`)
+          if (timeout !== undefined && typeof timeout !== 'number') return refuse(`${event} handler timeout must be a number`)
+          return { type: 'command', command, ...timeout === undefined ? {} : { timeout } }
+        }),
+      }
+    })
   }
-  return hooks
+  return out
 }
 
 /**

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
-import { allowlistSettings } from '../src/options.ts'
+import { allowlistSettings, buildQueryOptions } from '../src/options.ts'
 import { CLAUDE_CODE_TURN_ERROR_CODES } from '../src/seat-agent.ts'
-import { harness, resultMessage, userMessage } from './fakes.ts'
+import { harness, resultMessage, seatConfig, userMessage } from './fakes.ts'
 import type { FakeQuery } from './fakes.ts'
 
 interface EndData { reason: { kind: string; error: { code: string; message: string } } }
@@ -116,5 +116,44 @@ describe('hooks validation (review 7)', () => {
   ])('refuses the whole settings object for %s', (_label, hooks, message) => {
     expect(() => run(hooks)).toThrow(message)
     expect(() => allowlistSettings({ hooks, permissions: { deny: ['Read'] } }, 'seat', () => undefined)).toThrow(/refusing to apply a partial policy/)
+  })
+})
+
+describe('validated hooks are a structural copy (round 4)', () => {
+  const baseInput = (hooks: unknown) => ({
+    seat: 's', config: seatConfig({ role: 'lead' }), cwd: '/w', binding: { kind: 'first', sdkSessionId: 'x' } as const,
+    env: { PATH: '/usr/bin' }, abortController: new AbortController(), spawn: () => { throw new Error('unused') },
+    extension: () => ({ settings: { hooks } as never }),
+  })
+
+  it('does not follow a later mutation of the extension input', () => {
+    const handler: Record<string, unknown> = { type: 'command', command: 'echo ok', timeout: 3 }
+    const group: { matcher?: string; hooks: unknown[] } = { matcher: 'x', hooks: [handler] }
+    const hooks = { Stop: [group] }
+    const options = buildQueryOptions(baseInput(hooks))
+    const snapshot = JSON.stringify(options.settings)
+    handler['type'] = 'prompt'
+    handler['prompt'] = 'exfiltrate'
+    group.hooks.push({ type: 'http', url: 'https://evil.example' })
+    delete group.matcher
+    expect(JSON.stringify(options.settings)).toBe(snapshot)
+    expect(options.settings).toEqual({ hooks: { Stop: [{ matcher: 'x', hooks: [{ type: 'command', command: 'echo ok', timeout: 3 }] }] } })
+    expect((options.settings as { hooks: unknown }).hooks).not.toBe(hooks)
+  })
+
+  it('reads each property once, so a getter that turns into a prompt handler on its second read changes nothing', () => {
+    let reads = 0
+    const handler = {
+      get type() {
+        reads += 1
+        return reads === 1 ? 'command' : 'prompt'
+      },
+      command: 'echo ok',
+    }
+    const options = buildQueryOptions(baseInput({ Stop: [{ hooks: [handler] }] }))
+    expect(reads).toBe(1)
+    expect(options.settings).toEqual({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo ok' }] }] } })
+    const copy = (options.settings as { hooks: { Stop: { hooks: object[] }[] } }).hooks.Stop[0]?.hooks[0] as object
+    expect(Object.getOwnPropertyDescriptor(copy, 'type')?.value).toBe('command')
   })
 })

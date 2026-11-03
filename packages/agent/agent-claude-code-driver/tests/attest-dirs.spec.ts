@@ -62,3 +62,16 @@ describe('directory ownership of the attested binary (review 8)', () => {
     expect(() => attestClaudePath(link)).toThrow(/its directory .* is group- or world-writable \(mode 777\)/)
   })
 })
+
+describe('symlinked intermediate directory (round 4)', () => {
+  it('checks the directories above a symlinked intermediate component as written', () => {
+    const file = fakeClaudeBinary()
+    const outer = tempDir('cc-outer-')
+    chmodSync(outer, 0o700)
+    symlinkSync(dirname(file), join(outer, 'link'))
+    const through = join(outer, 'link', 'claude')
+    expect(attestClaudePath(through).realPath).toBe(file)
+    owners.set(outer, mine + 1)
+    expect(() => attestClaudePath(through)).toThrow(new RegExp(`its directory ${outer} is owned by uid ${mine + 1}`))
+  })
+})
