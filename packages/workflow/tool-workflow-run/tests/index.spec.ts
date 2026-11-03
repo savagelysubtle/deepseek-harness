@@ -10,10 +10,11 @@ afterEach(async () => { await h?.cleanup(); h = undefined })
 describe('tool-workflow-run plugin', () => {
   it('declares its plugin identity and required services', () => {
     expect(ToolWorkflowRun.name).toBe('tool-workflow-run')
-    expect(ToolWorkflowRun.inject).toEqual(['tools', 'workflowEngine'])
+    // The engine is optional: a composition without it (the web preset) must still settle.
+    expect(ToolWorkflowRun.inject).toEqual(['tools'])
   })
 
-  it('does not start without the engine services', async () => {
+  it('does not start without the tools service', async () => {
     const ctx = new Context()
     await expect(ctx.plugin(ToolWorkflowRun)).resolves.toBeDefined()
     expect((ctx as unknown as { workflowRuns?: unknown }).workflowRuns).toBeUndefined()

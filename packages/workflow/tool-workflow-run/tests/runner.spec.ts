@@ -143,3 +143,24 @@ describe('engine error text', () => {
     expect(outcome.error).not.toContain('\n')
   })
 })
+
+describe('without a workflow engine (web preset)', () => {
+  it('mounts the runner without the tool, serves reads, and refuses a run with RUNNER_UNAVAILABLE before any record or trust is written', async () => {
+    h = await setup({ engine: false })
+    await h.writeWorkflow('demo', DEMO)
+    expect(h.ctx.get('workflowEngine')).toBeUndefined()
+    expect(h.ctx.workflowRuns).toBeDefined()
+    // The model tool waits for the engine, so the global tool layer stays empty (web preset contract).
+    expect(h.ctx.tools.get('workflow_run')).toBeUndefined()
+    const dry = await h.ctx.workflowRuns.dryRun(h.workspace, { name: 'demo', caller: 'parent' })
+    expect(dry).toMatchObject({ ok: true })
+    if (!dry.ok) return
+    const refused = await h.ctx.workflowRuns.start({
+      parent: h.parent, name: 'demo', trustHash: dry.trustKey, ...dry.trustChallenge === undefined ? {} : { trustChallenge: dry.trustChallenge },
+    })
+    expect(refused).toMatchObject({ ok: false, error: 'RUNNER_UNAVAILABLE' })
+    const store = await h.ctx.workflowRuns.storeFor(h.workspace)
+    expect((await store.listRuns({ limit: 10 })).runs).toEqual([])
+    expect(await h.ctx.workflowRuns.dryRun(h.workspace, { name: 'demo' })).toMatchObject({ trusted: false })
+  })
+})

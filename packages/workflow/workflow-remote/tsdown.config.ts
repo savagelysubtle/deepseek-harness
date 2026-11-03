@@ -23,6 +23,17 @@ export default defineConfig([
     clean: false,
   },
   {
+    // Browser-safe re-export of the wire contract; inlined by client bundles (see the purity gate).
+    entry: { client: 'lib/types/client/index.js' },
+    outDir: 'lib',
+    format: ['esm'],
+    platform: 'node',
+    target: 'es2024',
+    fixedExtension: false,
+    dts: false,
+    clean: false,
+  },
+  {
     // The public non-root subpath the Typert generator requires every
     // Remote-boundary type (WorkflowListEntry) to be exported from; see
     // package.json's `./wire` export.

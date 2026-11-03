@@ -4732,7 +4732,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'StartErrorCode',
-    declaration: 'export type StartErrorCode = \'NOT_FOUND\' | \'DIAGNOSTICS\' | \'INVALID_INPUT\' | \'TRUST_REQUIRED\' | \'TRUST_DENIED\' | \'WRITER_BUSY\' | \'RESUME_REFUSED\' | \'START_FAILED\';',
+    declaration: 'export type StartErrorCode = \'NOT_FOUND\' | \'DIAGNOSTICS\' | \'INVALID_INPUT\' | \'TRUST_REQUIRED\' | \'TRUST_DENIED\' | \'WRITER_BUSY\' | \'RESUME_REFUSED\' | \'START_FAILED\' | \'RUNNER_UNAVAILABLE\';',
   },
   {
     name: 'StartOptions',

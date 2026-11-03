@@ -174,7 +174,7 @@ export async function setup(
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
-  await ctx.plugin(StubEngine)
+  if (options.engine !== false) await ctx.plugin(StubEngine)
   await ctx.plugin(StubShell)
   let approval: FakeApproval | undefined
   if (options.approval !== false) {
@@ -189,7 +189,7 @@ export async function setup(
   const parent = { id, options: { model: 'test-model' }, session } as unknown as Agent
   const harness: Harness = {
     ctx,
-    engine: ctx.workflowEngine as StubEngine,
+    engine: ctx.get('workflowEngine') as unknown as StubEngine,
     shell: ctx.get('shell') as unknown as StubShell,
     approval,
     workspace,

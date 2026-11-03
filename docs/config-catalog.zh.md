@@ -3121,7 +3121,7 @@ export interface Config {
 
 ## `@deepseek-ai/dsh-tool-workflow-run`
 
-需要： `tools` · `workflowEngine`
+需要： `tools`
 
 ```ts config-catalog
 /** Config: every key is optional; the schema fills the defaults. */

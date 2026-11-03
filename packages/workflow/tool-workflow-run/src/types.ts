@@ -48,6 +48,7 @@ export type StartErrorCode =
   | 'WRITER_BUSY'
   | 'RESUME_REFUSED'
   | 'START_FAILED'
+  | 'RUNNER_UNAVAILABLE'
 
 /** A start that did not begin a run. Always carries a message that already names the remedy. */
 export interface StartRefused {

@@ -3119,7 +3119,7 @@ Source: [`packages/workflow/tool-workflow/src/index.ts:34`](../packages/workflow
 
 ## `@deepseek-ai/dsh-tool-workflow-run`
 
-Requires: `tools` · `workflowEngine`
+Requires: `tools`
 
 ```ts config-catalog
 /** Config: every key is optional; the schema fills the defaults. */

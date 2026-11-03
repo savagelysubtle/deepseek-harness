@@ -15,7 +15,10 @@ import { WorkflowRunsService } from './runner.ts'
 import { registerWorkflowRunTool } from './tool.ts'
 
 export const name = 'tool-workflow-run'
-export const inject = ['tools', 'workflowEngine']
+// `workflowEngine` is deliberately NOT injected: compositions without the engine (the web preset)
+// still mount the runner (the Workflows UI reads and a run reports RUNNER_UNAVAILABLE) instead of
+// leaving the whole plugin tree pending; only the model tool waits for the engine.
+export const inject = ['tools']
 
 export { assertConfigUsable, Config } from './config.ts'
 export type { ResolvedConfig, TierModels, TrustPolicy } from './config.ts'
@@ -45,5 +48,5 @@ export function apply(ctx: Context, config: Config = {}): void {
   const resolved = config as ResolvedConfig
   assertConfigUsable(resolved)
   new WorkflowRunsService(ctx, resolved)
-  registerWorkflowRunTool(ctx, resolved)
+  ctx.inject(['workflowEngine'], (engineCtx) => { registerWorkflowRunTool(engineCtx, resolved) })
 }

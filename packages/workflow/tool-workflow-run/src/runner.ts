@@ -718,6 +718,14 @@ export class WorkflowRunsService extends Service {
       script = seeded
     }
 
+    // Optional service: without it nothing can run, and no run record may be created.
+    const engine = this.ctx.get('workflowEngine')
+    if (engine === undefined) {
+      return refused('RUNNER_UNAVAILABLE', 'Workflow runs are not available in this composition: no workflow engine is mounted.', {
+        remedy: 'Use a composition that includes the workflow engine (dsh-workflow plus a worker provider).',
+      })
+    }
+
     // Trust.
     const trust = await this.trustStoreFor(workspace)
     const key = trustKey(hash, promptHashes)
@@ -837,7 +845,7 @@ export class WorkflowRunsService extends Service {
     }
     let engineRun: WorkflowRun
     try {
-      engineRun = this.ctx.workflowEngine.start(request)
+      engineRun = engine.start(request)
     } catch (error: unknown) {
       this.ctx.logger.warn(`tool-workflow-run: the engine refused workflow '${doc.name}': ${describeError(error)}`)
       const shown = `the engine refused the workflow: ${modelFacingError(describeError(error))}`

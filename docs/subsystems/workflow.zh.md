@@ -355,7 +355,7 @@ An approval left the pending state.
 'workflow/approval-decided'(decision: WorkflowApprovalDecided): void
 ```
 
-Source: [`packages/workflow/workflow-remote/src/wire.ts:804`](../../packages/workflow/workflow-remote/src/wire.ts)
+Source: [`packages/workflow/workflow-remote/src/wire.ts:823`](../../packages/workflow/workflow-remote/src/wire.ts)
 
 <a id="workflowapproval-pending--emit"></a>
 
@@ -372,7 +372,7 @@ An approval node is waiting for a human answer.
 'workflow/approval-pending'(approval: WorkflowApprovalPending): void
 ```
 
-Source: [`packages/workflow/workflow-remote/src/wire.ts:798`](../../packages/workflow/workflow-remote/src/wire.ts)
+Source: [`packages/workflow/workflow-remote/src/wire.ts:817`](../../packages/workflow/workflow-remote/src/wire.ts)
 
 <a id="workflowend--emit"></a>
 
@@ -509,7 +509,7 @@ A workflow run started, advanced a node, or ended. Forwarded to clients verbatim
 'workflow/run-changed'(change: WorkflowRunChange): void
 ```
 
-Source: [`packages/workflow/workflow-remote/src/wire.ts:792`](../../packages/workflow/workflow-remote/src/wire.ts)
+Source: [`packages/workflow/workflow-remote/src/wire.ts:811`](../../packages/workflow/workflow-remote/src/wire.ts)
 
 <a id="workflowstart--emit"></a>
 

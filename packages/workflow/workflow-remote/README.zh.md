@@ -6,6 +6,15 @@ Workflows UI（OP-240）所使用的常驻挂载 Typert Remote 命名空间 `wor
 
 本包拥有独立的 Loader 条目（挂载于 [`packages/bundle/web-app/cordis.patch.yml`](../../bundle/web-app/cordis.patch.yml)），原因与 [`@deepseek-ai/dsh-mcp-status`](../../mcp/mcp-status/README.md) 相同：当包的最后一个 Loader 条目卸载时，其 RPC 契约会被撤回，且 Gateway 不会回退，因此该命名空间不能依附于可能卸载的包。读取方法无需特权（`list`、`read`、`validate`、`dryRun`、`runs`、`runDetail`、`pendingApprovals`）；写入方法与原始节点输出为特权方法（`save`、`run`、`resume`、`cancel`、`nodeOutput`、`approve`、`reject`、`attachUi`、`detachUi`），列于 [`@deepseek-ai/dsh-connection`](../../client/connection/README.md) 的 `PRIVILEGED_METHODS`，因此只有 TCP 对端地址为回环（且 Host 头也为回环）的调用方才能访问；从不参考 `X-Forwarded-For`。每个方法都根据调用方会话解析其工作区，校验所有参数，并返回 `{ ok: true, ... }` 或不含堆栈与主机路径的纯文本失败。`save` 检查工作区 `workflows/` 目录内的包含关系，拒绝符号链接，原子写入，并比较乐观内容令牌。`run` 与 `resume` 需要 `dryRun` 为调用方签发的信任挑战（一次性，五分钟有效）。`attachUi` 与 `detachUi` 持有可续期租约，告知运行器有人在场。`cancel` 只能停止调用方会话自己启动的运行。推送事件仅携带标识与状态，且不含主机路径：`workflow/run-changed`（`WorkflowRunChange`）、`workflow/approval-pending`（`WorkflowApprovalPending`：运行、批准与节点标识，绝不含问题文本，问题文本由 `pendingApprovals` 返回）和 `workflow/approval-decided`（`WorkflowApprovalDecided`）。每个事件还带有不透明的 `workspaceKey`，与 `list`、`runs`、`attachUi` 返回的值相同，客户端据此忽略其他工作区的事件。发布后目录刷新失败的保存仍然成功，并附带 `warning`。
 
+## 调用形态
+
+浏览器代码从 `@deepseek-ai/dsh-workflow-remote/client` 导入契约（类型、常量、`WORKFLOW_LOOPBACK_ONLY_MESSAGE`、`explainWorkflowRefusal`、`explainWorkflowRejection`、租约时间）；它只重新导出不含任何导入的 `src/wire.ts`，因此无法触达任何 Host 模块。Remote 层会再包装一次方法结果，所以一次调用有以下几种结果：
+
+- **成功** 为 `RemoteResult<{ ok: true, ... }>`，例如 `{ ok: true, value: { ok: true, leaseId: 'ab12...', ttlMs: 45000, workspaceKey: '0f3a...' } }`。
+- **Host 报告的失败** 为 `{ ok: true, value: { ok: false, error: 'NOT_FOUND', message: '...' } }`；机器可读字段是 `error`（一个 `WorkflowErrorCode`），从来不是 `code`。`validate` 把无效草稿报告为不带 `error` 的 `{ ok: false, diagnostics }`，所以用 `error` 区分调用失败与校验结论。
+- **载体失败**（特权方法上的 403、网络故障）为 `{ ok: false, error: { message: '... HTTP 403 ...' } }` 或一次拒绝，它不是 `WorkflowFailure`。把它们传给 `explainWorkflowRejection('workflow/save', cause)`：对特权端点上的 403 返回 `WORKFLOW_LOOPBACK_ONLY_MESSAGE`，否则返回 `undefined`。
+- **`validate` 不接受会话参数：** 其请求为 `{ text, name? }`，其余每个方法都根据调用方会话解析工作区。
+
 ## 模型体验
 
 无，因为这个仅限 Host 的 Remote 服务不注册任何提示词、工具、消息或提供方请求。

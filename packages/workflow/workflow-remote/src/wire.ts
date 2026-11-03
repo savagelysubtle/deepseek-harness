@@ -780,6 +780,25 @@ export interface WorkflowApprovalDecided {
   workspaceKey?: string
 }
 
+/**
+ * Explain a call that never produced a Host result: the carrier folds a refused request into a failure
+ * (or a rejection) whose text contains `HTTP 403`, which is not a {@link WorkflowFailure}. Call this on
+ * any such failure or rejection; it accepts a string, an `Error`, or any object with a string `message`
+ * (the carrier's `RemoteFailure`).
+ * @param endpoint - the wire endpoint that was called, for example `workflow/save`.
+ * @param cause - the carrier failure, the rejection, or its text.
+ * @returns the loopback-only message when the call was a 403 on a privileged workflow endpoint, otherwise undefined.
+ */
+export function explainWorkflowRejection(endpoint: string, cause: unknown): string | undefined {
+  const text = typeof cause === 'string'
+    ? cause
+    : typeof cause === 'object' && cause !== null && 'message' in cause && typeof cause.message === 'string'
+      ? cause.message
+      : ''
+  const status = /HTTP (\d{3})/.exec(text)?.[1]
+  return status === undefined ? undefined : explainWorkflowRefusal(endpoint, Number(status))
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Events {
     /**
