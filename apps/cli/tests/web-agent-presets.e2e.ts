@@ -217,7 +217,7 @@ describe('the shipped Web composition', () => {
         'ask_user_question', 'await_subagent', 'bash', 'create_goal', 'edit', 'exit_plan_mode',
         'get_goal', 'interrupt_agent', 'job_kill', 'job_list', 'job_output', 'list_agents', 'memory', 'ralph', 'read', 'read_image', 'send_message', 'session_title', 'skill',
         'subagent', 'subagent_fork', 'todo_write', 'update_goal', 'web_search',
-        'workflow', 'write',
+        'workflow', 'workflow_run', 'write',
       ])
     } finally {
       await handle.dispose()

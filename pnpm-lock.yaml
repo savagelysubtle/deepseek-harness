@@ -1556,6 +1556,9 @@ importers:
       '@deepseek-ai/dsh-workflow-remote':
         specifier: workspace:^
         version: link:../../workflow/workflow-remote
+      '@deepseek-ai/dsh-workflow-worker-thread':
+        specifier: workspace:^
+        version: link:../../workflow/workflow-worker-thread
       '@deepseek-ai/dsh-workspace':
         specifier: workspace:^
         version: link:../../workspace/workspace

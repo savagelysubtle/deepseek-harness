@@ -24,6 +24,11 @@ export interface TierModels {
 export interface Config {
   /** The model-facing tool name to register (default `workflow_run`). */
   toolName?: string
+  /**
+   * Register the model-facing tool (default true). False mounts only the `ctx.workflowRuns` service,
+   * which the Workflows UI uses, so a composition can serve the UI without giving every agent the tool.
+   */
+  exposeTool?: boolean
   /** Workspace-relative directory holding `<name>.yaml` workflow files (default `.workflows`). */
   workflowsDir?: string
   /** How long an approval may wait for an answer before it expires and the node is rejected, in milliseconds (default 3600000). */
@@ -52,6 +57,7 @@ const MAX_APPROVAL_WAIT_MS = 24 * 60 * 60 * 1000
 
 export const Config: z<Config> = z.object({
   toolName: z.string().default('workflow_run'),
+  exposeTool: z.boolean().default(true),
   workflowsDir: z.string().default('.workflows'),
   approvalWaitMs: z.natural().min(1).max(MAX_APPROVAL_WAIT_MS).default(3_600_000),
   headless: z.boolean().default(false),

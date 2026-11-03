@@ -7,10 +7,21 @@ let h: Harness | undefined
 afterEach(async () => { await h?.cleanup(); h = undefined })
 
 describe('config', () => {
+  it('exposeTool true registers workflow_run and false mounts only the service', async () => {
+    h = await setup()
+    expect(h.ctx.tools.schemas().map(schema => schema.name)).toContain('workflow_run')
+    await h.cleanup()
+    h = await setup({ config: { exposeTool: false } })
+    expect(h.ctx.tools.schemas().map(schema => schema.name)).not.toContain('workflow_run')
+    expect(h.ctx.workflowRuns).toBeDefined()
+    expect(await h.ctx.workflowRuns.listWorkflows(h.workspace)).toEqual([])
+  })
+
   it('fills the documented defaults', () => {
     const resolved = Config({})
     expect(resolved).toMatchObject({
       toolName: 'workflow_run',
+      exposeTool: true,
       workflowsDir: '.workflows',
       approvalWaitMs: 3_600_000,
       headless: false,

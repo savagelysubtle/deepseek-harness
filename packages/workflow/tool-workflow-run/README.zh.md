@@ -22,6 +22,7 @@
 | 键 | 默认值 | 含义 |
 |---|---|---|
 | `toolName` | `workflow_run` | 面向模型的工具名称。 |
+| `exposeTool` | `true` | 设为 false 时只挂载 `ctx.workflowRuns` 服务（供 Workflows 界面使用），不注册面向模型的工具；Web 组合在全局层设置它，并在 `standard` 预设中挂载该工具。 |
 | `workflowsDir` | `.workflows` | 存放 `<name>.yaml` 的工作区相对目录；必须位于工作区内。 |
 | `approvalWaitMs` | `3600000` | 审批最长等待时间（1 到 86400000 毫秒），到期后审批过期且节点被拒绝。 |
 | `headless` | `false` | 无人可回答时为 true：审批节点立即被拒绝，并给出原因与处理办法。 |

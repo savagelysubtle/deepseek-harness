@@ -48,5 +48,5 @@ export function apply(ctx: Context, config: Config = {}): void {
   const resolved = config as ResolvedConfig
   assertConfigUsable(resolved)
   new WorkflowRunsService(ctx, resolved)
-  ctx.inject(['workflowEngine'], (engineCtx) => { registerWorkflowRunTool(engineCtx, resolved) })
+  if (resolved.exposeTool) ctx.inject(['workflowEngine'], (engineCtx) => { registerWorkflowRunTool(engineCtx, resolved) })
 }
