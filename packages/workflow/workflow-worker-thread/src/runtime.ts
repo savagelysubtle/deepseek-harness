@@ -65,7 +65,7 @@ const NODE_ERROR_MAX_CHARS = 2000
  * a timeout is the hard per-node limit. Both name the window and the retry count.
  */
 function describeStop(
-  stop: { code: 'NODE_STALLED' | 'NODE_TIMEOUT'; idleTimeoutMs?: number; timeoutMs?: number },
+  stop: { code: 'NODE_STALLED' | 'NODE_TIMEOUT'; idleTimeoutMs?: number; timeoutMs?: number; subject?: 'bash' },
   attempts: number,
 ): NonNullable<WorkflowNodeEndInfo['failure']> {
   const retries = Math.max(attempts - 1, 0)
@@ -81,7 +81,7 @@ function describeStop(
   const limit = stop.timeoutMs === undefined ? 'the node deadline' : `${stop.timeoutMs} ms`
   return {
     code: 'NODE_TIMEOUT',
-    message: `NODE_TIMEOUT: the agent did not finish within ${limit} (timeoutMs, the hard per-node limit) ${retried}`,
+    message: `NODE_TIMEOUT: the ${stop.subject === 'bash' ? 'command' : 'agent'} did not finish within ${limit} (timeoutMs, the hard per-node limit) ${retried}`,
     remedy: 'raise timeoutMs (timeout_ms in YAML) for this node or split its work into smaller nodes',
   }
 }
@@ -159,7 +159,7 @@ export class WorkflowExecution {
   /** Attempts the node's latest agent call ran, retries included (reported as `attempts` on node-end). */
   private readonly attemptsByNode = new Map<string, number>()
   /** The supervisor stop that ended a node's latest agent call, when it was a stall or a deadline. */
-  private readonly stopByNode = new Map<string, { code: 'NODE_STALLED' | 'NODE_TIMEOUT'; idleTimeoutMs?: number; timeoutMs?: number }>()
+  private readonly stopByNode = new Map<string, { code: 'NODE_STALLED' | 'NODE_TIMEOUT'; idleTimeoutMs?: number; timeoutMs?: number; subject?: 'bash' }>()
 
   constructor(
     meta: WorkflowMeta,
@@ -674,6 +674,21 @@ export class WorkflowExecution {
     }
   }
 
+  /**
+   * Remember a node's bash attempts and, when the last attempt hit its timeout, the `NODE_TIMEOUT`
+   * stop that {@link nodeEnd} turns into the documented failure (same shape as an agent stop).
+   */
+  private noteBashCall(nodeId: string | undefined, attempts: number, timedOut: boolean, timeoutMs: number): void {
+    if (nodeId === undefined) return
+    if (timedOut) {
+      this.attemptsByNode.set(nodeId, attempts)
+      this.stopByNode.set(nodeId, { code: 'NODE_TIMEOUT', timeoutMs, subject: 'bash' })
+    } else {
+      if (attempts > 1) this.attemptsByNode.set(nodeId, attempts)
+      this.stopByNode.delete(nodeId)
+    }
+  }
+
   /** The `bash(command, options)` hook: validated here (fail fast) and again host-side, then run on the host. */
   private async bash(rawCommand: unknown, rawOpts: unknown): Promise<unknown> {
     this.throwIfCancelled()
@@ -704,7 +719,10 @@ export class WorkflowExecution {
         if (error instanceof WorkflowError) throw error
         throw new WorkflowError(`bash() failed: ${renderThrown(error)}`, 'BASH_FAILED_INFRA', { cause: error })
       }
-      if (!result.timedOut || attempt >= (retry?.maxAttempts ?? 1)) return result
+      if (!result.timedOut || attempt >= (retry?.maxAttempts ?? 1)) {
+        this.noteBashCall(call.nodeId, attempt, result.timedOut, call.timeoutMs)
+        return result
+      }
       await this.pause(retry?.delayMs ?? 0)
     }
   }
@@ -786,7 +804,8 @@ export class WorkflowExecution {
     }
     const started = this.liveNodes.get(nodeId)
     if (started === undefined) throw new WorkflowError(`nodeEnd() node "${nodeId}" was not started`, 'INVALID_ARGUMENT')
-    const exitCode = info.exitCode
+    // A command killed by a signal (timeout, abort) has no exit code: null means "none", like undefined.
+    const exitCode = info.exitCode === null ? undefined : info.exitCode
     if (exitCode !== undefined && (typeof exitCode !== 'number' || !Number.isSafeInteger(exitCode))) {
       throw new WorkflowError('nodeEnd() exitCode must be an integer', 'INVALID_ARGUMENT')
     }

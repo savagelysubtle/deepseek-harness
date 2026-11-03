@@ -216,6 +216,26 @@ describe('bash() host hook', () => {
     expect(result.value).toMatchObject({ t: true })
   })
 
+  it('a timed-out bash node ends failed with NODE_TIMEOUT, honours retry, and the run completes', async () => {
+    const { ctx, nodeEnds } = await setup()
+    const script = `
+      nodeStart('slow', 'bash')
+      const r = await bash('sleep 30', { nodeId: 'slow', timeoutMs: 200, retry: { maxAttempts: 2, delayMs: 0 } })
+      nodeEnd('slow', { status: 'failed', exitCode: r.exitCode, error: 'x' })
+      return r.timedOut`
+    const result = await finish(start(ctx, script, { bashEnabled: true }))
+    expect(result.stopReason).toBe('completed')
+    expect(result.value).toBe(true)
+    expect(nodeEnds).toHaveLength(1)
+    expect(nodeEnds[0]!.status).toBe('failed')
+    expect(nodeEnds[0]!.attempts).toBe(2)
+    expect(nodeEnds[0]!.exitCode).toBeUndefined()
+    expect(nodeEnds[0]!.failure).toMatchObject({ code: 'NODE_TIMEOUT', remedy: 'raise timeoutMs (timeout_ms in YAML) for this node or split its work into smaller nodes' })
+    expect(nodeEnds[0]!.failure!.message).toContain('200 ms')
+    expect(nodeEnds[0]!.failure!.message).toContain('1 retry')
+    expect(nodeEnds[0]!.failure!.message).toContain('command')
+  })
+
   it('a custom executor can replace the local one', async () => {
     const { ctx } = await setup()
     const seen: string[] = []
