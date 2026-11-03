@@ -42,6 +42,11 @@ export interface WorkflowEditorProps {
    * disables Save; it does not catch rejections from `onSave`.
    */
   conflict?: boolean
+  /**
+   * The text has no file behind it yet (a new workflow), so it counts as unsaved even though it
+   * equals the baseline; Save is enabled without an edit.
+   */
+  unsaved?: boolean
   /** Called with the new text on each edit. */
   onChange: (text: string) => void
   /** Save request carrying the text and the token it was loaded with. Fired by the button and Ctrl/Cmd+S. */
@@ -90,7 +95,9 @@ function offsetOf(text: string, line: number, column: number): number {
  * @returns the editor element.
  */
 export function WorkflowEditor(props: WorkflowEditorProps) {
-  const { name, text, token, diagnostics, conflict = false, onChange, onSave, onValidate, onDryRun, onRun, onReload } = props
+  const {
+    name, text, token, diagnostics, conflict = false, unsaved = false, onChange, onSave, onValidate, onDryRun, onRun, onReload,
+  } = props
   const l = { ...DEFAULT_LABELS, ...props.labels }
   const areaRef = useRef<HTMLTextAreaElement | null>(null)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -120,7 +127,7 @@ export function WorkflowEditor(props: WorkflowEditorProps) {
     return map
   }, [diagnostics])
   const hasError = diagnostics.some(d => d.severity === 'error')
-  const dirty = text !== baseline.text
+  const dirty = unsaved || text !== baseline.text
   const canSave = dirty && !hasError && !conflict
 
   const edit = (next: string): void => {

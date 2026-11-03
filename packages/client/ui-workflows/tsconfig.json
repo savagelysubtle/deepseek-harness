@@ -15,6 +15,9 @@
       "path": "../../workflow/workflow-yaml"
     },
     {
+      "path": "../../workflow/workflow-remote/tsconfig.client.json"
+    },
+    {
       "path": "../ui-slots"
     },
     {
@@ -28,6 +31,9 @@
     },
     {
       "path": "../ui-layout"
+    },
+    {
+      "path": "../ui-workflow-run"
     },
     {
       "path": "../locale"

@@ -3341,10 +3341,6 @@ importers:
         version: 18.3.31
 
   packages/client/ui-workflows:
-    dependencies:
-      '@xyflow/react':
-        specifier: ^12.11.6
-        version: 12.11.6(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(immer@10.2.0)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: workspace:^
@@ -3373,9 +3369,15 @@ importers:
       '@deepseek-ai/dsh-client-ui-slots':
         specifier: workspace:^
         version: link:../ui-slots
+      '@deepseek-ai/dsh-client-ui-workflow-run':
+        specifier: workspace:^
+        version: link:../ui-workflow-run
       '@deepseek-ai/dsh-invariants':
         specifier: workspace:^
         version: link:../../runtime-diagnostics/invariants
+      '@deepseek-ai/dsh-workflow-remote':
+        specifier: workspace:^
+        version: link:../../workflow/workflow-remote
       '@deepseek-ai/dsh-workflow-yaml':
         specifier: workspace:^
         version: link:../../workflow/workflow-yaml

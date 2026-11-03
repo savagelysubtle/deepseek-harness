@@ -156,4 +156,10 @@ describe('WorkflowEditor', () => {
     expect(fns.onDryRun).toHaveBeenCalledTimes(1)
     expect(fns.onRun).toHaveBeenCalledTimes(1)
   })
+
+  it('counts a new, never-saved text as unsaved so Save is enabled without an edit', () => {
+    const { q } = setup({ unsaved: true })
+    expect(q('[data-dirty]')).not.toBeNull()
+    expect((q('[data-save]') as HTMLButtonElement).disabled).toBe(false)
+  })
 })
