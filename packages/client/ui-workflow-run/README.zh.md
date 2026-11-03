@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-这个浏览器插件把持久化的顶层工作流运行重建为独立 Chat 节点。它消费由 [`dsh-tool-workflow`](../../workflow/tool-workflow/README.md) 拥有的四类 `tool-workflow/*` Session 事件，注册一个 `ConversationNodeDefinition`，并通过 keyed `conversation.chat.node` slot 渲染，不改变现有工作流工具卡。
+这个浏览器插件把持久化的顶层工作流运行重建为独立 Chat 节点。它消费由 [`dsh-tool-workflow`](../../workflow/tool-workflow/README.md) 拥有的 `tool-workflow/*` Session 事件，注册一个 `ConversationNodeDefinition`，并通过 keyed `conversation.chat.node` slot 渲染，不改变现有工作流工具卡。
 
 ## 持久状态与回放
 
@@ -15,6 +15,10 @@
 运行和每个阶段都从当前生命周期事实派生 disclosure 控制。运行自身处于运行中、失败、已取消或已中断，或者任一阶段包含这些状态的成员时，运行保持展开；受影响的阶段也保持展开。强制展开的标题行只是静态展开行，不承诺按钮、键盘操作或 `aria-expanded`。阶段在全部成员完成时折叠一次；运行在自身和全部阶段都完成时折叠一次。每个干净层级随后恢复普通 disclosure 控件，其本地选择在干净状态的 rerender 中保持；新活动会重新取得控制，remount 则从当前数据派生初始状态。运行使用 32 像素 `--dsw-alias-bg-module-platform` 背景行，常驻向右／向下 chevron，并以内联状态点加状态文字表达结局，不使用胶囊。阶段使用 32 像素 disclosure 行，在可伸缩主区显示标题与成员数，在固定尾部精确显示聚合状态且不重复状态点。成员使用 16 像素状态点槽、可省略名称区和固定 64 像素状态列。
 
 只有所有实时事实同时成立时，成员才可打开子 Session：成员仍在运行、子 id 位于普通 Session 列表、列表行为 `origin: 'subagent'`、`parentId` 等于当前 Session，且列表行仍标记运行。带下划线的成员文字是唯一可见导航提示；键盘聚焦时，名称区显示 2 像素 business-primary 焦点环，右侧状态仍只显示“运行中”。组件只调用注入的普通 `sessions.open(id)`；远程、仅地址化、父级不符或终态的行都不可交互。
+
+## YAML 工作流节点与门禁报告
+
+对 YAML 工作流运行，节点还会折叠 `tool-workflow/node-start`、`tool-workflow/node-end`、`tool-workflow/approval` 与 `tool-workflow/gate-report`。node-start 使该行变为 `running` 并记录开始时间；node-end 将其结算为 `done`、`failed`、`skipped`、`cancelled` 或 `interrupted`，同一节点后到的 node-end 会替换先前的记录（agent 节点的截断要到运行结束才知道）。运行结束时仍在运行的节点显示为 `interrupted`。每行（`data-workflow-node`、`data-node-id`、`data-node-status`）显示状态文字、退出码、耗时，以及来自事件 `truncated` 字段的输出截断标记。有审批记录的节点带 `data-approval-state`（`pending`、`allowed`、`rejected`、`expired`、`unavailable` 或 `cancelled`）及文字徽标，取自最新的 `tool-workflow/approval` 事件；决定是终局的，晚到的 `pending` 不会回退。审批原因（否则取门禁报告原因）原样显示，因此无头或无人应答的拒绝会连同补救办法一起呈现。没有 `run-start` 的运行所对应的事件会被忽略。门禁报告渲染在运行 disclosure 之后，是带标题的表格（`data-gate-table`），每个门禁一行：节点、类型、`fired-pass`、`fired-block`、`skipped`、`not-reached` 或 `never-evaluated` 的文字结果徽标，以及原因。默认折叠，若有门禁阻止则默认展开；切换按钮（`data-gate-toggle`、`aria-expanded`）仅在组件状态中按运行 id 记忆。普通 `workflow` 工具运行的渲染保持不变。
 
 ## 装配
 
@@ -32,4 +36,4 @@
 
 - 只有经 `dsh-tool-workflow` 发起的顶层调用会生成这些记录；嵌套 Code Mode 调用和直接 `WorkflowEngine` 消费方不会生成。
 - 导航刻意只面向实时运行。终态成员继续保留供复盘，但本节点永不为其提供冷 Session 入口。
-- 节点只显示运行、阶段、成员身份与状态；脚本、输出、错误、日志、用量、静态拓扑和控制操作都不属于本界面。
+- 节点只显示运行、阶段、成员身份、节点、审批与门禁报告事实；脚本、输出、错误、日志、用量、静态拓扑和控制操作都不属于本界面。

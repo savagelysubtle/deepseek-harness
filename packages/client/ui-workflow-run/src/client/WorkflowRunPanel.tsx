@@ -7,7 +7,8 @@ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots
 import { shallowEqual, type SessionId, type SessionListState } from '@deepseek-ai/dsh-client-runtime/client'
 import type { WorkflowRunKey } from './locales.ts'
 import type {
-  WorkflowRunMemberData, WorkflowRunPhaseData, WorkflowRunStatus,
+  WorkflowRunGateRow, WorkflowRunMemberData, WorkflowRunNodeData, WorkflowRunPhaseData,
+  WorkflowRunStatus,
 } from './workflow-definition.ts'
 import css from './WorkflowRunPanel.module.css'
 
@@ -235,11 +236,163 @@ function PhaseSection({ phase, navigable, openSession, t }: {
   )
 }
 
+const GATE_OUTCOME_KEYS = {
+  'fired-pass': 'gate.outcome.fired-pass',
+  'fired-block': 'gate.outcome.fired-block',
+  skipped: 'gate.outcome.skipped',
+  'not-reached': 'gate.outcome.not-reached',
+  'never-evaluated': 'gate.outcome.never-evaluated',
+} as const satisfies Record<string, WorkflowRunKey>
+
+function gateOutcomeText(outcome: string, t: WorkflowRunPanelProps['t']): string {
+  return Object.hasOwn(GATE_OUTCOME_KEYS, outcome)
+    ? t(GATE_OUTCOME_KEYS[outcome as keyof typeof GATE_OUTCOME_KEYS])
+    : outcome
+}
+
+const NODE_STATUS_KEYS = {
+  running: 'node.status.running',
+  done: 'node.status.done',
+  failed: 'node.status.failed',
+  skipped: 'node.status.skipped',
+  cancelled: 'node.status.cancelled',
+  interrupted: 'node.status.interrupted',
+} as const satisfies Record<WorkflowRunNodeData['status'], WorkflowRunKey>
+
+const APPROVAL_KEYS = {
+  pending: 'approval.pending',
+  cancelled: 'approval.cancelled',
+  allowed: 'approval.allowed',
+  rejected: 'approval.rejected',
+  expired: 'approval.expired',
+  unavailable: 'approval.unavailable',
+} as const satisfies Record<NonNullable<WorkflowRunNodeData['approval']>, WorkflowRunKey>
+
+function nodeDot(status: WorkflowRunNodeData['status']): StateDotState {
+  switch (status) {
+    case 'running': return 'ongoing'
+    case 'done': return 'done'
+    case 'failed': return 'error'
+    case 'skipped':
+    case 'cancelled':
+    case 'interrupted': return 'warning'
+    /* v8 ignore next -- the node status union is closed and every variant is handled above. */
+    default: return status satisfies never
+  }
+}
+
+function NodeRow({ node, t }: { readonly node: WorkflowRunNodeData; readonly t: WorkflowRunPanelProps['t'] }) {
+  const meta = [
+    node.exitCode === undefined ? undefined : t('node.exit', { code: node.exitCode }),
+    node.durationMs === undefined ? undefined : t('node.duration', { ms: node.durationMs }),
+  ].filter((part): part is string => part !== undefined)
+  return (
+    <li
+      className={css.nodeRow}
+      data-workflow-node
+      data-node-id={node.nodeId}
+      data-node-kind={node.kind}
+      data-node-status={node.status}
+      {...node.approval === undefined ? {} : { 'data-approval-state': node.approval }}
+    >
+      <span className={css.dotSlot}><StateDot state={nodeDot(node.status)} /></span>
+      <span className={css.nodeLabel}>{node.nodeId}</span>
+      <span className={css.nodeStatus} data-node-status-text>{t(NODE_STATUS_KEYS[node.status])}</span>
+      {node.approval === undefined
+        ? null
+        : <span className={css.approvalBadge} data-approval-text>{t(APPROVAL_KEYS[node.approval])}</span>}
+      {meta.length === 0 ? null : <span className={css.nodeMeta} data-node-meta>{meta.join(' · ')}</span>}
+      {node.truncated === true
+        ? <span className={css.nodeMeta} data-node-truncated>{t('node.truncated')}</span>
+        : null}
+      {node.reason === undefined
+        ? null
+        : <span className={css.nodeReason} data-node-reason>{node.reason}</span>}
+    </li>
+  )
+}
+
+function NodeList({ nodes, t }: {
+  readonly nodes: readonly WorkflowRunNodeData[]
+  readonly t: WorkflowRunPanelProps['t']
+}) {
+  return (
+    <div className={css.nodes} data-workflow-nodes>
+      <span className={css.sectionHeading}>{t('node.heading')}</span>
+      <ul className={css.nodeList}>
+        {nodes.map(node => <NodeRow key={node.nodeId} node={node} t={t} />)}
+      </ul>
+    </div>
+  )
+}
+
+function GateReport({ rows, open, onToggle, t }: {
+  readonly rows: readonly WorkflowRunGateRow[]
+  readonly open: boolean
+  readonly onToggle: () => void
+  readonly t: WorkflowRunPanelProps['t']
+}) {
+  return (
+    <div className={css.gateReport} data-gate-report data-gate-report-open={open ? 'true' : 'false'}>
+      <button
+        type="button"
+        className={css.gateToggle}
+        aria-expanded={open}
+        data-gate-toggle
+        onClick={onToggle}
+      >
+        {t('gate.toggle', { count: rows.length })}
+      </button>
+      {open
+        ? rows.length === 0
+          ? <span className={css.empty}>{t('gate.empty')}</span>
+          : (
+            <table className={css.gateTable} data-gate-table>
+              <caption className={css.gateCaption}>{t('gate.caption')}</caption>
+              <thead>
+                <tr>
+                  <th scope="col">{t('gate.col.node')}</th>
+                  <th scope="col">{t('gate.col.kind')}</th>
+                  <th scope="col">{t('gate.col.outcome')}</th>
+                  <th scope="col">{t('gate.col.reason')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(row => (
+                  <tr
+                    key={`${row.nodeId}\u0000${row.gateKind}`}
+                    data-gate-row
+                    data-gate-node={row.nodeId}
+                    data-gate-kind={row.gateKind}
+                    data-gate-outcome={row.outcome}
+                  >
+                    <td>{row.nodeId}</td>
+                    <td>{row.gateKind}</td>
+                    <td>
+                      <span className={css.gateBadge} data-gate-badge data-outcome={row.outcome}>
+                        {gateOutcomeText(row.outcome, t)}
+                      </span>
+                    </td>
+                    <td data-gate-reason>{row.reason ?? ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )
+        : null}
+    </div>
+  )
+}
+
 /** Render one durable workflow run with status-driven run and phase disclosure. */
 export function WorkflowRunPanel({ node, sessionId, useSessions, openSession, t }: WorkflowRunPanelProps) {
   const totalMembers = node.data.phases.reduce((count, phase) => count + phase.members.length, 0)
   const requiresExpansion = node.data.status !== 'completed'
     || node.data.phases.some(phaseRequiresExpansion)
+  const { nodes, gateReport } = node.data
+  // Remembered per run id in component state; the default opens the report when a gate blocked.
+  const [gateOpen, setGateOpen] = useState<Readonly<Record<string, boolean>>>({})
+  const reportOpen = gateOpen[node.id] ?? (gateReport?.some(row => row.outcome === 'fired-block') ?? false)
   const navigable = useSessions(
     sessions => navigableMembers(sessions, node.data.phases, sessionId),
     shallowEqual,
@@ -254,7 +407,7 @@ export function WorkflowRunPanel({ node, sessionId, useSessions, openSession, t 
         t={t}
       >
         <div className={css.phaseList}>
-          {node.data.phases.length === 0
+          {node.data.phases.length === 0 && (nodes === undefined || nodes.length === 0)
             ? <span className={css.empty}>{t('run.empty')}</span>
             : node.data.phases.map(phase => (
               <PhaseSection
@@ -265,8 +418,20 @@ export function WorkflowRunPanel({ node, sessionId, useSessions, openSession, t 
                 t={t}
               />
             ))}
+          {nodes === undefined || nodes.length === 0 ? null : <NodeList nodes={nodes} t={t} />}
         </div>
       </RunHeader>
+      {/* Outside the disclosure so the end-of-run report stays visible once the clean run folds. */}
+      {gateReport === undefined
+        ? null
+        : (
+          <GateReport
+            rows={gateReport}
+            open={reportOpen}
+            onToggle={() => { setGateOpen(prev => ({ ...prev, [node.id]: !reportOpen })) }}
+            t={t}
+          />
+        )}
     </section>
   )
 }

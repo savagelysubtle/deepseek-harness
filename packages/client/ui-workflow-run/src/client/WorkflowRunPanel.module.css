@@ -246,6 +246,161 @@
   padding: 0;
 }
 
+.nodes {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sectionHeading {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.nodeList {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nodeRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 8px;
+  min-width: 0;
+  min-height: 24px;
+}
+
+.nodeLabel {
+  overflow: hidden;
+  min-width: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  line-height: 24px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nodeStatus,
+.nodeMeta {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 24px;
+  white-space: nowrap;
+}
+
+.approvalBadge,
+.gateBadge {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid currentcolor;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.approvalBadge {
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.nodeRow[data-approval-state='rejected'] .approvalBadge,
+.nodeRow[data-approval-state='expired'] .approvalBadge {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.nodeRow[data-approval-state='unavailable'] .approvalBadge,
+.nodeRow[data-approval-state='cancelled'] .approvalBadge {
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.nodeRow[data-approval-state='allowed'] .approvalBadge {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.nodeReason {
+  flex-basis: 100%;
+  padding-left: 24px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.gateReport {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.gateToggle {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  line-height: 24px;
+  text-decoration: underline;
+}
+
+.gateToggle:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
+}
+
+.gateTable {
+  width: 100%;
+  border-collapse: collapse;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: left;
+}
+
+.gateTable th,
+.gateTable td {
+  padding: 2px 8px 2px 0;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.gateTable td:last-child {
+  white-space: pre-wrap;
+}
+
+.gateCaption {
+  padding-bottom: 2px;
+  color: var(--dsw-alias-label-tertiary);
+  text-align: left;
+}
+
+.gateBadge {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.gateBadge[data-outcome='fired-pass'] {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.gateBadge[data-outcome='fired-block'] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.gateBadge[data-outcome='not-reached'],
+.gateBadge[data-outcome='never-evaluated'] {
+  color: var(--dsw-alias-state-warn-label);
+}
+
 @media (max-width: 560px) {
   .phaseList,
   .members {
