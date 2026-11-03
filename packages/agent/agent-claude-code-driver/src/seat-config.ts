@@ -35,6 +35,9 @@ export const DEFAULT_MAX_CALLS_PER_WINDOW = 120
 /** Default call window length: the five-hour subscription window. */
 export const DEFAULT_CALL_WINDOW_MS = 5 * 60 * 60 * 1000
 
+/** Shortest call window accepted: a window under a minute would make the per-seat cap meaningless. */
+export const MIN_CALL_WINDOW_MS = 60_000
+
 /** The `claude_code` block of a seat registry row, as written in config. */
 export interface ClaudeCodeSeatBlock {
   /** Model alias (`opus`, `sonnet`, `haiku`) or a full `claude-(opus|sonnet|haiku)-<version>` id; anything else is refused. */
@@ -51,7 +54,7 @@ export interface ClaudeCodeSeatBlock {
   claude_path: string
   /** Per-seat cap on queries started per call window; defaults to 120. Refused turns leave a record. */
   max_calls_per_window?: number
-  /** Call window length in milliseconds; defaults to five hours. */
+  /** Call window length in milliseconds, at least one minute; defaults to five hours. */
   call_window_ms?: number
   /** Optional SHA-256 (hex) of the pinned binary; an explicit value re-pins the recorded first-seen hash. */
   claude_path_sha256?: string
@@ -76,7 +79,7 @@ export const ClaudeCodeSeatBlock: z<ClaudeCodeSeatBlock> = z.object({
   max_budget_usd: z.number().min(0.01).default(DEFAULT_MAX_BUDGET_USD),
   claude_path: z.string().required(),
   max_calls_per_window: z.number().step(1).min(1).default(DEFAULT_MAX_CALLS_PER_WINDOW),
-  call_window_ms: z.number().step(1).min(1).default(DEFAULT_CALL_WINDOW_MS),
+  call_window_ms: z.number().step(1).min(MIN_CALL_WINDOW_MS).default(DEFAULT_CALL_WINDOW_MS),
   claude_path_sha256: z.string(),
 })
 
@@ -197,8 +200,8 @@ export function parseSeatRow(row: ClaudeCodeSeatRow, seat: string, options: Pars
     fail('claude_code.max_budget_usd must be a positive number')
   }
   const callWindowMs = block.call_window_ms ?? DEFAULT_CALL_WINDOW_MS
-  if (!Number.isSafeInteger(callWindowMs) || callWindowMs < 1) {
-    fail('claude_code.call_window_ms must be a positive integer')
+  if (!Number.isSafeInteger(callWindowMs) || callWindowMs < MIN_CALL_WINDOW_MS) {
+    fail(`claude_code.call_window_ms must be an integer of at least ${MIN_CALL_WINDOW_MS} (one minute)`)
   }
   if (typeof block.claude_path !== 'string' || !isAbsolute(block.claude_path) || block.claude_path.includes('\0')) {
     fail('claude_code.claude_path must be an absolute path to the real claude binary (no PATH lookup)')

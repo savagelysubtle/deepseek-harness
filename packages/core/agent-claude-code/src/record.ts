@@ -14,7 +14,7 @@ import type {
   ClaudeCodeCompactData, ClaudeCodeFleetRefusedData, ClaudeCodeMailClaimedData,
   ClaudeCodeMailOutcomeData, ClaudeCodeModelUsage, ClaudeCodePausedData, ClaudeCodeRateLimitedData,
   ClaudeCodeRefusedData, ClaudeCodeResumeFailedData, ClaudeCodeSessionBoundData, ClaudeCodeSteerData,
-  ClaudeCodeThinkingData, ClaudeCodeToolCallData, ClaudeCodeUnmappedData, ClaudeCodeUsage,
+  ClaudeCodeThinkingData, ClaudeCodeThrowawayTurnData, ClaudeCodeToolCallData, ClaudeCodeUnmappedData, ClaudeCodeUsage,
 } from './types.ts'
 
 /** SDK-sourced counter that may be absent; absent or invalid values are recorded as 0. */
@@ -66,6 +66,7 @@ export interface ClaudeCodeEventInputMap {
   'claude-code/thinking': WithoutVersion<ClaudeCodeThinkingData>
   'claude-code/unmapped': WithoutVersion<ClaudeCodeUnmappedData>
   'claude-code/mail-claimed': WithoutVersion<ClaudeCodeMailClaimedData>
+  'claude-code/throwaway-turn': WithoutVersion<ClaudeCodeThrowawayTurnData>
   'claude-code/mail-outcome': WithoutVersion<ClaudeCodeMailOutcomeData>
   'claude-code/refused': WithoutVersion<ClaudeCodeRefusedData>
 }
@@ -243,6 +244,11 @@ function normalize(type: ClaudeCodeEventType, data: unknown): Plain | undefined 
       const kind = sanitizeLabel(read(data, 'type'))
       if (kind === '') return undefined
       return { version, type: kind, at: timestamp(read(data, 'at')) }
+    }
+    case 'claude-code/throwaway-turn': {
+      const turnIndex = wholeCount(read(data, 'turnIndex'))
+      if (turnIndex < 1) return undefined
+      return { version, turnIndex, at: timestamp(read(data, 'at')) }
     }
     case 'claude-code/mail-claimed': {
       const messageId = sanitizeLabel(read(data, 'messageId'))

@@ -21,7 +21,7 @@ describe('claude-code event vocabulary', () => {
     expect([...CLAUDE_CODE_EVENT_TYPES].sort()).toEqual([
       'claude-code/compact', 'claude-code/fleet-refused', 'claude-code/mail-claimed', 'claude-code/mail-outcome',
       'claude-code/paused', 'claude-code/rate-limited', 'claude-code/refused', 'claude-code/resume-failed',
-      'claude-code/session-bound', 'claude-code/steer', 'claude-code/thinking', 'claude-code/tool-call',
+      'claude-code/session-bound', 'claude-code/steer', 'claude-code/thinking', 'claude-code/throwaway-turn', 'claude-code/tool-call',
       'claude-code/turn-completed', 'claude-code/unmapped',
     ])
     for (const type of CLAUDE_CODE_EVENT_TYPES) expect(KNOWN_SESSION_EVENT_TYPES.has(type)).toBe(true)
@@ -181,6 +181,13 @@ describe('recordClaudeCodeEvent', () => {
     ])
   })
 
+  it('records a throwaway-turn marker and drops one without a turn number', async () => {
+    const session = await newSession()
+    expect(recordClaudeCodeEvent(session, 'claude-code/throwaway-turn', { turnIndex: 3, at: 1, body: 'x' } as never)).toBe(true)
+    expect(recordClaudeCodeEvent(session, 'claude-code/throwaway-turn', { turnIndex: 0, at: 1 })).toBe(false)
+    expect(session.events.map(event => event.data)).toEqual([{ version: 1, turnIndex: 3, at: 1 }])
+  })
+
   it('redacts tokens and paths, strips control characters, and caps free text', async () => {
     const session = await newSession()
     recordClaudeCodeEvent(session, 'claude-code/session-bound', {
@@ -196,6 +203,21 @@ describe('recordClaudeCodeEvent', () => {
     expect(reason.length).toBeLessThanOrEqual(200)
     expect(reason).toContain('[redacted]')
     expect(reason).toContain('[path]')
+  })
+
+  it('redacts more vendor shapes, whatever their case', () => {
+    const hex32 = '0123456789abcdef0123456789abcdef'
+    for (const secret of [
+      'sk_live_AbCdEfGhIjKlMnOp1234', 'rk_live_AbCdEfGhIjKlMnOp1234', 'sk_test_AbCdEfGhIjKlMnOp1234', 'whsec_AbCdEfGhIjKlMnOp1234',
+      `SK${hex32}`, `AC${hex32}`, 'ASIAIOSFODNN7EXAMPLE', `AIza${'A1b2C3d4E5'.repeat(4)}`, `ya29.${'a1B2c3D4e5'.repeat(3)}`,
+      `glpat-${'abcDEF123456'.repeat(2)}`, `npm_${'aB3dE6gH9jK2mN5pQ8sT'.repeat(2)}`, 'SK-ANT-OAT01-AbCdEfGhIjKlMnOpQrStUvWx',
+      'GHP_abcdefghijklmnopqrstuvwxyz0123456789', 'BEARER abcdefghijklmnop1234',
+      '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\nabc\n-----END RSA PRIVATE KEY-----',
+      '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC',
+    ]) {
+      expect(redactTokens(`before ${secret} after`)).toMatch(/^before \[redacted\]( after)?$/)
+    }
+    expect(redactTokens('ordinary words, a-b-c, and sk and ac and ya29 stay')).toBe('ordinary words, a-b-c, and sk and ac and ya29 stay')
   })
 
   it('redacts credential-shaped strings of several vendors', () => {

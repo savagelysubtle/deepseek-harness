@@ -34,7 +34,8 @@ export type {
   BuildQueryOptionsInput, ExtensionSettings, QueryBinding, QueryOptionsContext, QueryOptionsExtension,
 } from './options.ts'
 export {
-  defaultAdmission, externalHops, frameMailText, isTaintedMail, mailboxMessageId, MAIL_FRAME_FOOTER, MAIL_FRAME_HEADER,
+  defaultAdmission, externalHops, frameMailText, isTaintedMail, mailboxMessageId, mailFrameFooter, mailFrameHeader,
+  unrecordableMailboxId,
 } from './admission.ts'
 export type { MailAdmission, MailAdmissionDecision, MailAdmissionPath, MailAdmissionRequest } from './admission.ts'
 export { MailLog } from './mail-lease.ts'
@@ -56,7 +57,7 @@ export {
 export type { SeatAgentDeps, TranscriptState } from './seat-agent.ts'
 export {
   CLAUDE_CODE_DRIVER_KEY, CLAUDE_CODE_EFFORTS, CLAUDE_CODE_ROLES, ClaudeCodeSeatBlock, ClaudeCodeSeatRow,
-  DEFAULT_CALL_WINDOW_MS, DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_CALLS_PER_WINDOW, DEFAULT_MAX_TURNS,
+  DEFAULT_CALL_WINDOW_MS, DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_CALLS_PER_WINDOW, DEFAULT_MAX_TURNS, MIN_CALL_WINDOW_MS,
   foldModelId, isAllowedModel, isFableModel, parseSeatRow, toolPolicyFor,
 } from './seat-config.ts'
 export type {

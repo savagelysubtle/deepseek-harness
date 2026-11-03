@@ -11,15 +11,29 @@ export const REDACTED_PATH = '[path]'
 /** Input is pre-capped so the redaction regexes never scan unbounded text. */
 const REGEX_INPUT_CAP = 4096
 
-// Order matters: specific vendor prefixes first, then key=value shapes.
+// Order matters: PEM blocks and specific vendor prefixes first, then key=value shapes. All case-insensitive.
 const TOKEN_PATTERNS: readonly RegExp[] = [
-  /sk-ant-[\w-]+/g,
-  /\bsk-[\w-]{16,}/g,
-  /\b(?:ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{16,}/g,
-  /\bgithub_pat_\w{16,}/g,
-  /\bxox[abprs]-[\w-]{8,}/g,
-  /\bAKIA[0-9A-Z]{16}\b/g,
-  /\beyJ[\w-]{8,}\.[\w-]{8,}(?:\.[\w-]*)?/g,
+  // A private-key block, or an unterminated one cut off at the end of the text.
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gi,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*/gi,
+  /sk-ant-[\w-]+/gi,
+  /\bsk-[\w-]{16,}/gi,
+  // Stripe secret, restricted and publishable keys, and webhook signing secrets (underscore variants).
+  /\b(?:sk|rk|pk)_(?:live|test)_[a-z0-9]{8,}/gi,
+  /\bwhsec_[a-z0-9]{8,}/gi,
+  // Twilio API key and account SIDs: SK or AC followed by 32 hex characters.
+  /\b(?:SK|AC)[0-9a-f]{32}\b/gi,
+  /\b(?:ghp|gho|ghu|ghs|ghr)_[a-z0-9]{16,}/gi,
+  /\bgithub_pat_\w{16,}/gi,
+  /\bglpat-[\w-]{16,}/gi,
+  /\bnpm_[a-z0-9]{20,}/gi,
+  /\bxox[abprs]-[\w-]{8,}/gi,
+  // AWS access key ids: long-lived (AKIA) and temporary (ASIA).
+  /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/gi,
+  // Google API keys and OAuth access tokens.
+  /\bAIza[\w-]{30,}/gi,
+  /\bya29\.[\w.-]{20,}/gi,
+  /\beyJ[\w-]{8,}\.[\w-]{8,}(?:\.[\w-]*)?/gi,
   /\b(?:Bearer|Basic)\s+[\w.~+/=-]{8,}/gi,
   // key=value / key: value / quoted JSON "key":"value" for credential-named keys.
   /["']?\b[\w-]*(?:token|secret|passw(?:or)?d|api[_-]?key|apikey|auth)["']?\s*[:=]\s*["']?[^\s"',;]{4,}["']?/gi,

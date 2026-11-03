@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { recordClaudeCodeEvent } from '@deepseek-ai/dsh-agent-claude-code'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { MailAdmissionRequest } from '../src/admission.ts'
 import { framed, harness, mailMessage, resultMessage, seatConfig, tick, userMessage } from './fakes.ts'
@@ -89,6 +90,37 @@ describe('an injected admission check', () => {
     expect(agent.turnTainted).toBe(false)
   })
 
+  it('does not claim or settle a refusal notice, and refuses mailbox mail that carries no seat sender class', async () => {
+    const h = await harness()
+    const agent = h.agent()
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: 'Mail refused.' }],
+      source: { kind: 'mailbox', form: 'notice', refusedTo: 'x', messageId: 'm-other-seat', reason: 'r', summary: 's' } as never,
+    }))
+    agent.followup(mailMessage('who am I', 'm-anon', { senderClass: undefined }))
+    await agent.whenIdle()
+    expect(h.queries).toHaveLength(0)
+    expect(dataOf(agent.session, 'claude-code/mail-claimed')).toEqual([])
+    expect(dataOf(agent.session, 'claude-code/refused')).toEqual([
+      expect.objectContaining({ reason: 'admission', detail: expect.stringContaining('unknown') as string }),
+      expect.objectContaining({ reason: 'admission', messageId: 'm-anon', detail: expect.stringContaining('unknown') as string }),
+    ])
+    expect(h.state.leases).toEqual([expect.stringMatching(/^fail:m-anon:refused:/)])
+  })
+
+  it('refuses mailbox mail whose id changes when recorded, loudly, and fails its lease under the raw id', async () => {
+    const h = await harness()
+    const agent = h.agent()
+    agent.followup(mailMessage('odd id', 'm\nsplit'))
+    await agent.whenIdle()
+    expect(h.queries).toHaveLength(0)
+    const refused = dataOf(agent.session, 'claude-code/refused')
+    expect(refused).toEqual([expect.objectContaining({ reason: 'admission', detail: expect.stringContaining('changes when recorded') as string })])
+    expect(refused[0]).not.toHaveProperty('messageId')
+    expect(h.state.leases).toEqual([expect.stringMatching(/^fail:m\nsplit:refused: the mailbox message id changes/)])
+    expect(h.warnings.some(line => line.includes('unrecordable mailbox id'))).toBe(true)
+  })
+
   it('treats a check that throws, or answers nonsense, or denies with a reason, as a refusal', async () => {
     const h = await harness()
     const agent = h.agent()
@@ -138,6 +170,11 @@ describe('tainted mail runs in a throwaway session with no tools', () => {
     expect(dataOf(agent.session, 'claude-code/session-bound')).toHaveLength(1)
     expect(dataOf(agent.session, 'claude-code/mail-claimed')).toEqual([expect.objectContaining({ messageId: 'm-taint', tainted: true })])
     expect(dataOf(agent.session, 'claude-code/turn-completed').map(data => data['throwaway'])).toEqual([undefined, true])
+    // The turn is marked before any of its messages are logged, so a digest can exclude it.
+    expect(dataOf(agent.session, 'claude-code/throwaway-turn')).toEqual([expect.objectContaining({ turnIndex: 2 })])
+    const marker = agent.session.events.find(event => event.type === 'claude-code/throwaway-turn')
+    const taintedMail = agent.session.events.find(event => event.type === 'user/message' && JSON.stringify(event.data).includes('m-taint'))
+    expect(marker !== undefined && taintedMail !== undefined && marker.seq < taintedMail.seq).toBe(true)
 
     agent.followup(userMessage('normal again'))
     const normal = await h.query(2)

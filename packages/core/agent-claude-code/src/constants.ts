@@ -28,6 +28,7 @@ export const CLAUDE_CODE_EVENT_TYPES = [
   'claude-code/mail-claimed',
   'claude-code/mail-outcome',
   'claude-code/refused',
+  'claude-code/throwaway-turn',
 ] as const
 
 /** One of {@link CLAUDE_CODE_EVENT_TYPES}. */

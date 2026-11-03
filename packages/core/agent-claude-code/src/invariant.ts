@@ -211,6 +211,11 @@ function applyEvent(trace: DriverTrace, event: SessionEvent, fail: InvariantFail
       amount(data, 'at', type, fail)
       return
     }
+    case 'claude-code/throwaway-turn': {
+      if (whole(data, 'turnIndex', type, fail) < 1) fail(`${type} turnIndex must be at least 1`)
+      amount(data, 'at', type, fail)
+      return
+    }
     case 'claude-code/mail-claimed': {
       text(data, 'messageId', type, fail)
       flag(data, 'tainted', type, fail)

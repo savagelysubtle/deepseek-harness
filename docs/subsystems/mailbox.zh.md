@@ -183,7 +183,7 @@ Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnp
 
 The mail seams a later slice (registry admission in S3, the mailbox bridge's lease in S8) plugs in by providing `ctx.claudeCodeMailHooks`. Both are optional and read at use time, so the provider may load after this plugin.
 
-Source: [`packages/agent/agent-claude-code-driver/src/index.ts:71`](../../packages/agent/agent-claude-code-driver/src/index.ts)
+Source: [`packages/agent/agent-claude-code-driver/src/index.ts:72`](../../packages/agent/agent-claude-code-driver/src/index.ts)
 
 <a id="ctxmailbox--mailboxregistry"></a>
 

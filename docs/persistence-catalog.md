@@ -260,7 +260,7 @@ Source: [`packages/core/session/src/types.ts:277`](../packages/core/session/src/
 'claude-code/compact': ClaudeCodeCompactData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:230`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:238`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codefleet-refused--log-only"></a>
 
@@ -274,7 +274,7 @@ Source: [`packages/core/agent-claude-code/src/types.ts:230`](../packages/core/ag
 'claude-code/fleet-refused': ClaudeCodeFleetRefusedData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:240`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:248`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codemail-claimed--log-only"></a>
 
@@ -288,7 +288,7 @@ Source: [`packages/core/agent-claude-code/src/types.ts:240`](../packages/core/ag
 'claude-code/mail-claimed': ClaudeCodeMailClaimedData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:270`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:278`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codemail-outcome--log-only"></a>
 
@@ -302,7 +302,7 @@ Source: [`packages/core/agent-claude-code/src/types.ts:270`](../packages/core/ag
 'claude-code/mail-outcome': ClaudeCodeMailOutcomeData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:275`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:283`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codepaused--log-only"></a>
 
@@ -316,7 +316,7 @@ Source: [`packages/core/agent-claude-code/src/types.ts:275`](../packages/core/ag
 'claude-code/paused': ClaudeCodePausedData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:250`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:258`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-coderate-limited--log-only"></a>
 
@@ -330,7 +330,7 @@ Source: [`packages/core/agent-claude-code/src/types.ts:250`](../packages/core/ag
 'claude-code/rate-limited': ClaudeCodeRateLimitedData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:235`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:243`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-coderefused--log-only"></a>
 
@@ -344,7 +344,7 @@ Source: [`packages/core/agent-claude-code/src/types.ts:235`](../packages/core/ag
 'claude-code/refused': ClaudeCodeRefusedData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:280`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:288`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-coderesume-failed--log-only"></a>
 
@@ -358,7 +358,7 @@ Source: [`packages/core/agent-claude-code/src/types.ts:280`](../packages/core/ag
 'claude-code/resume-failed': ClaudeCodeResumeFailedData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:245`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:253`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codesession-bound--log-only"></a>
 
@@ -372,7 +372,7 @@ Source: [`packages/core/agent-claude-code/src/types.ts:245`](../packages/core/ag
 'claude-code/session-bound': ClaudeCodeSessionBoundData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:215`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:223`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codesteer--log-only"></a>
 
@@ -386,7 +386,7 @@ Source: [`packages/core/agent-claude-code/src/types.ts:215`](../packages/core/ag
 'claude-code/steer': ClaudeCodeSteerData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:225`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:233`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codethinking--log-only"></a>
 
@@ -400,7 +400,21 @@ Source: [`packages/core/agent-claude-code/src/types.ts:225`](../packages/core/ag
 'claude-code/thinking': ClaudeCodeThinkingData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:260`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:268`](../packages/core/agent-claude-code/src/types.ts)
+
+<a id="claude-codethrowaway-turn--log-only"></a>
+
+#### `claude-code/throwaway-turn` — log-only
+
+```ts persistence-catalog
+/**
+ * Marks a turn as a throwaway (tainted-mail) turn, before any of its messages are logged.
+ * @param data - the dsh turn number and time.
+ */
+'claude-code/throwaway-turn': ClaudeCodeThrowawayTurnData
+```
+
+Source: [`packages/core/agent-claude-code/src/types.ts:293`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codetool-call--log-only"></a>
 
@@ -414,7 +428,7 @@ Source: [`packages/core/agent-claude-code/src/types.ts:260`](../packages/core/ag
 'claude-code/tool-call': ClaudeCodeToolCallData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:255`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:263`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codeturn-completed--log-only"></a>
 
@@ -428,7 +442,7 @@ Source: [`packages/core/agent-claude-code/src/types.ts:255`](../packages/core/ag
 'claude-code/turn-completed': ClaudeCodeTurnCompletedData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:220`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:228`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codeunmapped--log-only"></a>
 
@@ -442,7 +456,7 @@ Source: [`packages/core/agent-claude-code/src/types.ts:220`](../packages/core/ag
 'claude-code/unmapped': ClaudeCodeUnmappedData
 ```
 
-Source: [`packages/core/agent-claude-code/src/types.ts:265`](../packages/core/agent-claude-code/src/types.ts)
+Source: [`packages/core/agent-claude-code/src/types.ts:273`](../packages/core/agent-claude-code/src/types.ts)
 
 ### `command/*`
 

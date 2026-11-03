@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { CLAUDE_CODE_TURN_ERROR_CODES, SeatGate } from '../src/seat-agent.ts'
+import type { SeatAgentDeps } from '../src/seat-agent.ts'
 import { harness, mailMessage, resultMessage, seatConfig, tick, userMessage } from './fakes.ts'
 import type { FakeQuery } from './fakes.ts'
 
@@ -134,7 +135,7 @@ describe('per-seat limits', () => {
 
   it('refuses a turn once the seat used its calls for the window, with a record, and runs again when the window moves on', async () => {
     const h = await harness()
-    const agent = h.agent({ config: seatConfig({ max_calls_per_window: 2, call_window_ms: 1000 }) })
+    const agent = h.agent({ config: seatConfig({ max_calls_per_window: 2, call_window_ms: 60_000 }) })
     for (const text of ['one', 'two']) {
       agent.followup(userMessage(text))
       answer(await h.query(text === 'one' ? 0 : 1))
@@ -150,13 +151,51 @@ describe('per-seat limits', () => {
     ])
     expect(agent.inbox.nextTurn).toHaveLength(1)
 
-    h.state.now += 5000
+    h.state.now += 61_000
     agent.followup(userMessage('four'))
     answer(await h.query(2))
     await tick(5)
     answer(await h.query(3))
     await agent.whenIdle()
     expect(agent.inbox.hasPending).toBe(false)
+  })
+
+  it('rebuilds the call window from the log after a restart, once per seat, and ignores steps outside the window', async () => {
+    const h = await harness()
+    h.state.now = Date.now() + 1000
+    const config = seatConfig({ max_calls_per_window: 2, call_window_ms: 60_000 })
+    const session = h.session('s-restart')
+    session.append('step/start', { turn: 1, step: 1 })
+    session.append('step/start', { turn: 2, step: 1 })
+    session.append('turn/start', { turn: 3 })
+    const restarted = h.agent({ session, config })
+    restarted.followup(userMessage('after the restart'))
+    await restarted.whenIdle()
+    expect(h.queries).toHaveLength(0)
+    expect(dataOf(session, 'claude-code/refused')).toEqual([
+      expect.objectContaining({ reason: 'call-window', detail: expect.stringContaining('2 of 2 calls') as string }),
+    ])
+
+    // A second agent of the same seat must not count the same history again.
+    const other = h.session('s-other')
+    other.append('step/start', { turn: 1, step: 1 })
+    const second = h.agent({ session: other, config })
+    second.followup(userMessage('second'))
+    await second.whenIdle()
+    expect(dataOf(other, 'claude-code/refused')).toEqual([
+      expect.objectContaining({ detail: expect.stringContaining('2 of 2 calls') as string }),
+    ])
+
+    // History older than the window does not count.
+    const old = h.session('s-old')
+    old.append('step/start', { turn: 1, step: 1 })
+    old.append('step/start', { turn: 2, step: 1 })
+    h.state.now += 120_000
+    const fresh = h.agent({ session: old, config, seat: 'another-seat' })
+    fresh.followup(userMessage('fresh'))
+    answer(await h.query(0))
+    await fresh.whenIdle()
+    expect(dataOf(old, 'claude-code/refused')).toEqual([])
   })
 
   it('counts calls per seat across agents through the shared gate', () => {
@@ -194,6 +233,47 @@ describe('the kill switch', () => {
     answer(await h.query(1))
     await agent.whenIdle()
     expect(h.state.leases).toEqual(['settle:m-ks'])
+  })
+
+  it('looks once more right before the query starts, so a switch set during the awaits still stops the turn', async () => {
+    const h = await harness()
+    ;(h.deps as { flush: SeatAgentDeps['flush'] }).flush = () => {
+      h.state.calls.push('flush')
+      h.state.killSwitch = true
+      return Promise.resolve()
+    }
+    const agent = h.agent()
+    agent.followup(mailMessage('racing', 'm-race'))
+    await agent.whenIdle()
+    expect(h.queries).toHaveLength(0)
+    expect(h.state.calls).not.toContain('query')
+    expect(dataOf(agent.session, 'claude-code/refused')).toEqual([expect.objectContaining({ reason: 'kill-switch', detail: expect.stringContaining('turn refused') as string })])
+    expect(turnEnd(agent.session).reason.error?.code).toBe(CLAUDE_CODE_TURN_ERROR_CODES.killSwitch)
+    expect(h.state.leases).toEqual([expect.stringMatching(/^fail:m-race:.*kill-switch flag file is present/)])
+  })
+
+  it('polls the flag during a live turn, so a switch set while a tool runs aborts the query with no message to notice it on', async () => {
+    const h = await harness()
+    const agent = h.agent()
+    agent.followup(mailMessage('long tool', 'm-poll'))
+    const query = await h.query(0)
+    await tick(15)
+    expect(query.closed).toBe(false)
+    h.state.killSwitch = true
+    await agent.whenIdle()
+    expect(query.closed).toBe(true)
+    expect(dataOf(agent.session, 'claude-code/refused')).toEqual([expect.objectContaining({ reason: 'kill-switch', detail: expect.stringContaining('aborted') as string })])
+    expect(turnEnd(agent.session).reason.error?.code).toBe(CLAUDE_CODE_TURN_ERROR_CODES.killSwitch)
+  })
+
+  it('uses a 500 ms poll when no interval is configured, and stops polling when the turn ends', async () => {
+    const h = await harness()
+    ;(h.deps as { killSwitchPollMs?: number | undefined }).killSwitchPollMs = undefined
+    const agent = h.agent()
+    agent.followup(userMessage('quick'))
+    answer(await h.query(0))
+    await agent.whenIdle()
+    expect(turnEnd(agent.session).reason.kind).toBe('completed')
   })
 
   it('aborts the running query when the flag appears mid-turn, once, and fails its mail', async () => {

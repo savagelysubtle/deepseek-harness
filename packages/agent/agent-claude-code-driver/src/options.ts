@@ -178,7 +178,10 @@ export function allowlistSettings(raw: unknown, seat: string, warn: (message: st
 export function buildQueryOptions(input: BuildQueryOptionsInput): Options {
   const { config, binding } = input
   const policy = toolPolicyFor(config.role)
-  const extension = input.extension?.({ seat: input.seat, config, cwd: input.cwd, binding }) ?? {}
+  // A throwaway (tainted-mail) query takes no policy extension at all: no hooks, no settings, nothing but the fences.
+  const extension: { readonly settings?: ExtensionSettings } = input.throwaway === true
+    ? {}
+    : input.extension?.({ seat: input.seat, config, cwd: input.cwd, binding }) ?? {}
   const settings = allowlistSettings(extension.settings, input.seat, input.warn ?? (() => undefined))
   // Re-check after the extension ran: the fences must hold whatever it did.
   const leaked = forbiddenEnvPresent(input.env)

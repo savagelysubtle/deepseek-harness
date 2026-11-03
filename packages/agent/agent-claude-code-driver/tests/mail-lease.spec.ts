@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { recordClaudeCodeEvent } from '@deepseek-ai/dsh-agent-claude-code'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { MailLog } from '../src/mail-lease.ts'
@@ -227,10 +227,15 @@ describe('redelivery', () => {
   it('does not run mail whose claim record cannot be written, and fails its lease', async () => {
     const h = await harness()
     const agent = h.agent()
-    agent.followup(mailMessage('odd', '\u0001'))
+    const original = agent.session.append.bind(agent.session) as (type: string, data: unknown, options?: unknown) => unknown
+    vi.spyOn(agent.session, 'append').mockImplementation(((type: string, data: unknown, options?: unknown) => {
+      if (type === 'claude-code/mail-claimed') throw new Error('log closed')
+      return original(type, data, options)
+    }) as never)
+    agent.followup(mailMessage('odd', 'm-noclaim'))
     await agent.whenIdle()
     expect(h.queries).toHaveLength(0)
-    expect(h.state.leases).toEqual([expect.stringMatching(/^fail:\u0001:the claim record could not be written/)])
+    expect(h.state.leases).toEqual([expect.stringMatching(/^fail:m-noclaim:the claim record could not be written/)])
   })
 
   it('leaves no record for a failure before the claim, so the retry runs the mail exactly once', async () => {

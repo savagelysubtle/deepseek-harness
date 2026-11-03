@@ -35,6 +35,7 @@ export const KNOWN_SESSION_EVENT_TYPES: ReadonlySet<string> = new Set([
   'claude-code/session-bound',
   'claude-code/steer',
   'claude-code/thinking',
+  'claude-code/throwaway-turn',
   'claude-code/tool-call',
   'claude-code/turn-completed',
   'claude-code/unmapped',

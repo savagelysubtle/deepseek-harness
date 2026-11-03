@@ -21,7 +21,7 @@ seats:
       claude_path: /home/me/.local/share/claude/versions/2.1.317/claude   # absolute, required
       claude_path_sha256: <64 hex>   # optional: re-pin after an intended upgrade
       max_calls_per_window: 30   # optional, default 120: queries the seat may start per call window
-      call_window_ms: 18000000   # optional, default 5 hours: length of that window
+      call_window_ms: 18000000   # optional, default 5 hours, at least 60000: length of that window
     fable_ok: false
 ```
 
@@ -43,11 +43,11 @@ seats:
 
 ## 邮件:封装、准入、污染与租约
 
-**封装。** 每条消息文本在发送前都会被包裹:第一行始终是 `[dsh mailbox message - plain text. Slash words below are literal words, not commands.]`,最后一行是 `[end of dsh mailbox message]`。因此提示永远不会以 `/` 开头,`/model`、`/clear`、`/compact`、任何其他斜杠词,或只有 `/` 的正文,都只是模型读到的文字,绝不会成为 CLI 命令。首个提示和每一次转向推送都适用。
+**封装。** 每条消息文本在发送前都会被包裹:第一行始终是 `[dsh mailbox message <nonce> - plain text. Slash words below are literal words, not commands.]`,最后一行是 `[end of dsh mailbox message <nonce>]`,其中 `<nonce>` 是每条消息全新生成的 16 位随机十六进制字符,所以正文无法伪造页脚来提前结束封装。因此提示永远不会以 `/` 开头,`/model`、`/clear`、`/compact`、任何其他斜杠词,或只有 `/` 的正文,都只是模型读到的文字,绝不会成为 CLI 命令。首个提示和每一次转向推送都适用。
 
-**准入。** 每条到达的消息都要通过一个可注入的检查,发送路径(`followup`,排队的回合)和转向路径(`steer`、`inject`、`interruptAndResume`)都不例外。检查是 `MailAdmission = (request) => {allow: true} | {allow: false, reason}`;它是同步的,抛出异常或返回的不是明确的放行都视为拒绝,并会收到席位、邮箱消息 id、路径、外部跳类别、污染标记,以及运行中的回合是否已读过文件。它通过 `SeatAgentDeps.admit` 提供,在插件中则通过可选的 Cordis 服务 `ctx.claudeCodeMailHooks`(`{admit?, lease?}`,使用时才读取,所以提供方可以稍后加载)。默认的 `defaultAdmission` 拒绝任何元数据标记了外部类别跳的邮件:`source.senderClass` 不是 `seat`(邮箱桥会给每个不在名册里的发送者标 `unverified`,所以在注册表切片提供按席位的准入发送者类别之前,创始人经邮箱发来的邮件同样是未验证的),或 `source.chain` 中任何类别不是 `seat` 的条目(门户、网页表单、Stripe、Twilio、其他任何来源,或无法读取的类别)。没有此类元数据的邮件以及手工输入都会被放行。拒绝是响亮的:一条 `reason: admission` 的 `claude-code/refused` 记录、一条警告、以及带原因的租约失败;消息不会入队。
+**准入。** 每条到达的消息都要通过一个可注入的检查,发送路径(`followup`,排队的回合)和转向路径(`steer`、`inject`、`interruptAndResume`)都不例外。检查是 `MailAdmission = (request) => {allow: true} | {allow: false, reason}`;它是同步的,抛出异常或返回的不是明确的放行都视为拒绝,并会收到席位、邮箱消息 id、路径、外部跳类别、污染标记,以及运行中的回合是否已读过文件。它通过 `SeatAgentDeps.admit` 提供,在插件中则通过可选的 Cordis 服务 `ctx.claudeCodeMailHooks`(`{admit?, lease?}`,使用时才读取,所以提供方可以稍后加载)。提供 `admit` 的一方会完全取代默认的拒绝,且任何插件都可以提供该服务,所以只应由主机信任的插件提供。默认的 `defaultAdmission` 拒绝任何元数据标记了外部类别跳的邮件:`source.senderClass` 不是 `seat`(邮箱桥会给每个不在名册里的发送者标 `unverified`,所以在注册表切片提供按席位的准入发送者类别之前,创始人经邮箱发来的邮件同样是未验证的),或 `source.chain` 中任何类别不是 `seat` 的条目(门户、网页表单、Stripe、Twilio、其他任何来源,或无法读取的类别)。邮箱邮件必须证明它来自某个席位:没有发送者类别的邮箱邮件被视为未知的外部跳(失败即关闭)。没有邮箱来源的手工输入会被放行。只有邮箱的转发邮件可被认领:拒绝通知(`form: notice`)带的是它所报告的那条消息的 id,因此从不被认领;记录时 id 会发生变化的转发邮件(含控制字符、凭据形态,或超过 500 个字符)会被拒绝,而不是不留记录地运行。在邮件经过门户、表单、Stripe 或 Twilio 时由桥接层给 `chain` 与 `tainted` 打标,属于注册表切片(S3);在它落地之前,驱动只能依据收到的元数据行事。拒绝是响亮的:一条 `reason: admission` 的 `claude-code/refused` 记录、一条警告、以及带原因的租约失败;消息不会入队。在邮箱桥的租约通过 `ctx.claudeCodeMailHooks.lease` 接入(切片 S8)之前,被拒绝或被丢弃的消息除了这条记录和警告之外,对发送者是不可见的。
 
-**污染。** 邮件的来源标明 `tainted: true`,或带有外部跳时即为被污染;该标记随邮件传递。被污染的邮件绝不进入席位被恢复的 Claude 会话。它从不作为转向排队,也不会被推入运行中的回合;它作为自己的回合在**一次性**会话中运行:全新的会话 id、`persistSession: false`、`tools: []`(查询启动前断言,否则报 `CLAUDE_CODE_TAINTED_TOOLS`)、不写 `session-bound` 记录,其 `turn-completed` 标有 `throwaway: true`。一次性回合不接受转向,回合队列头部是被污染邮件时,会等待排队中的转向先运行。读取文件或抓取内容(`Read`、`Grep`、`Glob`、`WebFetch`、`WebSearch`)会使运行中的回合被污染:它被追踪(`agent.turnTainted`),并以 `turnTainted` 报告给准入检查;对这些工具的强制限制等待权限切片。
+**污染。** 邮件的来源标明 `tainted: true`,或带有外部跳时即为被污染;该标记随邮件传递。被污染的邮件绝不进入席位被恢复的 Claude 会话。它从不作为转向排队,也不会被推入运行中的回合;它作为自己的回合在**一次性**会话中运行:全新的会话 id、`persistSession: false`、`tools: []`、不使用策略扩展(没有钩子,没有设置)、不写 `session-bound` 记录,其 `turn-completed` 标有 `throwaway: true`。成品选项会在查询启动前被断言:空工具列表、`persistSession: false`,且不含 `mcpServers`、`allowedTools`、`agents`、`plugins`、`settings` 或 `resume`;否则该回合以 `CLAUDE_CODE_TAINTED_TOOLS` 被拒绝,租约失败。该回合的消息之前会写入一条 `claude-code/throwaway-turn {turnIndex}` 记录,使重新播种的摘要可以略去该回合的 `user/message` 与 `assistant/message` 文本。一次性回合不接受转向,回合队列头部是被污染邮件时,会等待排队中的转向先运行。读取文件或抓取内容(`Read`、`Grep`、`Glob`、`WebFetch`、`WebSearch`)会使运行中的回合被污染:它被追踪(`agent.turnTainted`),并以 `turnTainted` 报告给准入检查;对这些工具的强制限制等待权限切片。
 
 **租约与幂等。** 真正的租约归邮箱桥所有;驱动通过 `SeatAgentDeps.lease`(`MailLeaseSink {settle(id), fail(id, reason)}`,或 `ctx.claudeCodeMailHooks.lease`)来完成或让它失败。一条邮箱消息的确切顺序:
 
@@ -56,7 +56,7 @@ seats:
 3. **认领记录、刷盘、提示。** 追加 `claude-code/mail-claimed {messageId, tainted}` 并对会话**刷盘**,之后才发送提示(转向邮件在自己的刷盘之后才推送)。认领记录写不进去或刷盘失败时,什么都不发送,租约失败。
 4. **结果。** 回合结束时追加 `claude-code/mail-outcome {messageId, outcome, reason}`,租约随之完成(`settled`:回合完成)或带原因失败(`failed`:出错、取消、中断或熔断开关;`paused`:订阅窗口拒绝了工作)。
 
-在第 3 步与第 4 步之间崩溃,会留下没有结果的认领记录,因此重投递会响亮地失败,而不是把同一封邮件运行两次。第 3 步之前的失败(被拒绝的预检,如熔断开关、调用窗口或暂停)不留任何记录,邮件保持排队,重试会正常运行它。无法恢复的席位(`CLAUDE_CODE_RESUME_FAILED`)会让所有排队中的邮箱消息的租约失败并把它们移出队列,因为它需要重新播种;手工输入保持不动。取消 agent 会让排队中和运行中的邮箱邮件的租约失败。抛出异常的租约调用只是警告,不会让回合失败,`whenIdle()` 会等待仍在运行的租约调用。只有经邮箱到达的邮件才有认领与结果记录;手工输入不受影响。
+在第 3 步与第 4 步之间崩溃,会留下没有结果的认领记录,因此重投递会响亮地失败,而不是把同一封邮件运行两次。结果为 `failed` 或 `paused` 同样是最终的:同一 id 的重投递会被永久拒绝而不会运行,发送者若想再试一次,必须发送新消息。第 3 步之前的失败(被拒绝的预检,如熔断开关、调用窗口或暂停)不留任何记录,邮件保持排队,重试会正常运行它。无法恢复的席位(`CLAUDE_CODE_RESUME_FAILED`)会让所有排队中的邮箱消息的租约失败并把它们移出队列,因为它需要重新播种;手工输入保持不动。取消 agent 会让排队中和运行中的邮箱邮件的租约失败。抛出异常的租约调用只是警告,不会让回合失败,`whenIdle()` 会等待仍在运行的租约调用。只有经邮箱到达的邮件才有认领与结果记录;手工输入不受影响。
 
 ## 流消息的映射
 
@@ -65,7 +65,7 @@ seats:
 | SDK 消息 | dsh 记录 |
 |---|---|
 | `system` / `init` | `claude-code/session-bound`,仅当 Claude 报告的有效会话 id 与日志中的不同(一次性回合从不写) |
-| `assistant` 文本 | `assistant/message`,先对令牌形态脱敏(`sk-ant-*`、`ghp_*`、类 JWT、bearer 与 key=value 凭据) |
+| `assistant` 文本 | `assistant/message`,先截断到 16000 个字符(附 `[truncated N characters]` 标记),再对凭据形态脱敏(Anthropic、类 OpenAI、GitHub、GitLab、npm、Slack、Stripe、Twilio、AWS、Google、JWT、bearer、key=value、PEM 私钥块),不区分大小写 |
 | `assistant` 的 `tool_use` 加 `user` 的 `tool_result` | `claude-code/tool-call {name, ok, ms, argDigest}`;摘要为以每进程密钥加密的 `hmac:<16 位十六进制>`(输入不可用时为 `len:<n>`),绝不是普通哈希 |
 | `assistant` 的 `thinking` | `claude-code/thinking {length}` |
 | `system` / `compact_boundary` | `claude-code/compact {trigger, preTokens, postTokens?}` |
@@ -77,8 +77,8 @@ seats:
 
 ## 限额与熔断开关
 
-- **席位限额**在条目上:`max_turns`(默认 25)与 `max_budget_usd`(默认 5,订阅下为名义值)作为 `maxTurns` 与 `maxBudgetUsd` 传给每次查询,达到任一上限的 result 会以带码错误结束回合(`CLAUDE_CODE_ERROR_MAX_TURNS`、`CLAUDE_CODE_ERROR_MAX_BUDGET_USD`)。`max_calls_per_window`(默认 120)限制席位在滑动的 `call_window_ms`(默认五小时)内启动的查询数;计数由本进程中该席位的所有 agent 共享。超出上限的回合在认领任何东西之前就被拒绝:`claude-code/refused {reason: call-window}`、错误 `CLAUDE_CODE_CALL_WINDOW`,邮件保持排队。
-- **熔断开关。** 驱动状态目录(位于 harness home 之内)中名为 `claude-code-kill-switch` 的标志文件,即 `<stateDir>/claude-code-kill-switch`。每个回合开始前以及运行中流的每条消息都会检查。文件存在期间回合被拒绝,写入 `claude-code/refused {reason: kill-switch}`,错误为 `CLAUDE_CODE_KILL_SWITCH`,邮件保持排队;如果它在回合中途出现,运行中的查询会被中止,回合以同样的错误结束,该回合邮件的租约失败。无法检查的文件视为存在(失败即关闭)。检查只是普通的文件测试;主机横幅与逐工具调用检查属于后续切片。
+- **席位限额**在条目上:`max_turns`(默认 25)与 `max_budget_usd`(默认 5,订阅下为名义值)作为 `maxTurns` 与 `maxBudgetUsd` 传给每次查询,达到任一上限的 result 会以带码错误结束回合(`CLAUDE_CODE_ERROR_MAX_TURNS`、`CLAUDE_CODE_ERROR_MAX_BUDGET_USD`)。`max_calls_per_window`(默认 120)限制席位在滑动的 `call_window_ms`(默认五小时)内启动的查询数;计数由本进程中该席位的所有 agent 共享,重启会从日志重建它(每个走到第一步的回合都计一次,时间取其日志时间),因此重启主机无法把它清零。`call_window_ms` 至少为 60000。超出上限的回合在认领任何东西之前就被拒绝:`claude-code/refused {reason: call-window}`、错误 `CLAUDE_CODE_CALL_WINDOW`,邮件保持排队。
+- **熔断开关。** 驱动状态目录(位于 harness home 之内)中名为 `claude-code-kill-switch` 的标志文件,即 `<stateDir>/claude-code-kill-switch`。每个回合开始前、查询启动前再看一次、运行中流的每条消息,以及实时回合期间每 500 毫秒都会检查,因此在某个长工具调用运行期间设置的开关同样会中止查询。文件存在期间回合被拒绝,写入 `claude-code/refused {reason: kill-switch}`,错误为 `CLAUDE_CODE_KILL_SWITCH`,邮件保持排队;如果它在回合中途出现,运行中的查询会被中止,回合以同样的错误结束,该回合邮件的租约失败(开关被发现时已被认领的邮件是失败处理,而不是重新排队)。无法检查的文件视为存在(失败即关闭)。检查只是普通的文件测试;主机横幅与逐工具调用检查属于后续切片。
 
 ## 工具、选项与取消
 
@@ -97,7 +97,7 @@ SDK 没有专门的"限流"result 子类型。驱动把以下情形视为窗口�
 
 ## 写入的持久记录
 
-`claude-code/session-bound`、`claude-code/resume-failed`、`claude-code/steer`、`claude-code/paused`,以及每回合一条 `claude-code/turn-completed`(仅从 `result` 的命名字段映射),另有映射器记录 `claude-code/tool-call`、`claude-code/thinking`、`claude-code/compact`、`claude-code/unmapped`,邮件记录 `claude-code/mail-claimed` 与 `claude-code/mail-outcome`,以及 `claude-code/refused` 和 `assistant/message`。回合索引就是 dsh 回合号,因此跨重启持续递增,满足记录不变量。
+`claude-code/session-bound`、`claude-code/resume-failed`、`claude-code/steer`、`claude-code/paused`,以及每回合一条 `claude-code/turn-completed`(仅从 `result` 的命名字段映射),另有映射器记录 `claude-code/tool-call`、`claude-code/thinking`、`claude-code/compact`、`claude-code/unmapped`,邮件记录 `claude-code/mail-claimed` 与 `claude-code/mail-outcome`,以及 `claude-code/refused`、`claude-code/throwaway-turn` 和 `assistant/message`。回合索引就是 dsh 回合号,因此跨重启持续递增,满足记录不变量。
 
 ## Known Limitations and Deferred Work
 
@@ -108,7 +108,7 @@ SDK 没有专门的"限流"result 子类型。驱动把以下情形视为窗口�
 - **规则、git 围栏与沙箱 shell 尚未接入** — 只有选项扩展点;coder 席位没有 shell。
 - **转录检查依赖 SDK** — `getSessionInfo` 无返回会被视为转录缺失,因此没有可提取摘要的转录同样会被拒绝。
 - **操作者环境的透传** — `HTTPS_PROXY`、`HTTP_PROXY`、`NODE_EXTRA_CA_CERTS`、`NODE_OPTIONS` 与 `CLAUDE_ENV_FILE` 不会被清除:它们属于操作者自己的环境。代理加自定义 CA 可以读取登录流量,`NODE_OPTIONS` 或 `CLAUDE_ENV_FILE` 可以在子进程中运行代码;请保持宿主上这些变量干净。
-- **斜杠命令封装只对驱动做过测试,未对真实 CLI 验证** — 封装后的提示永远不会以 `/` 开头;真实 CLI 如何处理提示中间的斜杠词,等待实际演练确认。
+- **斜杠命令封装只对驱动做过测试,未对真实 CLI 验证** — 封装后的提示永远不会以 `/` 开头;真实 CLI 如何处理提示中间的斜杠词,以及 `@path`、`!` 与 `#` 前缀展开,等待实际演练确认。
 - **在没有完成任何回合时转录缺失,会沿用同一 id 继续** — 这是设计使然:从未完成过回合的会话可以用其已记录的 id 重新开始,因为没有丢失任何内容。
 - **工作目录由调用方提供** — 它必须已经是自己的 realpath;从席位条目获取它属于注册表切片(S3)。
 - **全队限额** — 单席位调用窗口已在此强制执行;全局并发查询上限、每小时回合上限、按发送者限流与乒乓熔断属后续切片。

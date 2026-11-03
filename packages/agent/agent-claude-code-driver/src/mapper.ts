@@ -7,7 +7,7 @@
  * | SDK message | dsh record |
  * |---|---|
  * | `system` / `init` | `claude-code/session-bound` when Claude reports a different session id |
- * | `assistant` text block | `assistant/message`, after token-shape redaction |
+ * | `assistant` text block | `assistant/message`, cut to a bounded length and token-redacted |
  * | `assistant` tool_use + `user` tool_result | `claude-code/tool-call {name, ok, ms, argDigest}` |
  * | `assistant` thinking block | `claude-code/thinking {length}` |
  * | `system` / `compact_boundary` | `claude-code/compact {trigger, preTokens, postTokens?}` |
@@ -46,6 +46,19 @@ const DIGEST_HEX_CHARS = 16
 
 /** Largest tool-input JSON the mapper will digest; past this only the size is kept. */
 const MAX_DIGEST_INPUT_CHARS = 1_000_000
+
+/**
+ * Most characters of one assistant text that are redacted and logged. The redaction patterns are not linear on
+ * adversarial input (a long run of `a-a-a-...` re-anchors a pattern at every word boundary), so the text is cut
+ * BEFORE redaction; the cut is marked in the log.
+ */
+export const MAX_ASSISTANT_TEXT_CHARS = 16_000
+
+/** Cut a text to {@link MAX_ASSISTANT_TEXT_CHARS} before any pattern touches it, noting how much was dropped. */
+function boundedAssistantText(text: string): string {
+  if (text.length <= MAX_ASSISTANT_TEXT_CHARS) return redactTokens(text)
+  return `${redactTokens(text.slice(0, MAX_ASSISTANT_TEXT_CHARS))}\n[truncated ${text.length - MAX_ASSISTANT_TEXT_CHARS} characters]`
+}
 
 /** Plain object read that survives getters that throw. */
 function read(source: unknown, key: string): unknown {
@@ -180,7 +193,7 @@ export class StreamMapper {
       }
     }
     const text = texts.join('')
-    if (text !== '') this.sink.assistantText(redactTokens(text))
+    if (text !== '') this.sink.assistantText(boundedAssistantText(text))
   }
 
   private mapUser(message: SDKMessage): void {

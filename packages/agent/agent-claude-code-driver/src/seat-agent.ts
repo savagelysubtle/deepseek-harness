@@ -32,7 +32,7 @@ import type { Scope } from '@deepseek-ai/dsh-scope'
 import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { claudeSpawnSpec, ManagedClaudeCodeProcess } from '@deepseek-ai/dsh-subagent-claude-code/src/process.ts'
 import type { SubprocessHandle, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
-import { defaultAdmission, externalHops, frameMailText, isTaintedMail, mailboxMessageId } from './admission.ts'
+import { defaultAdmission, externalHops, frameMailText, isTaintedMail, mailboxMessageId, unrecordableMailboxId } from './admission.ts'
 import type { MailAdmission, MailAdmissionDecision, MailAdmissionPath } from './admission.ts'
 import { assertCleanHostEnv } from './env.ts'
 import { MailLog } from './mail-lease.ts'
@@ -46,6 +46,9 @@ import type { ProcessLedger } from './ledger.ts'
 
 /** Longest error text the driver lets into a durable record or a warning. */
 const MAX_ERROR_TEXT_CHARS = 400
+
+/** How often a live turn re-reads the kill-switch flag file, so a switch set mid-tool still aborts the query. */
+const KILL_SWITCH_POLL_MS = 500
 
 /** Longest a pause may last, whatever reset time the CLI reports. */
 const MAX_PAUSE_MS = 24 * 60 * 60 * 1000
@@ -130,8 +133,10 @@ export interface SeatAgentDeps {
   readonly admit?: MailAdmission | undefined
   /** The mailbox bridge's lease, settled or failed deterministically per mail; absent means no lease calls. */
   readonly lease?: MailLeaseSink | undefined
-  /** Whether the kill-switch flag file is present; checked before every turn and on every stream message. */
+  /** Whether the kill-switch flag file is present; read before each turn and query, on each stream message, and on a timer. */
   readonly killSwitchActive?: (() => boolean) | undefined
+  /** Kill-switch poll interval in milliseconds during a live turn; defaults to 500. */
+  readonly killSwitchPollMs?: number | undefined
   /** Secret keying tool-argument digests; a private random key is made when omitted. */
   readonly digestKey?: Uint8Array | undefined
   /** Warning sink. */
@@ -179,6 +184,16 @@ export class SeatGate {
     const kept = (this.calls.get(seat) ?? []).filter(at => at > now - windowMs)
     this.calls.set(seat, kept)
     return kept.length
+  }
+
+  /**
+   * Seed a seat's call history from its durable log, once: only when this process has no record of the seat
+   * yet, so a restart does not reset the window and several agents of one seat do not count a call twice.
+   * @param seat - seat key.
+   * @param times - epoch milliseconds of the queries the log shows the seat started.
+   */
+  seed(seat: string, times: readonly number[]): void {
+    if (!this.calls.has(seat)) this.calls.set(seat, [...times])
   }
 
   /**
@@ -312,6 +327,20 @@ function messageText(message: UserMessage): string {
   return frameMailText(parts.join('\n'))
 }
 
+/** Query options a throwaway (tainted-mail) query must not carry: anything that adds tools, agents, plugins or settings. */
+const THROWAWAY_ABSENT_OPTIONS = ['mcpServers', 'allowedTools', 'agents', 'plugins', 'settings', 'resume'] as const
+
+/**
+ * What is wrong with the options of a throwaway query, or `undefined` when they hold the guarantee: an empty
+ * tool list, nothing persisted, and none of the options that could add capability.
+ */
+function throwawayViolation(options: Options): string | undefined {
+  if (!Array.isArray(options.tools) || options.tools.length !== 0) return 'an empty tool list'
+  if (options.persistSession !== false) return 'persistSession off (and an empty tool list)'
+  const present = THROWAWAY_ABSENT_OPTIONS.filter(key => options[key] !== undefined)
+  return present.length === 0 ? undefined : `an empty tool list and none of ${present.join(', ')}`
+}
+
 /** Tools whose use means untrusted content (files, fetched pages) entered the context. */
 const TAINTING_TOOLS: ReadonlySet<string> = new Set(['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch'])
 
@@ -401,6 +430,8 @@ export class ClaudeCodeSeatAgent implements Agent {
     this.phase = { kind: 'idle', lastTurn: session.events.findLast(event => event.type === 'turn/start')?.data.turn ?? 0 }
     this.pausedUntil = restoredPause(session, deps)
     this.mail = new MailLog(session)
+    // A step that started is a query (or an all-duplicate turn): rebuild the call window the process lost.
+    gate.seed(seat, session.events.filter(event => event.type === 'step/start').map(event => event.time))
     this.digestKey = deps.digestKey ?? randomBytes(32)
     this.scope = createScope(loopCtx, this)
     this.ctx = this.scope.ctx.extend({ agent: this })
@@ -455,6 +486,14 @@ export class ClaudeCodeSeatAgent implements Agent {
    * @returns the taint of an admitted message, or undefined when refused.
    */
   private admitMail(message: UserMessage, path: MailAdmissionPath): { tainted: boolean } | undefined {
+    const unrecordable = unrecordableMailboxId(message)
+    if (unrecordable !== undefined) {
+      const detail = 'the mailbox message id changes when recorded (control characters, a credential shape, or too long), so the idempotency record could not match a redelivery'
+      this.rec('claude-code/refused', { reason: 'admission', detail, at: this.deps.now() })
+      this.deps.warn(`agent-claude-code-driver: seat "${this.seat}" refused ${path} mail with an unrecordable mailbox id: ${detail}`)
+      void this.leaseCall(() => this.deps.lease?.fail(unrecordable, `refused: ${detail}`))
+      return undefined
+    }
     const messageId = mailboxMessageId(message)
     const tainted = isTaintedMail(message)
     let decision: MailAdmissionDecision
@@ -1105,6 +1144,8 @@ export class ClaudeCodeSeatAgent implements Agent {
       this.gate.acquire(this.seat, this)
       holdsGate = true
       const plan = this.planClaim()
+      // Mark the turn before any of its messages are logged, so no re-seed digest can carry its untrusted text.
+      if (plan.tainted) this.rec('claude-code/throwaway-turn', { turnIndex: turn, at: this.deps.now() })
       // Tainted mail never touches the seat's Claude session: a fresh id, nothing bound, nothing resumed.
       binding = plan.tainted ? { kind: 'first', sdkSessionId: randomUUID() } : await this.resolveBinding()
       signal.throwIfAborted()
@@ -1142,21 +1183,31 @@ export class ClaudeCodeSeatAgent implements Agent {
           throwaway: plan.tainted,
           warn: this.deps.warn,
         })
-        if (plan.tainted && !(Array.isArray(options.tools) && options.tools.length === 0)) {
+        const violation = plan.tainted ? throwawayViolation(options) : undefined
+        if (violation !== undefined) {
           throw new ClaudeCodeDriverError(
             CLAUDE_CODE_TURN_ERROR_CODES.tainted,
-            `agent-claude-code-driver: seat "${this.seat}": tainted mail must run with an empty tool list; refusing to start the query`,
+            `agent-claude-code-driver: seat "${this.seat}": tainted mail must run with ${violation}; refusing to start the query`,
           )
         }
+        // The awaits above (binding, flush) can outlast a switch set meanwhile: look once more right before the query.
+        this.assertKillSwitchOff()
         for (const message of run) this.pushMessage(live, message)
         this.gate.noteCall(this.seat, this.deps.now())
         live.query = this.deps.query({ prompt: live.stream, options })
         this.pumpSteer(phase)
+        // A flag file set while the query is busy inside one long tool call produces no stream message to notice it on.
+        const poll = setInterval(() => {
+          if (this.deps.killSwitchActive?.() === true) this.tripKillSwitch(active)
+        }, this.deps.killSwitchPollMs ?? KILL_SWITCH_POLL_MS)
+        poll.unref()
         try {
           for await (const message of live.query) this.observe(phase, live, message)
         } catch (error: unknown) {
           // An interrupt, a cancel, or a pause makes the result iterator throw; that is the expected end.
           if (!signal.aborted && !live.interrupted) throw error
+        } finally {
+          clearInterval(poll)
         }
         if (live.result !== undefined && !live.result.is_error && !plan.tainted) this.transcriptKnown = true
       }

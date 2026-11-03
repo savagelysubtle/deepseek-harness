@@ -175,6 +175,14 @@ export interface ClaudeCodeMailClaimedData {
   readonly at: number
 }
 
+/** A turn that runs in a throwaway, tool-less Claude session (tainted mail); everything logged for that turn is untrusted. */
+export interface ClaudeCodeThrowawayTurnData {
+  readonly version: ClaudeCodeEventVersion
+  /** The dsh turn number whose user and assistant messages must never feed a trusted re-seed digest. */
+  readonly turnIndex: number
+  readonly at: number
+}
+
 /** How a claimed mailbox message ended. */
 export type ClaudeCodeMailOutcome = 'settled' | 'failed' | 'paused'
 
@@ -278,5 +286,10 @@ declare module '@deepseek-ai/dsh-session/types' {
      * @param data - reason, optional message id, short detail, and time.
      */
     'claude-code/refused': ClaudeCodeRefusedData
+    /**
+     * Marks a turn as a throwaway (tainted-mail) turn, before any of its messages are logged.
+     * @param data - the dsh turn number and time.
+     */
+    'claude-code/throwaway-turn': ClaudeCodeThrowawayTurnData
   }
 }

@@ -33,8 +33,9 @@ describe('seat limits in the row', () => {
       [{ max_budget_usd: -1 }, /max_budget_usd must be a positive number/],
       [{ max_budget_usd: Number.NaN }, /max_budget_usd must be a positive number/],
       [{ max_budget_usd: '5' as never }, /max_budget_usd must be a positive number/],
-      [{ call_window_ms: 0 }, /call_window_ms must be a positive integer/],
-      [{ call_window_ms: 1.5 }, /call_window_ms must be a positive integer/],
+      [{ call_window_ms: 0 }, /call_window_ms must be an integer of at least 60000/],
+      [{ call_window_ms: 59_999 }, /call_window_ms must be an integer of at least 60000/],
+      [{ call_window_ms: 60_000.5 }, /call_window_ms must be an integer of at least 60000/],
     ]
     for (const [override, message] of bad) expect(() => parseSeatRow(seatRow(override), 's')).toThrow(message)
   })
@@ -64,6 +65,21 @@ describe('buildQueryOptions for a throwaway query', () => {
     expect(throwaway.persistSession).toBe(false)
     expect(throwaway.maxBudgetUsd).toBe(2)
     expect(throwaway.disallowedTools).toEqual(['Bash', 'AskUserQuestion'])
+  })
+
+  it('never calls the policy extension for a throwaway query, so no settings can ride along', () => {
+    let called = 0
+    const extension = (): { settings: { hooks: Record<string, never> } } => {
+      called += 1
+      return { settings: { hooks: {} } }
+    }
+    const binding = { kind: 'first' as const, sdkSessionId: 'sdk-3' }
+    const throwaway = buildQueryOptions({ ...base, config: seatConfig(), binding, throwaway: true, extension })
+    expect(called).toBe(0)
+    expect(throwaway).not.toHaveProperty('settings')
+    const normal = buildQueryOptions({ ...base, config: seatConfig(), binding, extension })
+    expect(called).toBe(1)
+    expect(normal).toHaveProperty('settings')
   })
 })
 

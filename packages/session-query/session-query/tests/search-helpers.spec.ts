@@ -184,6 +184,7 @@ describe('session-query semantic extraction', () => {
       .toBe('claude-code tool-call\nname=Bash\nok=false\nms=7')
     expect(at('claude-code/tool-call', {})).toBe('claude-code tool-call')
     expect(at('claude-code/unmapped', { version: 1, type: 'system/x', at: 1 })).toBe('claude-code unmapped\ntype=system/x')
+    expect(at('claude-code/throwaway-turn', { version: 1, turnIndex: 4, at: 1 })).toBe('claude-code throwaway-turn\nturnIndex=4')
     expect(at('claude-code/mail-claimed', { version: 1, messageId: 'm-1', tainted: true, at: 1 }))
       .toBe('claude-code mail-claimed\nmessageId=m-1\ntainted=true')
     expect(at('claude-code/mail-outcome', { version: 1, messageId: 'm-1', outcome: 'failed', reason: 'boom', at: 1 }))

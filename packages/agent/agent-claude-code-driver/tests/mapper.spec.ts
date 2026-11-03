@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
-import { StreamMapper } from '../src/mapper.ts'
+import { MAX_ASSISTANT_TEXT_CHARS, StreamMapper } from '../src/mapper.ts'
 import type { MapperSink } from '../src/mapper.ts'
 
 interface Seen {
@@ -10,7 +10,7 @@ interface Seen {
   tools: string[]
 }
 
-function rig(key = new Uint8Array(32).fill(7)): { mapper: StreamMapper; seen: Seen; clock: { now: number } } {
+function rig(key: Uint8Array = new Uint8Array(32).fill(7)): { mapper: StreamMapper; seen: Seen; clock: { now: number } } {
   const seen: Seen = { records: [], texts: [], inits: [], tools: [] }
   const clock = { now: 1000 }
   const sink: MapperSink = {
@@ -75,6 +75,37 @@ describe('assistant and user messages', () => {
     expect(seen.texts).toHaveLength(1)
     expect(seen.texts[0]).not.toMatch(/sk-ant|ghp_|eyJ/)
     expect(seen.texts[0]).toContain('[redacted]')
+  })
+
+  it('redacts more credential shapes in assistant text, whatever their case', () => {
+    const { mapper, seen } = rig()
+    const hex32 = '0123456789abcdef0123456789abcdef'
+    const secrets = [
+      'sk_live_AbCdEfGhIjKlMnOp1234', 'whsec_AbCdEfGhIjKlMnOp1234', `SK${hex32}`, `AC${hex32}`, 'ASIAIOSFODNN7EXAMPLE',
+      `AIza${'A1b2C3d4E5'.repeat(4)}`, `glpat-${'abcDEF123456'.repeat(2)}`, `npm_${'aB3dE6gH9jK2mN5pQ8sT'.repeat(2)}`,
+      'SK-ANT-OAT01-AbCdEfGhIjKlMnOpQrStUvWx',
+    ]
+    mapper.map(assistant({ type: 'text', text: `${secrets.join(' | ')}\n-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq\n-----END PRIVATE KEY-----` }))
+    const text = seen.texts[0] as string
+    for (const secret of secrets) expect(text).not.toContain(secret)
+    expect(text).not.toMatch(/PRIVATE KEY|MIIEvQ/)
+  })
+
+  it('cuts a huge assistant text before redacting and marks the cut, and an adversarial run stays fast', () => {
+    const { mapper, seen } = rig()
+    const hostile = 'a-'.repeat(500_000)
+    const started = performance.now()
+    mapper.map(assistant({ type: 'text', text: hostile }))
+    expect(performance.now() - started).toBeLessThan(500)
+    const text = seen.texts[0] as string
+    expect(text.endsWith(`\n[truncated ${hostile.length - MAX_ASSISTANT_TEXT_CHARS} characters]`)).toBe(true)
+    expect(text.length).toBeLessThan(MAX_ASSISTANT_TEXT_CHARS + 60)
+  })
+
+  it('keeps a text of exactly the cap whole, with no marker', () => {
+    const { mapper, seen } = rig()
+    mapper.map(assistant({ type: 'text', text: 'w'.repeat(MAX_ASSISTANT_TEXT_CHARS) }))
+    expect(seen.texts[0]).toBe('w'.repeat(MAX_ASSISTANT_TEXT_CHARS))
   })
 
   it('writes nothing for an assistant error notice, non-array content, or empty text', () => {

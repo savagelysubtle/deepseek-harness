@@ -54,6 +54,10 @@ interface ClaudeCodeUnmappedData {
   type?: string
 }
 
+interface ClaudeCodeThrowawayTurnData {
+  turnIndex?: number
+}
+
 interface ClaudeCodeMailClaimedData {
   messageId?: string
   tainted?: boolean
@@ -142,6 +146,10 @@ export function claudeCodeEventText(type: string, data: unknown): string | undef
     case 'claude-code/unmapped': {
       const d = data as ClaudeCodeUnmappedData
       return ['claude-code unmapped', ...field('type', d.type)].join('\n')
+    }
+    case 'claude-code/throwaway-turn': {
+      const d = data as ClaudeCodeThrowawayTurnData
+      return ['claude-code throwaway-turn', ...field('turnIndex', d.turnIndex)].join('\n')
     }
     case 'claude-code/mail-claimed': {
       const d = data as ClaudeCodeMailClaimedData
