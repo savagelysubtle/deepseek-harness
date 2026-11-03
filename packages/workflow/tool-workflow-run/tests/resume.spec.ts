@@ -83,6 +83,32 @@ describe('resume', () => {
     await started.done
   })
 
+  it('a node that failed on attempt 1 and succeeded on attempt 2 resumes from attempt 2, and no attempt-1 "running" record survives', async () => {
+    const { first } = await firstRun((run) => {
+      bash(run, 'fetch', 'data\n')
+      run.nodeStart({ nodeId: 'plan', kind: 'prompt' })
+      run.nodeEnd({ nodeId: 'plan', kind: 'prompt', status: 'success', attempts: 2 })
+      bash(run, 'apply', 'oops', 'failed')
+      run.settle({
+        value: { status: 'failed', nodes: [
+          { id: 'fetch', status: 'success', exitCode: 0, output: 'data' },
+          { id: 'plan', status: 'success', exitCode: null, output: 'second try' },
+          { id: 'apply', status: 'failed', exitCode: 1, output: 'oops' },
+        ] },
+        stopReason: 'completed', agentsStarted: 2,
+      })
+    })
+    const store = await h!.ctx.workflowRuns.storeFor(h!.workspace)
+    const earlier = (await store.getRun(first.runId)).nodeStates.filter(s => s.nodeId === 'plan')
+    expect(earlier.map(s => [s.attempt, s.record.status, s.running])).toEqual([[1, 'failed', false], [2, 'success', false]])
+    const started = await startTrusted(h!, 'pipe', { resume: first.runId })
+    const seeds = seedsOf(h!.engine.runs[1]!.request.script)
+    // The highest attempt wins: the completed node is seeded (not re-run) with attempt 2's output.
+    expect(seeds.get('plan')).toEqual({ status: 'success', output: 'second try' })
+    expect(seeds.has('apply')).toBe(false)
+    expect(started.resumedFrom).toBe(first.runId)
+  })
+
   it('re-runs a non-mutating node whose output was never captured, and everything that depends on it', async () => {
     const { first } = await firstRun((run) => {
       bash(run, 'fetch', 'data')

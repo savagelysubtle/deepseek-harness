@@ -143,8 +143,10 @@ function applyEvent(trace: WorkflowTrace, event: SessionEvent, fail: InvariantFa
       }
       if (data.failure !== undefined) {
         const failure = data.failure as Record<string, unknown> | null
-        if (failure === null || typeof failure !== 'object' || (failure.code !== 'NODE_STALLED' && failure.code !== 'NODE_TIMEOUT')
-          || typeof failure.message !== 'string' || typeof failure.remedy !== 'string') {
+        const codeOk = failure !== null && typeof failure === 'object'
+          && (failure.code === 'NODE_STALLED' || failure.code === 'NODE_TIMEOUT')
+        const textOk = codeOk && typeof failure.message === 'string' && typeof failure.remedy === 'string'
+        if (!textOk) {
           fail('tool-workflow/node-end failure must carry a NODE_STALLED or NODE_TIMEOUT code, a message and a remedy when present')
         }
       }

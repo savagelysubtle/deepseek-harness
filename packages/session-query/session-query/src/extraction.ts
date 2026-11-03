@@ -31,6 +31,18 @@ interface SubagentSettlementEventData {
 }
 
 /**
+ * Loose shape of a `tool-workflow/node-end` event's data, mirrored from
+ * `packages/workflow/tool-workflow/src/types.ts`. session-query does not
+ * depend on the workflow packages, so the shape is mirrored for the same
+ * reason as the shapes above. Only the optional failure facts are read.
+ */
+interface ToolWorkflowNodeEndEventData {
+  nodeId?: string
+  attempts?: number
+  failure?: { code?: string; message?: string; remedy?: string }
+}
+
+/**
  * Extract searchable semantic text from one first-party session event.
  *
  * Structural boundaries, raw stream chunks, request envelopes, and unknown
@@ -74,8 +86,23 @@ export function extractSessionEventText(event: SessionEvent): string {
       if ((event.type as string) === 'subagent/settlement') {
         return settlementText(event.data as unknown as SubagentSettlementEventData)
       }
+      if ((event.type as string) === 'tool-workflow/node-end') {
+        return nodeEndText(event.data as unknown as ToolWorkflowNodeEndEventData)
+      }
       return ''
   }
+}
+
+/** A node-end is searchable only for the facts that explain a failure: its code, message, remedy and the attempt count. */
+function nodeEndText(data: ToolWorkflowNodeEndEventData): string {
+  if (data.failure === undefined && data.attempts === undefined) return ''
+  return joinText([
+    data.nodeId ?? '',
+    data.failure?.code ?? '',
+    data.failure?.message ?? '',
+    data.failure?.remedy ?? '',
+    data.attempts === undefined ? '' : `attempts ${data.attempts}`,
+  ])
 }
 
 function mailboxAwaitText(data: MailboxAwaitEventData): string {

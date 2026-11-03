@@ -913,7 +913,7 @@ describe('supervisor stop and engine retry', () => {
   }
 
   const stalling: WorkflowChildSupervisor = {
-    bind: (child, _id, handle) => { if (child.callId === 1) setTimeout(() => { handle.stop('stalled') }, 20) },
+    bind: (child, _id, handle) => { if (child.callId === 1) queueMicrotask(() => { handle.stop('stalled') }) },
   }
 
   it('a supervisor stop disposes the child, settles it as stalled, and the engine retries it', async () => {
@@ -927,7 +927,7 @@ describe('supervisor stop and engine retry', () => {
     const { ctx } = await stuckFirstSetup()
     let handleRef: { stop(reason: 'timeout' | 'stalled'): void } | undefined
     const result = await finish(start(ctx, "return await agent('p')", {
-      supervisor: { bind: (_c, _id, handle) => { handleRef = handle; setTimeout(() => { handle.stop('timeout') }, 20) } },
+      supervisor: { bind: (_c, _id, handle) => { handleRef = handle; queueMicrotask(() => { handle.stop('timeout') }) } },
     }))
     expect(result.value).toBeNull()
     expect(() => handleRef?.stop('stalled')).not.toThrow()
@@ -958,7 +958,7 @@ describe('supervisor stop and engine retry', () => {
   }
 
   const stopping = (reason: 'timeout' | 'stalled'): WorkflowChildSupervisor => ({
-    bind: (_child, _id, handle) => { setTimeout(() => { handle.stop(reason) }, 20) },
+    bind: (_child, _id, handle) => { queueMicrotask(() => { handle.stop(reason) }) },
   })
 
   const NODE_SCRIPT = (opts: string): string => `
@@ -994,6 +994,17 @@ describe('supervisor stop and engine retry', () => {
     expect(ends[0]!.error).toBe('the agent did not complete')
     expect(ends[0]!.failure).toBeUndefined()
     expect(ends[0]!.attempts).toBe(1)
+  })
+
+  it('a stall on attempt 1 followed by a genuine error on attempt 2 reads "did not complete" with no failure code and attempts 2', async () => {
+    const { ctx, ends } = await scriptedSetup(['hang', 'error'])
+    const stopFirst: WorkflowChildSupervisor = {
+      bind: (child, _id, handle) => { if (child.callId === 1 && child.iteration === 0) queueMicrotask(() => { handle.stop('stalled') }) },
+    }
+    await finish(start(ctx, NODE_SCRIPT('idleTimeoutMs: 1000, retry: { maxAttempts: 2, delayMs: 0 }'), { supervisor: stopFirst }))
+    expect(ends[0]!.error).toBe('the agent did not complete')
+    expect(ends[0]!.failure).toBeUndefined()
+    expect(ends[0]!.attempts).toBe(2)
   })
 
   it('nearest allow: a child that answers inside the window is not marked stalled, and a stall that a retry recovers carries no failure', async () => {
