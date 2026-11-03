@@ -99,7 +99,10 @@ export function runDetailToNodeData(detail: RunDetailInput): RunDetailView {
     if (last === undefined) throw new Error('unreachable: node group is never empty')
     const node = last.row
     const approval = latest.get(node.nodeId)
-    const reason = approval?.reason ?? node.error
+    // The failure card already shows the code and message, so the plain error that repeats them is dropped.
+    const repeatsFailure = node.failure !== undefined
+      && (node.error === node.failure.message || node.error === `${node.failure.code}: ${node.failure.message}`)
+    const reason = approval?.reason ?? (repeatsFailure ? undefined : node.error)
     const total = Math.max(node.attempts ?? 0, last.attempt, rows.length)
     const earlier = rows.slice(0, -1).map(({ row, attempt }): WorkflowRunNodeAttempt => ({
       attempt,

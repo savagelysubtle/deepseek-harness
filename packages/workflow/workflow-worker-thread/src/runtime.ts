@@ -62,7 +62,8 @@ const NODE_ERROR_MAX_CHARS = 2000
 
 /**
  * The documented node failure for a supervisor stop. A stall is "no output for the idle window";
- * a timeout is the hard per-node limit. Both name the window and the retry count.
+ * a timeout is the hard per-node limit. Both name the window and the retry count. The message
+ * carries no code prefix (the code is `failure.code`); the back-compat `error` string adds it.
  */
 function describeStop(
   stop: { code: 'NODE_STALLED' | 'NODE_TIMEOUT'; idleTimeoutMs?: number; timeoutMs?: number; subject?: 'bash' },
@@ -74,14 +75,14 @@ function describeStop(
     const window = stop.idleTimeoutMs === undefined ? 'the idle window' : `${stop.idleTimeoutMs} ms`
     return {
       code: 'NODE_STALLED',
-      message: `NODE_STALLED: the agent produced no output for ${window} (idleTimeoutMs) ${retried}`,
+      message: `the agent produced no output for ${window} (idleTimeoutMs) ${retried}`,
       remedy: "raise idleTimeoutMs for this node or check the agent's output",
     }
   }
   const limit = stop.timeoutMs === undefined ? 'the node deadline' : `${stop.timeoutMs} ms`
   return {
     code: 'NODE_TIMEOUT',
-    message: `NODE_TIMEOUT: the ${stop.subject === 'bash' ? 'command' : 'agent'} did not finish within ${limit} (timeoutMs, the hard per-node limit) ${retried}`,
+    message: `the ${stop.subject === 'bash' ? 'command' : 'agent'} did not finish within ${limit} (timeoutMs, the hard per-node limit) ${retried}`,
     remedy: 'raise timeoutMs (timeout_ms in YAML) for this node or split its work into smaller nodes',
   }
 }
@@ -826,7 +827,7 @@ export class WorkflowExecution {
       ...started,
       status: info.status as WorkflowNodeStatus,
       ...attempts !== undefined ? { attempts } : {},
-      ...failure !== undefined ? { failure, error: failure.message.slice(0, NODE_ERROR_MAX_CHARS) } : {},
+      ...failure !== undefined ? { failure, error: `${failure.code}: ${failure.message}`.slice(0, NODE_ERROR_MAX_CHARS) } : {},
       ...exitCode !== undefined ? { exitCode } : {},
       ...durationMs !== undefined ? { durationMs } : {},
       ...info.truncated !== undefined ? { truncated: info.truncated } : {},

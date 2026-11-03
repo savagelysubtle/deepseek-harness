@@ -6,7 +6,7 @@ let h: Harness | undefined
 afterEach(async () => { await h?.cleanup(); h = undefined })
 
 const REMEDY = "raise idleTimeoutMs for this node or check the agent's output"
-const MESSAGE = 'NODE_STALLED: the agent produced no output for 1000 ms (idleTimeoutMs) after 2 attempts (1 retry)'
+const MESSAGE = 'the agent produced no output for 1000 ms (idleTimeoutMs) after 2 attempts (1 retry)'
 
 async function runWith(end: (run: NonNullable<Harness['engine']['runs'][number]>) => void) {
   h = await setup()
@@ -23,7 +23,7 @@ describe('node failure persistence', () => {
   it('writes the coded failure on the final record of a stalled node, and not on the closed earlier attempt', async () => {
     const states = await runWith((run) => {
       run.nodeStart({ nodeId: 'think', kind: 'prompt' })
-      run.nodeEnd({ nodeId: 'think', kind: 'prompt', status: 'failed', attempts: 2, error: MESSAGE, failure: { code: 'NODE_STALLED', message: MESSAGE, remedy: REMEDY } })
+      run.nodeEnd({ nodeId: 'think', kind: 'prompt', status: 'failed', attempts: 2, error: `NODE_STALLED: ${MESSAGE}`, failure: { code: 'NODE_STALLED', message: MESSAGE, remedy: REMEDY } })
     })
     const think = states.filter(s => s.nodeId === 'think')
     expect(think.map(s => s.attempt)).toEqual([1, 2])

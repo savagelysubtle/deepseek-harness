@@ -123,4 +123,22 @@ describe('runDetailToNodeData', () => {
     expect(view.nodes[0]).toMatchObject({ attempt: 3, attempts: 3 })
     expect(view.nodes[0]?.earlier).toBeUndefined()
   })
+
+  it('shows a failure code once and its message once, dropping the repeated plain error line', () => {
+    const t = makeTranslate(en)
+    const message = 'the command did not finish within 500 ms'
+    const view = runDetailToNodeData({
+      nodes: [{
+        nodeId: 'slow', kind: 'bash', status: 'failed', error: `NODE_TIMEOUT: ${message}`,
+        failure: { code: 'NODE_TIMEOUT', message, remedy: 'raise timeoutMs' },
+      }],
+      gates: [], approvals: [],
+    })
+    const { container } = render(<NodeList nodes={view.nodes} t={t} />)
+    const card = container.querySelector('[data-node-id="slow"]')
+    expect(card?.querySelector('[data-node-reason]')).toBeNull()
+    const text = card?.textContent ?? ''
+    expect(text.split('NODE_TIMEOUT').length - 1).toBe(1)
+    expect(text.split(message).length - 1).toBe(1)
+  })
 })

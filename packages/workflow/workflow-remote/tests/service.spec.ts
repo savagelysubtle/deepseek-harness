@@ -306,7 +306,7 @@ describe('runDetail and nodeOutput', () => {
       nodeId: 'think', kind: 'prompt', status: 'failed', attempts: 2,
       error: 'NODE_STALLED: the agent produced no output for 5000 ms (idleTimeoutMs) after 2 attempts (1 retry)',
       failure: {
-        code: 'NODE_STALLED', message: 'NODE_STALLED: the agent produced no output for 5000 ms (idleTimeoutMs) after 2 attempts (1 retry)',
+        code: 'NODE_STALLED', message: 'the agent produced no output for 5000 ms (idleTimeoutMs) after 2 attempts (1 retry)',
         remedy: "raise idleTimeoutMs for this node or check the agent's output",
       },
     })
@@ -341,7 +341,7 @@ describe('runDetail and nodeOutput', () => {
     const started = await h.service.run(agent, { name: 'demo', trustHash: plan.trustKey, trustChallenge: plan.trustChallenge! })
     if (!started.ok) throw new Error(started.message)
     const run = h.engine.runs[0]!
-    const persisted = { code: 'NODE_TIMEOUT' as const, message: 'NODE_TIMEOUT: persisted message', remedy: 'persisted remedy, not the old table' }
+    const persisted = { code: 'NODE_TIMEOUT' as const, message: 'persisted message', remedy: 'persisted remedy, not the old table' }
     run.nodeStart({ nodeId: 'slow', kind: 'prompt' })
     run.nodeEnd({ nodeId: 'slow', kind: 'prompt', status: 'failed', error: 'NODE_TIMEOUT: persisted message', failure: persisted })
     run.nodeStart({ nodeId: 'old', kind: 'prompt' })

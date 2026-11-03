@@ -231,6 +231,8 @@ describe('bash() host hook', () => {
     expect(nodeEnds[0]!.attempts).toBe(2)
     expect(nodeEnds[0]!.exitCode).toBeUndefined()
     expect(nodeEnds[0]!.failure).toMatchObject({ code: 'NODE_TIMEOUT', remedy: 'raise timeoutMs (timeout_ms in YAML) for this node or split its work into smaller nodes' })
+    expect(nodeEnds[0]!.failure!.message).not.toMatch(/^NODE_/)
+    expect(nodeEnds[0]!.error).toBe(`NODE_TIMEOUT: ${nodeEnds[0]!.failure!.message}`)
     expect(nodeEnds[0]!.failure!.message).toContain('200 ms')
     expect(nodeEnds[0]!.failure!.message).toContain('1 retry')
     expect(nodeEnds[0]!.failure!.message).toContain('command')
@@ -996,7 +998,8 @@ describe('supervisor stop and engine retry', () => {
     expect(ends[0]!.failure).toMatchObject({ code: 'NODE_STALLED', remedy: "raise idleTimeoutMs for this node or check the agent's output" })
     expect(ends[0]!.failure!.message).toContain('1000 ms')
     expect(ends[0]!.failure!.message).toContain('1 retry')
-    expect(ends[0]!.error).toBe(ends[0]!.failure!.message)
+    expect(ends[0]!.failure!.message).not.toMatch(/^NODE_/)
+    expect(ends[0]!.error).toBe(`NODE_STALLED: ${ends[0]!.failure!.message}`)
   })
 
   it('NODE_TIMEOUT: the hard per-node limit is named apart from a stall', async () => {
