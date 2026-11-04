@@ -1,0 +1,49 @@
+# Example profile patch for registry-routed Claude Code seats (OP #292, slice S3).
+#
+# Two rows, two owners:
+#   - The driver row is HOST CONFIG and belongs to the founder. It decides everything that
+#     costs money or widens trust: the model, the caps, which `claude` binary runs, where the
+#     seat works, and the widest list of senders the registry may ever admit. A seat cannot
+#     write this file, so a seat (or anyone who can edit the org registry) can never loosen it.
+#   - The registry glue row has no config. The org registry row carries routing and admission
+#     only (`driver: claude-code`, `admit_from`, `admit_sender_classes`).
+#
+# A seat is live only when BOTH exist: a registry row naming `driver: claude-code` and an
+# entry for the same seat name under `hostSeats` below. A row with no host entry is refused
+# loudly (the refusal prints the entry to add); a host entry with no row logs a warning.
+- insert:
+    - id: agent-claude-code-driver
+      name: '@deepseek-ai/dsh-agent-claude-code-driver'
+      config:
+        # Private state (binary pins, session pins, call windows, pid ledger, kill switch).
+        # A subdirectory of the harness home; created with mode 0700.
+        stateDir: claude-code
+        # The founder's limit on what a registry-routed seat can run: the REAL path of every
+        # `claude_path` below must sit under one of these directories.
+        claudePathPrefixes:
+          - /home/me/.local/share/claude/versions
+        hostSeats:
+          mail-triage:
+            model: haiku                 # opus | sonnet | haiku or a full claude-<family>-<version> id
+            effort: low                  # optional: low | medium | high | xhigh | max
+            role: mail-only              # the only role accepted until the permission slice (S5)
+            max_turns: 20                # optional, default 25
+            max_budget_usd: 2            # optional, default 5 (notional on a subscription)
+            max_calls_per_window: 30     # optional, default 120 queries per window
+            call_window_ms: 18000000     # optional, default five hours, at least 60000
+            # Absolute path, no PATH lookup. Verify the path and its sha256 yourself: a script
+            # a seat could run may have resolved it, and the prefix above limits the damage.
+            claude_path: /home/me/.local/share/claude/versions/2.1.317/claude
+            # claude_path_sha256: <64 hex>   # optional: re-pin after an intended upgrade
+            # The seat's working directory (a realpath). The registry row's `cwd` must equal it.
+            cwd: /home/me/work/mail-triage
+            # The widest set of senders the registry row's `admit_from` may name: seats you
+            # attest are not reachable from outside (a default-loop seat that serves guest mail
+            # counts as exposed unless you list it here on purpose).
+            admit_from_ceiling:
+              - ops-lead
+            # session_id: <new session id>   # founder reseed ONLY: the one new id the driver
+            #                                # accepts in place of the pinned one (hire --reseed
+            #                                # prints it). The seat's call window is kept.
+    - id: agent-claude-code-registry
+      name: '@deepseek-ai/dsh-agent-claude-code-registry'

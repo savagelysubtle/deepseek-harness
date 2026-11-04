@@ -8,10 +8,12 @@
  */
 
 import { randomBytes } from 'node:crypto'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { getSessionInfo, query } from '@anthropic-ai/claude-agent-sdk'
 import type { Context } from '@deepseek-ai/cordis'
+import type { SeatBinding, SeatBindingOptions } from '@deepseek-ai/dsh-mailbox'
 import z from '@deepseek-ai/schemastery'
+import type { AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { defaultAdmission } from './admission.ts'
@@ -24,8 +26,19 @@ import type { ResolvedSeat } from './factory.ts'
 import { killProcessGroup, ProcessLedger } from './ledger.ts'
 import type { MailLeaseSink } from './mail-lease.ts'
 import type { SeatAgentDeps, TranscriptState } from './seat-agent.ts'
-import { ClaudeCodeSeatRow, CLAUDE_CODE_DRIVER_KEY, parseSeatRow } from './seat-config.ts'
+import { SeatGate } from './seat-agent.ts'
+import {
+  ClaudeCodeHostSeat, ClaudeCodeSeatRow, CLAUDE_CODE_DRIVER_KEY, hostSeatStanza, mergeHostSeat, parseHostSeat, parseSeatRow,
+} from './seat-config.ts'
+import type { ClaudeCodeSeatConfig, RegistrySeatView } from './seat-config.ts'
+import { CallWindowStore, SeatSessionPins } from './seat-state.ts'
 import { ensurePrivateDir, KILL_SWITCH_FILE_NAME, killSwitchPresent, resolveStateDir } from './state.ts'
+
+export { CALL_WINDOW_FILE_NAME, CallWindowStore, SEAT_SESSIONS_FILE_NAME, SeatSessionPins } from './seat-state.ts'
+export type { CallWindowPersistence, SessionPinOutcome } from './seat-state.ts'
+export { ClaudeCodeHostSeat, hostSeatStanza, mergeHostSeat, parseHostSeat } from './seat-config.ts'
+export type { RegistrySeatView } from './seat-config.ts'
+export { mailFrom } from './admission.ts'
 
 export { assertBinaryUnchanged, attestClaudePath, BinaryPins, sha256File } from './attest.ts'
 export type { AttestOptions, BinaryAttestation } from './attest.ts'
@@ -76,9 +89,46 @@ export interface ClaudeCodeMailHooks {
   readonly lease?: MailLeaseSink | undefined
 }
 
+/** What the driver hands the seat source for one create or resume. */
+export interface SeatSourceRequest {
+  /** The dsh session being created or resumed. */
+  readonly sessionId: SessionId
+  /** `meta.agentPreset` / the persisted header's preset, when the caller supplied one. */
+  readonly hint: string | undefined
+  /** The frozen registry row the mailbox bridge resolved for this delivery; absent for every other caller. */
+  readonly binding: SeatBinding | undefined
+}
+
+/** The seat a source resolved and the registry row that routed it (still untrusted; the host entry decides). */
+export interface SeatSourceResolution {
+  /** The seat name. */
+  readonly seat: string
+  /** The registry row. */
+  readonly row: RegistrySeatView
+}
+
+/**
+ * Finds the registry row of a seat that is not in the static `seats` config. Provided as
+ * `ctx.claudeCodeSeatSource` (by the registry glue package); read at use time, so its provider may load
+ * after this plugin. A source must refuse (throw) when it cannot prove the row is the bridge's current one.
+ */
+export interface ClaudeCodeSeatSource {
+  /**
+   * Resolve one create or resume.
+   * @throws when the request carries no binding, or the binding is stale or forged.
+   */
+  resolve(request: SeatSourceRequest): SeatSourceResolution
+  /**
+   * Whether the registry currently routes `seat` to this driver; `undefined` when the source cannot tell yet.
+   * Drives the mount-time warning for a host entry that has no registry row.
+   */
+  hasRow?(seat: string): boolean | undefined
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     claudeCodeMailHooks: ClaudeCodeMailHooks
+    claudeCodeSeatSource: ClaudeCodeSeatSource
   }
 }
 
@@ -90,6 +140,9 @@ export const inject = ['agents', 'sessions', 'subprocess']
 
 /** Default process-tree termination grace. */
 const DEFAULT_GRACE_MS = 3_000
+
+/** How long after mount the driver checks that every host entry has a registry row (the registry loads after mount). */
+export const UNROUTED_CHECK_DELAY_MS = 15_000
 
 /** Default refusal window after a pause signal that carried no reset time (15 minutes). */
 const DEFAULT_PAUSE_MS = 15 * 60_000
@@ -105,6 +158,17 @@ export interface Config {
   dshHome?: string
   /** Claude Code seat rows keyed by seat name (`meta.agentPreset`, else the session id). */
   seats: Record<string, ClaudeCodeSeatRow>
+  /**
+   * Directories the realpath of every host seat's `claude_path` must lie under. Required (non-empty, absolute)
+   * when `hostSeats` is non-empty; the founder's limit on what a registry-routed seat can ever run.
+   */
+  claudePathPrefixes?: string[]
+  /**
+   * Host-private entries for seats the registry routes to this driver, keyed by seat name. They hold everything
+   * that costs money or widens trust (model, caps, binary, cwd pin, sender ceiling); the registry row holds
+   * only routing and admission. This config lives in the profile, which no seat can write.
+   */
+  hostSeats?: Record<string, ClaudeCodeHostSeat>
   /** Process-tree termination grace in milliseconds. */
   disposeGraceMs?: number
   /** Refusal window in milliseconds after a pause signal with no reset time. */
@@ -116,6 +180,8 @@ export const Config: z<Config> = z.object({
   stateDir: z.string().required(),
   dshHome: z.string(),
   seats: z.dict(ClaudeCodeSeatRow).default({}),
+  claudePathPrefixes: z.array(z.string()).default([]),
+  hostSeats: z.dict(ClaudeCodeHostSeat).default({}),
   disposeGraceMs: z.number().step(1).min(1).default(DEFAULT_GRACE_MS),
   defaultPauseMs: z.number().step(1).min(1).default(DEFAULT_PAUSE_MS),
 })
@@ -148,15 +214,34 @@ export function apply(ctx: Context, config: Config): void {
   const attestations = new Map<string, BinaryAttestation>()
   const attestedBySeat = new Map<string, BinaryAttestation>()
   const seats = new Map<string, ResolvedSeat>()
-  for (const [seat, row] of Object.entries(config.seats)) {
-    // No permission-policy extension exists yet (slice S5), so `coder` rows are refused here.
-    const seatConfig = parseSeatRow(row, seat, { policyExtension: false })
+  const attestSeat = (seat: string, seatConfig: ClaudeCodeSeatConfig): void => {
     const attestation = attestations.get(seatConfig.claudePath) ?? attestClaudePath(seatConfig.claudePath)
     pins.enforce(seat, attestation.sha256, seatConfig.claudePathSha256)
     attestations.set(seatConfig.claudePath, attestation)
     attestedBySeat.set(seat, attestation)
+  }
+  for (const [seat, row] of Object.entries(config.seats)) {
+    // No permission-policy extension exists yet (slice S5), so `coder` rows are refused here.
+    const seatConfig = parseSeatRow(row, seat, { policyExtension: false })
+    attestSeat(seat, seatConfig)
     seats.set(seat, { seat, config: seatConfig })
   }
+  // Host entries for registry-routed seats: validated and attested now, so a bad entry fails the mount
+  // loudly instead of surfacing on the first mail.
+  const hostSeats = new Map(Object.entries(config.hostSeats ?? {}))
+  const prefixes = config.claudePathPrefixes ?? []
+  if (hostSeats.size > 0 && prefixes.length === 0) {
+    throw new Error('agent-claude-code-driver: claudePathPrefixes is required (and must not be empty) when hostSeats is non-empty')
+  }
+  for (const prefix of prefixes) {
+    if (!isAbsolute(prefix)) throw new Error(`agent-claude-code-driver: claudePathPrefixes entry "${prefix}" must be an absolute path`)
+  }
+  for (const [seat, host] of hostSeats) {
+    if (seats.has(seat)) throw new Error(`agent-claude-code-driver: seat "${seat}" is configured in both seats and hostSeats; use one`)
+    attestSeat(seat, parseHostSeat(host, seat, prefixes))
+  }
+  const sessionPins = new SeatSessionPins(stateDir)
+  const gate = new SeatGate(new CallWindowStore(stateDir, (message) => { ctx.logger.warn(message) }))
   const ledger = new ProcessLedger(join(stateDir, 'claude-code-seat-pids.json'))
   const report = ledger.reapStale()
   if (report.reaped.length > 0) {
@@ -207,17 +292,49 @@ export function apply(ctx: Context, config: Config): void {
   }
   const factory = new ClaudeCodeSeatFactory({
     ctx,
-    resolveSeat: (sessionId: SessionId, hint: string | undefined) => {
+    resolveSeat: (sessionId: SessionId, hint: string | undefined, agentOptions: AgentOptions | undefined) => {
       const key = hint ?? sessionId
+      // The static config is consulted first; the registry source only for a seat it does not hold.
       const resolved = seats.get(key)
-      if (resolved === undefined) {
+      if (resolved !== undefined) return resolved
+      const source = ctx.get('claudeCodeSeatSource')
+      if (source === undefined) {
         throw new Error(`agent-claude-code-driver: no ${CLAUDE_CODE_DRIVER_KEY} seat row for "${key}" (configured seats: ${[...seats.keys()].join(', ') || 'none'})`)
       }
-      return resolved
+      const binding = (agentOptions as SeatBindingOptions | undefined)?.seatBinding
+      const { seat, row } = source.resolve({ sessionId, hint, binding })
+      const host = hostSeats.get(seat)
+      if (host === undefined) {
+        throw new Error(
+          `agent-claude-code-driver: seat "${seat}" is routed to ${CLAUDE_CODE_DRIVER_KEY} by the registry but has no host entry, so it is refused. `
+          + `The founder adds this to the ${CLAUDE_CODE_DRIVER_KEY} driver row of the profile (cordis.patch.yml), with the real binary path:\n${hostSeatStanza(seat, row)}`,
+        )
+      }
+      const seatConfig = mergeHostSeat(row, host, prefixes, seat)
+      if (sessionPins.enforce(seat, sessionId, host.session_id) === 'reseeded') {
+        ctx.logger.warn(`agent-claude-code-driver: seat "${seat}" was reseeded by the founder's host-config session_id; its session pin moved to ${sessionId}. The call window is kept.`)
+      }
+      return { seat, config: seatConfig, cwdPin: host.cwd }
     },
     deps,
     persistence: () => ctx.get('sessionPersistence'),
+    gate,
   })
+  // A host entry no registry row routes to is inert. The registry side loads its first snapshot only after
+  // mount (the source cannot tell "not loaded yet" from "absent"), so the check runs once, shortly after mount.
+  if (hostSeats.size > 0) {
+    ctx.effect(() => {
+      const timer = setTimeout(() => {
+        const source = ctx.get('claudeCodeSeatSource')
+        for (const seat of hostSeats.keys()) {
+          if (source?.hasRow?.(seat) !== false) continue
+          ctx.logger.warn(`agent-claude-code-driver: host entry for seat "${seat}" has no registry row with driver ${CLAUDE_CODE_DRIVER_KEY}, so nothing routes mail to it; add the row (dsh-hire) or remove the host entry`)
+        }
+      }, UNROUTED_CHECK_DELAY_MS)
+      timer.unref()
+      return () => { clearTimeout(timer) }
+    }, 'agentClaudeCodeDriver.unroutedHostSeats()')
+  }
   ctx.effect(() => () => factory.dispose(), 'agentClaudeCodeDriver.factory()')
   ctx.effect(() => ctx.agents.setFactory(factory, CLAUDE_CODE_DRIVER_KEY), 'agentClaudeCodeDriver.setFactory()')
 }

@@ -29,7 +29,32 @@ seats:
 - 校验器先对模型 id 做 Unicode NFKC 折叠、去掉不可见格式字符并转小写,然后只接受白名单:`opus`、`sonnet`、`haiku`,或 `claude-opus|sonnet|haiku-<数字与连字符>`。fable id 仅在 `fable_ok: true` 时通过;其他任何写法(例如 Bedrock 或 Vertex 风格的 id)一律拒绝。
 - `role: coder` 条目在插件启动时被拒绝:它们需要后续切片的权限策略扩展,在其落地之前 coder 席位会在没有拒绝规则的情况下运行。
 - **二进制认证。**插件启动时,`claude_path` 必须解析为运行用户所有的常规文件,不得被组或其他用户写入,不得带脚本扩展名(`.js .mjs .cjs .sh .py`,在符号链接解析前后各检查一次),其路径上的任何目录也不得被组或其他用户写入(`/tmp` 这类带粘滞位的目录除外);其上方的每一级目录,无论沿解析后的文件,还是沿配置路径按原样书写的每一级目录前缀(因此带符号链接的中间目录以及存放符号链接的目录都在其内),都必须属于操作者或 root。其 SHA-256 在首次见到时按席位固定在 `<stateDir>/claude-code-binary-pins.json` 中。之后哈希变化会拒绝启动并给出新哈希;若升级是有意的,在条目上把 `claude_path_sha256` 设为该哈希即可接受。交给 SDK 的是已认证的真实路径,而不是配置的路径。每个回合之前会重新解析配置的路径,并重新检查文件的大小、mtime、ctime 与 inode,因此启动之后被替换,或符号链接被改指向(Claude Code 自动更新程序正是这样改指 `~/.local/bin/claude` 的),都会使回合被拒绝,直到重启宿主。
-- 插件 `Config` 为 `{ stateDir, dshHome?, seats, disposeGraceMs?, defaultPauseMs? }`。`stateDir` 必须位于 harness 主目录内(`dshHome`,否则 `$DSH_HOME`,否则 `~/.dsh`):`claude-code` 这样的普通名称是它的子目录,绝对路径必须本来就在其中,主目录本身或其外部的路径一律拒绝。该目录以 `0700` 创建,若是符号链接、属于他人或对组及其他用户开放则拒绝。在注册表切片落地之前,会话对应的席位按 `meta.agentPreset` 查找,否则按会话 id。
+- 插件 `Config` 为 `{ stateDir, dshHome?, seats, claudePathPrefixes?, hostSeats?, disposeGraceMs?, defaultPauseMs? }`(后两项新增,见下一节)。`stateDir` 必须位于 harness 主目录内(`dshHome`,否则 `$DSH_HOME`,否则 `~/.dsh`):`claude-code` 这样的普通名称是它的子目录,绝对路径必须本来就在其中,主目录本身或其外部的路径一律拒绝。该目录以 `0700` 创建,若是符号链接、属于他人或对组及其他用户开放则拒绝。会话对应的席位先在静态 `seats` 中按 `meta.agentPreset` 查找,否则按会话 id;在那里找不到的席位通过注册表来源查找。
+
+## 经注册表路由的席位与主机条目
+
+席位也可以通过组织注册表到达本驱动:它的注册表条目写着 `driver: claude-code`,邮箱桥在每次 create 和 resume 时把冻结的条目放在 `agentOptions.seatBinding` 中交给驱动。注册表条目是不受信任的请求,只携带路由与准入信息(`driver`、`admit_from`、`admit_sender_classes`,以及通用的 `cwd`、`sessionId`、`tools`)。所有花钱或扩大信任的设置都放在本插件自己配置里 `hostSeats` 下的**主机条目**中;这份配置属于 profile,任何席位都无法写入。
+
+```yaml
+claudePathPrefixes:
+  - /home/me/.local/share/claude/versions    # the real path of every claude_path must sit under one of these
+hostSeats:
+  mail-triage:
+    model: haiku                 # same allowlist and fable fence as a static row
+    role: mail-only              # the only role accepted until the permission slice (S5); any other role is refused
+    claude_path: /home/me/.local/share/claude/versions/2.1.317/claude
+    cwd: /home/me/work/mail-triage      # the pinned working directory; the registry row's cwd must equal it
+    admit_from_ceiling: [ops-lead]      # the widest sender list the registry row may ask for
+    # also: effort, max_turns, max_budget_usd, max_calls_per_window, call_window_ms, claude_path_sha256, fable_ok, session_id
+```
+
+- **查找顺序。** 先查静态 `seats` 配置;只有静态配置没有的席位才去查注册表来源(`ctx.claudeCodeSeatSource`,由 [`agent-claude-code-registry`](../agent-claude-code-registry/README.md) 提供)。没有绑定的请求会被来源拒绝,因此除邮箱桥之外没有任何调用方能打开经注册表路由的席位。来源的可选方法 `hasRow` 让驱动在挂载后不久对"没有任何注册表条目指向"的主机条目发出警告。
+- **没有主机条目的注册表条目会被响亮地拒绝**,拒绝信息会打印需要添加的 `hostSeats` 条目。创始人在 profile 中补上它,并填入真实的 `claude_path`。
+- **合并强制执行什么。** `mergeHostSeat` 用主机条目构造席位,并对它运行全部静态检查(模型白名单、fable 栅栏、限额)。它拒绝 `mail-only` 以外的任何角色,要求 `claude_path` 的 realpath 位于某个 `claudePathPrefixes` 条目之下,要求条目的 `admit_from` 是 `admit_from_ceiling` 的子集,要求条目的 `cwd` 等于主机 `cwd` 固定值(工厂还会用该固定值核对收到的工作目录),并要求条目的驱动为 `claude-code`。主机条目与静态席位一样在挂载时校验、认证并固定,因此坏条目让挂载失败,而不是等到第一封邮件。同时出现在 `seats` 与 `hostSeats` 的席位会被拒绝。
+- **静态席位的不变量对经注册表路由的席位同样成立:** `settingSources: []`、`strictMcpConfig: true`、`tools: []`、二进制认证及其每回合复查、熔断开关和调用窗口。
+- **会话固定。** 经注册表路由的席位首次创建时使用的 dsh 会话 id 会固定在 `<stateDir>/claude-code-seat-sessions.json` 中(私有,与二进制固定相同)。相同 id 通过。不同的 id 以 `seat-session-changed: ... ask the founder to reseed` 拒绝,因此注册表写入者无法通过修改 `sessionId` 给席位换上全新的日志。与主机条目的 `session_id` 相等的不同 id 是创始人授权的重新播种:固定值随之移动,驱动记录一条警告。
+- **调用窗口在重新播种和重启后保留。** 每个席位的调用时间随发生保存在 `<stateDir>/claude-code-call-windows.json` 中(私有),重启后的闸门计入已保存的时间,而不只是当前会话的日志。因此重新播种无法重置窗口,重启主机也不能。写入失败会被记录,内存中的计数继续。损坏或非私有的调用窗口状态文件会阻止挂载,纯静态部署也一样(有意为之,以便大声失败)。
+- **准入携带发送者。** 准入请求新增可选的 `from`,读取自邮件的 `source.from`;注册表胶水包的 `admit` 钩子据此应用条目的 `admit_from` 与 `admit_sender_classes`。
 
 ## 回合模型与转向
 
@@ -77,7 +102,7 @@ seats:
 
 ## 限额与熔断开关
 
-- **席位限额**在条目上:`max_turns`(默认 25)与 `max_budget_usd`(默认 5,订阅下为名义值)作为 `maxTurns` 与 `maxBudgetUsd` 传给每次查询,达到任一上限的 result 会以带码错误结束回合(`CLAUDE_CODE_ERROR_MAX_TURNS`、`CLAUDE_CODE_ERROR_MAX_BUDGET_USD`)。`max_calls_per_window`(默认 120)限制席位在滑动的 `call_window_ms`(默认五小时)内启动的查询数;计数由本进程中该席位的所有 agent 共享,重启会从日志重建它(重新播种会开启新的会话日志,因此会重置窗口)(每个走到第一步的回合都计一次,时间取其日志时间),因此重启主机无法把它清零。`call_window_ms` 至少为 60000。超出上限的回合在认领任何东西之前就被拒绝:`claude-code/refused {reason: call-window}`、错误 `CLAUDE_CODE_CALL_WINDOW`,邮件保持排队。
+- **席位限额**在条目上:`max_turns`(默认 25)与 `max_budget_usd`(默认 5,订阅下为名义值)作为 `maxTurns` 与 `maxBudgetUsd` 传给每次查询,达到任一上限的 result 会以带码错误结束回合(`CLAUDE_CODE_ERROR_MAX_TURNS`、`CLAUDE_CODE_ERROR_MAX_BUDGET_USD`)。`max_calls_per_window`(默认 120)限制席位在滑动的 `call_window_ms`(默认五小时)内启动的查询数;计数由本进程中该席位的所有 agent 共享,调用时间保存在 `<stateDir>/claude-code-call-windows.json` 中,因此重启和创始人重新播种(新的会话日志)都不会重置窗口;没有已保存时间的席位则从其日志重建(每个走到第一步的回合都计一次,时间取其日志时间)。`call_window_ms` 至少为 60000。超出上限的回合在认领任何东西之前就被拒绝:`claude-code/refused {reason: call-window}`、错误 `CLAUDE_CODE_CALL_WINDOW`,邮件保持排队。
 - **熔断开关。** 驱动状态目录(位于 harness home 之内)中名为 `claude-code-kill-switch` 的标志文件,即 `<stateDir>/claude-code-kill-switch`。每个回合开始前、查询启动前再看一次、运行中流的每条消息,以及实时回合期间每 500 毫秒都会检查,因此在某个长工具调用运行期间设置的开关同样会中止查询。文件存在期间回合被拒绝,写入 `claude-code/refused {reason: kill-switch}`,错误为 `CLAUDE_CODE_KILL_SWITCH`,邮件保持排队;如果它在回合中途出现,运行中的查询会被中止,回合以同样的错误结束,该回合邮件的租约失败(开关被发现时已被认领的邮件是失败处理,而不是重新排队)。无法检查的文件,或抛出异常的注入检查,都视为存在(失败即关闭)。检查只是普通的文件测试;主机横幅与逐工具调用检查属于后续切片。
 
 ## 工具、选项与取消
@@ -104,11 +129,11 @@ SDK 没有专门的"限流"result 子类型。驱动把以下情形视为窗口�
 - **租约与准入的提供方只是接缝** — 驱动调用注入的租约接收器与准入检查;接入邮箱桥的真实租约以及注册表的准入发送者类别(例如让创始人经邮箱发来的邮件被放行)属于后续切片。在此之前,默认准入会拒绝所有来自非名册席位发送者的邮件。
 - **读取造成的污染只追踪、不强制** — 读取文件或抓取内容的回合会被标记为被污染并报告给准入检查;限制这样的回合此后能做什么需要权限切片。
 - **熔断开关按回合和按流消息检查** — 尚未逐工具调用检查,也没有主机横幅。
-- **席位查找是临时的** — 在注册表切片提供真正的解析器之前,按 `meta.agentPreset` 或会话 id 查找席位。
+- **经注册表路由的席位需要两方各改一处** — 注册表条目(雇用脚本或组织看板)与主机条目(创始人,在 profile 中);只有条目没有主机条目会被拒绝,而"主机条目是否有注册表条目"的检查在挂载后不久只运行一次,因为注册表在挂载之后才加载。
 - **规则、git 围栏与沙箱 shell 尚未接入** — 只有选项扩展点;coder 席位没有 shell。
 - **转录检查依赖 SDK** — `getSessionInfo` 无返回会被视为转录缺失,因此没有可提取摘要的转录同样会被拒绝。
 - **操作者环境的透传** — `HTTPS_PROXY`、`HTTP_PROXY`、`NODE_EXTRA_CA_CERTS`、`NODE_OPTIONS` 与 `CLAUDE_ENV_FILE` 不会被清除:它们属于操作者自己的环境。代理加自定义 CA 可以读取登录流量,`NODE_OPTIONS` 或 `CLAUDE_ENV_FILE` 可以在子进程中运行代码;请保持宿主上这些变量干净。
 - **斜杠命令封装只对驱动做过测试,未对真实 CLI 验证** — 封装后的提示永远不会以 `/` 开头;真实 CLI 如何处理提示中间的斜杠词,以及 `@path`、`!` 与 `#` 前缀展开,等待实际演练确认。
 - **在没有完成任何回合时转录缺失,会沿用同一 id 继续** — 这是设计使然:从未完成过回合的会话可以用其已记录的 id 重新开始,因为没有丢失任何内容。
-- **工作目录由调用方提供** — 它必须已经是自己的 realpath;从席位条目获取它属于注册表切片(S3)。
+- **工作目录由调用方提供** — 它必须已经是自己的 realpath;对经注册表路由的席位,它还必须等于主机条目中的 `cwd` 固定值。
 - **全队限额** — 单席位调用窗口已在此强制执行;全局并发查询上限、每小时回合上限、按发送者限流与乒乓熔断属后续切片。

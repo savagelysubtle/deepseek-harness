@@ -29,6 +29,8 @@ export interface MailAdmissionRequest {
   readonly seat: string
   /** Mailbox message id (the idempotency key), when the message is mailbox mail. */
   readonly messageId?: string | undefined
+  /** The sender named by the mail's `source.from` (a roster seat or guest name), when the mail carries one. */
+  readonly from?: string | undefined
   /** `send` queues a turn; `steer` pushes into a running turn. */
   readonly path: MailAdmissionPath
   /** Hop classes in the mail's chain that are not a roster seat (empty for seat-only mail). */
@@ -103,6 +105,19 @@ export function mailboxMessageId(message: UserMessage): string | undefined {
 export function unrecordableMailboxId(message: UserMessage): string | undefined {
   const id = relayMessageId(message)
   return id !== undefined && sanitizeLabel(id) !== id ? id : undefined
+}
+
+/** Longest sender name kept in a request. */
+const MAX_FROM_CHARS = 200
+
+/**
+ * The sender a message names in its `source.from`.
+ * @param message - the dsh user message.
+ * @returns the sender name, or `undefined` when the source carries none that is a non-empty string.
+ */
+export function mailFrom(message: UserMessage): string | undefined {
+  const from = read(sourceOf(message), 'from')
+  return typeof from === 'string' && from !== '' ? from.slice(0, MAX_FROM_CHARS) : undefined
 }
 
 /** A hop class name from a chain entry: a string, or an object with a string `class`. */

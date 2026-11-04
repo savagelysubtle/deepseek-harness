@@ -197,6 +197,7 @@
     { "path": "./packages/core/agent-loop" },
     { "path": "./packages/core/agent-claude-code" },
     { "path": "./packages/agent/agent-claude-code-driver" },
+    { "path": "./packages/agent/agent-claude-code-registry" },
     { "path": "./packages/llm/llm-retry" },
     { "path": "./packages/examples/agent-spine-demo" },
     { "path": "./packages/subprocess/subprocess" },

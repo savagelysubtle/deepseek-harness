@@ -32,7 +32,8 @@ import type { Scope } from '@deepseek-ai/dsh-scope'
 import type { Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { claudeSpawnSpec, ManagedClaudeCodeProcess } from '@deepseek-ai/dsh-subagent-claude-code/src/process.ts'
 import type { SubprocessHandle, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
-import { defaultAdmission, externalHops, frameMailText, isTaintedMail, mailboxMessageId, unrecordableMailboxId } from './admission.ts'
+import { defaultAdmission, externalHops, frameMailText, isTaintedMail, mailboxMessageId, mailFrom, unrecordableMailboxId } from './admission.ts'
+import type { CallWindowPersistence } from './seat-state.ts'
 import type { MailAdmission, MailAdmissionDecision, MailAdmissionPath } from './admission.ts'
 import { assertCleanHostEnv } from './env.ts'
 import { MailLog } from './mail-lease.ts'
@@ -150,6 +151,12 @@ export class SeatGate {
   private readonly calls = new Map<string, number[]>()
 
   /**
+   * @param persistence - durable call history; when given, a seat's window survives a session-id change (a
+   *   reseed) and a host restart, because the saved times, not the new session's log, are the record.
+   */
+  constructor(private readonly persistence?: CallWindowPersistence) {}
+
+  /**
    * Whether a seat currently has a live query.
    * @param seat - seat key.
    * @returns true while the seat's slot is taken.
@@ -188,13 +195,22 @@ export class SeatGate {
   }
 
   /**
-   * Seed a seat's call history from its durable log, once: only when this process has no record of the seat
-   * yet, so a restart does not reset the window and several agents of one seat do not count a call twice.
+   * Seed a seat's call history, once: only when this process has no record of the seat yet, so a restart does not
+   * reset the window and several agents of one seat do not count a call twice. The saved history (when the gate
+   * has persistence and the seat has any) is the record, plus the log's queries older than all of it (made
+   * before saving began); otherwise the session log alone seeds it.
    * @param seat - seat key.
    * @param times - epoch milliseconds of the queries the log shows the seat started.
    */
   seed(seat: string, times: readonly number[]): void {
-    if (!this.calls.has(seat)) this.calls.set(seat, [...times])
+    if (this.calls.has(seat)) return
+    const saved = this.persistence?.load(seat)
+    if (saved === undefined || saved.length === 0) {
+      this.calls.set(seat, [...times])
+      return
+    }
+    const earliest = Math.min(...saved)
+    this.calls.set(seat, [...times.filter(at => at < earliest), ...saved])
   }
 
   /**
@@ -203,7 +219,9 @@ export class SeatGate {
    * @param now - epoch milliseconds.
    */
   noteCall(seat: string, now: number): void {
-    this.calls.set(seat, [...this.calls.get(seat) ?? [], now])
+    const next = [...this.calls.get(seat) ?? [], now]
+    this.calls.set(seat, next)
+    this.persistence?.save(seat, next)
   }
 
   /**
@@ -505,12 +523,14 @@ export class ClaudeCodeSeatAgent implements Agent {
       return undefined
     }
     const messageId = mailboxMessageId(message)
+    const from = mailFrom(message)
     const tainted = isTaintedMail(message)
     let decision: MailAdmissionDecision
     try {
       decision = verdictOf((this.deps.admit ?? defaultAdmission)({
         seat: this.seat,
         ...messageId === undefined ? {} : { messageId },
+        ...from === undefined ? {} : { from },
         path,
         externalHops: externalHops(message),
         tainted,
