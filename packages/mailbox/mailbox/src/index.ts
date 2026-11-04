@@ -28,6 +28,14 @@ export {
 } from './org-registry.ts'
 export type { OrgRegistry, OrgRegistryEdge, OrgRegistryParseOptions, OrgRegistrySeat } from './org-registry.ts'
 export {
+  admitsMail, DEFAULT_SEAT_DRIVER, recordedSeatDriver, SEAT_DRIVER_KEYS, SEAT_SENDER_CLASSES, seatDriverKey,
+  seatRoutingProjection, seatRowHash,
+} from './seat-driver.ts'
+export type {
+  RecordedSeatDriver, SeatAdmission, SeatBinding, SeatBindingOptions, SeatDriverEvent, SeatDriverKey, SeatMailRequest,
+  SeatRoutingProjection, SeatSenderClass,
+} from './seat-driver.ts'
+export {
   diffRosters, loadRegistrySeatNames, rosterDriftWarning, unknownServedSeats, unknownServedSeatsWarning,
 } from './roster.ts'
 export type { RegistryLoadOutcome, RosterDrift } from './roster.ts'

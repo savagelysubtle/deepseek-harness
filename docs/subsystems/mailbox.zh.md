@@ -284,7 +284,7 @@ async lookupInboundSince(address: MailboxAddress, sinceMs: number, signal?: Abor
 declareRoster(mountId: string, addresses: readonly string[]): void
 ```
 
-Source: [`packages/mailbox/mailbox/src/index.ts:66`](../../packages/mailbox/mailbox/src/index.ts)
+Source: [`packages/mailbox/mailbox/src/index.ts:74`](../../packages/mailbox/mailbox/src/index.ts)
 
 <a id="mailbox-events"></a>
 

@@ -97,7 +97,7 @@ import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { publishAndWake, GUEST_SENDER_PREFIX } from '@deepseek-ai/dsh-mailbox-bridge'
 import {
   loadOrgRegistryWithToken, OrgRegistryConflictError, OrgRegistryWriteError, parseMailboxAddress,
-  resolveSeatCwd, writeOrgRegistry,
+  recordedSeatDriver, resolveSeatCwd, writeOrgRegistry,
 } from '@deepseek-ai/dsh-mailbox'
 import type { OrgRegistry } from '@deepseek-ai/dsh-mailbox'
 import {
@@ -464,7 +464,11 @@ function resolvedOrgRegistryView(registry: OrgRegistry): OrgRegistryView {
 function orgRegistryDocumentOf(registry: OrgRegistry): OrgRegistryDocument {
   return {
     baseDir: registry.baseDir,
-    seats: registry.seats,
+    // `invalid` is a read-only verdict on the view; the document is the
+    // write shape and must never carry it back.
+    seats: Object.fromEntries(
+      Object.entries(registry.seats).map(([name, { invalid: _invalid, ...seat }]) => [name, seat]),
+    ),
     edges: registry.edges,
     callUp: registry.callUp,
   }
@@ -1300,6 +1304,32 @@ class SessionCwdConflict extends Error {
   }
 }
 
+/**
+ * A session's recorded history belongs to another driver. The default agent
+ * loop never drives a Claude Code seat's log (or a log mixing both): the
+ * door refuses rather than resume it under the wrong driver.
+ */
+class SessionDriverMismatch extends Error {
+  constructor(readonly sessionId: SessionId, readonly recorded: string) {
+    super(
+      `session "${sessionId}" holds "${recorded}" driver history and cannot be opened or forked by the default agent loop; `
+      + 'a seat driven by another driver is reachable only through its own mail route',
+    )
+    this.name = 'SessionDriverMismatch'
+  }
+}
+
+/**
+ * Refuse a session whose log records a non-default driver.
+ * @param sessionId - the session under judgment.
+ * @param events - its stored or live events.
+ * @throws {SessionDriverMismatch} when the log classifies as anything but the default driver or no claim.
+ */
+function assertDefaultDriverLog(sessionId: SessionId, events: Iterable<{ readonly type: string }>): void {
+  const recorded = recordedSeatDriver(events)
+  if (recorded !== undefined && recorded !== 'default') throw new SessionDriverMismatch(sessionId, recorded)
+}
+
 /** Requested identity is a named session a live headless process currently owns. */
 class SessionFollowedByOwner extends Error {
   constructor(readonly sessionId: SessionId, readonly pid: number) {
@@ -2041,6 +2071,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           if (hasSubagentOwner({ header: inspected.meta }, undefined)) {
             throw new SubagentSessionOwnership(sessionId)
           }
+          assertDefaultDriverLog(sessionId, inspected.events)
           if (inspected.meta.cwd !== cwd) {
             throw new SessionCwdConflict(sessionId, cwd, inspected.meta.cwd)
           }
@@ -2094,6 +2125,10 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     }
     const agent = await creation
     if (hasSubagentOwner(agent.session, agent)) throw new SubagentSessionOwnership(sessionId)
+    // After the await, not inside the creation, because the creation's catch
+    // recovers any failure into an already-live agent: a guard thrown there
+    // would be swallowed and a live non-default seat adopted anyway.
+    assertDefaultDriverLog(sessionId, agent.session.events)
     // Beside the cwd check for the same reason, and after the await so it
     // covers every path that yields a live agent — freshly created, adopted
     // live, resumed from disk, or recovered by the concurrent-creation catch.
@@ -2655,6 +2690,13 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
               details: { reason: 'headless-owned' },
             })
           }
+          if (error instanceof SessionDriverMismatch) {
+            return err(request, {
+              code: 'agent-busy',
+              message: error.message,
+              details: { reason: 'session-driver-mismatch' },
+            })
+          }
           return err(request, {
             code: 'internal',
             message: `failed to create session "${sessionId}": ${String(error)}`,
@@ -2827,6 +2869,15 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             code: 'internal',
             message: `fork source unavailable for session "${sessionId}": ${String(error)}`,
             details: {},
+          })
+        }
+        try {
+          assertDefaultDriverLog(sessionId, source.events)
+        } catch (error: unknown) {
+          return err(request, {
+            code: 'fork-unavailable',
+            message: error instanceof Error ? error.message : String(error),
+            details: { sessionId },
           })
         }
         const events = source.events

@@ -42,6 +42,22 @@ Seat identity is maintained BY HAND in three places: the org registry (`~/.dsh/o
 
 A registry that is simply ABSENT is the legitimate no-registry world (the down-host CLI bootstrap case): nothing is knowable as a seat, so condition (B) no-ops rather than alarming. A registry that EXISTS but will not load is different, and the alarm itself must never become a silent failure: that case warns explicitly that condition (B) could not be checked, instead of quietly passing as "nothing is wrong."
 
+## Seat drivers and mail admission (OP #292)
+
+A registry seat row may select a driver and say who may mail it. Three optional fields, all routing data and nothing else:
+
+| Field | Meaning |
+|---|---|
+| `driver` | `default` (the in-process agent loop; also what an absent field means) or `claude-code`. |
+| `admit_from` | Seat names whose mail a `claude-code` seat accepts. Absent or empty admits nobody. |
+| `admit_sender_classes` | Sender classes accepted: `seat` (any roster seat) or `unverified`. Absent admits none. `seat` means "a roster seat", not "trusted". |
+
+There is deliberately no `claude_code` block on a row. Model, effort, role, caps (`max_*`, `call_window_ms`), `claude_path`, its sha256 and `fable_ok` live in host-private configuration, because `org.write` is unauthenticated and a row is untrusted input.
+
+**Quarantine, not a crashed roster.** A row that carries any of those host-config keys, an unknown key on a `claude-code` seat, a malformed or unknown-class `admit_*`, an `admit_from` naming a non-seat, `admit_*` on a default seat, or a `sessionId` shared with another seat (when either selects `claude-code`) is marked `invalid: "<reason>"` and its driver fields are dropped; every other seat stays valid. Mail to or from an `invalid` seat must be refused by the bridge. `parseOrgRegistry(text, { strictSeats: true })` throws instead, and `writeOrgRegistry` always uses it, so the UI and the hire script fail loudly rather than write a row that would be quarantined on read.
+
+The pure helpers live in [`seat-driver.ts`](./src/seat-driver.ts): `seatDriverKey`, `recordedSeatDriver` (classifies a stored session log as `default`, `claude-code`, `mixed` or no claim, so a log is never resumed under the wrong driver), `admitsMail` (default-deny on sender AND class; the reason names the part that failed), and `seatRowHash` (sha256 of the security-field projection: `driver`, `sessionId`, `cwd`, `admit_from`, `admit_sender_classes`, `test`, `tools`; key and list order do not change it). `SeatBinding` is the frozen row plus its hash that the bridge hands the driver; its `AgentOptions` addition is `SeatBindingOptions` (this package does not depend on `@deepseek-ai/dsh-agent`, so a consumer merges it).
+
 ## Extension points
 
 Providers implement [`MailboxProvider`](./src/provider.ts) and register through `ctx.mailbox`. Address resolution policies (chair-to-chair aliasing) layer on top of the grammar extension point documented in [`provider.ts`](./src/provider.ts) — none ships yet.

@@ -26,6 +26,7 @@ import {
   writeOrgRegistry,
   yamlErrorFirstLine,
 } from '../src/index.ts'
+import type { OrgRegistrySeat } from '../src/index.ts'
 
 // Controls for the node:fs/promises mock below, used only by the defect-fix
 // tests in 'loadOrgRegistryWithToken and writeOrgRegistry' that must inject a
@@ -767,5 +768,244 @@ describe('loadOrgRegistryWithToken and writeOrgRegistry', () => {
       fsControl.forceRenameFailure = false
       fsControl.forceRmFailure = false
     }
+  })
+})
+
+describe('seat driver fields and quarantine (OP #292 S3)', () => {
+  let dirs: string[] = []
+
+  afterEach(() => {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
+    dirs = []
+  })
+
+  /** A temp dir that is provably under the OS temp root, never the live ~/.dsh. */
+  function tempDir(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-org-registry-driver-'))
+    expect(dir.startsWith(tmpdir())).toBe(true)
+    dirs.push(dir)
+    return dir
+  }
+
+  /** Block-style registry text (the live registry's style) with the given extra seat YAML. */
+  function blockRegistry(extraSeats: string): string {
+    return [
+      'baseDir: /projects',
+      'seats:',
+      '  alfred:',
+      '    cwd: alfred',
+      '    department: ops',
+      '    sessionId: named-alfred',
+      '  batman:',
+      '    cwd: batman',
+      '    test: true',
+      extraSeats,
+      'edges:',
+      '  - [alfred, batman]',
+      'callUp: []',
+      '',
+    ].join('\n')
+  }
+
+  const CC_ROW = [
+    '  claudie:',
+    '    cwd: claudie',
+    '    driver: claude-code',
+    '    sessionId: named-claudie',
+    '    admit_from: [alfred]',
+    '    admit_sender_classes: [seat]',
+  ].join('\n')
+
+  function seatOf(text: string, name: string, strictSeats?: boolean): OrgRegistrySeat {
+    const seat = parseOrgRegistry(text, strictSeats === undefined ? {} : { strictSeats }).seats[name]
+    if (seat === undefined) throw new Error(`no seat ${name}`)
+    return seat
+  }
+
+  it('parses a registry without any driver field to exactly the pre-change objects', () => {
+    const registry = parseOrgRegistry(blockRegistry(''))
+    expect(registry).toEqual({
+      baseDir: '/projects',
+      seats: {
+        alfred: { cwd: 'alfred', department: 'ops', sessionId: 'named-alfred' },
+        batman: { cwd: 'batman', test: true },
+      },
+      edges: [['alfred', 'batman']],
+      callUp: [],
+    })
+    expect(Object.keys(registry.seats.alfred ?? {})).toEqual(['cwd', 'sessionId', 'department'])
+    expect(parseOrgRegistry(VALID).seats['lead-a']).toEqual({ cwd: 'project-a', lead: true })
+  })
+
+  it('still drops unknown keys on a default seat, as before', () => {
+    expect(seatOf('baseDir: /p\nseats:\n  solo: { cwd: one, colour: red }\n', 'solo')).toEqual({ cwd: 'one' })
+  })
+
+  it('accepts a claude-code row carrying only driver and admission fields (block style)', () => {
+    const seat = seatOf(blockRegistry(CC_ROW), 'claudie', true)
+    expect(seat).toEqual({
+      cwd: 'claudie',
+      sessionId: 'named-claudie',
+      driver: 'claude-code',
+      admit_from: ['alfred'],
+      admit_sender_classes: ['seat'],
+    })
+    expect(seat.invalid).toBeUndefined()
+  })
+
+  it('accepts the same row in flow style', () => {
+    const text = 'baseDir: /p\nseats:\n  alfred: { cwd: a }\n  claudie: { cwd: c, driver: claude-code, admit_from: [alfred], admit_sender_classes: [seat, unverified] }\n'
+    expect(seatOf(text, 'claudie', true)).toEqual({
+      cwd: 'c', driver: 'claude-code', admit_from: ['alfred'], admit_sender_classes: ['seat', 'unverified'],
+    })
+  })
+
+  it('accepts an explicit driver: default row and keeps it', () => {
+    expect(seatOf('baseDir: /p\nseats:\n  solo: { cwd: one, driver: default }\n', 'solo', true)).toEqual({ cwd: 'one', driver: 'default' })
+  })
+
+  it('parses an empty admit_from as nobody (kept as an empty list, not dropped)', () => {
+    const text = 'baseDir: /p\nseats:\n  alfred: { cwd: a }\n  claudie: { cwd: c, driver: claude-code, admit_from: [] }\n'
+    const seat = seatOf(text, 'claudie', true)
+    expect(seat.admit_from).toEqual([])
+    expect(seat.invalid).toBeUndefined()
+  })
+
+  const QUARANTINE_CASES: ReadonlyArray<readonly [string, string, string]> = [
+    ['a claude_code block', '    claude_code: { model: haiku }', 'claude_code belongs in host config'],
+    ['model', '    model: haiku', 'model belongs in host config'],
+    ['effort', '    effort: high', 'effort belongs in host config'],
+    ['role', '    role: mail-only', 'role belongs in host config'],
+    ['claude_path', '    claude_path: /usr/bin/claude', 'claude_path belongs in host config'],
+    ['claude_path_sha256', '    claude_path_sha256: abc', 'claude_path_sha256 belongs in host config'],
+    ['fable_ok', '    fable_ok: true', 'fable_ok belongs in host config'],
+    ['call_window_ms', '    call_window_ms: 1000', 'call_window_ms belongs in host config'],
+    ['max_turns', '    max_turns: 3', 'max_turns belongs in host config'],
+    ['max_budget_usd', '    max_budget_usd: 1', 'max_budget_usd belongs in host config'],
+    ['an unknown key', '    colour: red', 'unknown key "colour" on a claude-code seat'],
+    ['an unknown class', '    admit_sender_classes: [seat, guest]', 'admit_sender_classes entry "guest" is not one of seat, unverified'],
+    ['a non-list admit_sender_classes', '    admit_sender_classes: seat', 'admit_sender_classes must be a list of sender classes'],
+    ['a non-list admit_from', '    admit_from: alfred', 'admit_from must be a list of seat names'],
+    ['a blank admit_from entry', '    admit_from: [alfred, " "]', 'admit_from must be a list of seat names'],
+    ['an admit_from naming a non-seat', '    admit_from: [ghost]', 'admit_from names "ghost", which is not a roster seat'],
+    ['an unknown driver', '    driver: codex', 'driver "codex" is not one of default, claude-code'],
+  ]
+
+  describe.each(QUARANTINE_CASES)('a row with %s', (_label, extraLine, reason) => {
+    // Rows set exactly one bad thing; the unknown-driver and bad admit_* cases
+    // replace the matching line from the base row rather than duplicating a key.
+    function rowWith(): string {
+      const key = extraLine.trim().split(':')[0] ?? ''
+      const lines = CC_ROW.split('\n').filter(line => !line.trim().startsWith(`${key}:`))
+      return [...lines, extraLine].join('\n')
+    }
+
+    it('quarantines only that seat, drops its driver fields and keeps the others valid', () => {
+      const registry = parseOrgRegistry(blockRegistry(rowWith()))
+      const seat = registry.seats.claudie
+      expect(seat?.invalid).toBe(reason)
+      expect(seat?.driver).toBeUndefined()
+      expect(seat?.admit_from).toBeUndefined()
+      expect(seat?.admit_sender_classes).toBeUndefined()
+      expect(seat?.cwd).toBe('claudie')
+      expect(registry.seats.alfred).toEqual({ cwd: 'alfred', department: 'ops', sessionId: 'named-alfred' })
+      expect(registry.seats.batman).toEqual({ cwd: 'batman', test: true })
+    })
+
+    it('throws under strictSeats, naming the seat and the reason', () => {
+      expect(() => parseOrgRegistry(blockRegistry(rowWith()), { strictSeats: true })).toThrow(
+        `org registry seat "claudie" is invalid: ${reason}`,
+      )
+    })
+  })
+
+  it('quarantines admit_from and admit_sender_classes on a default seat', () => {
+    for (const [line, key] of [['admit_from: [alfred]', 'admit_from'], ['admit_sender_classes: [seat]', 'admit_sender_classes']] as const) {
+      const text = `baseDir: /p\nseats:\n  alfred: { cwd: a }\n  solo: { cwd: one, ${line} }\n`
+      expect(seatOf(text, 'solo').invalid).toBe(`${key} requires driver "claude-code"`)
+      expect(() => parseOrgRegistry(text, { strictSeats: true })).toThrow(`${key} requires driver "claude-code"`)
+    }
+  })
+
+  it('quarantines a cost or trust key on a default seat too', () => {
+    expect(seatOf('baseDir: /p\nseats:\n  solo: { cwd: one, claude_path: /x }\n', 'solo').invalid).toBe(
+      'claude_path belongs in host config',
+    )
+  })
+
+  it('quarantines both rows when two seats share a sessionId and one is claude-code (A2)', () => {
+    const text = [
+      'baseDir: /p',
+      'seats:',
+      '  alfred: { cwd: a, sessionId: shared-1 }',
+      '  claudie: { cwd: c, driver: claude-code, sessionId: shared-1, admit_from: [alfred] }',
+      '  other: { cwd: o, sessionId: unique-1 }',
+      '',
+    ].join('\n')
+    const registry = parseOrgRegistry(text)
+    expect(registry.seats.alfred?.invalid).toBe('sessionId shared with seat claudie')
+    expect(registry.seats.claudie?.invalid).toBe('sessionId shared with seat alfred')
+    expect(registry.seats.claudie?.driver).toBeUndefined()
+    expect(registry.seats.other).toEqual({ cwd: 'o', sessionId: 'unique-1' })
+    expect(() => parseOrgRegistry(text, { strictSeats: true })).toThrow('sessionId shared with seat')
+  })
+
+  it('leaves two default seats that share a sessionId exactly as before', () => {
+    const registry = parseOrgRegistry('baseDir: /p\nseats:\n  a: { cwd: a, sessionId: s }\n  b: { cwd: b, sessionId: s }\n')
+    expect(registry.seats.a?.invalid).toBeUndefined()
+    expect(registry.seats.b?.invalid).toBeUndefined()
+  })
+
+  describe('writeOrgRegistry', () => {
+    it('refuses a document whose claude-code row would be quarantined, before touching the file', async () => {
+      const dir = tempDir()
+      const path = join(dir, 'registry.yml')
+      writeFileSync(path, blockRegistry(''))
+      const { token } = await loadOrgRegistryWithToken(path)
+      const before = readFileSync(path, 'utf8')
+      const document = parseYaml(blockRegistry(CC_ROW)) as { seats: Record<string, Record<string, unknown>> }
+      const claudie = document.seats.claudie
+      if (claudie === undefined) throw new Error('fixture lost claudie')
+      claudie.claude_path = '/usr/bin/claude'
+      await expect(writeOrgRegistry(path, document, token)).rejects.toThrow('claude_path belongs in host config')
+      expect(readFileSync(path, 'utf8')).toBe(before)
+      expect(readdirSync(dir).filter(name => name.includes('.bak-'))).toEqual([])
+    })
+
+    it('writes a valid claude-code row and reads it back with its fields', async () => {
+      const dir = tempDir()
+      const path = join(dir, 'registry.yml')
+      writeFileSync(path, blockRegistry(''))
+      const { token } = await loadOrgRegistryWithToken(path)
+      const { registry } = await writeOrgRegistry(path, parseYaml(blockRegistry(CC_ROW)) as object, token)
+      expect(registry.seats.claudie?.driver).toBe('claude-code')
+      const reread = (await loadOrgRegistryWithToken(path)).registry
+      expect(reread.seats.claudie).toEqual({
+        cwd: 'claudie', sessionId: 'named-claudie', driver: 'claude-code', admit_from: ['alfred'], admit_sender_classes: ['seat'],
+      })
+    })
+
+    it('round-trips a block-style registry with a claude-code row byte-identically', () => {
+      const text = [
+        'baseDir: /projects',
+        'seats:',
+        '  alfred:',
+        '    cwd: alfred',
+        '  claudie:',
+        '    cwd: claudie',
+        '    driver: claude-code',
+        '    admit_from:',
+        '    - alfred',
+        '    admit_sender_classes:',
+        '    - seat',
+        'edges:',
+        '- - alfred',
+        '  - claudie',
+        'callUp: []',
+        '',
+      ].join('\n')
+      expect(stringifyYaml(parseYaml(text), { indentSeq: false })).toBe(text)
+      expect(parseOrgRegistry(text, { strictSeats: true }).seats.claudie?.admit_from).toEqual(['alfred'])
+    })
   })
 })

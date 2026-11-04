@@ -21,6 +21,8 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { MAILBOX_SEGMENT_PATTERN_SOURCE } from './address.ts'
+import { SEAT_DRIVER_KEYS, SEAT_SENDER_CLASSES } from './seat-driver.ts'
+import type { SeatDriverKey, SeatSenderClass } from './seat-driver.ts'
 
 const SEGMENT_PATTERN = new RegExp(MAILBOX_SEGMENT_PATTERN_SOURCE)
 
@@ -66,6 +68,25 @@ export interface OrgRegistrySeat {
   readonly department?: string
   /** Restricts which tools the seat's agent may use; absent means unrestricted. */
   readonly tools?: OrgRegistrySeatTools
+  /**
+   * Which driver runs the seat; absent means `default` (the in-process agent
+   * loop). Routing data only — every cost or trust setting of a non-default
+   * driver lives in host-private config, never on a row.
+   */
+  readonly driver?: SeatDriverKey
+  /**
+   * Seats whose mail the seat admits (`claude-code` seats only). Default-deny:
+   * absent or empty admits nobody.
+   */
+  readonly admit_from?: readonly string[]
+  /** Sender classes the seat admits (`claude-code` seats only); default-deny. */
+  readonly admit_sender_classes?: readonly SeatSenderClass[]
+  /**
+   * Set by the parser, never written: the row failed a driver-field check and
+   * was quarantined. Its driver fields are dropped; mail to or from it is
+   * refused with this reason.
+   */
+  readonly invalid?: string
 }
 
 /** One undirected edge: both directions are implied unless a later rule excepts them. */
@@ -87,6 +108,12 @@ export interface OrgRegistry {
 export interface OrgRegistryParseOptions {
   /** Home directory a leading `~` expands against; defaults to the process user's home. */
   readonly home?: string
+  /**
+   * Throw on a quarantined seat instead of marking it `invalid`. Reads leave
+   * this off so one bad row cannot take the roster down; writes set it so a
+   * UI or hire edit fails loudly.
+   */
+  readonly strictSeats?: boolean
 }
 
 /**
@@ -139,7 +166,8 @@ export function parseOrgRegistry(text: string, options: OrgRegistryParseOptions 
   assertObject(seatsField, 'seats')
   const seatNames = Object.keys(seatsField)
   if (seatNames.length === 0) throw new Error('org registry field "seats" must list at least one seat')
-  const seats: Record<string, OrgRegistrySeat> = {}
+  const pending = new Map<string, PendingSeat>()
+  const drivers = new Map<string, boolean>()
   for (const name of seatNames) {
     if (!SEGMENT_PATTERN.test(name)) {
       throw new Error(`org registry seat ${JSON.stringify(name)}: names must match ${MAILBOX_SEGMENT_PATTERN_SOURCE} (seat names are mailbox addresses)`)
@@ -156,7 +184,7 @@ export function parseOrgRegistry(text: string, options: OrgRegistryParseOptions 
     }
     const department = seat.department === undefined ? undefined : parseSeatDepartment(seat.department, name)
     const tools = seat.tools === undefined ? undefined : parseSeatTools(seat.tools, name)
-    seats[name] = {
+    const base: OrgRegistrySeat = {
       cwd: expandTilde(seat.cwd, home),
       ...seat.lead === undefined ? {} : { lead: seat.lead },
       ...seat.sessionId === undefined ? {} : { sessionId: seat.sessionId },
@@ -164,7 +192,12 @@ export function parseOrgRegistry(text: string, options: OrgRegistryParseOptions 
       ...department === undefined ? {} : { department },
       ...tools === undefined ? {} : { tools },
     }
+    const driverFields = parseSeatDriverFields(seat)
+    drivers.set(name, seat.driver === CLAUDE_CODE_DRIVER)
+    if ('invalid' in driverFields) pending.set(name, { seat: base, invalid: driverFields.invalid })
+    else pending.set(name, { seat: base, fields: driverFields })
   }
+  const seats = finalizeSeats(pending, drivers, options.strictSeats === true)
 
   const edges: OrgRegistryEdge[] = []
   if (document.edges !== undefined) {
@@ -365,7 +398,8 @@ async function backupOrgRegistryBytes(expanded: string, currentBytes: Buffer): P
  * @throws {OrgRegistryWriteError} when the current file cannot be read for the concurrency
  *   check, the backup cannot be written, or the atomic write/rename itself fails —
  *   retry-the-same-write territory, never "fix your content."
- * @throws a plain `Error` (from {@link parseOrgRegistry}) when the proposed document fails
+ * @throws a plain `Error` (from {@link parseOrgRegistry} with `strictSeats`, so a row whose
+ *   driver fields would be quarantined on read is refused here) when the proposed document fails
  *   validation — "fix your content", never a reason to retry unchanged.
  */
 export async function writeOrgRegistry(
@@ -392,7 +426,7 @@ export async function writeOrgRegistry(
   // OrgRegistryWriteError): this is the "fix your content" branch, and a
   // caller must be able to tell it apart from the I/O failures below, which
   // mean "retry the same document."
-  const registry = parseOrgRegistry(proposedText, options)
+  const registry = parseOrgRegistry(proposedText, { ...options, strictSeats: true })
 
   await backupOrgRegistryBytes(expanded, currentBytes)
 
@@ -632,4 +666,147 @@ function assertStringArray(value: unknown, label: string): asserts value is read
   if (!Array.isArray(value) || value.some(entry => typeof entry !== 'string' || entry.trim().length === 0)) {
     throw new Error(`org registry field "${label}" must be a list of non-empty strings`)
   }
+}
+
+/** The driver value that selects the Claude Code seat driver. */
+const CLAUDE_CODE_DRIVER: SeatDriverKey = 'claude-code'
+
+/** Row keys that are valid on any seat. */
+const GENERIC_SEAT_KEYS: ReadonlySet<string> = new Set(['cwd', 'lead', 'sessionId', 'test', 'department', 'tools'])
+
+/** Row keys the driver slice adds. */
+const DRIVER_SEAT_KEYS: ReadonlySet<string> = new Set(['driver', 'admit_from', 'admit_sender_classes'])
+
+/** Exact cost and trust keys that belong in host-private config, never on a row. */
+const HOST_CONFIG_KEYS: ReadonlySet<string> = new Set([
+  'claude_code', 'model', 'effort', 'role', 'call_window_ms', 'claude_path', 'claude_path_sha256', 'fable_ok',
+])
+
+/** Whether a row key is a cost or trust setting that belongs in host config. */
+function isHostConfigKey(key: string): boolean {
+  return HOST_CONFIG_KEYS.has(key) || key.startsWith('max_')
+}
+
+/** The validated driver fields of one row. */
+interface SeatDriverFields {
+  readonly driver?: SeatDriverKey
+  readonly admit_from?: readonly string[]
+  readonly admit_sender_classes?: readonly SeatSenderClass[]
+}
+
+/** A seat awaiting the roster-wide checks. */
+interface PendingSeat {
+  readonly seat: OrgRegistrySeat
+  readonly fields?: SeatDriverFields
+  readonly invalid?: string
+}
+
+/**
+ * Validate one raw row's driver fields. Never throws: a failed check returns
+ * the reason so the caller can quarantine only this seat.
+ * @param seat - the raw row mapping.
+ * @returns the validated fields, or the quarantine reason.
+ */
+function parseSeatDriverFields(seat: Record<string, unknown>): SeatDriverFields | { readonly invalid: string } {
+  for (const key of Object.keys(seat)) {
+    if (isHostConfigKey(key)) return { invalid: `${key} belongs in host config` }
+  }
+  let driver: SeatDriverKey | undefined
+  if (seat.driver !== undefined) {
+    const found = SEAT_DRIVER_KEYS.find(key => key === seat.driver)
+    if (found === undefined) {
+      return { invalid: `driver ${JSON.stringify(seat.driver)} is not one of ${SEAT_DRIVER_KEYS.join(', ')}` }
+    }
+    driver = found
+  }
+  if (driver === CLAUDE_CODE_DRIVER) {
+    for (const key of Object.keys(seat)) {
+      if (!GENERIC_SEAT_KEYS.has(key) && !DRIVER_SEAT_KEYS.has(key)) {
+        return { invalid: `unknown key ${JSON.stringify(key)} on a ${CLAUDE_CODE_DRIVER} seat` }
+      }
+    }
+  } else if (seat.admit_from !== undefined || seat.admit_sender_classes !== undefined) {
+    const key = seat.admit_from !== undefined ? 'admit_from' : 'admit_sender_classes'
+    return { invalid: `${key} requires driver "${CLAUDE_CODE_DRIVER}"` }
+  }
+  let admitFrom: readonly string[] | undefined
+  if (seat.admit_from !== undefined) {
+    if (!Array.isArray(seat.admit_from) || seat.admit_from.some(entry => typeof entry !== 'string' || entry.trim().length === 0)) {
+      return { invalid: 'admit_from must be a list of seat names' }
+    }
+    admitFrom = seat.admit_from as string[]
+  }
+  let classes: readonly SeatSenderClass[] | undefined
+  if (seat.admit_sender_classes !== undefined) {
+    if (!Array.isArray(seat.admit_sender_classes)) return { invalid: 'admit_sender_classes must be a list of sender classes' }
+    const parsed: SeatSenderClass[] = []
+    for (const entry of seat.admit_sender_classes as unknown[]) {
+      const found = SEAT_SENDER_CLASSES.find(candidate => candidate === entry)
+      if (found === undefined) {
+        return { invalid: `admit_sender_classes entry ${JSON.stringify(entry)} is not one of ${SEAT_SENDER_CLASSES.join(', ')}` }
+      }
+      parsed.push(found)
+    }
+    classes = parsed
+  }
+  return {
+    ...driver === undefined ? {} : { driver },
+    ...admitFrom === undefined ? {} : { admit_from: admitFrom },
+    ...classes === undefined ? {} : { admit_sender_classes: classes },
+  }
+}
+
+/**
+ * Apply the roster-wide checks (`admit_from` names a roster seat; no two
+ * rows share a `sessionId` when either selects the Claude Code driver),
+ * then build the final seats: a quarantined seat keeps its generic fields,
+ * loses its driver fields and carries `invalid`.
+ * @param pending - every seat's generic row and driver-field verdict, in roster order.
+ * @param claudeCode - whether each raw row selected the Claude Code driver.
+ * @param strict - throw on the first quarantined seat instead of marking it.
+ * @returns the seats keyed by name.
+ * @throws when `strict` and any seat is quarantined.
+ */
+function finalizeSeats(
+  pending: ReadonlyMap<string, PendingSeat>,
+  claudeCode: ReadonlyMap<string, boolean>,
+  strict: boolean,
+): Record<string, OrgRegistrySeat> {
+  const reasons = new Map<string, string>()
+  for (const [name, entry] of pending) {
+    if (entry.invalid !== undefined) {
+      reasons.set(name, entry.invalid)
+      continue
+    }
+    for (const sender of entry.fields?.admit_from ?? []) {
+      if (!pending.has(sender)) {
+        reasons.set(name, `admit_from names ${JSON.stringify(sender)}, which is not a roster seat`)
+        break
+      }
+    }
+  }
+  const bySession = new Map<string, string[]>()
+  for (const [name, entry] of pending) {
+    const id = entry.seat.sessionId
+    if (id !== undefined) bySession.set(id, [...bySession.get(id) ?? [], name])
+  }
+  for (const names of bySession.values()) {
+    if (names.length < 2 || !names.some(name => claudeCode.get(name) === true)) continue
+    for (const name of names) {
+      if (reasons.has(name)) continue
+      const other = names.find(candidate => candidate !== name) ?? name
+      reasons.set(name, `sessionId shared with seat ${other}`)
+    }
+  }
+  const seats: Record<string, OrgRegistrySeat> = {}
+  for (const [name, entry] of pending) {
+    const invalid = reasons.get(name)
+    if (invalid !== undefined) {
+      if (strict) throw new Error(`org registry seat ${JSON.stringify(name)} is invalid: ${invalid}`)
+      seats[name] = { ...entry.seat, invalid }
+    } else {
+      seats[name] = { ...entry.seat, ...entry.fields }
+    }
+  }
+  return seats
 }

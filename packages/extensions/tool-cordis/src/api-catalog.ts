@@ -4099,7 +4099,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'OrgRegistryDocumentSeat',
-    declaration: 'export interface OrgRegistryDocumentSeat {\n    readonly cwd: string;\n    readonly lead?: boolean;\n    readonly sessionId?: string;\n    readonly test?: boolean;\n    readonly department?: string;\n    readonly tools?: OrgSeatTools;\n}',
+    declaration: 'export interface OrgRegistryDocumentSeat {\n    readonly cwd: string;\n    readonly lead?: boolean;\n    readonly sessionId?: string;\n    readonly test?: boolean;\n    readonly department?: string;\n    readonly tools?: OrgSeatTools;\n    readonly driver?: \'default\' | \'claude-code\';\n    readonly admit_from?: readonly string[];\n    readonly admit_sender_classes?: readonly (\'seat\' | \'unverified\')[];\n}',
   },
   {
     name: 'OrgRegistryResult',
@@ -4115,7 +4115,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'OrgSeat',
-    declaration: 'export interface OrgSeat {\n    readonly cwd: string;\n    readonly lead?: boolean;\n    readonly sessionId?: string;\n    readonly test?: boolean;\n    readonly department?: string;\n    readonly tools?: OrgSeatTools;\n}',
+    declaration: 'export interface OrgSeat {\n    readonly cwd: string;\n    readonly lead?: boolean;\n    readonly sessionId?: string;\n    readonly test?: boolean;\n    readonly department?: string;\n    readonly tools?: OrgSeatTools;\n    readonly driver?: \'default\' | \'claude-code\';\n    readonly admit_from?: readonly string[];\n    readonly admit_sender_classes?: readonly (\'seat\' | \'unverified\')[];\n    readonly invalid?: string;\n}',
   },
   {
     name: 'OrgSeatTools',
