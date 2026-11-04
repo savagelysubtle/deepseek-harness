@@ -96,7 +96,7 @@ import type { SettingsDescriptor, SettingsNamespace, SettingsPathOp } from '@dee
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { publishAndWake, GUEST_SENDER_PREFIX } from '@deepseek-ai/dsh-mailbox-bridge'
 import {
-  loadOrgRegistryWithToken, OrgRegistryConflictError, OrgRegistryWriteError, parseMailboxAddress,
+  loadOrgRegistry, loadOrgRegistryWithToken, OrgRegistryConflictError, OrgRegistryWriteError, parseMailboxAddress,
   recordedSeatDriver, resolveSeatCwd, writeOrgRegistry,
 } from '@deepseek-ai/dsh-mailbox'
 import type { OrgRegistry } from '@deepseek-ai/dsh-mailbox'
@@ -3643,6 +3643,32 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       // against its own file.
       async write(request) {
         const { document, expectedToken } = request.payload
+        // The document the board sends is the already-parsed view: it cannot carry a key the parser quarantined, so a
+        // save over a quarantined row would silently rewrite it as a plain default-loop seat. Refuse before any byte
+        // is written. A file that cannot be read or parsed is left to the write primitive's own handling below.
+        const onDisk = await loadOrgRegistry(orgRegistryPath).catch(() => undefined)
+        if (onDisk !== undefined) {
+          const quarantined = Object.entries(onDisk.seats).filter(([, seat]) => seat.invalid !== undefined)
+          if (quarantined.length > 0) {
+            const detail = quarantined.map(([name, seat]) => `seat ${JSON.stringify(name)} is quarantined (${seat.invalid})`).join('; ')
+            return err(request, {
+              code: 'org-registry-rejected',
+              message: `org-registry-quarantined: ${detail}; fix the registry file by hand, then save again`,
+              details: {},
+            })
+          }
+          const dropped = Object.entries(onDisk.seats)
+            .filter(([name, seat]) => seat.driver === 'claude-code' && Object.hasOwn(document.seats, name) && document.seats[name]?.driver !== 'claude-code')
+            .map(([name]) => JSON.stringify(name))
+          if (dropped.length > 0) {
+            return err(request, {
+              code: 'org-registry-rejected',
+              message: `org-registry-driver-dropped: seat ${dropped.join(', ')} runs the claude-code driver and the incoming document drops or changes it; `
+                + 'the driver field cannot be removed from the board; revert the row\'s driver by editing the registry file',
+              details: {},
+            })
+          }
+        }
         let written: { registry: OrgRegistry; token: string }
         try {
           written = await writeOrgRegistry(orgRegistryPath, document, expectedToken)
