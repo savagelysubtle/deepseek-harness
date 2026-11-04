@@ -18,6 +18,9 @@
  *    failure the `test: true` boundary exists to prevent. A MISSING registry
  *    file is a deployment without an org graph (the down-host CLI bootstrap
  *    world); the registry-dependent rules have nothing to judge and no-op.
+ *    Straight after it, a quarantined seat row (`invalid`) on either side
+ *    refuses the lease (`seat-row-invalid`): the parser dropped its driver and
+ *    admission fields, so it must not read as a default-loop seat.
  * 2. **The `test: true` boundary** — a seat marked `test: true` may only
  *    exchange mail with seats also marked, in either direction. The boundary
  *    outranks everything below it: the admission list, the edge list, and
@@ -35,6 +38,12 @@
  *    memory records real admissions only, so a lease deferred back to
  *    `pending` is re-claimed and re-judged next cycle, never suppressed by
  *    its own earlier check.
+ * 6. **Seat driver** — a recipient whose registry row selects a non-default
+ *    driver is judged against that row after the sender class
+ *    (`seat-driver-unavailable`, `seat-driver-admission-denied`, and the
+ *    fail-closed `seat-driver-admission-error`); a log written by the other
+ *    driver is refused (`seat-driver-flip`); and a resident composed under an
+ *    older row is disposed so the delivery goes cold. See `seat-rows.ts`.
  *
  * Routing for an admitted lease:
  *
@@ -77,7 +86,7 @@ import { createHash } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
-import type { Agent, AgentHandle, AgentSetup, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, AgentOptions, AgentSetup, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 // Type-only: the bridge does not depend on the tools package at runtime, but
 // this augments `Context` with `.tools` so `agentCtx.tools` type-checks
@@ -98,17 +107,20 @@ import {
 } from '@deepseek-ai/dsh-named-sessions'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import {
+  admitsMail,
+  DEFAULT_SEAT_DRIVER,
   findOrgRegistryRoute,
   loadOrgRegistry,
   loadRegistrySeatNames,
   orgRegistryAllows,
   parseMailboxAddress,
+  recordedSeatDriver,
   resolveSeatCwd,
   resolveSeatSessionId,
   unknownServedSeats,
   unknownServedSeatsWarning,
 } from '@deepseek-ai/dsh-mailbox'
-import type { OrgRegistry, OrgRegistrySeat } from '@deepseek-ai/dsh-mailbox'
+import type { OrgRegistry, OrgRegistrySeat, SeatBindingOptions, SeatDriverKey } from '@deepseek-ai/dsh-mailbox'
 import type { MailboxAddress, MailboxClaimFilter, MailboxLease, MailboxMessageId } from '@deepseek-ai/dsh-mailbox'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
@@ -116,6 +128,19 @@ import { admittedOutcome, refusalUserMessage, relayUserMessage, seatToolRestrict
 import type { SenderClass } from './delivery.ts'
 import { applySeatToolRestriction } from './seat-tool-restriction.ts'
 import type { SeatToolRestrictionOutcome, SeatToolRestrictionRule } from './seat-tool-restriction.ts'
+import {
+  createMailboxSeatRows,
+  seatBindingOf,
+  seatDriverFlipReason,
+  seatDriverFlipRefusal,
+  seatInvalidReason,
+  SeatRowTracker,
+  seatViewOf,
+} from './seat-rows.ts'
+import type { MailboxSeatRows, SeatRowView } from './seat-rows.ts'
+
+export { createMailboxSeatRows, diffSeatRows, SeatRowTracker, seatBindingOf, seatDriverFlipReason, seatDriverFlipRefusal, seatViewOf } from './seat-rows.ts'
+export type { MailboxSeatRows, SeatRowChange, SeatRowView } from './seat-rows.ts'
 
 export { admittedOutcome, HEADLESS_BACKLOG_LIMIT, HEADLESS_BACKLOG_STALE_CLAIM_MS, messageEnvelope, refusalSource, refusalText, refusalUserMessage, relaySource, relayText, relayUserMessage, seatToolRestrictionSource, seatToolRestrictionText, seatToolRestrictionUserMessage } from './delivery.ts'
 export type { SenderClass, SeatToolRestrictionNoticeSource } from './delivery.ts'
@@ -172,6 +197,23 @@ interface HopCount {
 
 /** One resident seat: its agent handle plus the residency's release paths. */
 export interface ResidentSeat {
+  /** The resident agent; the live path matches it against the registry's agent before trusting this entry. */
+  readonly agent: Agent
+  /**
+   * {@link SeatRowView.rowHash} of the row this resident was composed under,
+   * recorded only for a non-default driver. `undefined` for a default-loop
+   * resident, which the row-change revocation never touches.
+   */
+  readonly rowHash: string | undefined
+  /**
+   * Dispose the resident because its seat's row changed (a security field, or
+   * the row went invalid), awaiting the teardown so a cold re-composition for
+   * the same session can follow immediately. Unlike {@link ResidentSeat.release}
+   * this flushes and awaits disposal; like it, it does not wait for live
+   * background work - a revocation is a security action and outranks that
+   * ruling.
+   */
+  revoke(): Promise<void>
   /**
    * Dispose the agent and release its per-session lock immediately, with no
    * deferral for live background work. This is host teardown's own path (see
@@ -378,6 +420,8 @@ export interface BridgeSpec {
   readonly seatAliases: ReadonlyMap<MailboxAddress, SessionId>
   /** Live resident seats keyed by address; the host's one-writer pen. */
   readonly residents: Map<string, ResidentSeat>
+  /** Remembers the last registry this bridge observed, to diff each reload's seat rows. */
+  readonly seatRows: SeatRowTracker
 }
 
 /**
@@ -430,6 +474,7 @@ export function resolveBridgeSpec(config: Config): BridgeSpec {
     orgRegistryPath: config.orgRegistryPath ?? dshHomePath('org', 'registry.yml'),
     seatAliases,
     residents: new Map(),
+    seatRows: new SeatRowTracker(),
   }
 }
 
@@ -790,6 +835,19 @@ async function injectRefusalNotice(ctx: Context, spec: BridgeSpec, lease: Mailbo
     // Nowhere to log the notice; the failed row and the context event remain.
     return
   }
+  // A sender whose row selects a non-default driver keeps a log the default
+  // loop must never write to or resume, and a quarantined row (`invalid`) has
+  // had its driver dropped so its log's owner is unknowable: neither gets a
+  // notice here. The refusal still reached the sender's address on the
+  // context bus (`mailbox/refused`, already emitted by `refuse`) and the warn
+  // below; a Claude Code shaped notice is a later slice's work.
+  const senderRows = await cachedRegistry(spec.orgRegistryPath).catch(() => undefined)
+  const senderInvalid = seatInvalidReason(senderRows, from)
+  const senderDriver = seatViewOf(senderRows, from)?.driver ?? DEFAULT_SEAT_DRIVER
+  if (senderInvalid !== undefined || senderDriver !== DEFAULT_SEAT_DRIVER) {
+    ctx.logger.warn(`mailbox-bridge: refusal notice for sender "${from}" not logged: ${senderInvalid !== undefined ? `its seat row is quarantined (${senderInvalid})` : `its seat runs the "${senderDriver}" driver and its session log is not appended to by the bridge`}`)
+    return
+  }
   // The same identity resolution delivery uses, retargeted at the sender:
   // recorded identity beats derivation, and an explicit web-seat alias wins
   // over both.
@@ -909,6 +967,17 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
     // The next cycle re-reads the file, so fixing it self-heals the bridge.
     return refuse(ctx, spec, lease, `org-registry-unavailable: ${(error as Error).message}`)
   }
+  // A quarantined row (`invalid`) has had its driver and admission fields
+  // dropped by the parser, so it would otherwise read as a default-loop seat:
+  // refuse any exchange it is part of, before the live path and before any
+  // other rule can mistake it for one. A resident already running under the
+  // row it just lost is torn down first (revocation), so the refusal is also
+  // the last thing that resident ever does.
+  const invalidRow = seatRowInvalidRefusal(registry, from, name)
+  if (invalidRow !== undefined) {
+    if (seatInvalidReason(registry, name) !== undefined) await revokeResident(ctx, spec, name)
+    return refuse(ctx, spec, lease, invalidRow)
+  }
   // The test boundary outranks everything below it — the admission list, the
   // edge list, and callUp (which would otherwise carry a call-up seat
   // straight across it).
@@ -924,6 +993,23 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
   // Derived once per lease here, where the registry is already reachable, and
   // passed into the rendered turn so delivery.ts stays pure and testable.
   const senderClass = await senderClassFor(spec, from)
+  // The recipient's row, resolved ONCE from the registry this lease was
+  // judged against; the admission verdict, the live-path revocation check, the
+  // flip check and the binding a driver receives all use this one frozen view.
+  // Fail closed: a throw while resolving the view (the clone and hash of a
+  // malformed row) or inside the judgment (a registry service that cannot list
+  // its drivers) refuses the lease instead of letting an unjudged message
+  // reach a driver, or the drain's generic failure path.
+  let view: SeatRowView | undefined
+  try {
+    view = seatViewOf(registry, name)
+  } catch (error) {
+    return refuse(ctx, spec, lease, `seat-driver-admission-error: seat "${name}" row could not be resolved, so the mail is refused: ${safeString(error)}`)
+  }
+  if (view !== undefined && view.driver !== DEFAULT_SEAT_DRIVER) {
+    const denial = seatDriverAdmissionRefusal(ctx, view, from, senderClass)
+    if (denial !== undefined) return refuse(ctx, spec, lease, denial)
+  }
   // Every served address was grammar-checked at mount, and the address IS
   // the session name. An explicit seat-alias row routes to that EXISTING
   // session id (web-host seats are not name-derived); anything else falls
@@ -938,7 +1024,14 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
   // Host-resident delivery: an agent this process already owns takes the
   // message directly. The operator's composer rides the same residency, so
   // human input and mail converge on one agent with no fence in between.
-  const live = ctx.agents.get(sessionId)
+  let live = ctx.agents.get(sessionId)
+  if (live !== undefined) {
+    const gate = await gateLiveSeat(ctx, spec, name, view, live)
+    if (gate.kind === 'refuse') return refuse(ctx, spec, lease, gate.reason)
+    // A revoked resident is gone: the delivery proceeds cold below, so the
+    // driver re-validates the seat against its host config.
+    if (gate.kind === 'revoked') live = undefined
+  }
   if (live !== undefined) {
     const outcome = deliverToLive(live, relayUserMessage(lease, senderClass))
     if (!outcome.delivered) {
@@ -983,9 +1076,10 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
       throw new Error('mailbox-bridge: wake requires a configured session-persistence backend')
     }
     const persisted = (await persistence.list()).some(header => header.id === sessionId)
+    const resolved = { view }
     const handle = persisted
-      ? await resumeTarget(ctx, spec, sessionId, name)
-      : await createTarget(ctx, spec, sessionId, await seatCwd(spec, name), name)
+      ? await resumeTarget(ctx, spec, sessionId, name, resolved)
+      : await createTarget(ctx, spec, sessionId, await seatCwd(spec, name), name, resolved)
     // A freshly resident agent takes the delivery as an ordinary FIFO turn;
     // steering a cold resume would skip reconstructing prior context.
     handle.agent.followup(relayUserMessage(lease, senderClass))
@@ -1005,7 +1099,9 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
       lock.release()
       return { kind: 'done' }
     }
-    retainResident(ctx, spec, name, handle, lock, residency)
+    // Only a non-default-driver resident records its row hash; a default one stays unrevocable by row edits, as before.
+    const residentRowHash = view !== undefined && view.driver !== DEFAULT_SEAT_DRIVER ? view.rowHash : undefined
+    retainResident(ctx, spec, name, handle, lock, residency, residentRowHash)
     return { kind: 'done' }
   } catch (error) {
     lock.release()
@@ -1021,6 +1117,12 @@ async function deliverLease(ctx: Context, spec: BridgeSpec, lease: MailboxLease)
       ctx.logger.warn(`mailbox-bridge: seat "${error.seatName}" tool restriction leaves it with NO tools at all — it cannot report this itself; refusing mail to it instead of composing it`)
       emitSeatToolsRestricted(ctx, error.seatName, error.outcome)
       return refuse(ctx, spec, lease, `seat-tools-muted: seat "${name}"'s configured tool restriction leaves it with no tools at all and cannot receive mail`)
+    }
+    // The cold path found the stored log written by the other driver: the
+    // refusal names the founder as the remedy and prints no command.
+    if (error instanceof SeatDriverFlipError) {
+      ctx.logger.warn(`mailbox-bridge: ${error.message}`)
+      return refuse(ctx, spec, lease, error.message)
     }
     throw error
   }
@@ -1224,6 +1326,7 @@ function logBlockedAnnouncement(
  * @param handle - the resident agent handle.
  * @param lock - the per-name lock acquired for this residency.
  * @param idleMs - idle milliseconds before the resident disposes.
+ * @param rowHash - the row hash of a non-default-driver seat this resident was composed under; absent for the default loop.
  */
 function retainResident(
   ctx: Context,
@@ -1232,6 +1335,7 @@ function retainResident(
   handle: AgentHandle,
   lock: NamedSessionLock,
   idleMs: number,
+  rowHash?: string,
 ): void {
   // The name belongs to THIS resident from here on; whatever the previous
   // occupant is still finishing runs its own independent course (see
@@ -1319,7 +1423,31 @@ function retainResident(
     }
     flushAndDispose(ctx, name, handle, lock)
   }
+  // The awaited teardown behind `revoke()`, memoised so a reload-driven
+  // revocation and a delivery-driven one racing each other dispose once.
+  let revocation: Promise<void> | undefined
+  const revoke = async (): Promise<void> => {
+    if (timer !== undefined) clearTimeout(timer)
+    if (spec.residents.get(name) === resident) spec.residents.delete(name)
+    const sessions = ctx.get('sessions')
+    try {
+      if (sessions !== undefined) await sessions.flush(handle.agent.session)
+    } catch (error) {
+      ctx.logger.warn(`mailbox-bridge: final flush for revoked resident "${name}" (${handle.agent.session.id}) failed: ${safeString(error)}`)
+    }
+    try {
+      await handle.dispose()
+    } finally {
+      lock.release()
+    }
+  }
   const resident: ResidentSeat = {
+    agent: handle.agent,
+    rowHash,
+    revoke(): Promise<void> {
+      revocation ??= revoke()
+      return revocation
+    },
     keepAlive(): void {
       /* v8 ignore next -- timer is always set before a ResidentSeat becomes externally reachable
          (arm() runs synchronously in retainResident before the object escapes), and clearTimeout
@@ -1620,6 +1748,174 @@ async function senderClassFor(spec: BridgeSpec, from: string): Promise<SenderCla
 }
 
 /**
+ * Refuse any exchange a quarantined (`invalid`) seat row is part of. The
+ * parser drops a quarantined seat's driver and admission fields, so without
+ * this step the seat would read as a default-loop seat and its mail would be
+ * delivered by the wrong driver. Judged on both parties; a non-seat sender
+ * (a guest, the operator) has no row and is never refused here.
+ * @param registry - the loaded registry; `undefined` (no registry file) judges nothing.
+ * @param from - the message's sender address.
+ * @param to - the recipient address.
+ * @returns the refusal reason, or undefined when neither party is quarantined.
+ */
+function seatRowInvalidRefusal(registry: OrgRegistry | undefined, from: string, to: string): string | undefined {
+  for (const seat of [from, to]) {
+    const reason = seatInvalidReason(registry, seat)
+    if (reason !== undefined) return `seat-row-invalid: seat "${seat}": ${reason}`
+  }
+  return undefined
+}
+
+/**
+ * Judge one piece of mail against a non-default-driver seat's row: the driver
+ * must be registered in this host, and the row's own admission lists
+ * ({@link admitsMail}: default-deny on sender and on class) must admit the
+ * sender. The whole judgment fails CLOSED - a throw anywhere in it is a
+ * refusal, never a pass.
+ * @param ctx - plugin context carrying the agent registry.
+ * @param view - the recipient seat's frozen row view.
+ * @param from - the message's sender address.
+ * @param senderClass - the sender's registry-derived class.
+ * @returns the refusal reason, or undefined when the seat admits the mail.
+ */
+function seatDriverAdmissionRefusal(ctx: Context, view: SeatRowView, from: string, senderClass: SenderClass): string | undefined {
+  try {
+    if (!ctx.agents.listDrivers().includes(view.driver)) {
+      return `seat-driver-unavailable: seat "${view.seat}" row says driver "${view.driver}" but no such agent driver is registered in this host`
+    }
+    const verdict = admitsMail(view.row, { from, classes: [senderClass] })
+    if (!verdict.allow) {
+      return `seat-driver-admission-denied: seat "${view.seat}" does not admit mail from "${from}": ${verdict.reason}`
+    }
+    return undefined
+  } catch (error) {
+    return `seat-driver-admission-error: seat "${view.seat}" admission could not be judged, so the mail is refused: ${safeString(error)}`
+  }
+}
+
+/**
+ * Dispose the bridge's resident for a seat whose row no longer authorises it,
+ * awaiting the teardown. Best-effort for callers that are about to refuse
+ * anyway: a teardown failure is logged, never raised.
+ * @param ctx - plugin context carrying the logger.
+ * @param spec - resolved serving parameters carrying the residency map.
+ * @param name - the seat name.
+ */
+async function revokeResident(ctx: Context, spec: BridgeSpec, name: string): Promise<void> {
+  const resident = spec.residents.get(name)
+  if (resident === undefined) return
+  ctx.logger.warn(`mailbox-bridge: disposing the resident for seat "${name}": its registry row no longer authorises it`)
+  try {
+    await resident.revoke()
+  } catch (error) {
+    ctx.logger.warn(`mailbox-bridge: disposing the resident for seat "${name}" failed: ${safeString(error)}`)
+  }
+}
+
+/** What the live-path gate decided about an already-resident agent. */
+type LiveGate =
+  | { readonly kind: 'ok' }
+  | { readonly kind: 'revoked' }
+  | { readonly kind: 'refuse'; readonly reason: string }
+
+/**
+ * Sessions whose live log has been seen to match the driver their row selects.
+ * Positive only: a log that makes no claim yet is re-read on the next
+ * delivery, and a mismatch is never cached.
+ */
+const verifiedLiveDrivers = new WeakMap<object, SeatDriverKey>()
+
+/**
+ * The live path's two gates, run before a message is steered into a resident
+ * agent:
+ *
+ * 1. **Revocation.** A resident composed under a non-default row is only
+ *    trusted while the row is byte-for-byte what it was composed under (the
+ *    security-field hash). A different hash, or a non-default row facing a
+ *    resident with no recorded hash, disposes the resident and the delivery
+ *    proceeds cold, so the driver re-validates against host config. A
+ *    non-default row facing a live agent this bridge does not own cannot be
+ *    disposed, so the mail is refused rather than steered into it.
+ * 2. **Flip.** The live log's recorded driver must match the row's, judged on
+ *    `agent.session.events` with a per-agent positive cache.
+ * @param ctx - plugin context.
+ * @param spec - resolved serving parameters carrying the residency map.
+ * @param name - the seat name.
+ * @param view - the seat's frozen row view; undefined for a default-loop or unknown seat.
+ * @param live - the agent the registry resolved for the seat's session.
+ * @returns the gate's verdict.
+ */
+async function gateLiveSeat(ctx: Context, spec: BridgeSpec, name: string, view: SeatRowView | undefined, live: Agent): Promise<LiveGate> {
+  const driver = view?.driver ?? DEFAULT_SEAT_DRIVER
+  const resident = spec.residents.get(name)
+  const owned = resident !== undefined && resident.agent === live
+  if (view !== undefined && driver !== DEFAULT_SEAT_DRIVER) {
+    if (!owned) {
+      return {
+        kind: 'refuse',
+        reason: `seat-driver-live-unmanaged: seat "${name}" row says driver "${driver}" but its live agent is not one this bridge composed, so it cannot be revoked or trusted`,
+      }
+    }
+    if (resident.rowHash !== view.rowHash) {
+      ctx.logger.warn(`mailbox-bridge: seat "${name}" registry row changed under its resident (or the resident has no recorded row); disposing it so the next delivery is cold`)
+      await resident.revoke()
+      return { kind: 'revoked' }
+    }
+  } else if (owned && resident.rowHash !== undefined) {
+    ctx.logger.warn(`mailbox-bridge: seat "${name}" no longer selects the driver its resident was composed under; disposing it so the next delivery is cold`)
+    await resident.revoke()
+    return { kind: 'revoked' }
+  }
+  if (verifiedLiveDrivers.get(live) === driver) return { kind: 'ok' }
+  let recorded: ReturnType<typeof recordedSeatDriver>
+  try {
+    recorded = recordedSeatDriver(live.session.events)
+  } catch (error) {
+    if (driver !== DEFAULT_SEAT_DRIVER) {
+      return { kind: 'refuse', reason: `seat-driver-flip-check-failed: seat "${name}" live log could not be read, so the mail is refused: ${safeString(error)}` }
+    }
+    ctx.logger.warn(`mailbox-bridge: could not read the live log of seat "${name}" for a driver flip; delivering under the default loop as before: ${safeString(error)}`)
+    return { kind: 'ok' }
+  }
+  const flip = seatDriverFlipRefusal(name, driver, recorded)
+  if (flip !== undefined) {
+    ctx.logger.warn(`mailbox-bridge: ${flip}`)
+    return { kind: 'refuse', reason: flip }
+  }
+  if (recorded !== undefined) verifiedLiveDrivers.set(live, driver)
+  return { kind: 'ok' }
+}
+
+/**
+ * Diff this cycle's registry against the last one the bridge observed and
+ * make every routing-relevant seat change loud: a warn plus the
+ * `mailbox/seat-driver-row-changed` bus event, and a resident whose seat
+ * just became quarantined is disposed on the spot. Called once per drain
+ * cycle; the registry read is the same mtime-keyed cache every other step
+ * uses, so it costs one `stat`. A registry that will not load is left to the
+ * health check at delivery, and the next good read is diffed against the last
+ * good one.
+ * @param ctx - plugin context carrying the logger and the bus.
+ * @param spec - resolved serving parameters carrying the tracker.
+ */
+async function observeSeatRows(ctx: Context, spec: BridgeSpec): Promise<void> {
+  try {
+    const registry = await cachedRegistry(spec.orgRegistryPath)
+    for (const change of spec.seatRows.observe(registry)) {
+      ctx.logger.warn(`mailbox-bridge: registry row of seat "${change.seat}" changed (${change.changed.join(', ')})`)
+      ctx.emit('mailbox/seat-driver-row-changed', { seat: change.seat, changed: change.changed })
+      if (change.nowInvalid && !change.wasInvalid) await revokeResident(ctx, spec, change.seat)
+    }
+  } catch (error) {
+    // A registry that will not load is the health check's to report at
+    // delivery; any other failure here must not break the drain it rides on.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      ctx.logger.warn(`mailbox-bridge: seat-row change check skipped: ${safeString(error)}`)
+    }
+  }
+}
+
+/**
  * Create the first session for a seat that has never run — the basic
  * wake-up: mail alone provisions the seat, no hire script required.
  *
@@ -1636,6 +1932,7 @@ async function senderClassFor(spec: BridgeSpec, from: string): Promise<SenderCla
  * @param sessionId - the derived durable session id to create.
  * @param cwd - the seat's own project directory, from the org registry.
  * @param name - the seat name (which is also its address), for its tool rule and attribution.
+ * @param resolved - the seat's row view `deliverLease` already judged; absent, the view is read from the registry cache.
  * @throws {@link SeatMutedToolsError} when the resolved tool rule leaves the
  *   seat with no tools at all — caught in `deliverLease`, never here.
  */
@@ -1645,14 +1942,15 @@ async function createTarget(
   sessionId: ReturnType<typeof deriveNamedSessionId>,
   cwd: string,
   name: string,
+  resolved?: ResolvedSeatView,
 ): Promise<AgentHandle> {
   // The SEAT's directory, never `process.cwd()`. The host's cwd is wherever it
   // was launched from — systemd sets none, so it resolves to the home directory
   // — and the UI groups sessions by cwd. A seat provisioned with the host's cwd
   // is filed under a workspace nobody opens: the session is live and correct and
   // simply cannot be found. That is the "ghost session" class.
-  return composeSeatAgent(ctx, spec, name, 'wake', (agentOptions, setup) =>
-    ctx.agents.create({ sessionId, meta: { cwd }, agentOptions, setup }))
+  return composeSeatAgent(ctx, spec, name, 'wake', (agentOptions, setup, driver) =>
+    ctx.agents.create({ sessionId, meta: { cwd }, agentOptions, setup, ...driver }), resolved)
 }
 
 /**
@@ -1669,21 +1967,111 @@ async function createTarget(
  * @param spec - resolved serving parameters carrying the registry path.
  * @param sessionId - the derived durable session id to resume.
  * @param name - the seat name (which is also its address), for its tool rule and attribution.
+ * @param resolved - the seat's row view `deliverLease` already judged; absent, the view is read from the registry cache.
  * @throws {@link SeatMutedToolsError} when the resolved tool rule leaves the
  *   seat with no tools at all. `deliverLease` catches it for the drain's own
  *   wake path; `injectRefusalNotice`'s call (resuming a dormant SENDER to
  *   notice it) already wraps this in a best-effort catch-all, so a sender
  *   that happens to be muted itself degrades to "notice not logged" rather
  *   than a second refusal.
+ * @throws {@link SeatDriverFlipError} when the stored log was written by a
+ *   different driver than the seat's row selects. This is the single resume
+ *   funnel, so the cold-path flip check lives here: it runs before anything is
+ *   composed, so a refused seat is never resumed.
  */
 async function resumeTarget(
   ctx: Context,
   spec: BridgeSpec,
   sessionId: ReturnType<typeof deriveNamedSessionId>,
   name: string,
+  resolved?: ResolvedSeatView,
 ): Promise<AgentHandle> {
-  return composeSeatAgent(ctx, spec, name, 'cold-resume', (agentOptions, setup) =>
-    ctx.agents.resume({ resumeSessionId: sessionId, agentOptions, setup }))
+  const view = resolved !== undefined ? resolved.view : await readSeatViewFailOpen(spec, name)
+  await assertStoredLogDriver(ctx, name, sessionId, view?.driver ?? DEFAULT_SEAT_DRIVER)
+  return composeSeatAgent(ctx, spec, name, 'cold-resume', (agentOptions, setup, driver) =>
+    ctx.agents.resume({ resumeSessionId: sessionId, agentOptions, setup, ...driver }), { view })
+}
+
+/**
+ * A seat row view as `deliverLease` resolved it, wrapped so "resolved, and the
+ * seat is a default-loop or unknown one" (`view` undefined) is distinguishable
+ * from "not resolved yet" (the wrapper itself absent).
+ */
+interface ResolvedSeatView {
+  /** The seat's frozen view, or undefined for a default-loop, unknown or quarantined seat. */
+  readonly view: SeatRowView | undefined
+}
+
+/**
+ * Read a seat's row view from the bridge's registry cache, failing OPEN to
+ * "no view" (the default loop) when the registry will not load - exactly the
+ * posture {@link senderClassFor} and {@link seatToolsRule} already take.
+ * @param spec - resolved serving parameters carrying the registry path.
+ * @param name - the seat name.
+ * @returns the seat's view, or undefined.
+ */
+async function readSeatViewFailOpen(spec: BridgeSpec, name: string): Promise<SeatRowView | undefined> {
+  try {
+    return seatViewOf(await cachedRegistry(spec.orgRegistryPath), name)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Thrown by the cold-resume path when a seat's stored session log was written
+ * by a different driver than its registry row now selects (a flip), or by
+ * both (`mixed`). `deliverLease` catches it beside {@link SeatMutedToolsError}
+ * and turns its message into the refusal the sender sees; the message names
+ * the founder as the remedy and prints no command.
+ */
+export class SeatDriverFlipError extends Error {
+  constructor(
+    readonly seatName: string,
+    readonly rowDriver: SeatDriverKey,
+    readonly logDriver: string,
+  ) {
+    super(seatDriverFlipReason(seatName, rowDriver, logDriver))
+    this.name = 'SeatDriverFlipError'
+  }
+}
+
+/**
+ * Cold-path flip check: classify the stored log with `persistence.inspect` and
+ * refuse when it holds the other driver's history. A log that never answered a
+ * model turn makes no claim and passes.
+ *
+ * Fail posture follows the driver: for a non-default seat an unreadable log
+ * fails CLOSED (the throw reaches the drain's failure path), because resuming
+ * a Claude Code seat on an unverified log is exactly what the check exists to
+ * stop. For a default-loop seat it fails OPEN with a warning, preserving
+ * today's behaviour for a deployment whose persistence backend cannot inspect;
+ * the host door's own guard still covers the operator's open and fork.
+ * @param ctx - plugin context carrying the persistence service.
+ * @param name - the seat name.
+ * @param sessionId - the session about to be resumed.
+ * @param rowDriver - the driver the seat's row selects.
+ * @throws {@link SeatDriverFlipError} on a flip.
+ */
+async function assertStoredLogDriver(
+  ctx: Context,
+  name: string,
+  sessionId: ReturnType<typeof deriveNamedSessionId>,
+  rowDriver: SeatDriverKey,
+): Promise<void> {
+  let recorded: ReturnType<typeof recordedSeatDriver>
+  try {
+    const persistence = ctx.get('sessionPersistence')
+    if (persistence === undefined) throw new Error('no session-persistence backend is composed')
+    recorded = recordedSeatDriver((await persistence.inspect(sessionId)).events)
+  } catch (error) {
+    if (rowDriver !== DEFAULT_SEAT_DRIVER) {
+      throw new Error(`mailbox-bridge: cannot verify the stored session log of seat "${name}" against its "${rowDriver}" driver: ${safeString(error)}`, { cause: error })
+    }
+    ctx.logger.warn(`mailbox-bridge: could not inspect the stored log of seat "${name}" for a driver flip; resuming under the default loop as before: ${safeString(error)}`)
+    return
+  }
+  if (recorded !== undefined && recorded !== rowDriver) throw new SeatDriverFlipError(name, rowDriver, recorded)
 }
 
 /**
@@ -1763,8 +2151,13 @@ async function composeSeatAgent(
   spec: BridgeSpec,
   name: string,
   requirement: string,
-  mint: (agentOptions: { provider: string; model: string }, setup: AgentSetup) => Promise<AgentHandle>,
+  mint: SeatMint,
+  resolved?: ResolvedSeatView,
 ): Promise<AgentHandle> {
+  // The driver read fails open to the default loop on an unreadable registry,
+  // exactly as `senderClassFor` does today.
+  const view = resolved !== undefined ? resolved.view : await readSeatViewFailOpen(spec, name)
+  if (view !== undefined && view.driver !== DEFAULT_SEAT_DRIVER) return composeDriverSeat(ctx, name, view, mint)
   const defaultModel = ctx.get('agentDefaultModel')
   if (defaultModel === undefined) {
     throw new Error(`mailbox-bridge: ${requirement} requires the default model-selection service`)
@@ -1783,7 +2176,10 @@ async function composeSeatAgent(
     }
     restriction = outcome
   }
-  const handle = await mint({ provider: selection.provider, model: selection.model }, setup)
+  // Default seats pass NO driver argument at all: the key is absent from the
+  // create/resume call, so the call is byte-for-byte what it was before keyed
+  // drivers existed.
+  const handle = await mint({ provider: selection.provider, model: selection.model }, setup, {})
   // Setup composes, it never drives (see its own contract) — the durable
   // notice of what setup did is appended here, after creation resolves,
   // mirroring the refusal notice's append through the returned handle.
@@ -1791,6 +2187,53 @@ async function composeSeatAgent(
   // this line was never reached for it.
   if (restriction !== undefined) {
     handle.agent.session.append('user/message', seatToolRestrictionUserMessage(name, restriction), { surfaceOp: 'append' })
+    emitSeatToolsRestricted(ctx, name, restriction)
+  }
+  return handle
+}
+
+/**
+ * Creates or resumes the agent with the composed options; `driver` is spread
+ * into the call, so it is either `{}` (the key stays absent) or `{ driver }`.
+ */
+type SeatMint = (
+  agentOptions: AgentOptions & SeatBindingOptions,
+  setup: AgentSetup,
+  driver: { readonly driver?: string },
+) => Promise<AgentHandle>
+
+/**
+ * Compose a seat that runs under a non-default driver. The default-loop
+ * wiring does not apply: there is no model-selection requirement or install
+ * (the driver owns its model, from host-private config), and no restriction
+ * notice is appended to the seat's log (the driver's log is not the bridge's
+ * to write), but the seat's tool restriction is still applied in `setup`, and
+ * the bus event and a log line still report it. The driver receives the frozen
+ * row binding in `agentOptions.seatBinding`, the same view admission judged.
+ * @param ctx - plugin context.
+ * @param name - the seat name.
+ * @param view - the seat's frozen row view.
+ * @param mint - creates or resumes the agent.
+ * @returns the composed handle.
+ * @throws {@link SeatMutedToolsError} when the seat's tool rule leaves it no tools.
+ */
+async function composeDriverSeat(ctx: Context, name: string, view: SeatRowView, mint: SeatMint): Promise<AgentHandle> {
+  const rule = view.row.tools
+  let restriction: SeatToolRestrictionOutcome | undefined
+  const setup: AgentSetup = (agentCtx): void => {
+    // A rule with no tool registry to enforce it would leave the seat
+    // unrestricted: refuse to compose instead.
+    if (rule !== undefined && agentCtx.get('tools') === undefined) {
+      throw new Error(`mailbox-bridge: seat "${name}" has a tool restriction but its agent context has no tools service; refusing to compose it unrestricted`)
+    }
+    const outcome = applySeatToolRestriction(agentCtx, name, rule)
+    if (outcome !== undefined && outcome.remaining.length === 0) throw new SeatMutedToolsError(name, outcome)
+    restriction = outcome
+  }
+  const agentOptions: AgentOptions & SeatBindingOptions = { seatBinding: seatBindingOf(view) }
+  const handle = await mint(agentOptions, setup, { driver: view.driver })
+  if (restriction !== undefined) {
+    ctx.logger.info(`mailbox-bridge: seat "${name}" (${view.driver} driver) tool restriction applied; ${restriction.remaining.length} tools remain, ${restriction.missing.length} configured names unknown`)
     emitSeatToolsRestricted(ctx, name, restriction)
   }
   return handle
@@ -1865,10 +2308,31 @@ export interface SeatToolsRestricted {
   readonly remaining: readonly string[]
 }
 
+/**
+ * One routing-relevant seat row change seen on a registry reload, carried on
+ * the context bus as `mailbox/seat-driver-row-changed`.
+ */
+export interface SeatDriverRowChanged {
+  /** The seat whose row changed. */
+  readonly seat: string
+  /**
+   * The security fields that differ: any of `driver`, `sessionId`, `cwd`,
+   * `admit_from`, `admit_sender_classes`, `test`, `tools`, plus `invalid`
+   * (the quarantine reason changed), `added` or `removed`.
+   */
+  readonly changed: readonly string[]
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     /** Union of every mounted bridge's serving roster in mount order. */
     mailboxBridgeSpecs?: MailboxBridgeSpecs
+    /**
+     * The bridge's single view of the org registry's seat rows: what a driver
+     * glue asks to confirm the row it was bound to is still the current one.
+     * Two mounted bridges naming different registry paths fail at mount.
+     */
+    mailboxSeatRows?: MailboxSeatRows
   }
 
   interface Events {
@@ -1919,6 +2383,18 @@ declare module '@deepseek-ai/cordis' {
      * @mode emit
      */
     'mailbox/seat-tools-restricted'(restriction: SeatToolsRestricted): void
+
+    /**
+     * A registry reload changed a routing-relevant field of a seat whose
+     * driver is or was non-default (or quarantined a seat). Emitted once per
+     * affected seat per reload, alongside a `logger.warn`, so a registry edit
+     * that could re-aim, widen or narrow a Claude Code seat is never silent.
+     * The seat's resident, if any, is disposed on its next delivery (a changed
+     * security hash) or immediately (the row went invalid).
+     * @param change - the seat and the fields that differ.
+     * @mode emit
+     */
+    'mailbox/seat-driver-row-changed'(change: SeatDriverRowChanged): void
   }
 }
 
@@ -1990,7 +2466,13 @@ export const internals = {
       limit: spec.maxClaimPerCycle,
       staleClaimMs: spec.staleClaimMs,
     }
+    // Started before the claim and awaited only when mail arrived: an idle
+    // cycle must not be held open by the registry stat, while a cycle with
+    // mail sees its row changes (and any disposal of a resident that just
+    // lost its row) before the first lease is judged.
+    const observed = observeSeatRows(ctx, spec)
     const leases = await ctx.mailbox.claim(filter)
+    if (leases.length > 0) await observed
     for (const lease of leases) {
       try {
         const result = await deliverLease(ctx, spec, lease)
@@ -2019,6 +2501,20 @@ export const internals = {
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
   const spec = resolveBridgeSpec(config)
+  // One view of the registry per process: a second bridge must read the same
+  // file, or the `mailboxSeatRows` service could answer for a registry the
+  // other bridge does not enforce. Fail the mount, loudly, rather than let
+  // two views exist.
+  const seatRows = ctx.get('mailboxSeatRows')
+  if (seatRows !== undefined && seatRows.registryPath !== spec.orgRegistryPath) {
+    throw new Error(
+      `mailbox-bridge: orgRegistryPath "${spec.orgRegistryPath}" differs from the "${seatRows.registryPath}" another mounted bridge already provides mailboxSeatRows for; `
+      + 'a process has exactly one view of the org registry',
+    )
+  }
+  if (seatRows === undefined) {
+    ctx.provide('mailboxSeatRows', createMailboxSeatRows(spec.orgRegistryPath, () => registryCache.get(spec.orgRegistryPath)?.registry))
+  }
   ctx.provide('mailboxBridgeSpecs', [...ctx.get('mailboxBridgeSpecs') ?? [], spec])
   let draining = false
   const cycle = (): void => {
@@ -2037,6 +2533,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       })
   }
   await internals.drainOnce(ctx, spec)
+  // An idle first drain does not wait for its registry read, so settle it here:
+  // the `mailboxSeatRows` service answers from the cache this read fills, and
+  // it must be filled (and the change baseline set) before the mount returns.
+  await observeSeatRows(ctx, spec)
   const timer = setInterval(cycle, spec.pollIntervalMs)
   // Unref'd: the drain loop must not pin its host's event loop. Deployments
   // that exist only to serve mail hold themselves up through other handles.

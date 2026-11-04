@@ -34,6 +34,22 @@
 
 轮询计时器从不钉住宿主事件循环（`unref`）：只为服务邮件而存在的部署须通过其他句柄维持自身存活。挂载后的结构性失败会清除计时器并抛出，而不是永远静默空转。
 
+## 席位驱动（OP #292）
+
+注册表中的席位行可以选择运行该席位的驱动（`driver: claude-code`；缺省或 `default` 即进程内 agent 循环），并列出谁可以给它发邮件（`admit_from`、`admit_sender_classes`）。行是不受信的路由数据：模型、effort、上限和二进制路径都在主机私有配置里，绝不在行上。桥是这方面唯一读取注册表的一方：每次投递它把收件席位的行一次性解析为冻结视图（行本身加上其安全字段投影的 sha256），准入、翻转检查和交给驱动的绑定都用这同一份视图。
+
+| 步骤 | 行为 |
+|---|---|
+| `seat-row-invalid` | 紧接注册表健康检查之后、测试边界之前，发往或来自被隔离席位（注册表解析器标记 `invalid`）的邮件会带着隔离原因被拒绝。存活路径同样适用，且其席位变为 invalid 的常驻 agent 会被销毁。 |
+| 准入 | 对非默认席位，在防护和发送方类别之后：驱动必须已在本主机注册（`seat-driver-unavailable`），随后共享的 `admitsMail` 规则必须放行发送方（`seat-driver-admission-denied`，指明失败的部分：不在 `admit_from`、`admit_from` 为空、或类别未列出）。任何异常都以 `seat-driver-admission-error` 关闭式拒绝。`guest:` 发送方永远不在行的列表里，所以访客邮件（包括前缀后面伪造的名册名字）会被拒绝。 |
+| 组装 | 非默认席位以 `driver` 和 `agentOptions: { seatBinding: { seat, rowHash, row } }`（冻结）创建和恢复，没有默认模型要求、不安装模型选择、也不向其日志追加限制通知；工具限制仍然生效（有规则却没有工具服务时拒绝组装），总线事件和一条日志行保留。默认席位根本不传 `driver` 键，执行的 setup 与以往完全一致。注册表无法加载时按默认驱动处理，与发送方类别的做法相同。 |
+| 翻转 | 已存储的日志（单一恢复入口里的 `persistence.inspect`）或存活 agent 的日志不得包含另一驱动的历史：`seat-driver-flip: ... ask the founder to reseed this seat or revert the row`（不打印任何命令）。无人应答过的日志不构成声明。行里换新的 `sessionId`（创始人重新播种）即指向全新日志并可投递。默认席位在日志不可读时放行，驱动席位则关闭式拒绝。 |
+| 撤销 | 常驻 agent 记录其行哈希。存活路径上哈希不同、或驱动席位面对没有记录哈希的常驻 agent，都会销毁该常驻 agent，投递转为冷启动，由驱动对照主机配置重新验证。驱动席位面对桥未组装的存活 agent 时拒绝（`seat-driver-live-unmanaged`）。 |
+| 可见性 | 每次注册表重载都按席位做差异比较：对当前或曾经为非默认（或刚变为 invalid）的席位，桥发出警告并发出 `mailbox/seat-driver-row-changed { seat, changed }`。 |
+| 拒绝通知 | 被拒发送方的行若选择了非默认驱动或被隔离，则其日志中不会有通知（桥既不恢复它也不追加）；`mailbox/refused` 事件和一条警告保留。 |
+
+桥提供上下文服务 `mailboxSeatRows`（`registryPath`，以及 `current(seat)`，从桥自己的缓存返回冻结的行和哈希，未知或被隔离的席位返回 `undefined`），供驱动胶水确认绑定仍是最新的。两个桥若指定不同的 `orgRegistryPath`，挂载时失败。桥从不提供驱动的邮件租约钩子：租约仍然只在 follow-up 之后结算一次。已知遗留：暂停或超额的驱动席位会把邮件排队，而租约按已投递结算；真正的邮箱租约汇点属于后续切片。
+
 ## Roster-drift alarm (SWD-118)
 
 挂载时，仅一次，在第一次排水之前——无论此刻是否有邮件在等待——本桥会把 `addresses` 声明给共享的 `ctx.mailbox` 注册表（[`declareRoster`](../mailbox/README.md#roster-drift-alarm)），并对照组织注册表做检查。两种情况会响亮告警，绝不抛出、绝不拒绝挂载、绝不阻塞邮件：本桥的名册与 `tool-mailbox` 的名册不一致，以及本桥服务了组织注册表并不认识的名称。注册表若根本不存在，属于合法的“无注册表”世界，直接跳过；注册表存在却无法加载，则告警说明检查未能完成，而不是悄悄当作“一切正常”。完整契约（包括刻意不告警的情形）见 [mailbox 包的 roster-drift alarm](../mailbox/README.md#roster-drift-alarm)。
