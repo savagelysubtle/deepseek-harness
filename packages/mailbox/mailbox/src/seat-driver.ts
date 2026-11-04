@@ -115,6 +115,8 @@ export function admitsMail(
         : `sender "${request.from}" is not in admit_from`,
     }
   }
+  // Fail closed: a sender with no class at all is not "every class listed".
+  if (request.classes.length === 0) return { allow: false, reason: 'no sender class supplied' }
   const classes = row.admit_sender_classes ?? []
   for (const senderClass of request.classes) {
     if (!classes.includes(senderClass)) {

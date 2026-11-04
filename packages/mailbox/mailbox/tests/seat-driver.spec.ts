@@ -90,6 +90,14 @@ describe('admitsMail', () => {
     })
   })
 
+  it('fails closed on an empty classes array, naming it', () => {
+    expect(admitsMail(row, { from: 'alfred', classes: [] })).toEqual({ allow: false, reason: 'no sender class supplied' })
+    // An unlisted sender is still refused for the sender first.
+    expect(admitsMail(row, { from: 'mallory', classes: [] })).toEqual({
+      allow: false, reason: 'sender "mallory" is not in admit_from',
+    })
+  })
+
   it('allows a listed sender with every class listed', () => {
     expect(admitsMail(row, { from: 'alfred', classes: ['seat'] })).toEqual({ allow: true })
     expect(admitsMail({ admit_from: ['a'], admit_sender_classes: ['seat', 'unverified'] }, { from: 'a', classes: ['seat', 'unverified'] }))
