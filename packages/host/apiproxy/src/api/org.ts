@@ -41,6 +41,18 @@ export interface OrgSeat {
   readonly department?: string
   /** Restricts which tools the seat's agent may use; absent means unrestricted. */
   readonly tools?: OrgSeatTools
+  /** Which driver runs the seat; absent means `default`. Routing only: cost and trust settings live in host config. */
+  readonly driver?: 'default' | 'claude-code'
+  /** Seats whose mail a `claude-code` seat admits; absent or empty admits nobody. */
+  readonly admit_from?: readonly string[]
+  /** Sender classes a `claude-code` seat admits; absent admits none. */
+  readonly admit_sender_classes?: readonly ('seat' | 'unverified')[]
+  /**
+   * Read-only verdict, present only on the `org.get` view: the parser
+   * quarantined this seat's driver fields for the reason given, and mail to
+   * or from it is refused. Never part of the write document.
+   */
+  readonly invalid?: string
 }
 
 /** One undirected mail-permission edge between two seat names. */
@@ -118,6 +130,12 @@ export interface OrgRegistryDocumentSeat {
   readonly department?: string
   /** Restricts which tools the seat's agent may use; absent means unrestricted. */
   readonly tools?: OrgSeatTools
+  /** Which driver runs the seat; absent means `default`. Routing only: cost and trust settings live in host config. */
+  readonly driver?: 'default' | 'claude-code'
+  /** Seats whose mail a `claude-code` seat admits; absent or empty admits nobody. */
+  readonly admit_from?: readonly string[]
+  /** Sender classes a `claude-code` seat admits; absent admits none. */
+  readonly admit_sender_classes?: readonly ('seat' | 'unverified')[]
 }
 
 /**

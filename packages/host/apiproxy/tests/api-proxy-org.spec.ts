@@ -794,3 +794,167 @@ describe('org.writeServed', () => {
     expect(error.message).toContain('could not be read for the concurrency check')
   })
 })
+
+/** A block-style registry text with one claude-code seat, plus any extra row YAML for it. */
+function writeDriverRegistry(dir: string, extraClaudieLines: readonly string[] = []): string {
+  const path = join(dir, 'registry.yml')
+  expect(path.startsWith(tmpdir())).toBe(true)
+  writeFileSync(path, [
+    `baseDir: ${dir}`,
+    'seats:',
+    '  alfred:',
+    '    cwd: .',
+    '  claudie:',
+    '    cwd: .',
+    '    driver: claude-code',
+    '    admit_from:',
+    '    - alfred',
+    '    admit_sender_classes:',
+    '    - seat',
+    ...extraClaudieLines,
+    'edges:',
+    '- - alfred',
+    '  - claudie',
+    'callUp: []',
+    '',
+  ].join('\n'))
+  return path
+}
+
+describe('seat driver fields (OP #292 S3)', () => {
+  it('org.get returns the driver fields on the view and the document, and the schemas keep them', async () => {
+    const dir = tempDir('dsh-org-registry-')
+    const path = writeDriverRegistry(dir)
+    const value = expectOk(await api(await floor(), { orgRegistryPath: path, orgProfileDir: tempDir('dsh-org-profile-') }).org.get(request()))
+    const parsed = orgGetValueSchema.parse(value)
+    if (!parsed.registry.ok) throw new Error('unreachable')
+    const expected = { driver: 'claude-code', admit_from: ['alfred'], admit_sender_classes: ['seat'] }
+    expect(parsed.registry.registry.seats.claudie).toMatchObject(expected)
+    expect(parsed.registry.document.seats.claudie).toEqual({ cwd: '.', ...expected })
+    expect('invalid' in (parsed.registry.registry.seats.claudie as object)).toBe(false)
+    expect(parsed.registry.document.seats.alfred).toEqual({ cwd: '.' })
+  })
+
+  it('org.get reports a quarantined seat as read-only `invalid` on the view only, never in the document', async () => {
+    const dir = tempDir('dsh-org-registry-')
+    const path = writeDriverRegistry(dir, ['    model: haiku'])
+    const value = expectOk(await api(await floor(), { orgRegistryPath: path, orgProfileDir: tempDir('dsh-org-profile-') }).org.get(request()))
+    const parsed = orgGetValueSchema.parse(value)
+    if (!parsed.registry.ok) throw new Error('unreachable')
+    expect(parsed.registry.registry.seats.claudie?.invalid).toBe('model belongs in host config')
+    expect(parsed.registry.registry.seats.claudie?.driver).toBeUndefined()
+    expect(parsed.registry.registry.seats.alfred?.invalid).toBeUndefined()
+    expect('invalid' in (parsed.registry.document.seats.claudie as object)).toBe(false)
+    // The document the UI edits can be written straight back: the quarantined
+    // seat degrades to a plain row rather than carrying `invalid` into a write.
+    expect(orgRegistryDocumentSchema.safeParse(parsed.registry.document).success).toBe(true)
+  })
+
+  it('org.write preserves a claude-code row through the file and a re-read', async () => {
+    const dir = tempDir('dsh-org-registry-')
+    const path = writeRegistry(dir, { alfred: {} })
+    const app = api(await floor(), { orgRegistryPath: path, orgProfileDir: tempDir('dsh-org-profile-') })
+    const before = expectOk(await app.org.get(request()))
+    if (!before.registry.ok) throw new Error('unreachable')
+    const document: OrgRegistryDocument = {
+      baseDir: dir,
+      seats: {
+        alfred: { cwd: '.' },
+        claudie: { cwd: '.', driver: 'claude-code', admit_from: ['alfred'], admit_sender_classes: ['seat', 'unverified'] },
+      },
+      edges: [['alfred', 'claudie']],
+      callUp: [],
+    }
+    expect(orgRegistryDocumentSchema.parse(document)).toEqual(document)
+    const written = expectOk(await app.org.write(requestWith({ document, expectedToken: before.registry.token })))
+    expect(written.registry.seats.claudie).toMatchObject({ driver: 'claude-code', admit_from: ['alfred'], admit_sender_classes: ['seat', 'unverified'] })
+    const text = readFileSync(path, 'utf8')
+    expect(text).toContain('driver: claude-code')
+    const after = expectOk(await app.org.get(request()))
+    if (!after.registry.ok) throw new Error('unreachable')
+    expect(after.registry.document.seats.claudie).toEqual(document.seats.claudie)
+  })
+
+  it('org.write rejects claude_path (and any other host-config key) on a row, and writes nothing', async () => {
+    const dir = tempDir('dsh-org-registry-')
+    const path = writeRegistry(dir, { alfred: {} })
+    const app = api(await floor(), { orgRegistryPath: path, orgProfileDir: tempDir('dsh-org-profile-') })
+    const before = expectOk(await app.org.get(request()))
+    if (!before.registry.ok) throw new Error('unreachable')
+    const original = readFileSync(path)
+    const document = {
+      baseDir: dir,
+      seats: { alfred: { cwd: '.' }, claudie: { cwd: '.', driver: 'claude-code', claude_path: '/usr/bin/claude' } },
+      edges: [],
+      callUp: [],
+    }
+    // The wire schema is strict: the key is rejected, not stripped.
+    expect(orgRegistryDocumentSchema.safeParse(document).success).toBe(false)
+    // And the host refuses it even if a caller skips the wire schema.
+    const error = expectErr(await app.org.write(requestWith({
+      document: document as unknown as OrgRegistryDocument,
+      expectedToken: before.registry.token,
+    })))
+    expect(error.code).toBe('org-registry-rejected')
+    expect(error.message).toContain('claude_path belongs in host config')
+    expect(readFileSync(path)).toEqual(original)
+    expect(readdirSync(dir).filter(name => name.includes('.bak-'))).toEqual([])
+  })
+})
+
+describe('org.write over rows the board cannot round-trip (OP #292 S3)', () => {
+  async function open(path: string) {
+    const app = api(await floor(), { orgRegistryPath: path, orgProfileDir: tempDir('dsh-org-profile-') })
+    const read = expectOk(await app.org.get(request()))
+    if (!read.registry.ok) throw new Error('unreachable')
+    return { app, read: read.registry }
+  }
+
+  it('refuses a save while any row is quarantined, naming the seat and the reason, and touches nothing', async () => {
+    const dir = tempDir('dsh-org-registry-')
+    const path = writeDriverRegistry(dir, ['    model: haiku'])
+    const { app, read } = await open(path)
+    const bytes = readFileSync(path)
+    const files = readdirSync(dir).sort()
+    const error = expectErr(await app.org.write(requestWith({ document: read.document, expectedToken: read.token })))
+    expect(error.code).toBe('org-registry-rejected')
+    expect(error.message).toContain('org-registry-quarantined: seat "claudie" is quarantined (model belongs in host config)')
+    expect(error.message).toContain('fix the registry file by hand, then save again')
+    expect(readFileSync(path)).toEqual(bytes)
+    expect(readdirSync(dir).sort()).toEqual(files)
+  })
+
+  it('refuses a save that would drop the driver of a claude-code row, and touches nothing', async () => {
+    const dir = tempDir('dsh-org-registry-')
+    const path = writeDriverRegistry(dir)
+    const { app, read } = await open(path)
+    const bytes = readFileSync(path)
+    const files = readdirSync(dir).sort()
+    const document: OrgRegistryDocument = {
+      baseDir: dir,
+      seats: { alfred: { cwd: '.' }, claudie: { cwd: '.' } },
+      edges: [['alfred', 'claudie']],
+      callUp: [],
+    }
+    const error = expectErr(await app.org.write(requestWith({ document, expectedToken: read.token })))
+    expect(error.code).toBe('org-registry-rejected')
+    expect(error.message).toContain('seat "claudie" runs the claude-code driver')
+    expect(error.message).toContain('the driver field cannot be removed from the board')
+    expect(readFileSync(path)).toEqual(bytes)
+    expect(readdirSync(dir).sort()).toEqual(files)
+  })
+
+  it('still saves a valid registry and keeps the claude-code fields when only a department changes', async () => {
+    const dir = tempDir('dsh-org-registry-')
+    const path = writeDriverRegistry(dir)
+    const { app, read } = await open(path)
+    const document: OrgRegistryDocument = {
+      ...read.document,
+      seats: { ...read.document.seats, alfred: { cwd: '.', department: 'ops' } },
+    }
+    const written = expectOk(await app.org.write(requestWith({ document, expectedToken: read.token })))
+    expect(written.registry.seats.alfred?.department).toBe('ops')
+    expect(written.registry.seats.claudie).toMatchObject({ driver: 'claude-code', admit_from: ['alfred'], admit_sender_classes: ['seat'] })
+    expect(readFileSync(path, 'utf8')).toContain('driver: claude-code')
+  })
+})

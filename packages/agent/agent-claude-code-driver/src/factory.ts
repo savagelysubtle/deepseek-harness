@@ -11,7 +11,7 @@ import { isAbsolute } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { emitAgentEvent } from '@deepseek-ai/dsh-agent'
 import type {
-  AgentFactory, AgentHandle, AgentSetup, CreateAgentOptions, ResumeAgentOptions, SessionStartSource,
+  AgentFactory, AgentHandle, AgentOptions, AgentSetup, CreateAgentOptions, ResumeAgentOptions, SessionStartSource,
 } from '@deepseek-ai/dsh-agent'
 import { SessionPreparation } from '@deepseek-ai/dsh-session'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
@@ -25,14 +25,19 @@ export interface ResolvedSeat {
   /** Seat key (registry name); keys the live-query slot and the pid ledger. */
   readonly seat: string
   readonly config: ClaudeCodeSeatConfig
+  /**
+   * The founder's working-directory pin for a registry-routed seat. When present the working directory the
+   * caller resolved (`meta.cwd`) must equal it, so a row cannot move the seat.
+   */
+  readonly cwdPin?: string | undefined
 }
 
 /**
  * Finds the seat row for a session. The seat key is `meta.agentPreset` when the
- * caller supplied one, otherwise the session id; the registry slice (S3) will
- * replace this with a lookup in the live seat registry.
+ * caller supplied one, otherwise the session id; a registry-routed seat is found
+ * through the binding the mailbox bridge passes in `agentOptions.seatBinding`.
  */
-export type SeatResolver = (sessionId: SessionId, seatHint: string | undefined) => ResolvedSeat
+export type SeatResolver = (sessionId: SessionId, seatHint: string | undefined, agentOptions: AgentOptions | undefined) => ResolvedSeat
 
 /** Everything the factory needs beyond the agent's own dependencies. */
 export interface FactoryInputs {
@@ -79,12 +84,13 @@ export class ClaudeCodeSeatFactory implements AgentFactory {
 
   async createAgent(ownerCtx: Context, options: CreateAgentOptions): Promise<AgentHandle> {
     this.assertAccepting()
-    const { seat, config } = this.inputs.resolveSeat(options.sessionId, options.meta?.agentPreset)
+    const { seat, config, cwdPin } = this.inputs.resolveSeat(options.sessionId, options.meta?.agentPreset, options.agentOptions)
     const meta = options.meta
     const cwd = meta?.cwd
     if (meta === undefined || cwd === undefined || !isAbsolute(cwd)) {
       throw new Error(`agent-claude-code-driver: seat "${seat}" needs an absolute meta.cwd to start`)
     }
+    this.assertCwdPin(seat, cwd, cwdPin)
     this.assertCanonicalCwd(seat, cwd)
     this.assertSeatFree(seat)
     using preparation = SessionPreparation.create(this.inputs.ctx.sessions.prepare(options.sessionId, {
@@ -103,19 +109,27 @@ export class ClaudeCodeSeatFactory implements AgentFactory {
     const id = options.resumeSessionId
     using preparation = await persistence.prepare(id, options.signal)
     const header = preparation.session.header
-    const { seat, config } = this.inputs.resolveSeat(id, header.agentPreset)
+    const { seat, config, cwdPin } = this.inputs.resolveSeat(id, header.agentPreset, options.agentOptions)
     if (header.cwd === undefined || !isAbsolute(header.cwd)) {
       throw new Error(`agent-claude-code-driver: persisted session "${id}" has no absolute cwd; seat "${seat}" cannot resume`)
     }
+    this.assertCwdPin(seat, header.cwd, cwdPin)
     this.assertCanonicalCwd(seat, header.cwd)
     this.assertSeatFree(seat)
     return await this.publish(ownerCtx, preparation.session, seat, config, header.cwd, options.setup, options.signal, 'resume')
   }
 
+  /** A registry-routed seat may only run in the working directory the founder pinned in host config. */
+  private assertCwdPin(seat: string, cwd: string, pin: string | undefined): void {
+    if (pin !== undefined && cwd !== pin) {
+      throw new Error(`agent-claude-code-driver: seat "${seat}" working directory ${cwd} differs from the host cwd pin ${pin}; refusing to start`)
+    }
+  }
+
   /**
    * The working directory must already be its own realpath: a symlinked cwd
    * would let the transcript lookup and the future permission entries disagree
-   * about where the seat works. (Row-sourced cwd belongs to the registry slice, S3.)
+   * about where the seat works. (A registry-routed seat's pin is checked first, see assertCwdPin.)
    */
   private assertCanonicalCwd(seat: string, cwd: string): void {
     let real: string

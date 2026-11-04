@@ -183,7 +183,33 @@ Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnp
 
 The mail seams a later slice (registry admission in S3, the mailbox bridge's lease in S8) plugs in by providing `ctx.claudeCodeMailHooks`. Both are optional and read at use time, so the provider may load after this plugin.
 
-Source: [`packages/agent/agent-claude-code-driver/src/index.ts:72`](../../packages/agent/agent-claude-code-driver/src/index.ts)
+Source: [`packages/agent/agent-claude-code-driver/src/index.ts:85`](../../packages/agent/agent-claude-code-driver/src/index.ts)
+
+<a id="ctxclaudecodeseatsource--claudecodeseatsource"></a>
+
+### `ctx.claudeCodeSeatSource` — `ClaudeCodeSeatSource`
+
+Finds the registry row of a seat that is not in the static `seats` config. Provided as `ctx.claudeCodeSeatSource` (by the registry glue package); read at use time, so its provider may load after this plugin. A source must refuse (throw) when it cannot prove the row is the bridge's current one.
+
+```ts cordis-catalog
+/**
+ * Resolve one create or resume.
+ * @param request - the session being created or resumed, with the hint and the bridge's seat binding if it passed one.
+ * @returns the seat key and the registry row the source has verified as the bridge's current one.
+ * @throws when the request carries no binding, or the binding is stale or forged.
+ */
+resolve(request: SeatSourceRequest): SeatSourceResolution
+
+/**
+ * Whether the registry currently routes `seat` to this driver; `undefined` when the source cannot tell yet.
+ * Drives the mount-time warning for a host entry that has no registry row.
+ * @param seat - the seat key to look up.
+ * @returns `true` when a row routes the seat to this driver, `false` when none does, `undefined` when unknown.
+ */
+hasRow?(seat: string): boolean | undefined
+```
+
+Source: [`packages/agent/agent-claude-code-driver/src/index.ts:115`](../../packages/agent/agent-claude-code-driver/src/index.ts)
 
 <a id="ctxmailbox--mailboxregistry"></a>
 
@@ -284,7 +310,7 @@ async lookupInboundSince(address: MailboxAddress, sinceMs: number, signal?: Abor
 declareRoster(mountId: string, addresses: readonly string[]): void
 ```
 
-Source: [`packages/mailbox/mailbox/src/index.ts:66`](../../packages/mailbox/mailbox/src/index.ts)
+Source: [`packages/mailbox/mailbox/src/index.ts:74`](../../packages/mailbox/mailbox/src/index.ts)
 
 <a id="mailbox-events"></a>
 
@@ -317,7 +343,29 @@ The bridge refused a claimed lease terminally at admission — registry health, 
 'mailbox/refused'(refusal: MailboxRefusal): void
 ```
 
-Source: [`packages/mailbox/bridge/src/index.ts:1892`](../../packages/mailbox/bridge/src/index.ts)
+Source: [`packages/mailbox/bridge/src/index.ts:2356`](../../packages/mailbox/bridge/src/index.ts)
+
+<a id="mailboxseat-driver-row-changed--emit"></a>
+
+#### `mailbox/seat-driver-row-changed` — emit
+
+A registry reload changed a routing-relevant field of a seat whose driver is or was non-default (or quarantined a seat). Emitted once per affected seat per reload, alongside a `logger.warn`, so a registry edit that could re-aim, widen or narrow a Claude Code seat is never silent. The seat's resident, if any, is disposed on its next delivery (a changed security hash) or immediately (the row went invalid).
+
+```ts cordis-catalog
+/**
+ * A registry reload changed a routing-relevant field of a seat whose
+ * driver is or was non-default (or quarantined a seat). Emitted once per
+ * affected seat per reload, alongside a `logger.warn`, so a registry edit
+ * that could re-aim, widen or narrow a Claude Code seat is never silent.
+ * The seat's resident, if any, is disposed on its next delivery (a changed
+ * security hash) or immediately (the row went invalid).
+ * @param change - the seat and the fields that differ.
+ * @mode emit
+ */
+'mailbox/seat-driver-row-changed'(change: SeatDriverRowChanged): void
+```
+
+Source: [`packages/mailbox/bridge/src/index.ts:2397`](../../packages/mailbox/bridge/src/index.ts)
 
 <a id="mailboxseat-tools-restricted--emit"></a>
 
@@ -361,5 +409,5 @@ Listener failures are logged and contained by Cordis dispatch.
 'mailbox/seat-tools-restricted'(restriction: SeatToolsRestricted): void
 ```
 
-Source: [`packages/mailbox/bridge/src/index.ts:1921`](../../packages/mailbox/bridge/src/index.ts)
+Source: [`packages/mailbox/bridge/src/index.ts:2385`](../../packages/mailbox/bridge/src/index.ts)
 <!-- END GENERATED cordis-surface -->

@@ -7,5 +7,6 @@
 | 包 | 角色 | ctx 键 |
 |---|---|---|
 | [`agent-claude-code-driver/`](agent-claude-code-driver/README.md) | 通过官方 Agent SDK 让席位运行在未经修改的 `claude` 程序上 | 在 `ctx.agents` 上注册 `claude-code` 驱动 |
+| [`agent-claude-code-registry/`](agent-claude-code-registry/README.md) | 为 Claude Code 席位验证邮箱桥的席位绑定,并应用注册表条目的发送者列表 | 提供 `ctx.claudeCodeSeatSource` 与 `ctx.claudeCodeMailHooks` |
 
 Claude Code 驱动的持久事件词汇位于 [`core/agent-claude-code`](../core/agent-claude-code/README.md)。

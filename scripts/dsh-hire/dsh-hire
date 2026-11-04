@@ -1,0 +1,757 @@
+#!/usr/bin/env bash
+# dsh-hire — create or resume a seat's standing session, the sanctioned way.
+#
+# Encodes the gotchas learned 2026-08-28 so hiring is a command, not improvisation:
+#   * a seat spawns from its PROJECT ROOT, never org/<seat>/ (permission friction)
+#   * the durable session id is sha256(seat-name)[:32] — the same derivation the
+#     lock file uses, so id and lock can never drift
+#   * the panel title is pinned via session.rename, or the sidebar shows a
+#     truncated kickoff prompt instead of the seat's name
+#   * the memory scope is derived from the resolved cwd, not the seat name
+set -euo pipefail
+
+HOST="${DSH_HOST:-http://127.0.0.1:3080}"
+REGISTRY="${DSH_ORG_REGISTRY:-$HOME/.dsh/org/registry.yml}"
+PROFILE="${DSH_HIRE_PROFILE:-headless}"
+
+die() { printf 'dsh-hire: %s\n' "$1" >&2; exit 1; }
+
+usage() {
+  cat <<'USAGE'
+usage: dsh-hire <seat> [options]
+
+  --project <path>   project root to spawn from (default: from the org registry)
+  --brief <text>     extra kickoff instructions appended to the persona
+  --title <text>     panel title to pin (default: the seat name)
+  --no-title         skip pinning a title
+  --generic          hire with a generic kickoff when PERSONA.md is missing
+  --no-spawn         spawn nothing; pin the title on the existing session only
+  --dry-run          print what would happen, spawn nothing
+  -h, --help         this
+
+claude-code seats (OP #292):
+  --driver <default|claude-code>   which driver runs the seat (default: default)
+  --model <id>       model for the printed host-config stanza (required for claude-code)
+  --role mail-only   the only role accepted (lead and coder wait for slice S5)
+  --admit-from a,b   seats whose mail the seat admits (default: nobody)
+  --admit <classes>  sender classes admitted (only seat; the default)
+  --test             write test: true on the new row
+  --reseed           founder only: pin a NEW session id on an existing claude-code row;
+                     repeat that row's own --admit-from, --admit and --test values
+A claude-code hire writes only the routing row to the registry, spawns nothing, and
+PRINTS the host-config stanza for the profile; it never writes the profile.
+
+Reads the seat's cwd from ~/.dsh/org/registry.yml and its persona from
+<project>/org/<seat>/PERSONA.md when present. Idempotent: an existing session
+for the seat is resumed, not duplicated.
+USAGE
+}
+
+[ $# -ge 1 ] || { usage; exit 1; }
+case "$1" in -h|--help) usage; exit 0;; -*) die "first argument must be a seat name";; esac
+SEAT="$1"; shift
+
+PROJECT=""; BRIEF=""; TITLE=""; DRY=0; PIN=0; NOSPAWN=0; GENERIC=0
+DRIVER=default; MODEL=""; ROLE=mail-only; ADMIT_FROM=""; ADMIT=seat; TEST=0; RESEED=0; CC_ONLY_FLAG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --project) PROJECT="${2:?--project needs a path}"; shift 2;;
+    --brief)   BRIEF="${2:?--brief needs text}"; shift 2;;
+    --title)   TITLE="${2:?--title needs text}"; shift 2;;
+    --no-title) PIN=0; shift;;
+    --generic) GENERIC=1; shift;;
+    --no-spawn) NOSPAWN=1; PIN=1; shift;;
+    --dry-run) DRY=1; shift;;
+    --driver)  DRIVER="${2:?--driver needs default or claude-code}"; shift 2;;
+    --model)   MODEL="${2:?--model needs a model id}"; CC_ONLY_FLAG="--model"; shift 2;;
+    --role)    ROLE="${2:?--role needs a role}"; CC_ONLY_FLAG="--role"; shift 2;;
+    --admit-from) ADMIT_FROM="${2:?--admit-from needs a comma list}"; CC_ONLY_FLAG="--admit-from"; shift 2;;
+    --admit)   ADMIT="${2:?--admit needs classes}"; CC_ONLY_FLAG="--admit"; shift 2;;
+    --test)    TEST=1; CC_ONLY_FLAG="--test"; shift;;
+    --reseed)  RESEED=1; CC_ONLY_FLAG="--reseed"; shift;;
+    -h|--help) usage; exit 0;;
+    *) die "unknown option: $1";;
+  esac
+done
+
+case "$DRIVER" in
+  default) [ -z "$CC_ONLY_FLAG" ] || die "$CC_ONLY_FLAG only applies with --driver claude-code";;
+  claude-code) ;;
+  *) die "unknown driver \"$DRIVER\" (default, claude-code)";;
+esac
+
+# Seat-name grammar, mirrored from dsh-named-sessions SESSION_NAME_PATTERN_SOURCE.
+printf '%s' "$SEAT" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' \
+  || die "invalid seat name '$SEAT' (must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\$)"
+
+if [ -z "$PROJECT" ]; then
+  PROJECT="$(python3 - "$REGISTRY" "$SEAT" <<'PY'
+import sys, os
+try: import yaml
+except ImportError: sys.exit('pyyaml missing; pass --project explicitly')
+path, seat = sys.argv[1], sys.argv[2]
+if not os.path.exists(path): sys.exit(f'no registry at {path}; pass --project')
+reg = yaml.safe_load(open(path)) or {}
+seats = reg.get('seats') or {}
+if seat not in seats:
+    sys.exit(f'seat "{seat}" is not in the registry; add it there or pass --project')
+entry = seats[seat] or {}
+cwd = entry.get('cwd')
+if not cwd: sys.exit(f'seat "{seat}" has no cwd in the registry')
+base = reg.get('baseDir') or ''
+print(cwd if os.path.isabs(cwd) else os.path.join(base, cwd))
+PY
+)" || exit 1
+fi
+
+[ -d "$PROJECT" ] || die "project root does not exist: $PROJECT"
+PROJECT="$(cd "$PROJECT" && pwd -P)"
+
+# ---------------------------------------------------------------------------
+# claude-code seats (OP #292 S3). Everything below runs ONLY for
+# --driver claude-code; a default hire never reaches it.
+# ---------------------------------------------------------------------------
+
+# Mirror of ALLOWED_MODEL in packages/agent/agent-claude-code-driver/src/seat-config.ts
+# (the spec asserts the two are equal). Used for the PRINTED host-config stanza only;
+# the driver re-validates against host config at run time.
+ALLOWED_MODEL_RE='^(?:opus|sonnet|haiku|claude-(?:opus|sonnet|haiku)-[0-9][0-9-]*)$'
+
+# The registry-editing tool. It never sees a secret: it reads and edits the registry
+# text only. Three test seams, honoured ONLY when DSH_HIRE_TEST=1: DSH_HIRE_HOOK_BEFORE_WRITE
+# (runs an executable just before the write: lost-update case), DSH_HIRE_HOOK_AFTER_WRITE
+# (concurrent writer after the write) and DSH_HIRE_FORCE_VERIFY_FAIL=1 (failed-verify case).
+regtool() {
+  python3 - "$@" <<'REGTOOL_PY'
+import json, os, re, subprocess, sys, tempfile, time
+try:
+    import yaml
+except ImportError:
+    sys.exit('dsh-hire: pyyaml missing; the claude-code path needs it to verify registry edits')
+
+def die(msg):
+    sys.stderr.write('dsh-hire: ' + msg + '\n')
+    sys.exit(1)
+
+def read(path):
+    with open(path, encoding='utf-8') as fh:
+        return fh.read()
+
+def load(text):
+    doc = yaml.safe_load(text)
+    if not isinstance(doc, dict) or not isinstance(doc.get('seats'), dict):
+        die('registry is not a mapping with a seats map')
+    return doc
+
+def atomic_write(path, text):
+    mode = os.stat(path).st_mode & 0o777
+    fd, tmp = tempfile.mkstemp(prefix='.registry-', suffix='.tmp', dir=os.path.dirname(os.path.abspath(path)))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+def backup(path, text):
+    stamp = time.strftime('%Y%m%dT%H%M%S') + '%06d' % int((time.time() % 1) * 1e6)
+    for n in range(100):
+        cand = f'{path}.bak-{stamp}' + ('' if n == 0 else f'-{n}')
+        try:
+            fd = os.open(cand, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        return cand
+    die('could not find a free backup filename')
+
+RESERVED = {'y', 'n', 'yes', 'no', 'on', 'off', 'true', 'false', 'null', '~'}
+
+def scalar(value):
+    if re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]*', value) and value.lower() not in RESERVED:
+        return value
+    return json.dumps(value)
+
+def csv(value):
+    return [v for v in value.split(',') if v]
+
+def resolve_cwd(doc, entry):
+    cwd = entry.get('cwd') or ''
+    base = doc.get('baseDir') or ''
+    return os.path.realpath(cwd if os.path.isabs(cwd) else os.path.join(os.path.expanduser(base), cwd))
+
+def plan(registry, seat, project, admit_from, classes, test):
+    if not os.path.exists(registry):
+        die(f'no registry at {registry}')
+    doc = load(read(registry))
+    seats = doc['seats']
+    edges = doc.get('edges') or []
+    missing = []
+    for sender in admit_from:
+        if sender not in seats:
+            die(f'--admit-from names "{sender}", which is not a seat in the registry')
+        if not any(isinstance(e, list) and len(e) == 2 and set(e) == {seat, sender} for e in edges):
+            missing.append(sender)
+    entry = seats.get(seat)
+    if entry is None:
+        # A new seat cannot have an edge yet (an edge naming an unknown seat does not
+        # parse), so the edge is reported for the founder to add, not refused.
+        print('STATE=new')
+        print('SESSION_ID=')
+        print('MISSING_EDGES=' + ','.join(missing))
+        return
+    if missing:
+        die(f'--admit-from seat(s) {", ".join(missing)} have no edge to "{seat}" in the registry edges block; '
+            'mail from them would be refused by topology')
+    if not isinstance(entry, dict):
+        die(f'seat "{seat}" row is not a mapping')
+    problems = []
+    if entry.get('driver') != 'claude-code':
+        problems.append(f'driver is {entry.get("driver", "default")!r}, not claude-code (dsh-hire never changes an existing driver)')
+    if set(entry.get('admit_from') or []) != set(admit_from):
+        problems.append(f'admit_from is {sorted(entry.get("admit_from") or [])}, requested {sorted(admit_from)}')
+    if set(entry.get('admit_sender_classes') or []) != set(classes):
+        problems.append(f'admit_sender_classes is {sorted(entry.get("admit_sender_classes") or [])}, requested {sorted(classes)}')
+    if bool(entry.get('test')) != bool(test):
+        problems.append(f'test is {bool(entry.get("test"))}, requested {bool(test)}')
+    if resolve_cwd(doc, entry) != os.path.realpath(project):
+        problems.append(f'cwd resolves to {resolve_cwd(doc, entry)}, requested {os.path.realpath(project)}')
+    if not entry.get('sessionId'):
+        problems.append('row has no pinned sessionId')
+    if problems:
+        die(f'seat "{seat}" already exists with a different row: ' + '; '.join(problems)
+            + '. Pass the row\'s own values, or edit the registry by hand.')
+    print('STATE=existing')
+    print('SESSION_ID=' + entry['sessionId'])
+
+def test_seam(name):
+    # Test seams only exist when DSH_HIRE_TEST=1; otherwise they are ignored.
+    return os.environ.get(name) if os.environ.get('DSH_HIRE_TEST') == '1' else None
+
+def guarded_write(path, planned_raw, new_text, bak):
+    hook = test_seam('DSH_HIRE_HOOK_BEFORE_WRITE')
+    if hook:
+        subprocess.run([hook, path], check=False)
+    if read(path) != planned_raw:
+        die(f'the registry changed while this run was planned; nothing written (backup kept: {bak}). Re-run.')
+    atomic_write(path, new_text)
+
+def hook_and_verify(path, check):
+    hook = test_seam('DSH_HIRE_HOOK_AFTER_WRITE')  # simulate a concurrent writer
+    if hook:
+        subprocess.run([hook, path], check=False)
+    if test_seam('DSH_HIRE_FORCE_VERIFY_FAIL') == '1':
+        return 'forced verify failure'
+    try:
+        return check(load(read(path)))
+    except Exception as exc:  # parse failure counts as a failed verify
+        return f'registry no longer parses: {exc}'
+
+def remove_exact(path, fragment, replacement=''):
+    raw = read(path)
+    if raw.count(fragment) != 1:
+        die(f'could not undo: the inserted text is not present exactly once in {path}; inspect the registry by hand '
+            f'(backup kept next to it)')
+    atomic_write(path, raw.replace(fragment, replacement, 1))
+
+def unchanged_except(before, after, seat_allowed):
+    for key, value in before.items():
+        if key == 'seats':
+            continue
+        if after.get(key) != value:
+            return f'top-level key {key} changed'
+    for name, row in before['seats'].items():
+        if name in seat_allowed:
+            continue
+        if after['seats'].get(name) != row:
+            return f'seat {name} changed'
+    return None
+
+def insert(registry, seat, project, session_id, admit_from, classes, test):
+    raw = read(registry)
+    bak = backup(registry, raw)
+    raw2 = read(registry)
+    if raw2 != raw:  # a writer landed between read and backup: back up what we will actually edit
+        raw = raw2
+        bak = backup(registry, raw)
+    before = load(raw)
+    if seat in before['seats']:
+        die(f'seat "{seat}" appeared in the registry while hiring; re-run')
+    lines = raw.splitlines(keepends=True)
+    start = next((i for i, l in enumerate(lines) if re.match(r'^seats:\s*(#.*)?$', l)), None)
+    if start is None:
+        die('registry has no block-style top-level "seats:" key (flow-style seats cannot be edited safely); add the row by hand')
+    nxt = next((i for i in range(start + 1, len(lines)) if re.match(r'^[A-Za-z_"\'][^\s]*:', lines[i])), len(lines))
+    k = nxt
+    while k - 1 > start and (not lines[k - 1].strip() or lines[k - 1].startswith('#')):
+        k -= 1
+    block = [f'  {scalar(seat)}:\n', f'    cwd: {json.dumps(os.path.realpath(project))}\n',
+             f'    sessionId: {session_id}\n', '    driver: claude-code\n']
+    if admit_from:
+        block.append('    admit_from:\n')
+        block += [f'    - {scalar(x)}\n' for x in admit_from]
+    else:
+        block.append('    admit_from: []\n')
+    block.append('    admit_sender_classes:\n')
+    block += [f'    - {c}\n' for c in classes]
+    if test:
+        block.append('    test: true\n')
+    fragment = ''.join(block)
+    if k > 0 and not lines[k - 1].endswith('\n'):
+        fragment = '\n' + fragment
+    new = ''.join(lines[:k]) + fragment + ''.join(lines[k:])
+    guarded_write(registry, raw, new, bak)
+    expected = {'cwd': os.path.realpath(project), 'sessionId': session_id, 'driver': 'claude-code',
+                'admit_from': list(admit_from), 'admit_sender_classes': list(classes)}
+    if test:
+        expected['test'] = True
+
+    def check(after):
+        if set(after['seats']) != set(before['seats']) | {seat}:
+            return 'seat set is not the old set plus the new seat'
+        if after['seats'].get(seat) != expected:
+            return f'new row parsed as {after["seats"].get(seat)!r}'
+        return unchanged_except(before, after, {seat})
+    problem = hook_and_verify(registry, check)
+    if problem:
+        remove_exact(registry, fragment)
+        die(f'verify failed ({problem}); removed only the inserted row. Backup: {bak}')
+    print('BACKUP=' + bak)
+
+def reseed(registry, seat, old, new):
+    raw = read(registry)
+    bak = backup(registry, raw)
+    raw2 = read(registry)
+    if raw2 != raw:
+        raw = raw2
+        bak = backup(registry, raw)
+    before = load(raw)
+    row = before['seats'].get(seat)
+    if not isinstance(row, dict) or row.get('sessionId') != old or row.get('driver') != 'claude-code':
+        die(f'seat "{seat}" does not hold the expected claude-code row with sessionId {old}')
+    lines = raw.splitlines(keepends=True)
+    head = next((i for i, l in enumerate(lines) if re.match(r'^(\s+)' + re.escape(seat) + r':\s*(#.*)?$', l)), None)
+    if head is None:
+        die(f'seat "{seat}" is not a block-style row; edit its sessionId by hand')
+    indent = len(re.match(r'^(\s*)', lines[head]).group(1))
+    target = None
+    for i in range(head + 1, len(lines)):
+        if lines[i].strip() and len(lines[i]) - len(lines[i].lstrip()) <= indent:
+            break
+        m = re.match(r'^(\s+)sessionId:\s*["\']?' + re.escape(old) + r'["\']?\s*(#.*)?$', lines[i].rstrip('\n'))
+        if m:
+            target = (i, m.group(1))
+            break
+    if target is None:
+        die(f'could not find the sessionId line of seat "{seat}"; edit it by hand')
+    i, pad = target
+    old_line = lines[i]
+    new_line = f'{pad}sessionId: {new}\n' if old_line.endswith('\n') else f'{pad}sessionId: {new}'
+    lines[i] = new_line
+    guarded_write(registry, raw, ''.join(lines), bak)
+
+    def check(after):
+        if after['seats'].get(seat) != {**row, 'sessionId': new}:
+            return f'row parsed as {after["seats"].get(seat)!r}'
+        return unchanged_except(before, after, {seat})
+    problem = hook_and_verify(registry, check)
+    if problem:
+        remove_exact(registry, new_line, old_line)
+        die(f'verify failed ({problem}); restored only the sessionId line. Backup: {bak}')
+    print('BACKUP=' + bak)
+
+def main():
+    mode, args = sys.argv[1], sys.argv[2:]
+    if mode == 'plan':
+        registry, seat, project, af, cl, test = args
+        plan(registry, seat, project, csv(af), csv(cl), test == '1')
+    elif mode == 'insert':
+        registry, seat, project, sid, af, cl, test = args
+        insert(registry, seat, project, sid, csv(af), csv(cl), test == '1')
+    elif mode == 'reseed':
+        reseed(*args)
+    else:
+        die('bad regtool mode')
+
+main()
+REGTOOL_PY
+}
+
+cc_hire() {
+  # --- argument validation (no registry access yet) ---
+  case "$ROLE" in
+    mail-only) ;;
+    lead|coder) die "role \"$ROLE\" is refused until the permission-policy extension (slice S5) is registered; use \"mail-only\"" ;;
+    *) die "unknown role \"$ROLE\"; only \"mail-only\" is accepted" ;;
+  esac
+  [ -n "$MODEL" ] || die "--model is required for --driver claude-code (it goes into the printed host-config stanza)"
+  case "$MODEL" in *$'\n'*) die "invalid --model (contains a newline)";; esac
+  case "$(printf '%s' "$MODEL" | LC_ALL=C tr 'A-Z' 'a-z')" in
+    *fable*) die "model \"$MODEL\" is a fable model; fable seats need an explicit fable_ok: true host-config entry (founder only) and cannot be hired from here";;
+  esac
+  printf '%s' "$MODEL" | grep -qP "$ALLOWED_MODEL_RE" \
+    || die "model \"$MODEL\" is not on the allowlist (opus, sonnet, haiku, or claude-<family>-<version>)"
+  local tok
+  for tok in "$ADMIT" "$ADMIT_FROM"; do
+    case "$tok" in
+      *[[:space:]]*) die "--admit/--admit-from must be comma lists without whitespace or newlines";;
+      ,*|*,|*,,*) die "--admit/--admit-from must not contain empty entries";;
+    esac
+  done
+  [ -n "$ADMIT" ] || die "--admit must name at least one class"
+  local cls
+  for cls in $(printf '%s' "$ADMIT" | tr ',' ' '); do
+    case "$cls" in
+      seat) ;;
+      *) die "--admit \"$cls\" refused: S3 admits roster seats only; guest admission is an S8 item";;
+    esac
+  done
+  local sender
+  for sender in $(printf '%s' "$ADMIT_FROM" | tr ',' ' '); do
+    printf '%s' "$sender" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' || die "invalid --admit-from seat name '$sender'"
+  done
+
+  # --- registry plan: validates admit-from seats/edges and compares an existing row ---
+  [ -f "$REGISTRY" ] || die "no registry at $REGISTRY"
+  local plan STATE="" RECORDED_ID="" MISSING_EDGES="" line
+  plan="$(regtool plan "$REGISTRY" "$SEAT" "$PROJECT" "$ADMIT_FROM" "$ADMIT" "$TEST")" || exit 1
+  while IFS= read -r line; do
+    case "$line" in STATE=*) STATE="${line#STATE=}";; SESSION_ID=*) RECORDED_ID="${line#SESSION_ID=}";; MISSING_EDGES=*) MISSING_EDGES="${line#MISSING_EDGES=}";; esac
+  done <<< "$plan"
+
+  local OLD_ID="" SESSION_ID_CC
+  if [ "$RESEED" -eq 1 ]; then
+    [ "$STATE" = existing ] || die "--reseed needs an existing claude-code row for \"$SEAT\""
+    OLD_ID="$RECORDED_ID"
+    SESSION_ID_CC="named-$(printf '%s' "$SEAT:$(date +%s)" | sha256sum | cut -c1-32)"
+  elif [ "$STATE" = existing ]; then
+    SESSION_ID_CC="$RECORDED_ID"
+  else
+    SESSION_ID_CC="named-$(printf '%s' "$SEAT" | sha256sum | cut -c1-32)"
+  fi
+
+  local lock_id="${OLD_ID:-$SESSION_ID_CC}" lock_token lock_file
+  lock_token="${lock_id#named-}"
+  [ "$lock_token" != "$lock_id" ] || lock_token="$(printf '%s' "$lock_id" | sha256sum | cut -c1-32)"
+  lock_file="$HOME/.dsh/headless/locks/$lock_token.lock"
+
+  local git_local email
+  git_local="$(printf '%s' "$SEAT" | LC_ALL=C tr 'A-Z' 'a-z' | LC_ALL=C sed 's/[^a-z0-9._+-]/-/g; s/^[+-]*//')"
+  email="$git_local+$(printf '%s' "$SESSION_ID_CC" | LC_ALL=C tr 'A-Z' 'a-z' | LC_ALL=C sed 's/[^a-z0-9._+-]/-/g; s/^[+-]*//')@steveweb.dev"
+
+  cat <<INFO
+seat        $SEAT
+project     $PROJECT
+driver      claude-code (model $MODEL, role $ROLE)
+session id  $SESSION_ID_CC
+            $([ "$STATE" = existing ] && [ "$RESEED" -eq 0 ] && echo "recorded in registry — survives a rename" || echo "will be pinned in the registry by this run")
+admit_from  ${ADMIT_FROM:-(nobody)}
+admit class $ADMIT$([ "$TEST" -eq 1 ] && echo "  (test seat)")
+lock        $lock_file
+git identity: $SEAT $email
+INFO
+
+  if [ "$RESEED" -eq 1 ]; then
+    if [ "$DRY" -eq 0 ] && ! { [ -t 0 ] || [ "${DSH_HIRE_FOUNDER:-}" = 1 ]; }; then
+      die "--reseed is a founder action: it needs an interactive terminal or DSH_HIRE_FOUNDER=1"
+    fi
+    if [ -f "$lock_file" ]; then
+      local pid
+      pid="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('pid',''))" "$lock_file" 2>/dev/null || true)"
+      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        printf '\n!!! WARNING: the OLD session (%s) is held by a LIVE process (pid %s).\n' "$OLD_ID" "$pid"
+        printf '!!! A resident agent keeps its lock and keeps running under the old id until it is stopped.\n'
+        printf '!!! The new id takes effect for a resident only after it is disposed or the host restarts.\n\n'
+      fi
+    fi
+  fi
+
+  if [ "$DRY" -eq 1 ]; then
+    echo
+    if [ "$STATE" = new ]; then echo "dry run — would insert the row above into $REGISTRY; nothing written, nothing spawned"
+    elif [ "$RESEED" -eq 1 ]; then echo "dry run — would replace sessionId $OLD_ID with $SESSION_ID_CC; nothing written"
+    else echo "dry run — the registry row already matches; nothing to write"; fi
+    cc_print_stanza "$SESSION_ID_CC"
+    exit 0
+  fi
+
+  local out
+  if [ "$RESEED" -eq 1 ]; then
+    out="$(regtool reseed "$REGISTRY" "$SEAT" "$OLD_ID" "$SESSION_ID_CC")" || exit 1
+    echo; echo "reseeded: $SEAT"
+    echo "  old session id  $OLD_ID  (its log is left in place)"
+    echo "  new session id  $SESSION_ID_CC"
+    echo "  update the host-config stanza line to:  session_id: $SESSION_ID_CC"
+    echo "  the pause resets on the next restart; call-window counters are pinned per seat by the driver and are expected to survive"
+    echo "  (host config session_id must be updated or the driver refuses the seat)"
+    echo "  the git-identity email changes to $email"
+  elif [ "$STATE" = new ]; then
+    out="$(regtool insert "$REGISTRY" "$SEAT" "$PROJECT" "$SESSION_ID_CC" "$ADMIT_FROM" "$ADMIT" "$TEST")" || exit 1
+    echo; echo "registry row inserted for $SEAT"
+  else
+    out=""
+    echo; echo "registry row already matches; nothing written"
+  fi
+  case "$out" in BACKUP=*) echo "backup      ${out#BACKUP=}";; esac
+  if [ -n "$MISSING_EDGES" ]; then
+    echo
+    echo "NOTE: no edge yet between $SEAT and: ${MISSING_EDGES//,/, }. Add [<seat>, $SEAT] pairs to the registry"
+    echo "  edges block (an edge cannot name a seat before its row exists), or mail from them is refused by topology."
+  fi
+  echo
+  echo "$SEAT is served by the mail bridge; first mail starts it; refused until the host-config stanza below is added."
+  echo "Nothing was spawned and no kickoff was sent."
+  cc_print_stanza "$SESSION_ID_CC"
+}
+
+cc_print_stanza() {
+  local claude_bin claude_path sha prefix
+  claude_bin="$(command -v claude 2>/dev/null || true)"
+  if [ -n "$claude_bin" ]; then
+    claude_path="$(readlink -f "$claude_bin")"
+    sha="$(sha256sum "$claude_path" 2>/dev/null | cut -d' ' -f1)"
+    prefix="$(dirname "$claude_path")"
+  else
+    claude_path="<claude not found on PATH — set the absolute path>"; sha="<sha256 of that binary>"; prefix="<directory of that binary>"
+  fi
+  cat <<STANZA
+
+----- host-config stanza (PRINTED, NOT WRITTEN) -----
+Add to the claude-code driver row's config in
+  ~/.dsh/profiles/$PROFILE/cordis.patch.yml
+(host-private and founder-owned; dsh-hire never writes it):
+
+claudePathPrefixes:
+  - $prefix
+hostSeats:
+  $SEAT:
+    model: $MODEL
+    role: $ROLE
+    max_turns: 25
+    max_budget_usd: 5
+    max_calls_per_window: 120
+    call_window_ms: 18000000
+    claude_path: $claude_path
+    claude_path_sha256: $sha
+    cwd: $PROJECT
+    admit_from_ceiling: [${ADMIT_FROM//,/, }]
+    session_id: $1
+-----------------------------------------------------
+SECURITY: claude_path and claude_path_sha256 above were resolved at hire time by this script
+(readlink -f "\$(command -v claude)"), and a script a seat could run chose them. The founder
+must verify claude_path and its sha256 independently before adding the stanza. The required
+prefix in claudePathPrefixes limits the damage if the path is wrong.
+STANZA
+}
+
+if [ "$DRIVER" = claude-code ]; then cc_hire; exit 0; fi
+
+# Recorded identity beats derived. A seat pinned in the registry keeps its id
+# through a rename; derivation is only the bootstrap for one that never ran.
+RECORDED="$(python3 - "$REGISTRY" "$SEAT" <<'IDEOF' 2>/dev/null || true
+import sys
+try:
+    import yaml
+except ImportError:
+    sys.exit(0)
+try:
+    reg = yaml.safe_load(open(sys.argv[1])) or {}
+except Exception:
+    sys.exit(0)
+entry = (reg.get('seats') or {}).get(sys.argv[2])
+if isinstance(entry, dict) and entry.get('sessionId'):
+    print(entry['sessionId'])
+IDEOF
+)"
+if [ -n "$RECORDED" ]; then
+  SESSION_ID="$RECORDED"
+  PINNED_ALREADY=yes
+else
+  SESSION_ID="named-$(printf '%s' "$SEAT" | sha256sum | cut -c1-32)"
+  PINNED_ALREADY=no
+fi
+# The lock guards the identity that is WRITTEN, not the label. A derived id
+# carries its own token; anything else hashes the id string. Keying the lock off
+# the name would hand a renamed seat a second lock over the same log.
+case "$SESSION_ID" in
+  named-*) LOCK_TOKEN="${SESSION_ID#named-}" ;;
+  *)       LOCK_TOKEN="$(printf '%s' "$SESSION_ID" | sha256sum | cut -c1-32)" ;;
+esac
+LOCK="$HOME/.dsh/headless/locks/$LOCK_TOKEN.lock"
+MEM="$(python3 -c "
+import hashlib,base64,os,re,sys
+p=sys.argv[1]; b=os.path.basename(p)
+sb=re.sub(r'[^a-zA-Z0-9._-]+','-',b)[:64] or 'project'
+d=base64.urlsafe_b64encode(hashlib.sha256(p.encode()).digest()).decode()
+print(sb+'-'+re.sub(r'[^A-Za-z0-9]','',d)[:6].lower())
+" "$PROJECT")"
+
+PERSONA_FILE="$PROJECT/org/$SEAT/PERSONA.md"
+KICKOFF="You are $SEAT."
+if [ -f "$PERSONA_FILE" ]; then
+  KICKOFF="$KICKOFF Your persona follows. Read it, then write it to your memory so it survives compaction — that first memory is also how your continuity is traced later.
+
+$(cat "$PERSONA_FILE")"
+else
+  printf '\nWARNING: no persona found at %s\n' "$PERSONA_FILE" >&2
+  if [ "$GENERIC" -eq 0 ]; then
+    if [ "$DRY" -eq 1 ]; then
+      printf '  a real hire would refuse this — pass --generic to accept a generic kickoff\n' >&2
+    else
+      die "refusing to spawn a blank seat. Write that persona, or pass --generic to accept a generic kickoff"
+    fi
+  fi
+  KICKOFF="$KICKOFF Write a memory recording your seat name and that you were hired on $(date +%F)."
+fi
+[ -n "$BRIEF" ] && KICKOFF="$KICKOFF
+
+$BRIEF"
+
+# Session-bucket munging: strip the leading slash, then swap separators.
+# /mnt/a/b -> --mnt-a-b--   (an extra leading dash here silently breaks the probe)
+MUNGED="--${PROJECT#/}--"; MUNGED="${MUNGED//\//-}"
+EXISTS=no
+[ -d "$HOME/.dsh/sessions/$MUNGED/$SESSION_ID" ] && EXISTS=yes
+
+# Cross-project name collision: the session id and the lock are derived from the
+# NAME ALONE, with no project component — so the same seat name in two projects
+# yields two log files sharing one id and one mutex. Two such seats can never run
+# at once, and anything resolving by id alone can reach the wrong one. Surface it
+# loudly here until the derivation carries a project key.
+COLLISIONS=""
+for d in "$HOME"/.dsh/sessions/*/; do
+  [ -d "$d$SESSION_ID" ] || continue
+  base="$(basename "$d")"
+  [ "$base" = "$MUNGED" ] && continue
+  COLLISIONS="$COLLISIONS  $base\n"
+done
+if [ -n "$COLLISIONS" ]; then
+  printf '\nWARNING: "%s" already names a session in another project.\n' "$SEAT" >&2
+  printf 'The id and lock derive from the name alone, so these share one mutex:\n' >&2
+  printf '  %s  (this project)\n' "$MUNGED" >&2
+  printf "$COLLISIONS" >&2
+  printf 'They can never run at the same time. Rename one, or pass --project deliberately.\n\n' >&2
+fi
+
+# OP-261: per-seat git identity. Local part = lowercased seat + plus-tag carrying the
+# session id, so `git log --format='%an %ae'` names the seat and its session log at once.
+git_local_part() { printf '%s' "$1" | LC_ALL=C tr 'A-Z' 'a-z' | LC_ALL=C sed 's/[^a-z0-9._+-]/-/g; s/^[+-]*//'; }
+GIT_ID_NAME="$SEAT"
+GIT_ID_EMAIL="$(git_local_part "$SEAT")+$(git_local_part "$SESSION_ID")@steveweb.dev"
+
+cat <<INFO
+seat        $SEAT
+project     $PROJECT
+session id  $SESSION_ID
+            $([ "$PINNED_ALREADY" = yes ] && echo "recorded in registry — survives a rename" || echo "derived from the name — will be pinned after this run")   (existing: $EXISTS)
+lock        $LOCK
+memory      ~/.dsh/memory/$MEM
+persona     $([ -f "$PERSONA_FILE" ] && echo "$PERSONA_FILE" || echo '(none — generic kickoff)')
+git identity: $GIT_ID_NAME $GIT_ID_EMAIL
+INFO
+
+if [ "$DRY" -eq 1 ]; then echo; echo "dry run — nothing spawned"; exit 0; fi
+
+if [ "$NOSPAWN" -eq 0 ] && [ -f "$LOCK" ]; then
+  PID="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('pid',''))" "$LOCK" 2>/dev/null || true)"
+  if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+    die "seat '$SEAT' is already held by a live process (pid $PID). Stop it or wait."
+  fi
+fi
+
+if [ "$NOSPAWN" -eq 1 ]; then
+  echo; echo "no-spawn — nothing spawned; pinning the title on the existing session"
+else
+  echo; echo "spawning…"
+  ( cd "$PROJECT" && GIT_AUTHOR_NAME="$GIT_ID_NAME" GIT_COMMITTER_NAME="$GIT_ID_NAME" \
+      GIT_AUTHOR_EMAIL="$GIT_ID_EMAIL" GIT_COMMITTER_EMAIL="$GIT_ID_EMAIL" \
+      dsh --profile "$PROFILE" --session-name "$SEAT" --session-id "$SESSION_ID" "$KICKOFF" )
+  STATUS=$?
+  [ $STATUS -eq 0 ] || die "spawn failed with exit $STATUS"
+fi
+
+if [ "$PIN" -eq 1 ]; then
+  [ -n "$TITLE" ] || TITLE="$SEAT"
+  if curl -sf -m 5 -o /dev/null "$HOST/" 2>/dev/null; then
+    # Wait until the log is READABLE before writing to it. The headless process
+    # exiting is not the same as its zstd frame being closed and flushed: renaming
+    # into a half-written frame appends after a torn record and corrupts the log.
+    # Two logs were lost this way on 2026-08-28. Read-before-write, not a sleep.
+    READY=no
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      PROBE="$(curl -s -X POST "$HOST/api/session.history" -H 'content-type: application/json' \
+        -d "$(python3 -c "
+import json,sys
+print(json.dumps({'type':'client-request','rpcId':'probe','method':'session.history',
+  'payload':{'sessionId':sys.argv[1],'maxMessages':1}}))" "$SESSION_ID")" 2>/dev/null || true)"
+      case "$PROBE" in
+        *'"ok":true'*) READY=yes; break ;;
+      esac
+      sleep 0.5
+    done
+    if [ "$READY" != yes ]; then
+      echo "WARNING: session log not readable yet — skipping the title pin rather than"
+      echo "  risking a torn append. Set the title later with: dsh-hire $SEAT --no-spawn"
+      PIN=0
+    fi
+    if [ "$PIN" -eq 1 ]; then
+      RESP="$(curl -s -X POST "$HOST/api/session.rename" -H 'content-type: application/json' \
+        -d "$(python3 -c "
+import json,sys
+print(json.dumps({'type':'client-request','rpcId':'hire','method':'session.rename',
+  'payload':{'sessionId':sys.argv[1],'title':sys.argv[2]}}))" "$SESSION_ID" "$TITLE")" || true)"
+      case "$RESP" in
+        *'"ok":true'*) echo "title pinned: $TITLE";;
+        *) echo "WARNING: could not pin title (seat will show its kickoff prompt in the panel)"; echo "  $RESP";;
+      esac
+    fi
+  else
+    echo "NOTE: host not reachable at $HOST — title not pinned."
+    echo "  Start the host and run: dsh-hire $SEAT --no-spawn  (or rename in the UI)"
+  fi
+fi
+
+# Pin the seat's identity in the registry the first time it runs. Until an id is
+# recorded, identity is derived from the NAME — so a rename would move the id and
+# orphan the log. Recording it once makes the name a label from here on.
+pin_identity() {
+  python3 - "$1" "$2" "$3" <<'PINEOF'
+import sys, re
+path, seat, sid = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    import yaml
+    reg = yaml.safe_load(open(path)) or {}
+except Exception:
+    sys.exit(0)
+entry = (reg.get('seats') or {}).get(seat)
+if not isinstance(entry, dict) or entry.get('sessionId'):
+    sys.exit(0)
+raw = open(path).read()
+pat = re.compile(r'^(\s*)' + re.escape(seat) + r':(\s*)\{([^}]*)\}\s*$', re.M)
+m = pat.search(raw)
+if not m:
+    sys.exit(0)
+body = m.group(3).rstrip()
+sep = '' if (not body.strip() or body.endswith(',')) else ','
+raw = raw[:m.start()] + m.group(1) + seat + ':' + m.group(2) + '{' + body + sep + ' sessionId: ' + sid + ' }' + raw[m.end():]
+open(path, 'w').write(raw)
+print(sid)
+PINEOF
+}
+
+if [ -n "$(pin_identity "$REGISTRY" "$SEAT" "$SESSION_ID" 2>/dev/null)" ]; then
+  echo "identity pinned in registry: $SEAT -> $SESSION_ID"
+  echo "  (a rename now carries this conversation instead of orphaning it)"
+fi
+
+echo
+echo "done. If the seat does not appear under its workspace, restart the host once:"
+echo "  the registry attaches sessions on open."

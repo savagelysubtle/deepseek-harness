@@ -423,6 +423,26 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'claudeCodeSeatSource',
+    summary: 'Finds the registry row of a seat that is not in the static `seats` config.',
+    description: 'Finds the registry row of a seat that is not in the static `seats` config. Provided as `ctx.claudeCodeSeatSource` (by the registry glue package); read at use time, so its provider may load after this plugin. A source must refuse (throw) when it cannot prove the row is the bridge\'s current one.',
+    methods: [
+      {
+        signature: 'resolve(request: SeatSourceRequest): SeatSourceResolution',
+        description: 'Resolve one create or resume.',
+        parameters: [{ name: 'request', description: 'the session being created or resumed, with the hint and the bridge\'s seat binding if it passed one.' }],
+        returns: 'the seat key and the registry row the source has verified as the bridge\'s current one.',
+        throws: ['when the request carries no binding, or the binding is stale or forged.'],
+      },
+      {
+        signature: 'hasRow?(seat: string): boolean | undefined',
+        description: 'Whether the registry currently routes `seat` to this driver; `undefined` when the source cannot tell yet. Drives the mount-time warning for a host entry that has no registry row.',
+        parameters: [{ name: 'seat', description: 'the seat key to look up.' }],
+        returns: '`true` when a row routes the seat to this driver, `false` when none does, `undefined` when unknown.',
+      },
+    ],
+  },
+  {
     key: 'clientModules',
     summary: 'The web plugin table service: incremental `dsh.client` scan + wire composition + bundle route + index tap.',
     description: 'The web plugin table service: incremental `dsh.client` scan + wire composition + bundle route + index tap. Construction runs the activation scan synchronously — a malformed declaration or missing bundle among the already-loaded entries aggregates into one loud throw (FAILED fiber; the boot activation audit reports it).',
@@ -2718,6 +2738,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'refusal', description: 'the sender and recipient addresses and the terminal reason.' }],
   },
   {
+    name: 'mailbox/seat-driver-row-changed',
+    mode: 'emit',
+    signature: '\'mailbox/seat-driver-row-changed\'(change: SeatDriverRowChanged): void',
+    summary: 'A registry reload changed a routing-relevant field of a seat whose driver is or was non-default (or quarantined a seat).',
+    description: 'A registry reload changed a routing-relevant field of a seat whose driver is or was non-default (or quarantined a seat). Emitted once per affected seat per reload, alongside a `logger.warn`, so a registry edit that could re-aim, widen or narrow a Claude Code seat is never silent. The seat\'s resident, if any, is disposed on its next delivery (a changed security hash) or immediately (the row went invalid).',
+    parameters: [{ name: 'change', description: 'the seat and the fields that differ.' }],
+  },
+  {
     name: 'mailbox/seat-tools-restricted',
     mode: 'emit',
     signature: '\'mailbox/seat-tools-restricted\'(restriction: SeatToolsRestricted): void',
@@ -3855,7 +3883,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'MailAdmissionRequest',
-    declaration: 'export interface MailAdmissionRequest {\n    readonly seat: string;\n    readonly messageId?: string | undefined;\n    readonly path: MailAdmissionPath;\n    readonly externalHops: readonly string[];\n    readonly tainted: boolean;\n    readonly turnTainted: boolean;\n}',
+    declaration: 'export interface MailAdmissionRequest {\n    readonly seat: string;\n    readonly messageId?: string | undefined;\n    readonly from?: string | undefined;\n    readonly path: MailAdmissionPath;\n    readonly externalHops: readonly string[];\n    readonly tainted: boolean;\n    readonly turnTainted: boolean;\n}',
   },
   {
     name: 'MailboxAddress',
@@ -4099,11 +4127,19 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'OrgRegistryDocumentSeat',
-    declaration: 'export interface OrgRegistryDocumentSeat {\n    readonly cwd: string;\n    readonly lead?: boolean;\n    readonly sessionId?: string;\n    readonly test?: boolean;\n    readonly department?: string;\n    readonly tools?: OrgSeatTools;\n}',
+    declaration: 'export interface OrgRegistryDocumentSeat {\n    readonly cwd: string;\n    readonly lead?: boolean;\n    readonly sessionId?: string;\n    readonly test?: boolean;\n    readonly department?: string;\n    readonly tools?: OrgSeatTools;\n    readonly driver?: \'default\' | \'claude-code\';\n    readonly admit_from?: readonly string[];\n    readonly admit_sender_classes?: readonly (\'seat\' | \'unverified\')[];\n}',
   },
   {
     name: 'OrgRegistryResult',
     declaration: 'export type OrgRegistryResult = {\n    readonly ok: true;\n    readonly registry: OrgRegistryView;\n    readonly document: OrgRegistryDocument;\n    readonly token: string;\n} | {\n    readonly ok: false;\n    readonly reason: string;\n};',
+  },
+  {
+    name: 'OrgRegistrySeat',
+    declaration: 'export interface OrgRegistrySeat {\n    readonly cwd: string;\n    readonly lead?: boolean;\n    readonly sessionId?: string;\n    readonly test?: boolean;\n    readonly department?: string;\n    readonly tools?: OrgRegistrySeatTools;\n    readonly driver?: SeatDriverKey;\n    readonly admit_from?: readonly string[];\n    readonly admit_sender_classes?: readonly SeatSenderClass[];\n    readonly invalid?: string;\n}',
+  },
+  {
+    name: 'OrgRegistrySeatTools',
+    declaration: 'export interface OrgRegistrySeatTools {\n    readonly allow?: readonly string[];\n    readonly deny?: readonly string[];\n}',
   },
   {
     name: 'OrgRegistryView',
@@ -4115,7 +4151,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'OrgSeat',
-    declaration: 'export interface OrgSeat {\n    readonly cwd: string;\n    readonly lead?: boolean;\n    readonly sessionId?: string;\n    readonly test?: boolean;\n    readonly department?: string;\n    readonly tools?: OrgSeatTools;\n}',
+    declaration: 'export interface OrgSeat {\n    readonly cwd: string;\n    readonly lead?: boolean;\n    readonly sessionId?: string;\n    readonly test?: boolean;\n    readonly department?: string;\n    readonly tools?: OrgSeatTools;\n    readonly driver?: \'default\' | \'claude-code\';\n    readonly admit_from?: readonly string[];\n    readonly admit_sender_classes?: readonly (\'seat\' | \'unverified\')[];\n    readonly invalid?: string;\n}',
   },
   {
     name: 'OrgSeatTools',
@@ -4228,6 +4264,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'RedactedSecret',
     declaration: 'export interface RedactedSecret {\n    path: string[];\n    set: boolean;\n}',
+  },
+  {
+    name: 'RegistrySeatView',
+    declaration: 'export interface RegistrySeatView {\n    readonly driver?: string | undefined;\n    readonly cwd: string;\n    readonly admit_from?: readonly string[] | undefined;\n}',
   },
   {
     name: 'ReplayEnvelope',
@@ -4404,6 +4444,30 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SearchResultView',
     declaration: 'export type SearchResultView = SearchMatchesResultView | SearchPathsResultView;',
+  },
+  {
+    name: 'SeatBinding',
+    declaration: 'export interface SeatBinding {\n    readonly seat: string;\n    readonly rowHash: string;\n    readonly row: OrgRegistrySeat;\n}',
+  },
+  {
+    name: 'SeatDriverKey',
+    declaration: 'export type SeatDriverKey = typeof SEAT_DRIVER_KEYS[number];',
+  },
+  {
+    name: 'SeatDriverRowChanged',
+    declaration: 'export interface SeatDriverRowChanged {\n    readonly seat: string;\n    readonly changed: readonly string[];\n}',
+  },
+  {
+    name: 'SeatSenderClass',
+    declaration: 'export type SeatSenderClass = typeof SEAT_SENDER_CLASSES[number];',
+  },
+  {
+    name: 'SeatSourceRequest',
+    declaration: 'export interface SeatSourceRequest {\n    readonly sessionId: SessionId;\n    readonly hint: string | undefined;\n    readonly binding: SeatBinding | undefined;\n}',
+  },
+  {
+    name: 'SeatSourceResolution',
+    declaration: 'export interface SeatSourceResolution {\n    readonly seat: string;\n    readonly row: RegistrySeatView;\n}',
   },
   {
     name: 'SeatToolsRestricted',

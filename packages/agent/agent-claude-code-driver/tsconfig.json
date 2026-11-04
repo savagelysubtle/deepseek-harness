@@ -21,6 +21,9 @@
       "path": "../../llm/llm"
     },
     {
+      "path": "../../mailbox/mailbox"
+    },
+    {
       "path": "../../core/session"
     },
     {

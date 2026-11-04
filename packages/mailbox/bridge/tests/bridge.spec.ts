@@ -65,6 +65,12 @@ function writeTestRegistry(
     readonly testSeats?: readonly string[]
     readonly callUp?: readonly string[]
     readonly tools?: Readonly<Record<string, { readonly allow?: readonly string[]; readonly deny?: readonly string[] }>>
+    /**
+     * Extra YAML lines appended to a seat's row, written in block style like
+     * the live registry (`driver: claude-code`, `admit_from: [alice]`, ...).
+     * A seat listed here is emitted as a block mapping instead of a flow one.
+     */
+    readonly rowLines?: Readonly<Record<string, readonly string[]>>
   } = {},
 ): string {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-bridge-registry-'))
@@ -78,7 +84,13 @@ function writeTestRegistry(
     if (rule.deny !== undefined) parts.push(`deny: [${rule.deny.join(', ')}]`)
     return `, tools: { ${parts.join(', ')} }`
   }
-  const rows = seats.map(seat => `  ${seat}: { cwd: ${seat}${testSeats.has(seat) ? ', test: true' : ''}${toolsRow(seat)} }`).join('\n')
+  const seatRow = (seat: string): string => {
+    const extra = options.rowLines?.[seat]
+    if (extra === undefined) return `  ${seat}: { cwd: ${seat}${testSeats.has(seat) ? ', test: true' : ''}${toolsRow(seat)} }`
+    const lines = [`  ${seat}:`, `    cwd: ${seat}`, ...testSeats.has(seat) ? ['    test: true'] : [], ...extra.map(line => `    ${line}`)]
+    return lines.join('\n')
+  }
+  const rows = seats.map(seatRow).join('\n')
   const edges = options.edges ?? [['alice', 'target'], ['alice', 'ghost'], ['ghost', 'other']]
   const edgeBlock = edges.length === 0
     ? 'edges: []'

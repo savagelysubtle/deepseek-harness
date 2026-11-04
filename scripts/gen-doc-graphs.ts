@@ -114,6 +114,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'An optional service a later slice provides: the admission check and the mailbox lease sink the Claude Code seat driver calls, read lazily; the driver falls back to its default-deny admission and no lease (see packages/agent/agent-claude-code-driver/README.md).',
   },
   {
+    key: 'claudeCodeSeatSource',
+    pkg: 'agent-claude-code-registry',
+    title: 'Registry row lookup for Claude Code seats the static config does not list',
+    mode: 'seam',
+    consumers: ['agent-claude-code-driver'],
+    note: 'The registry glue package verifies the mailbox bridge seat binding against the bridge current row and hands the driver the row; the driver reads it lazily and refuses a seat with no source (see packages/agent/agent-claude-code-registry/README.md).',
+  },
+  {
     key: 'mailbox',
     pkg: 'mailbox',
     title: 'Durable agent-to-agent mailbox',

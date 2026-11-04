@@ -84,7 +84,7 @@ describe('an injected admission check', () => {
     agent.steer(userMessage('also this'))
     await tick(5)
     expect(seen).toEqual([
-      { seat: 'tester', messageId: 'm-1', path: 'send', externalHops: [], tainted: false, turnTainted: false },
+      { seat: 'tester', messageId: 'm-1', from: 'peer@dsh', path: 'send', externalHops: [], tainted: false, turnTainted: false },
       { seat: 'tester', path: 'steer', externalHops: [], tainted: false, turnTainted: true },
     ])
     answer(query)

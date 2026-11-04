@@ -14,6 +14,12 @@ export const orgSeatToolsSchema = z.object({
   deny: z.array(z.string()).optional(),
 }) satisfies z.ZodType<Wire<OrgSeatTools>>
 
+/** The driver a registry row may select (see `OrgSeat.driver`). */
+export const orgSeatDriverSchema = z.enum(['default', 'claude-code'])
+
+/** A sender class a registry row may admit (see `OrgSeat.admit_sender_classes`). */
+export const orgSeatSenderClassSchema = z.enum(['seat', 'unverified'])
+
 /** OrgSeat: one registry roster entry. */
 export const orgSeatSchema = z.object({
   cwd: z.string(),
@@ -22,6 +28,10 @@ export const orgSeatSchema = z.object({
   test: z.boolean().optional(),
   department: z.string().min(1).max(48).optional(),
   tools: orgSeatToolsSchema.optional(),
+  driver: orgSeatDriverSchema.optional(),
+  admit_from: z.array(z.string()).optional(),
+  admit_sender_classes: z.array(orgSeatSenderClassSchema).optional(),
+  invalid: z.string().optional(),
 }) satisfies z.ZodType<Wire<OrgSeat>>
 
 /** OrgEdge: one undirected [from, to] seat pair. */
@@ -35,7 +45,11 @@ export const orgRegistryViewSchema = z.object({
   callUp: z.array(z.string()),
 }) satisfies z.ZodType<Wire<OrgRegistryView>>
 
-/** OrgRegistryDocumentSeat: one seat as submitted to org.write (cwd unresolved; see {@link OrgRegistryDocumentSeat}). */
+/**
+ * OrgRegistryDocumentSeat: one seat as submitted to org.write (cwd unresolved; see {@link OrgRegistryDocumentSeat}).
+ * Strict: a key the row does not define (`claude_path`, `claude_code`, `model`, ...) is rejected, never stripped,
+ * so a cost or trust setting cannot ride a write and silently vanish.
+ */
 export const orgRegistryDocumentSeatSchema = z.object({
   cwd: z.string(),
   lead: z.boolean().optional(),
@@ -43,7 +57,10 @@ export const orgRegistryDocumentSeatSchema = z.object({
   test: z.boolean().optional(),
   department: z.string().min(1).max(48).optional(),
   tools: orgSeatToolsSchema.optional(),
-}) satisfies z.ZodType<Wire<OrgRegistryDocumentSeat>>
+  driver: orgSeatDriverSchema.optional(),
+  admit_from: z.array(z.string()).optional(),
+  admit_sender_classes: z.array(orgSeatSenderClassSchema).optional(),
+}).strict() satisfies z.ZodType<Wire<OrgRegistryDocumentSeat>>
 
 /** OrgRegistryDocument: the whole-document write payload org.write accepts (see {@link OrgRegistryDocument}). */
 export const orgRegistryDocumentSchema = z.object({

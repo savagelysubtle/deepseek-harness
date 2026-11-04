@@ -42,6 +42,22 @@
 
 注册表若根本不存在，属于合法的“无注册表”世界（宕机主机的 CLI 引导场景）：没有任何名称可判定为座位，因此条件 (B) 直接跳过而不告警。注册表存在却无法加载则是另一种情况，告警机制本身绝不能因此变成静默失败——该情况会明确告警说明条件 (B) 未能完成检查，而不是悄悄当作“一切正常”。
 
+## 座位驱动与邮件准入（OP #292）
+
+注册表中的座位行可以选择驱动，并声明谁可以向它发邮件。三个可选字段，只承载路由数据：
+
+| 字段 | 含义 |
+|---|---|
+| `driver` | `default`（进程内智能体循环；字段缺失时同义）或 `claude-code`。 |
+| `admit_from` | `claude-code` 座位接受其邮件的座位名。缺失或为空表示不接受任何人。 |
+| `admit_sender_classes` | 接受的发送方类别：`seat`（任意注册表座位）或 `unverified`。缺失表示一类都不接受。`seat` 的意思是「注册表中的座位」，并不表示「可信」。 |
+
+行上刻意没有 `claude_code` 块。模型、effort、角色、上限（`max_*`、`call_window_ms`）、`claude_path`、其 sha256 与 `fable_ok` 都在宿主私有配置中，因为 `org.write` 未经认证，行属于不可信输入。
+
+**隔离，而不是让整份名册崩溃。** 若某行带有上述宿主配置键、在 `claude-code` 座位上出现未知键、`admit_*` 格式错误或类别未知、`admit_from` 指向非座位、默认座位上出现 `admit_*`，或 `sessionId` 与另一座位相同（且其中一方选择 `claude-code`），该行会被标记为 `invalid: "<原因>"` 并丢弃其驱动字段；其他座位保持有效。桥必须拒绝发往或来自 `invalid` 座位的邮件。`parseOrgRegistry(text, { strictSeats: true })` 则直接抛错，`writeOrgRegistry` 始终使用它，因此界面与雇佣脚本会明确失败，而不是写入读取时会被隔离的行。
+
+纯函数位于 [`seat-driver.ts`](./src/seat-driver.ts)：`seatDriverKey`、`recordedSeatDriver`（把已存储的会话日志分类为 `default`、`claude-code`、`mixed` 或不作断言，使日志不会被错误的驱动恢复）、`admitsMail`（发送方与类别均默认拒绝；原因会指明失败的部分）以及 `seatRowHash`（对安全字段投影取 sha256：`driver`、`sessionId`、`cwd`、`admit_from`、`admit_sender_classes`、`test`、`tools`；键顺序与列表顺序不影响结果）。`SeatBinding` 是桥交给驱动的已冻结行及其哈希；其 `AgentOptions` 扩展为 `SeatBindingOptions`（本包不依赖 `@deepseek-ai/dsh-agent`，由使用方合并）。
+
 ## 扩展点
 
 提供方实现 [`MailboxProvider`](./src/provider.ts) 并经 `ctx.mailbox` 注册。地址解析策略（chair-to-chair 别名）叠加在 [`provider.ts`](./src/provider.ts) 记录的文法扩展点之上——目前刻意不内置任何策略。
