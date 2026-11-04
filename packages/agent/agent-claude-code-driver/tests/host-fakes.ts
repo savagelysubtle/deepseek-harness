@@ -15,7 +15,7 @@ import type { ClaudeCodeHostSeat } from '../src/seat-config.ts'
 import { fakeChild, fakeClaudeBinary, tempDir } from './fakes.ts'
 
 /** A subprocess owner that hands out fake children. */
-export class FakeSubprocess extends Service {
+class FakeSubprocess extends Service {
   constructor(ctx: Context) {
     super(ctx, 'subprocess')
   }

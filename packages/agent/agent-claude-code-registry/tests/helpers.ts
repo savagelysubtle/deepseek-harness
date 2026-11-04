@@ -21,7 +21,7 @@ import type { SeatRowsService } from '../src/index.ts'
 const tempDirs: string[] = []
 
 /** A fresh temporary directory, removed by {@link cleanTempDirs}. */
-export function tempDir(prefix: string): string {
+function tempDir(prefix: string): string {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)))
   tempDirs.push(dir)
   return dir
@@ -38,7 +38,7 @@ export function cleanHostEnv(): void {
 }
 
 /** A private executable standing in for the claude binary. */
-export function fakeClaudeBinary(): string {
+function fakeClaudeBinary(): string {
   const dir = tempDir('cc-registry-bin-')
   chmodSync(dir, 0o700)
   const file = join(dir, 'claude')

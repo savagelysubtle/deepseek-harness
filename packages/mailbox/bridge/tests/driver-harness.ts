@@ -30,7 +30,7 @@ let dshHomeSaved = false
 let mtimeSeconds = Math.floor(Date.now() / 1000) + 10
 
 /** The one served address every driver spec mails. */
-export const TARGET = formatMailboxAddress('target')
+const TARGET = formatMailboxAddress('target')
 
 /** A stored-log event as the flip classifier reads it. */
 export interface LogEvent { readonly type: string }
@@ -96,7 +96,7 @@ export const CC_TARGET: readonly string[] = [
 ]
 
 /** One recorded `agents.create` / `agents.resume` call. */
-export interface RecordedCall {
+interface RecordedCall {
   readonly kind: 'create' | 'resume'
   /** The exact options object the registry was handed. */
   readonly args: Readonly<Record<string, unknown>>
