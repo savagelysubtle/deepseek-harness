@@ -115,12 +115,16 @@ export interface SeatSourceResolution {
 export interface ClaudeCodeSeatSource {
   /**
    * Resolve one create or resume.
+   * @param request - the session being created or resumed, with the hint and the bridge's seat binding if it passed one.
+   * @returns the seat key and the registry row the source has verified as the bridge's current one.
    * @throws when the request carries no binding, or the binding is stale or forged.
    */
   resolve(request: SeatSourceRequest): SeatSourceResolution
   /**
    * Whether the registry currently routes `seat` to this driver; `undefined` when the source cannot tell yet.
    * Drives the mount-time warning for a host entry that has no registry row.
+   * @param seat - the seat key to look up.
+   * @returns `true` when a row routes the seat to this driver, `false` when none does, `undefined` when unknown.
    */
   hasRow?(seat: string): boolean | undefined
 }

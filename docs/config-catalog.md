@@ -134,6 +134,17 @@ export interface Config {
   dshHome?: string
   /** Claude Code seat rows keyed by seat name (`meta.agentPreset`, else the session id). */
   seats: Record<string, ClaudeCodeSeatRow>
+  /**
+   * Directories the realpath of every host seat's `claude_path` must lie under. Required (non-empty, absolute)
+   * when `hostSeats` is non-empty; the founder's limit on what a registry-routed seat can ever run.
+   */
+  claudePathPrefixes?: string[]
+  /**
+   * Host-private entries for seats the registry routes to this driver, keyed by seat name. They hold everything
+   * that costs money or widens trust (model, caps, binary, cwd pin, sender ceiling); the registry row holds
+   * only routing and admission. This config lives in the profile, which no seat can write.
+   */
+  hostSeats?: Record<string, ClaudeCodeHostSeat>
   /** Process-tree termination grace in milliseconds. */
   disposeGraceMs?: number
   /** Refusal window in milliseconds after a pause signal with no reset time. */
@@ -148,6 +159,40 @@ export interface ClaudeCodeSeatRow {
   claude_code: ClaudeCodeSeatBlock
   /** Founder-only opt-in that lets a fable model id through the validator. */
   fable_ok?: boolean
+}
+
+/**
+ * One host-private seat entry: everything that costs money or widens trust for a registry-routed seat.
+ * The registry row only names the seat's driver and who may mail it; this entry (in the profile, which a
+ * seat cannot write) decides the model, caps, binary, working directory and the widest sender list.
+ */
+export interface ClaudeCodeHostSeat {
+  /** Model alias or full id; the same allowlist and fable fence as a static row. */
+  model: string
+  /** Optional reasoning effort. */
+  effort?: ClaudeCodeEffort
+  /** Tool surface. Only `mail-only` is accepted until the permission slice (S5) lands; any other role is refused. */
+  role: ClaudeCodeRole
+  /** Hard cap on agentic turns for one query; defaults to 25. */
+  max_turns?: number
+  /** Notional spend cap in USD for one query; defaults to 5. */
+  max_budget_usd?: number
+  /** Per-seat cap on queries started per call window; defaults to 120. */
+  max_calls_per_window?: number
+  /** Call window length in milliseconds, at least one minute; defaults to five hours. */
+  call_window_ms?: number
+  /** Absolute path of the real `claude` binary; its realpath must lie under one of `claudePathPrefixes`. */
+  claude_path: string
+  /** Optional SHA-256 (hex) of the pinned binary; an explicit value re-pins the recorded first-seen hash. */
+  claude_path_sha256?: string
+  /** Founder-only opt-in that lets a fable model id through the validator. */
+  fable_ok?: boolean
+  /** The seat's working directory (a realpath). The registry row's `cwd` must equal it. */
+  cwd: string
+  /** The widest set of senders the registry row's `admit_from` may name: seats the founder attests are not externally exposed. */
+  admit_from_ceiling: string[]
+  /** Founder-authorised session id for a reseed: the one new id the driver accepts in place of the pinned one. */
+  session_id?: string
 }
 
 /** The `claude_code` block of a seat registry row, as written in config. */
@@ -179,7 +224,7 @@ export type ClaudeCodeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 export type ClaudeCodeRole = 'coder' | 'lead' | 'mail-only'
 ```
 
-Source: [`packages/agent/agent-claude-code-driver/src/index.ts:98`](../packages/agent/agent-claude-code-driver/src/index.ts)
+Source: [`packages/agent/agent-claude-code-driver/src/index.ts:155`](../packages/agent/agent-claude-code-driver/src/index.ts)
 
 <a id="deepseek-aidsh-agent-default-model"></a>
 
@@ -1544,7 +1589,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/mailbox/bridge/src/index.ts:203`](../packages/mailbox/bridge/src/index.ts)
+Source: [`packages/mailbox/bridge/src/index.ts:245`](../packages/mailbox/bridge/src/index.ts)
 
 <a id="deepseek-aidsh-mailbox-local"></a>
 
@@ -3548,6 +3593,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 
 - `@deepseek-ai/dsh-agent` ([`packages/core/agent/src/index.ts`](../packages/core/agent/src/index.ts))
 - `@deepseek-ai/dsh-agent-claude-code` ([`packages/core/agent-claude-code/src/index.ts`](../packages/core/agent-claude-code/src/index.ts))
+- `@deepseek-ai/dsh-agent-claude-code-registry` — requires `agents` ([`packages/agent/agent-claude-code-registry/src/index.ts`](../packages/agent/agent-claude-code-registry/src/index.ts))
 - `@deepseek-ai/dsh-api-gateway` — requires `typert` ([`packages/api/gateway/src/index.ts`](../packages/api/gateway/src/index.ts))
 - `@deepseek-ai/dsh-api-remotes` ([`packages/api/remotes/src/index.ts`](../packages/api/remotes/src/index.ts))
 - `@deepseek-ai/dsh-client-locale` ([`packages/client/locale/src/index.ts`](../packages/client/locale/src/index.ts))
