@@ -34,7 +34,7 @@ claude-code seats (OP #292):
   --model <id>       model for the printed host-config stanza (required for claude-code)
   --role mail-only   the only role accepted (lead and coder wait for slice S5)
   --admit-from a,b   seats whose mail the seat admits (default: nobody)
-  --admit <classes>  sender classes admitted (default: seat; unverified needs --test)
+  --admit <classes>  sender classes admitted (only seat; the default)
   --test             write test: true on the new row
   --reseed           founder only: pin a NEW session id on an existing claude-code row;
                      repeat that row's own --admit-from, --admit and --test values
@@ -411,8 +411,7 @@ cc_hire() {
   for cls in $(printf '%s' "$ADMIT" | tr ',' ' '); do
     case "$cls" in
       seat) ;;
-      unverified) [ "$TEST" -eq 1 ] || die "--admit unverified is refused unless --test (unverified senders include any guest)";;
-      *) die "unknown sender class \"$cls\" (seat, unverified)";;
+      *) die "--admit \"$cls\" refused: S3 admits roster seats only; guest admission is an S8 item";;
     esac
   done
   local sender

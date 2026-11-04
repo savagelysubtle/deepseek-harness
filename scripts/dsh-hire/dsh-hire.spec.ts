@@ -167,12 +167,11 @@ describe('claude-code hire', () => {
     expect(out.stdout).toContain('no edge yet between claudie and: alfred')
   })
 
-  it('writes test: true and the unverified class only for a --test seat', () => {
+  it('writes test: true for a --test seat', () => {
     const r = rig()
-    const out = run(r, HIRE_CC(r, '--admit-from', 'alfred', '--admit', 'seat,unverified', '--test'))
+    const out = run(r, HIRE_CC(r, '--admit-from', 'alfred', '--test'))
     expect(out.status, out.stderr).toBe(0)
-    const text = readRegistry(r)
-    expect(text).toContain('    - seat\n    - unverified\n    test: true\n')
+    expect(readRegistry(r)).toContain('    - seat\n    test: true\n')
   })
 
   it('writes a timestamped backup of the registry it replaced', () => {
@@ -221,8 +220,9 @@ describe('claude-code hire', () => {
       ['a mixed-case fable model', ['--model', 'Claude-FABLE-1'], 'fable'],
       ['an off-allowlist model', ['--model', 'gpt-5'], 'allowlist'],
       ['a model with a newline', ['--model', 'haiku\nopus'], 'newline'],
-      ['unverified without --test', ['--admit', 'unverified'], 'unless --test'],
-      ['an unknown class', ['--admit', 'guest'], 'unknown sender class'],
+      ['unverified', ['--admit', 'unverified'], 'S3 admits roster seats only; guest admission is an S8 item'],
+      ['unverified even with --test', ['--admit', 'seat,unverified', '--test'], 'guest admission is an S8 item'],
+      ['an unknown class', ['--admit', 'guest'], 'guest admission is an S8 item'],
     ])('refuses %s and writes nothing', (_name, extra, message) => {
       const r = rig()
       const before = readRegistry(r)
