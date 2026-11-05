@@ -11,8 +11,9 @@ import { seatRowHash } from '@deepseek-ai/dsh-mailbox'
 import type { OrgRegistrySeat, SeatBinding, SeatBindingOptions } from '@deepseek-ai/dsh-mailbox'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import type { ClaudeCodeSeatSource } from '../src/index.ts'
+import type { ClaudeCodePolicy } from '../src/policy-contract.ts'
 import type { ClaudeCodeHostSeat } from '../src/seat-config.ts'
-import { fakeChild, fakeClaudeBinary, tempDir } from './fakes.ts'
+import { fakeChild, fakeClaudeBinary, stubPolicy, tempDir } from './fakes.ts'
 
 /** A subprocess owner that hands out fake children. */
 class FakeSubprocess extends Service {
@@ -26,13 +27,14 @@ class FakeSubprocess extends Service {
 }
 
 /** A context with the session store, agent registry and fake subprocess owner. */
-export async function bootedContext(): Promise<Context> {
+export async function bootedContext(policy: ClaudeCodePolicy | null = stubPolicy({}, ['lead'])): Promise<Context> {
   const ctx = new Context()
   const { default: SessionStore } = await import('@deepseek-ai/dsh-session')
   const { default: AgentRegistry } = await import('@deepseek-ai/dsh-agent')
   await ctx.plugin(SessionStore)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(FakeSubprocess)
+  if (policy !== null) ctx.provide('claudeCodePolicy', policy)
   return ctx
 }
 

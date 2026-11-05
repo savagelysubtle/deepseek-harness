@@ -8,7 +8,7 @@ import { SessionId, SessionPreparation } from '@deepseek-ai/dsh-session'
 import * as Driver from '../src/index.ts'
 import { ClaudeCodeSeatFactory } from '../src/factory.ts'
 import type { ResolvedSeat } from '../src/factory.ts'
-import { cleanHostEnv, cleanTempDirs, fakeClaudeBinary, harness, resultMessage, seatConfig, seatRow, tempDir, tick, userMessage } from './fakes.ts'
+import { cleanHostEnv, cleanTempDirs, fakeClaudeBinary, harness, resultMessage, seatConfig, seatRow, stubPolicy, tempDir, tick, userMessage } from './fakes.ts'
 
 class FakeSubprocess extends Service {
   constructor(ctx: Context) {
@@ -189,6 +189,7 @@ describe('plugin entry', () => {
     await ctx.plugin(SessionStore)
     await ctx.plugin(AgentRegistry)
     await ctx.plugin(FakeSubprocess)
+    ctx.provide('claudeCodePolicy', stubPolicy({}, ['lead']))
     const dshHome = tempDir('cc-home-')
     const cwd = tempDir()
     const fiber = await ctx.plugin(Driver, Driver.Config({

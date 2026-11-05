@@ -27,8 +27,10 @@ import { killProcessGroup, ProcessLedger } from './ledger.ts'
 import type { MailLeaseSink } from './mail-lease.ts'
 import type { SeatAgentDeps, TranscriptState } from './seat-agent.ts'
 import { SeatGate } from './seat-agent.ts'
+import type { ClaudeCodePolicy } from './policy-contract.ts'
 import {
-  ClaudeCodeHostSeat, ClaudeCodeSeatRow, CLAUDE_CODE_DRIVER_KEY, hostSeatStanza, mergeHostSeat, parseHostSeat, parseSeatRow,
+  assertRoleServable, ClaudeCodeHostSeat, ClaudeCodeSeatRow, CLAUDE_CODE_DRIVER_KEY, hostSeatStanza, mergeHostSeat, parseHostSeat,
+  parseSeatRow,
 } from './seat-config.ts'
 import type { ClaudeCodeSeatConfig, RegistrySeatView } from './seat-config.ts'
 import { CallWindowStore, SeatSessionPins } from './seat-state.ts'
@@ -47,9 +49,9 @@ export type {
   ClaudeCodePolicy, PolicyExtension, PolicyFileV1, PolicyHostSeatFields, PolicyQueryContext, PolicyReadiness,
   ReadinessContributor, ReadinessRequirement,
 } from './policy-contract.ts'
-export { allowlistSettings, buildQueryOptions } from './options.ts'
+export { allowlistSettings, buildQueryOptions, expectedInitTools, toolSetMismatch } from './options.ts'
 export type {
-  BuildQueryOptionsInput, ExtensionSettings, QueryBinding, QueryOptionsContext, QueryOptionsExtension,
+  BuildQueryOptionsInput, ExtensionSettings, QueryBinding, QueryOptionsContext, QueryOptionsExtension, QueryTaintControls,
 } from './options.ts'
 export {
   defaultAdmission, externalHops, frameMailText, isTaintedMail, mailboxMessageId, mailFrameFooter, mailFrameHeader,
@@ -74,9 +76,9 @@ export {
 } from './seat-agent.ts'
 export type { SeatAgentDeps, TranscriptState } from './seat-agent.ts'
 export {
-  CLAUDE_CODE_DRIVER_KEY, CLAUDE_CODE_EFFORTS, CLAUDE_CODE_ROLES, ClaudeCodeSeatBlock, ClaudeCodeSeatRow,
+  assertRoleServable, CLAUDE_CODE_DRIVER_KEY, CLAUDE_CODE_EFFORTS, CLAUDE_CODE_ROLES, ClaudeCodeSeatBlock, ClaudeCodeSeatRow,
   DEFAULT_CALL_WINDOW_MS, DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_CALLS_PER_WINDOW, DEFAULT_MAX_TURNS, MIN_CALL_WINDOW_MS,
-  foldModelId, isAllowedModel, isFableModel, parseSeatRow, toolPolicyFor,
+  foldModelId, isAllowedModel, isFableModel, parseSeatRow, POLICY_HOST_KEYS, toolPolicyFor,
 } from './seat-config.ts'
 export type {
   ClaudeCodeEffort, ClaudeCodeRole, ClaudeCodeSeatConfig, ClaudeCodeToolPolicy, ParseSeatRowOptions,
@@ -136,6 +138,11 @@ export interface ClaudeCodeSeatSource {
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
+    /**
+     * The permission-policy provider (contract in `policy-contract.ts`). Read at use time, never at mount: `lead` and
+     * `coder` rows are accepted only while it is registered and its readiness lists the role.
+     */
+    claudeCodePolicy: ClaudeCodePolicy
     claudeCodeMailHooks: ClaudeCodeMailHooks
     claudeCodeSeatSource: ClaudeCodeSeatSource
   }
@@ -230,8 +237,8 @@ export function apply(ctx: Context, config: Config): void {
     attestedBySeat.set(seat, attestation)
   }
   for (const [seat, row] of Object.entries(config.seats)) {
-    // No permission-policy extension exists yet (slice S5), so `coder` rows are refused here.
-    const seatConfig = parseSeatRow(row, seat, { policyExtension: false })
+    // Role acceptance is lazy (see `assertRoleServable`, called at resolve): the policy service may register after this plugin mounts.
+    const seatConfig = parseSeatRow(row, seat, { policyExtension: true })
     attestSeat(seat, seatConfig)
     seats.set(seat, { seat, config: seatConfig })
   }
@@ -290,6 +297,7 @@ export function apply(ctx: Context, config: Config): void {
       assertBinaryUnchanged(attestation)
       return attestation.realPath
     },
+    policy: () => ctx.get('claudeCodePolicy'),
     admit: request => (ctx.get('claudeCodeMailHooks')?.admit ?? defaultAdmission)(request),
     lease: {
       settle: id => ctx.get('claudeCodeMailHooks')?.lease?.settle(id),
@@ -305,7 +313,10 @@ export function apply(ctx: Context, config: Config): void {
       const key = hint ?? sessionId
       // The static config is consulted first; the registry source only for a seat it does not hold.
       const resolved = seats.get(key)
-      if (resolved !== undefined) return resolved
+      if (resolved !== undefined) {
+        assertRoleServable(resolved.config.role, resolved.seat, ctx.get('claudeCodePolicy'))
+        return resolved
+      }
       const source = ctx.get('claudeCodeSeatSource')
       if (source === undefined) {
         throw new Error(`agent-claude-code-driver: no ${CLAUDE_CODE_DRIVER_KEY} seat row for "${key}" (configured seats: ${[...seats.keys()].join(', ') || 'none'})`)
@@ -320,6 +331,8 @@ export function apply(ctx: Context, config: Config): void {
         )
       }
       const seatConfig = mergeHostSeat(row, host, prefixes, seat)
+      // Before the session pin moves: a refused role must leave the seat exactly as it was.
+      assertRoleServable(seatConfig.role, seat, ctx.get('claudeCodePolicy'))
       if (sessionPins.enforce(seat, sessionId, host.session_id) === 'reseeded') {
         ctx.logger.warn(`agent-claude-code-driver: seat "${seat}" was reseeded by the founder's host-config session_id; its session pin moved to ${sessionId}. The call window is kept.`)
       }

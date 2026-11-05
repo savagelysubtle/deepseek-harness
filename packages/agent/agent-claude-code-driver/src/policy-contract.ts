@@ -63,9 +63,16 @@ export interface PolicyReadiness {
 export interface ClaudeCodePolicy {
   /** Contract version; the driver refuses any value it does not know. */
   readonly version: 1
-  /** Build the contribution for one query. */
+  /**
+   * Build the contribution for one query.
+   * @param ctx - what the driver tells the provider about the query, plus the live taint controls.
+   * @returns the settings, in-process server and allow entries the driver then validates.
+   */
   extend(ctx: PolicyQueryContext): PolicyExtension
-  /** Report which roles are servable now. */
+  /**
+   * Report which roles are servable now.
+   * @returns the servable roles and the requirements still unmet.
+   */
   readiness(): PolicyReadiness
 }
 

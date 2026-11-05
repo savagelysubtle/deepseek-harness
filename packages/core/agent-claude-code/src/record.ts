@@ -13,7 +13,7 @@ import { sanitizeFreeText, sanitizeLabel } from './sanitize.ts'
 import type {
   ClaudeCodeCompactData, ClaudeCodeFleetRefusedData, ClaudeCodeMailClaimedData,
   ClaudeCodeMailOutcomeData, ClaudeCodeModelUsage, ClaudeCodePausedData, ClaudeCodeRateLimitedData,
-  ClaudeCodeRefusedData, ClaudeCodeResumeFailedData, ClaudeCodeSessionBoundData, ClaudeCodeSteerData,
+  ClaudeCodeRefusedData, ClaudeCodeResumeFailedData, ClaudeCodeSessionBoundData, ClaudeCodeSessionTaintedData, ClaudeCodeSteerData,
   ClaudeCodeThinkingData, ClaudeCodeThrowawayTurnData, ClaudeCodeToolCallData, ClaudeCodeUnmappedData, ClaudeCodeUsage,
 } from './types.ts'
 
@@ -69,6 +69,7 @@ export interface ClaudeCodeEventInputMap {
   'claude-code/throwaway-turn': WithoutVersion<ClaudeCodeThrowawayTurnData>
   'claude-code/mail-outcome': WithoutVersion<ClaudeCodeMailOutcomeData>
   'claude-code/refused': WithoutVersion<ClaudeCodeRefusedData>
+  'claude-code/session-tainted': WithoutVersion<ClaudeCodeSessionTaintedData>
 }
 
 /** Optional sink for the one-line reason a record was dropped (the recorder itself has no logger). */
@@ -275,6 +276,11 @@ function normalize(type: ClaudeCodeEventType, data: unknown): Plain | undefined 
         detail: sanitizeFreeText(read(data, 'detail'), CLAUDE_CODE_MAX_REASON_CHARS),
         at: timestamp(read(data, 'at')),
       }
+    }
+    case 'claude-code/session-tainted': {
+      const reason = sanitizeFreeText(read(data, 'reason'), CLAUDE_CODE_MAX_REASON_CHARS)
+      if (reason === '') return undefined
+      return { version, reason, at: timestamp(read(data, 'at')) }
     }
     default:
       return undefined

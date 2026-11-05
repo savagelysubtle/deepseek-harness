@@ -21,7 +21,7 @@ describe('claude-code event vocabulary', () => {
     expect([...CLAUDE_CODE_EVENT_TYPES].sort()).toEqual([
       'claude-code/compact', 'claude-code/fleet-refused', 'claude-code/mail-claimed', 'claude-code/mail-outcome',
       'claude-code/paused', 'claude-code/rate-limited', 'claude-code/refused', 'claude-code/resume-failed',
-      'claude-code/session-bound', 'claude-code/steer', 'claude-code/thinking', 'claude-code/throwaway-turn', 'claude-code/tool-call',
+      'claude-code/session-bound', 'claude-code/session-tainted', 'claude-code/steer', 'claude-code/thinking', 'claude-code/throwaway-turn', 'claude-code/tool-call',
       'claude-code/turn-completed', 'claude-code/unmapped',
     ])
     for (const type of CLAUDE_CODE_EVENT_TYPES) expect(KNOWN_SESSION_EVENT_TYPES.has(type)).toBe(true)
@@ -186,6 +186,13 @@ describe('recordClaudeCodeEvent', () => {
     expect(recordClaudeCodeEvent(session, 'claude-code/throwaway-turn', { turnIndex: 3, at: 1, body: 'x' } as never)).toBe(true)
     expect(recordClaudeCodeEvent(session, 'claude-code/throwaway-turn', { turnIndex: 0, at: 1 })).toBe(false)
     expect(session.events.map(event => event.data)).toEqual([{ version: 1, turnIndex: 3, at: 1 }])
+  })
+
+  it('records a session-tainted marker with a redacted reason and drops one without a reason', async () => {
+    const session = await newSession()
+    expect(recordClaudeCodeEvent(session, 'claude-code/session-tainted', { reason: 'tool:Read', at: 1, body: 'x' } as never)).toBe(true)
+    expect(recordClaudeCodeEvent(session, 'claude-code/session-tainted', { reason: '', at: 1 })).toBe(false)
+    expect(session.events.map(event => event.data)).toEqual([{ version: 1, reason: 'tool:Read', at: 1 }])
   })
 
   it('redacts tokens and paths, strips control characters, and caps free text', async () => {

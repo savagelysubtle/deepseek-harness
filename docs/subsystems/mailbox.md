@@ -183,7 +183,30 @@ Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnp
 
 The mail seams a later slice (registry admission in S3, the mailbox bridge's lease in S8) plugs in by providing `ctx.claudeCodeMailHooks`. Both are optional and read at use time, so the provider may load after this plugin.
 
-Source: [`packages/agent/agent-claude-code-driver/src/index.ts:90`](../../packages/agent/agent-claude-code-driver/src/index.ts)
+Source: [`packages/agent/agent-claude-code-driver/src/index.ts:92`](../../packages/agent/agent-claude-code-driver/src/index.ts)
+
+<a id="ctxclaudecodepolicy--claudecodepolicy"></a>
+
+### `ctx.claudeCodePolicy` — `ClaudeCodePolicy`
+
+The `claudeCodePolicy` service a provider plugin registers and the driver reads at use time.
+
+```ts cordis-catalog
+/**
+ * Build the contribution for one query.
+ * @param ctx - what the driver tells the provider about the query, plus the live taint controls.
+ * @returns the settings, in-process server and allow entries the driver then validates.
+ */
+extend(ctx: PolicyQueryContext): PolicyExtension
+
+/**
+ * Report which roles are servable now.
+ * @returns the servable roles and the requirements still unmet.
+ */
+readiness(): PolicyReadiness
+```
+
+Source: [`packages/agent/agent-claude-code-driver/src/policy-contract.ts:63`](../../packages/agent/agent-claude-code-driver/src/policy-contract.ts)
 
 <a id="ctxclaudecodeseatsource--claudecodeseatsource"></a>
 
@@ -209,7 +232,7 @@ resolve(request: SeatSourceRequest): SeatSourceResolution
 hasRow?(seat: string): boolean | undefined
 ```
 
-Source: [`packages/agent/agent-claude-code-driver/src/index.ts:120`](../../packages/agent/agent-claude-code-driver/src/index.ts)
+Source: [`packages/agent/agent-claude-code-driver/src/index.ts:122`](../../packages/agent/agent-claude-code-driver/src/index.ts)
 
 <a id="ctxmailbox--mailboxregistry"></a>
 

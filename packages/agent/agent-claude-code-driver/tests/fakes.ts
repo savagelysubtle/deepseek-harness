@@ -23,6 +23,7 @@ import { defaultAdmission } from '../src/admission.ts'
 import type { MailAdmission } from '../src/admission.ts'
 import { buildChildEnv, forbiddenEnvPresent } from '../src/env.ts'
 import { ProcessLedger } from '../src/ledger.ts'
+import type { ClaudeCodePolicy, PolicyExtension } from '../src/policy-contract.ts'
 import type { LedgerProcessOps } from '../src/ledger.ts'
 import { ClaudeCodeSeatAgent, SeatGate } from '../src/seat-agent.ts'
 import type { SeatAgentDeps, TranscriptState } from '../src/seat-agent.ts'
@@ -36,6 +37,11 @@ import type { ClaudeCodeSeatConfig, ClaudeCodeSeatRow } from '../src/seat-config
  */
 export function cleanHostEnv(): void {
   for (const name of forbiddenEnvPresent(process.env)) vi.stubEnv(name, undefined)
+}
+
+/** A policy service that serves lead and coder and contributes nothing (the pre-S5 behaviour of a lead seat). */
+export function stubPolicy(extension: PolicyExtension = {}, roles: readonly ('lead' | 'coder')[] = ['lead', 'coder']): ClaudeCodePolicy {
+  return { version: 1, extend: () => extension, readiness: () => ({ roles: new Set(roles), missing: [] }) }
 }
 
 export const CLAUDE_PATH = '/opt/claude/versions/2.1.317/claude'
@@ -227,6 +233,8 @@ export interface Harness {
     leases: string[]
     /** Make every lease call throw. */
     leaseError: Error | undefined
+    /** The policy service the driver reads per turn; absent models "nothing registered". Defaults to {@link stubPolicy}. */
+    policy: ClaudeCodePolicy | undefined
   }
   readonly deps: SeatAgentDeps
   session(id?: string): Session
@@ -283,7 +291,7 @@ export async function harness(options: { childPid?: number; childExitsOnWait?: b
   const killed: number[] = []
   const warnings: string[] = []
   const state: Harness['state'] = { transcript: 'ok', hostEnv: {}, failNextQuery: undefined, now: 1_800_000_000_000, flushError: undefined, calls: [],
-    killSwitch: false, admit: undefined, leases: [], leaseError: undefined }
+    killSwitch: false, admit: undefined, leases: [], leaseError: undefined, policy: stubPolicy() }
   const ledgerFile = join(tempDir(), 'pids.json')
   const ledger = new ProcessLedger(ledgerFile, ledgerOps(new Map([[options.childPid ?? 4242, 'tick-1'], [777, 'host-tick']]), []))
   const gate = new SeatGate()
@@ -319,6 +327,7 @@ export async function harness(options: { childPid?: number; childExitsOnWait?: b
       state.calls.push('flush')
       return state.flushError === undefined ? Promise.resolve() : Promise.reject(state.flushError)
     },
+    policy: () => state.policy,
     killSwitchActive: () => state.killSwitch,
     killSwitchPollMs: 5,
     admit: request => (state.admit === undefined ? defaultAdmission(request) : state.admit(request)),

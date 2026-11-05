@@ -423,6 +423,30 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'claudeCodePolicy',
+    summary: 'The `claudeCodePolicy` service a provider plugin registers and the driver reads at use time.',
+    description: 'The `claudeCodePolicy` service a provider plugin registers and the driver reads at use time.',
+    methods: [
+      {
+        signature: 'readonly version: 1',
+        description: 'Contract version; the driver refuses any value it does not know.',
+        parameters: [],
+      },
+      {
+        signature: 'extend(ctx: PolicyQueryContext): PolicyExtension',
+        description: 'Build the contribution for one query.',
+        parameters: [{ name: 'ctx', description: 'what the driver tells the provider about the query, plus the live taint controls.' }],
+        returns: 'the settings, in-process server and allow entries the driver then validates.',
+      },
+      {
+        signature: 'readiness(): PolicyReadiness',
+        description: 'Report which roles are servable now.',
+        parameters: [],
+        returns: 'the servable roles and the requirements still unmet.',
+      },
+    ],
+  },
+  {
     key: 'claudeCodeSeatSource',
     summary: 'Finds the registry row of a seat that is not in the static `seats` config.',
     description: 'Finds the registry row of a seat that is not in the static `seats` config. Provided as `ctx.claudeCodeSeatSource` (by the registry glue package); read at use time, so its provider may load after this plugin. A source must refuse (throw) when it cannot prove the row is the bridge\'s current one.',
@@ -3202,6 +3226,18 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface CancelScope {\n    readonly workspace: string;\n    readonly sessionId?: string;\n}',
   },
   {
+    name: 'ClaudeCodeEffort',
+    declaration: 'export type ClaudeCodeEffort = \'low\' | \'medium\' | \'high\' | \'xhigh\' | \'max\';',
+  },
+  {
+    name: 'ClaudeCodeRole',
+    declaration: 'export type ClaudeCodeRole = \'coder\' | \'lead\' | \'mail-only\';',
+  },
+  {
+    name: 'ClaudeCodeSeatConfig',
+    declaration: 'export interface ClaudeCodeSeatConfig {\n    readonly model: string;\n    readonly effort?: ClaudeCodeEffort;\n    readonly role: ClaudeCodeRole;\n    readonly maxTurns: number;\n    readonly maxBudgetUsd: number;\n    readonly claudePath: string;\n    readonly maxCallsPerWindow: number;\n    readonly callWindowMs: number;\n    readonly claudePathSha256?: string;\n    readonly fableOk: boolean;\n    readonly policy?: PolicyHostSeatFields;\n}',
+  },
+  {
     name: 'ClientResponse',
     declaration: 'export interface ClientResponse {\n    type: \'client-response\';\n    rpcId: RpcId;\n    result: RpcResult<unknown>;\n}',
   },
@@ -3508,6 +3544,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'EpochHeader',
     declaration: 'export interface EpochHeader {\n    config: LlmCallConfig;\n    adapterDefaults?: LlmCallConfigAdapterDefaults;\n    system?: string;\n    tools?: ToolSchema[];\n}',
+  },
+  {
+    name: 'ExtensionSettings',
+    declaration: 'export interface ExtensionSettings {\n    readonly hooks?: Readonly<Record<string, unknown>>;\n    readonly permissions?: {\n        readonly deny?: readonly string[];\n        readonly ask?: readonly string[];\n    };\n}',
   },
   {
     name: 'FileDiff',
@@ -4174,6 +4214,22 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface PermissionSelect {\n    options: PresetOption[];\n    currentValue: string;\n}',
   },
   {
+    name: 'PolicyExtension',
+    declaration: 'export interface PolicyExtension {\n    readonly settings?: ExtensionSettings;\n    readonly mcpServers?: Readonly<Record<\'dsh\', McpSdkServerConfigWithInstance>>;\n    readonly allow?: readonly string[];\n}',
+  },
+  {
+    name: 'PolicyHostSeatFields',
+    declaration: 'export interface PolicyHostSeatFields {\n    readonly tools?: readonly string[];\n    readonly send_to?: readonly string[];\n    readonly allow_blocking?: boolean;\n    readonly rules_dir?: string;\n}',
+  },
+  {
+    name: 'PolicyQueryContext',
+    declaration: 'export interface PolicyQueryContext {\n    readonly seat: string;\n    readonly role: ClaudeCodeRole;\n    readonly config: ClaudeCodeSeatConfig;\n    readonly cwd: string;\n    readonly binding: QueryBinding;\n    isTurnTainted(): boolean;\n    markTurnTainted(reason: string): void;\n    deliveredTraceIds(): ReadonlySet<string>;\n}',
+  },
+  {
+    name: 'PolicyReadiness',
+    declaration: 'export interface PolicyReadiness {\n    readonly roles: ReadonlySet<\'lead\' | \'coder\'>;\n    readonly missing: readonly ReadinessRequirement[];\n}',
+  },
+  {
     name: 'PostToolDecision',
     declaration: 'export type PostToolDecision = {\n    kind: \'accept\';\n    content?: ContentBlock[];\n    value?: never;\n    additionalContexts?: UserMessage[];\n} | {\n    kind: \'accept\';\n    value: JsonValue;\n    content?: never;\n    additionalContexts?: UserMessage[];\n} | {\n    kind: \'block\';\n    feedback: ContentBlock[];\n    additionalContexts?: UserMessage[];\n};',
   },
@@ -4246,8 +4302,16 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type ProviderRequestId = Branded<\'ProviderRequestId\'>;',
   },
   {
+    name: 'QueryBinding',
+    declaration: 'export type QueryBinding = {\n    readonly kind: \'first\';\n    readonly sdkSessionId: string;\n} | {\n    readonly kind: \'resume\';\n    readonly sdkSessionId: string;\n};',
+  },
+  {
     name: 'ReadFileLine',
     declaration: 'export interface ReadFileLine {\n    number: number;\n    text: string;\n}',
+  },
+  {
+    name: 'ReadinessRequirement',
+    declaration: 'export type ReadinessRequirement = \'sandbox\' | \'canary\' | \'rules-hooks\';',
   },
   {
     name: 'ReadResultView',

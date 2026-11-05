@@ -5,7 +5,8 @@ import { harness, mailMessage } from './fakes.ts'
 
 const built = vi.hoisted(() => ({ options: {} as Record<string, unknown> }))
 
-vi.mock('../src/options.ts', () => ({
+vi.mock('../src/options.ts', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/options.ts')>(),
   buildQueryOptions: (): Options => built.options,
 }))
 

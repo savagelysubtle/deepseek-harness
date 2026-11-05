@@ -262,7 +262,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'claude-code/compact': ClaudeCodeCompactData
 ```
 
-来源：[`packages/core/agent-claude-code/src/types.ts:238`](../packages/core/agent-claude-code/src/types.ts)
+来源：[`packages/core/agent-claude-code/src/types.ts:246`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codefleet-refused--log-only"></a>
 
@@ -276,7 +276,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'claude-code/fleet-refused': ClaudeCodeFleetRefusedData
 ```
 
-来源：[`packages/core/agent-claude-code/src/types.ts:248`](../packages/core/agent-claude-code/src/types.ts)
+来源：[`packages/core/agent-claude-code/src/types.ts:256`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codemail-claimed--log-only"></a>
 
@@ -290,7 +290,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'claude-code/mail-claimed': ClaudeCodeMailClaimedData
 ```
 
-来源：[`packages/core/agent-claude-code/src/types.ts:278`](../packages/core/agent-claude-code/src/types.ts)
+来源：[`packages/core/agent-claude-code/src/types.ts:286`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codemail-outcome--log-only"></a>
 
@@ -304,7 +304,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'claude-code/mail-outcome': ClaudeCodeMailOutcomeData
 ```
 
-来源：[`packages/core/agent-claude-code/src/types.ts:283`](../packages/core/agent-claude-code/src/types.ts)
+来源：[`packages/core/agent-claude-code/src/types.ts:291`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codepaused--log-only"></a>
 
@@ -318,7 +318,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'claude-code/paused': ClaudeCodePausedData
 ```
 
-来源：[`packages/core/agent-claude-code/src/types.ts:258`](../packages/core/agent-claude-code/src/types.ts)
+来源：[`packages/core/agent-claude-code/src/types.ts:266`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-coderate-limited--log-only"></a>
 
@@ -332,7 +332,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'claude-code/rate-limited': ClaudeCodeRateLimitedData
 ```
 
-来源：[`packages/core/agent-claude-code/src/types.ts:243`](../packages/core/agent-claude-code/src/types.ts)
+来源：[`packages/core/agent-claude-code/src/types.ts:251`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-coderefused--log-only"></a>
 
@@ -346,7 +346,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'claude-code/refused': ClaudeCodeRefusedData
 ```
 
-来源：[`packages/core/agent-claude-code/src/types.ts:288`](../packages/core/agent-claude-code/src/types.ts)
+来源：[`packages/core/agent-claude-code/src/types.ts:296`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-coderesume-failed--log-only"></a>
 
@@ -360,7 +360,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'claude-code/resume-failed': ClaudeCodeResumeFailedData
 ```
 
-来源：[`packages/core/agent-claude-code/src/types.ts:253`](../packages/core/agent-claude-code/src/types.ts)
+来源：[`packages/core/agent-claude-code/src/types.ts:261`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codesession-bound--log-only"></a>
 
@@ -374,7 +374,21 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'claude-code/session-bound': ClaudeCodeSessionBoundData
 ```
 
-来源：[`packages/core/agent-claude-code/src/types.ts:223`](../packages/core/agent-claude-code/src/types.ts)
+来源：[`packages/core/agent-claude-code/src/types.ts:231`](../packages/core/agent-claude-code/src/types.ts)
+
+<a id="claude-codesession-tainted--log-only"></a>
+
+#### `claude-code/session-tainted` — log-only
+
+```ts persistence-catalog
+/**
+ * Marks the Claude session as tainted (it read files, fetched content, or took in tool output the policy calls untrusted).
+ * @param data - short redacted reason and time.
+ */
+'claude-code/session-tainted': ClaudeCodeSessionTaintedData
+```
+
+来源：[`packages/core/agent-claude-code/src/types.ts:306`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codesteer--log-only"></a>
 
@@ -388,7 +402,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'claude-code/steer': ClaudeCodeSteerData
 ```
 
-来源：[`packages/core/agent-claude-code/src/types.ts:233`](../packages/core/agent-claude-code/src/types.ts)
+来源：[`packages/core/agent-claude-code/src/types.ts:241`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codethinking--log-only"></a>
 
@@ -402,7 +416,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'claude-code/thinking': ClaudeCodeThinkingData
 ```
 
-来源：[`packages/core/agent-claude-code/src/types.ts:268`](../packages/core/agent-claude-code/src/types.ts)
+来源：[`packages/core/agent-claude-code/src/types.ts:276`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codethrowaway-turn--log-only"></a>
 
@@ -416,7 +430,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'claude-code/throwaway-turn': ClaudeCodeThrowawayTurnData
 ```
 
-来源：[`packages/core/agent-claude-code/src/types.ts:293`](../packages/core/agent-claude-code/src/types.ts)
+来源：[`packages/core/agent-claude-code/src/types.ts:301`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codetool-call--log-only"></a>
 
@@ -430,7 +444,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'claude-code/tool-call': ClaudeCodeToolCallData
 ```
 
-来源：[`packages/core/agent-claude-code/src/types.ts:263`](../packages/core/agent-claude-code/src/types.ts)
+来源：[`packages/core/agent-claude-code/src/types.ts:271`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codeturn-completed--log-only"></a>
 
@@ -444,7 +458,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'claude-code/turn-completed': ClaudeCodeTurnCompletedData
 ```
 
-来源：[`packages/core/agent-claude-code/src/types.ts:228`](../packages/core/agent-claude-code/src/types.ts)
+来源：[`packages/core/agent-claude-code/src/types.ts:236`](../packages/core/agent-claude-code/src/types.ts)
 
 <a id="claude-codeunmapped--log-only"></a>
 
@@ -458,7 +472,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 'claude-code/unmapped': ClaudeCodeUnmappedData
 ```
 
-来源：[`packages/core/agent-claude-code/src/types.ts:273`](../packages/core/agent-claude-code/src/types.ts)
+来源：[`packages/core/agent-claude-code/src/types.ts:281`](../packages/core/agent-claude-code/src/types.ts)
 
 ### `command/*`
 

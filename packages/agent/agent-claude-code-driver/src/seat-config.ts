@@ -8,6 +8,7 @@
 import { realpathSync } from 'node:fs'
 import { isAbsolute, relative, resolve } from 'node:path'
 import z from '@deepseek-ai/schemastery'
+import type { ClaudeCodePolicy, PolicyHostSeatFields } from './policy-contract.ts'
 
 /** The registry `driver` value that selects this package's factory. */
 export const CLAUDE_CODE_DRIVER_KEY = 'claude-code'
@@ -108,6 +109,8 @@ export interface ClaudeCodeSeatConfig {
   readonly claudePathSha256?: string
   /** Whether the row opted into fable models (founder only). */
   readonly fableOk: boolean
+  /** The host-private policy fields (tools, send_to, allow_blocking, rules_dir), validated; only a host entry carries them. */
+  readonly policy?: PolicyHostSeatFields
 }
 
 /**
@@ -149,9 +152,9 @@ export function isAllowedModel(model: string, fableOk: boolean): boolean {
 /** Options of {@link parseSeatRow}. */
 export interface ParseSeatRowOptions {
   /**
-   * Whether a permission-policy extension is registered (slice S5).
-   * Without one a `coder` row is refused: its edit tools would run with no
-   * generated deny entries.
+   * Whether `coder` may pass this check. The driver's mount passes `true` because role acceptance is lazy
+   * (see {@link assertRoleServable}: decided against the `claudeCodePolicy` service at seat resolve and per query);
+   * a direct caller that omits it keeps the old refusal of `coder`.
    */
   readonly policyExtension?: boolean
 }
@@ -228,6 +231,39 @@ export function parseSeatRow(row: ClaudeCodeSeatRow, seat: string, options: Pars
   }
 }
 
+/**
+ * Whether a seat's role can be served right now. `mail-only` always can. `lead` and `coder` need the
+ * `claudeCodePolicy` service (read at use time, so it may register after mount) at a known contract
+ * version whose readiness lists the role; `coder` is listed only when sandbox, canary and rules-hooks
+ * contributors are all registered.
+ * @param role - the seat's role.
+ * @param seat - seat label used in the error message.
+ * @param policy - the service as read just now, or `undefined` when none is registered.
+ * @throws when the role cannot be served, naming why and the remedy.
+ */
+export function assertRoleServable(role: ClaudeCodeRole, seat: string, policy: ClaudeCodePolicy | undefined): void {
+  if (role === 'mail-only') return
+  const refuse = (why: string): never => {
+    throw new Error(`agent-claude-code-driver: seat "${seat}": role "${role}" is refused: ${why}`)
+  }
+  if (policy === undefined) {
+    return refuse('policy service absent (nothing has registered ctx.claudeCodePolicy); load the permission-policy provider or use role "mail-only"')
+  }
+  if ((policy.version as number) !== 1) return refuse(`the policy service has contract version ${String(policy.version)}, which this driver does not know`)
+  let ready: boolean
+  let missing: readonly string[] = []
+  try {
+    const readiness = policy.readiness()
+    ready = readiness.roles.has(role)
+    missing = readiness.missing
+  } catch (error: unknown) {
+    return refuse(`the policy service could not report readiness (${error instanceof Error ? error.message : String(error)})`)
+  }
+  if (!ready) {
+    refuse(`the policy service is not ready for it${missing.length === 0 ? '' : ` (missing: ${missing.join(', ')})`}; coder seats wait for the sandbox (S6) and canary (S7) contributors`)
+  }
+}
+
 /** Native tool surface of one role. */
 export interface ClaudeCodeToolPolicy {
   /** The SDK `tools` allowlist (an empty list disables every built-in tool). */
@@ -261,7 +297,7 @@ export interface ClaudeCodeHostSeat {
   model: string
   /** Optional reasoning effort. */
   effort?: ClaudeCodeEffort
-  /** Tool surface. Only `mail-only` is accepted until the permission slice (S5) lands; any other role is refused. */
+  /** Tool surface. `lead` and `coder` are accepted only while the policy service serves them (checked at use time). */
   role: ClaudeCodeRole
   /** Hard cap on agentic turns for one query; defaults to 25. */
   max_turns?: number
@@ -283,6 +319,14 @@ export interface ClaudeCodeHostSeat {
   admit_from_ceiling: string[]
   /** Founder-authorised session id for a reseed: the one new id the driver accepts in place of the pinned one. */
   session_id?: string
+  /** Policy: exact dsh tool names the seat may call (`lead` and `coder` only). */
+  tools?: string[]
+  /** Policy: seats this seat may mail (`lead` and `coder` only). */
+  send_to?: string[]
+  /** Policy: whether the seat may send blocking mail (`lead` and `coder` only). */
+  allow_blocking?: boolean
+  /** Policy: absolute path of the control-plane rule hook scripts (`coder` only). */
+  rules_dir?: string
 }
 
 /** Schema of {@link ClaudeCodeHostSeat}. */
@@ -300,6 +344,10 @@ export const ClaudeCodeHostSeat: z<ClaudeCodeHostSeat> = z.object({
   cwd: z.string().required(),
   admit_from_ceiling: z.array(z.string()).default([]),
   session_id: z.string(),
+  tools: z.array(z.string()),
+  send_to: z.array(z.string()),
+  allow_blocking: z.boolean(),
+  rules_dir: z.string(),
 })
 
 /** The part of a registry seat row the host merge reads; the full row type lives in the mailbox package. */
@@ -310,6 +358,57 @@ export interface RegistrySeatView {
   readonly cwd: string
   /** The sender list the registry writer asked for. */
   readonly admit_from?: readonly string[] | undefined
+}
+
+/** Host-private policy keys; a registry row must never carry any of them (the host profile alone decides). */
+export const POLICY_HOST_KEYS: readonly (keyof PolicyHostSeatFields)[] = ['tools', 'send_to', 'allow_blocking', 'rules_dir']
+
+/** A dsh tool name as the policy lists it. */
+const POLICY_TOOL_NAME = /^[a-z][a-z0-9_]{0,63}$/
+
+/** A seat name in `send_to`. */
+const POLICY_SEAT_NAME = /^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$/
+
+/** Most entries a policy list may hold. */
+const MAX_POLICY_LIST = 64
+
+/**
+ * Validate and copy the policy fields of a host entry.
+ * @param host - the host entry.
+ * @param role - the seat's role.
+ * @param fail - raises the seat-labelled error.
+ * @returns the copied fields, or `undefined` when the entry sets none.
+ */
+function parsePolicyFields(
+  host: ClaudeCodeHostSeat,
+  role: ClaudeCodeRole,
+  fail: (message: string) => never,
+): PolicyHostSeatFields | undefined {
+  // An empty list is the schema default and says nothing (an empty tool list mutes the seat anyway).
+  const present = POLICY_HOST_KEYS.filter(key => host[key] !== undefined && !(Array.isArray(host[key]) && host[key].length === 0))
+  if (present.length === 0) return undefined
+  if (role === 'mail-only') fail(`${present.join(', ')} need role "lead" or "coder"; a mail-only seat has no policy`)
+  const list = (key: 'tools' | 'send_to', pattern: RegExp): string[] | undefined => {
+    const value: unknown = host[key]
+    if (value === undefined || (Array.isArray(value) && value.length === 0)) return undefined
+    if (!Array.isArray(value) || value.length > MAX_POLICY_LIST || !value.every((entry): entry is string => typeof entry === 'string' && pattern.test(entry))) {
+      return fail(`${key} must be a list of at most ${MAX_POLICY_LIST} entries matching ${String(pattern)}`)
+    }
+    return [...value]
+  }
+  const tools = list('tools', POLICY_TOOL_NAME)
+  const sendTo = list('send_to', POLICY_SEAT_NAME)
+  if (host.allow_blocking !== undefined && typeof host.allow_blocking !== 'boolean') fail('allow_blocking must be true or false')
+  if (host.rules_dir !== undefined) {
+    if (role !== 'coder') fail('rules_dir needs role "coder"')
+    if (typeof host.rules_dir !== 'string' || !isAbsolute(host.rules_dir) || host.rules_dir.includes('\0')) fail('rules_dir must be an absolute path')
+  }
+  return {
+    ...tools === undefined ? {} : { tools },
+    ...sendTo === undefined ? {} : { send_to: sendTo },
+    ...host.allow_blocking === undefined ? {} : { allow_blocking: host.allow_blocking },
+    ...host.rules_dir === undefined ? {} : { rules_dir: host.rules_dir },
+  }
 }
 
 /** Make a host entry look like a static row so the one set of semantic checks runs on it. */
@@ -339,8 +438,9 @@ function isInside(directory: string, target: string): boolean {
 
 /**
  * Validate a host seat entry on its own (no registry row) and return its configuration. Runs the static
- * row's checks (model allowlist, fable fence, limits, absolute binary path), refuses every role but
- * `mail-only`, and requires the binary's realpath to lie under one allowed prefix.
+ * row's checks (model allowlist, fable fence, limits, absolute binary path), validates the policy fields,
+ * and requires the binary's realpath to lie under one allowed prefix. Whether the role can be served is
+ * decided later against the policy service ({@link assertRoleServable}), not here.
  * @param host - the host entry.
  * @param seat - seat label used in error messages.
  * @param prefixes - the allowed binary directories (`claudePathPrefixes`).
@@ -357,10 +457,9 @@ export function parseHostSeat(
   const fail = (message: string): never => {
     throw new Error(`agent-claude-code-driver: seat "${seat}": ${message}`)
   }
-  const config = parseSeatRow(hostSeatAsRow(host), seat, { policyExtension: false })
-  if (config.role !== 'mail-only') {
-    fail(`role "${config.role}" is refused for registry-routed seats until the permission-policy extension (slice S5) is registered; use "mail-only"`)
-  }
+  const parsed = parseSeatRow(hostSeatAsRow(host), seat, { policyExtension: true })
+  const policy = parsePolicyFields(host, parsed.role, fail)
+  const config: ClaudeCodeSeatConfig = policy === undefined ? parsed : { ...parsed, policy }
   if (typeof host.cwd !== 'string' || !isAbsolute(host.cwd) || host.cwd.includes('\0')) {
     fail('host cwd must be an absolute path (the seat\'s realpath)')
   }
@@ -392,8 +491,8 @@ export function parseHostSeat(
  * @param seat - seat label used in error messages.
  * @param realpath - symlink resolution; defaults to the filesystem's.
  * @returns the validated configuration.
- * @throws when the host entry is invalid, the row's driver is not `claude-code`, the row's `admit_from`
- *   names a sender beyond `admit_from_ceiling`, or the row's `cwd` differs from the host `cwd` pin.
+ * @throws when the host entry is invalid, the row's driver is not `claude-code`, the row carries a policy key,
+ *   the row's `admit_from` names a sender beyond `admit_from_ceiling`, or the row's `cwd` differs from the host `cwd` pin.
  */
 export function mergeHostSeat(
   row: RegistrySeatView,
@@ -405,6 +504,10 @@ export function mergeHostSeat(
   const config = parseHostSeat(host, seat, prefixes, realpath)
   const fail = (message: string): never => {
     throw new Error(`agent-claude-code-driver: seat "${seat}": ${message}`)
+  }
+  const carried = POLICY_HOST_KEYS.filter(key => Object.hasOwn(row, key))
+  if (carried.length > 0) {
+    fail(`the registry row carries ${carried.join(', ')}, which belongs in the host profile only (a row is not a trust root); remove it from the row`)
   }
   if (row.driver !== CLAUDE_CODE_DRIVER_KEY) fail(`the registry row's driver is ${JSON.stringify(row.driver ?? 'default')}, not "${CLAUDE_CODE_DRIVER_KEY}"`)
   const beyond = (row.admit_from ?? []).filter(sender => !host.admit_from_ceiling.includes(sender))

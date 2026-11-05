@@ -27,7 +27,7 @@ seats:
 
 - `claude_path` 必须是绝对路径并原样使用:从不通过 PATH 查找(`which claude` 可能是包装脚本)。
 - 校验器先对模型 id 做 Unicode NFKC 折叠、去掉不可见格式字符并转小写,然后只接受白名单:`opus`、`sonnet`、`haiku`,或 `claude-opus|sonnet|haiku-<数字与连字符>`。fable id 仅在 `fable_ok: true` 时通过;其他任何写法(例如 Bedrock 或 Vertex 风格的 id)一律拒绝。
-- `role: coder` 条目在插件启动时被拒绝:它们需要后续切片的权限策略扩展,在其落地之前 coder 席位会在没有拒绝规则的情况下运行。
+- **角色按需、对照策略服务接受。** `mail-only` 始终可运行。`lead` 与 `coder` 条目可以挂载,但只有当 `ctx.get('claudeCodePolicy')` 已注册、契约版本为 1 且其 `readiness().roles` 列出该角色时,席位才会被解析(回合才会启动);否则创建或回合会被拒绝并给出可见原因(`policy service absent`,或 `not ready for it (missing: ...)`)。该服务在使用时读取、绝不在挂载时读取,因此可以晚于驱动注册。在沙箱、金丝雀与规则钩子三个贡献者注册之前(S6、S7),`coder` 保持被拒绝。
 - **二进制认证。**插件启动时,`claude_path` 必须解析为运行用户所有的常规文件,不得被组或其他用户写入,不得带脚本扩展名(`.js .mjs .cjs .sh .py`,在符号链接解析前后各检查一次),其路径上的任何目录也不得被组或其他用户写入(`/tmp` 这类带粘滞位的目录除外);其上方的每一级目录,无论沿解析后的文件,还是沿配置路径按原样书写的每一级目录前缀(因此带符号链接的中间目录以及存放符号链接的目录都在其内),都必须属于操作者或 root。其 SHA-256 在首次见到时按席位固定在 `<stateDir>/claude-code-binary-pins.json` 中。之后哈希变化会拒绝启动并给出新哈希;若升级是有意的,在条目上把 `claude_path_sha256` 设为该哈希即可接受。交给 SDK 的是已认证的真实路径,而不是配置的路径。每个回合之前会重新解析配置的路径,并重新检查文件的大小、mtime、ctime 与 inode,因此启动之后被替换,或符号链接被改指向(Claude Code 自动更新程序正是这样改指 `~/.local/bin/claude` 的),都会使回合被拒绝,直到重启宿主。
 - 插件 `Config` 为 `{ stateDir, dshHome?, seats, claudePathPrefixes?, hostSeats?, disposeGraceMs?, defaultPauseMs? }`(后两项新增,见下一节)。`stateDir` 必须位于 harness 主目录内(`dshHome`,否则 `$DSH_HOME`,否则 `~/.dsh`):`claude-code` 这样的普通名称是它的子目录,绝对路径必须本来就在其中,主目录本身或其外部的路径一律拒绝。该目录以 `0700` 创建,若是符号链接、属于他人或对组及其他用户开放则拒绝。会话对应的席位先在静态 `seats` 中按 `meta.agentPreset` 查找,否则按会话 id;在那里找不到的席位通过注册表来源查找。
 
@@ -41,7 +41,12 @@ claudePathPrefixes:
 hostSeats:
   mail-triage:
     model: haiku                 # same allowlist and fable fence as a static row
-    role: mail-only              # the only role accepted until the permission slice (S5); any other role is refused
+    role: mail-only              # lead and coder need the claudeCodePolicy service to serve the role (checked at use time)
+    # lead/coder only, host-private (a registry row carrying any of these is refused):
+    # tools: [mailbox_send]        # exact dsh tool names
+    # send_to: [ops-lead]          # seats this seat may mail
+    # allow_blocking: false
+    # rules_dir: /abs/path         # coder only
     claude_path: /home/me/.local/share/claude/versions/2.1.317/claude
     cwd: /home/me/work/mail-triage      # the pinned working directory; the registry row's cwd must equal it
     admit_from_ceiling: [ops-lead]      # the widest sender list the registry row may ask for
@@ -50,7 +55,7 @@ hostSeats:
 
 - **查找顺序。** 先查静态 `seats` 配置;只有静态配置没有的席位才去查注册表来源(`ctx.claudeCodeSeatSource`,由 [`agent-claude-code-registry`](../agent-claude-code-registry/README.md) 提供)。没有绑定的请求会被来源拒绝,因此除邮箱桥之外没有任何调用方能打开经注册表路由的席位。来源的可选方法 `hasRow` 让驱动在挂载后不久对"没有任何注册表条目指向"的主机条目发出警告。
 - **没有主机条目的注册表条目会被响亮地拒绝**,拒绝信息会打印需要添加的 `hostSeats` 条目。创始人在 profile 中补上它,并填入真实的 `claude_path`。
-- **合并强制执行什么。** `mergeHostSeat` 用主机条目构造席位,并对它运行全部静态检查(模型白名单、fable 栅栏、限额)。它拒绝 `mail-only` 以外的任何角色,要求 `claude_path` 的 realpath 位于某个 `claudePathPrefixes` 条目之下,要求条目的 `admit_from` 是 `admit_from_ceiling` 的子集,要求条目的 `cwd` 等于主机 `cwd` 固定值(工厂还会用该固定值核对收到的工作目录),并要求条目的驱动为 `claude-code`。主机条目与静态席位一样在挂载时校验、认证并固定,因此坏条目让挂载失败,而不是等到第一封邮件。同时出现在 `seats` 与 `hostSeats` 的席位会被拒绝。
+- **合并强制执行什么。** `mergeHostSeat` 用主机条目构造席位,并对它运行全部静态检查(模型白名单、fable 栅栏、限额)。它校验策略字段(`tools`、`send_to`、`allow_blocking`、`rules_dir`;mail-only 不带任何字段,`rules_dir` 仅限 coder),并拒绝携带其中任何一项的注册表条目(条目不是信任根);角色能否被服务留待之后对照策略服务判断。它要求 `claude_path` 的 realpath 位于某个 `claudePathPrefixes` 条目之下,要求条目的 `admit_from` 是 `admit_from_ceiling` 的子集,要求条目的 `cwd` 等于主机 `cwd` 固定值(工厂还会用该固定值核对收到的工作目录),并要求条目的驱动为 `claude-code`。主机条目与静态席位一样在挂载时校验、认证并固定,因此坏条目让挂载失败,而不是等到第一封邮件。同时出现在 `seats` 与 `hostSeats` 的席位会被拒绝。
 - **静态席位的不变量对经注册表路由的席位同样成立:** `settingSources: []`、`strictMcpConfig: true`、`tools: []`、二进制认证及其每回合复查、熔断开关和调用窗口。
 - **会话固定。** 经注册表路由的席位首次创建时使用的 dsh 会话 id 会固定在 `<stateDir>/claude-code-seat-sessions.json` 中(私有,与二进制固定相同)。相同 id 通过。不同的 id 以 `seat-session-changed: ... ask the founder to reseed` 拒绝,因此注册表写入者无法通过修改 `sessionId` 给席位换上全新的日志。与主机条目的 `session_id` 相等的不同 id 是创始人授权的重新播种:固定值随之移动,驱动记录一条警告。
 - **调用窗口在重新播种和重启后保留。** 每个席位的调用时间随发生保存在 `<stateDir>/claude-code-call-windows.json` 中(私有),重启后的闸门计入已保存的时间,而不只是当前会话的日志。因此重新播种无法重置窗口,重启主机也不能。写入失败会被记录,内存中的计数继续。损坏或非私有的调用窗口状态文件会阻止挂载,纯静态部署也一样(有意为之,以便大声失败)。
@@ -108,7 +113,9 @@ hostSeats:
 ## 工具、选项与取消
 
 - 每次查询都设置 `settingSources: []`、`strictMcpConfig: true`、`permissionMode: 'dontAsk'`、`maxTurns`、`model`、固定的 `pathToClaudeCodeExecutable` 与已清洗的 `env`。`lead` 与 `mail-only` 席位为 `tools: []`;`coder` 席位为 `Read, Grep, Glob, Edit, Write`。原生 `Bash` 与 `AskUserQuestion` 始终在 `disallowedTools` 中。
-- `QueryOptionsExtension` 是内联 `settings`(钩子与拒绝规则,后续切片)的类型化扩展点。其输出经过白名单过滤:只保留 `hooks` 与 `permissions.deny` / `permissions.ask` 字符串列表,其余一切(允许规则、目录、默认模式、设置文件路径)都会被丢弃并给出警告。钩子校验很严格:只接受已知事件名,每个处理器必须是 `{type: "command", command: <string>}`(可带数值 `timeout`)。`prompt`、`agent` 与 `http` 处理器会发起模型调用或把工具输入发往机器之外,因此任何其他类型或多余的键都会使整个设置对象被拒绝、查询不会启动,因为只应用一部分的策略比没有策略更糟。它在围栏之前应用,因此无法放宽围栏,最后还会再次检查成品选项不含被禁止的环境变量名且模型在允许范围内。
+- 策略扩展(`ctx.claudeCodePolicy.extend`,包装为 `QueryOptionsExtension`)返回 `{settings?, mcpServers?, allow?}`,并收到一个 `PolicyQueryContext`(seat、role、config、cwd、binding、`isTurnTainted()`、`markTurnTainted(reason)`、`deliveredTraceIds()`)。`mcpServers` 必须恰好是键为 `dsh`、名为 `dsh` 的一个进程内 `sdk` 服务器(不允许 stdio、http 或 sse)。`allow` 条目必须通过严格语法,否则整个扩展被拒绝:`mcp__dsh__<name>`(`^[a-z][a-z0-9_]{0,63}$`,且必须同时提供 dsh 服务器)、`Read(//<cwd>/**)`,以及仅限 coder 的 `Edit(//<cwd>/**)`,其中 `//` 表示绝对路径、`<cwd>` 是席位自己的工作目录;若 cwd 含空格、控制字符或 `* ? [ ] ! # { } \` 中任一字符,或以 `/` 结尾,则不接受任何路径条目。没有 `canUseTool`:在 `dontAsk` 加生成的允许规则下它永远不会被调用,因此各层是拒绝/允许规则、仅拒绝的 PreToolUse 钩子,以及下面的 init 断言。`settings` 仍按白名单过滤:只保留 `hooks` 与 `permissions.deny` / `permissions.ask` 字符串列表,其余一切(`settings` 内的允许规则、目录、默认模式、设置文件路径)都会被丢弃并给出警告。钩子校验很严格:只接受已知事件名,每个处理器必须是 `{type: "command", command: <string>}`(可带数值 `timeout`)。`prompt`、`agent` 与 `http` 处理器会发起模型调用或把工具输入发往机器之外,因此任何其他类型或多余的键都会使整个设置对象被拒绝、查询不会启动,因为只应用一部分的策略比没有策略更糟。它在围栏之前应用,因此无法放宽围栏,最后还会再次检查成品选项不含被禁止的环境变量名且模型在允许范围内。
+- **Init 断言。** 每条 `system/init` 消息所报告的 `tools` 必须与预期集合(角色的原生工具加上允许的 `mcp__dsh__<name>` 条目)按集合严格相等;否则查询被中止,写入一条 `claude-code/refused` 记录(原因 `admission`,详情 `tool set mismatch ...`,即现有最接近的记录),回合以 `CLAUDE_CODE_TOOL_SET` 结束,邮件租约失败。因此暴露的工具多于其 `allow` 列表的策略服务器会响亮地失败。一次性(被污染邮件)查询必须是空列表。
+- **自动记忆**通过向每个非一次性查询的内联设置加入 `autoMemoryEnabled: false` 来关闭(SDK 的 `Settings.autoMemoryEnabled` 开关,无论 `settingSources` 如何都会加载)。尚未经过实机验证;实机探测必须确认 CLI 遵守它。一次性查询完全不带设置,也没有工具可触及记忆目录,因此那里不设该开关(残余风险:CLI 仍可能把记忆索引注入其提示)。
 - **取消**会中止控制器、调用 `query.close()`(try/catch),然后让子进程的进程组退出:先由子进程所有者执行 SIGTERM 再 SIGKILL 的阶梯,若无法证明进程树已消失则直接对进程组发 `SIGKILL`。回合以 `aborted` 结束,除非设置 `keepInbox`,否则清空收件箱。
 - **进程所有权:**子进程通过共享的子进程所有者在独立进程组中启动。每个席位的子进程(一个席位可保留多条)记录在 `<stateDir>/claude-code-seat-pids.json`,包含子进程的 pid 与启动时间、宿主的 pid 与启动时间以及内核 boot id。文件以原子方式写入(独占临时文件,模式 `0600`),若是符号链接、属于他人、对组或其他用户开放或已损坏则拒绝,错误信息会给出路径与补救办法。插件启动时,仅当 boot id 一致、启动时间仍然匹配且其所属宿主已不存在时,`ProcessLedger.reapStale()` 才会杀死已记录的子进程。来自更早一次启动的条目会被丢弃;所属宿主仍然存活的条目保持不动并给出警告;首进程已死但进程组仍有成员的情形只报告、不杀死;一次杀进程失败不会中断整个过程。所属宿主仍然存活的条目、杀进程失败的条目以及仍有存活进程组的条目会保留在文件中,供下一次启动再次检查。
 
@@ -127,10 +134,13 @@ SDK 没有专门的"限流"result 子类型。驱动把以下情形视为窗口�
 ## Known Limitations and Deferred Work
 
 - **租约与准入的提供方只是接缝** — 驱动调用注入的租约接收器与准入检查;接入邮箱桥的真实租约以及注册表的准入发送者类别(例如让创始人经邮箱发来的邮件被放行)属于后续切片。在此之前,默认准入会拒绝所有来自非名册席位发送者的邮件。
-- **读取造成的污染只追踪、不强制** — 读取文件或抓取内容的回合会被标记为被污染并报告给准入检查;限制这样的回合此后能做什么需要权限切片。
+- **污染按会话粘滞,只标注、不强制** — 污染性工具(`Read`、`Grep`、`Glob`、`WebFetch`、`WebSearch`)或策略的 `markTurnTainted(reason)` 会写入一次 `claude-code/session-tainted`;恢复时从日志还原,会话余下部分 `isTurnTainted()` 一直为真。只有全新会话(主机重新播种会产生新日志)才能清除。`compact_boundary` 不会清除它:SDK 无法确认摘要已丢弃被污染的文本,驱动绝不假设这一点。策略的邮件工具读取该标志来给发送加标签;标注不会拒绝发送。
+- **在 S6 与 S7 报告就绪之前,`coder` 保持被拒绝。** 只有沙箱、金丝雀与规则钩子三个贡献者全部注册后,策略服务才会列出 `coder`;目前一个都不存在。
+- **守卫钩子在崩溃、超时或缺少 node 时失败放行**(只有退出码 2 才会拦截);S7 启动金丝雀是结构性的兜底,在它出现之前,`lead` 席位(没有文件工具)是唯一被接受的带工具角色。
+- **没有 `canUseTool`** — 权限回调被有意从该接缝中去除。
 - **熔断开关按回合和按流消息检查** — 尚未逐工具调用检查,也没有主机横幅。
 - **经注册表路由的席位需要两方各改一处** — 注册表条目(雇用脚本或组织看板)与主机条目(创始人,在 profile 中);只有条目没有主机条目会被拒绝,而"主机条目是否有注册表条目"的检查在挂载后不久只运行一次,因为注册表在挂载之后才加载。
-- **规则、git 围栏与沙箱 shell 尚未接入** — 只有选项扩展点;coder 席位没有 shell。
+- **git 围栏与沙箱 shell 尚未接入** — 策略接缝已存在,但 coder 席位没有 shell,且尚未对真实 CLI 运行实机探测(规则匹配、钩子匹配器以及 `tools: []` 时的 init 工具列表无法离线测试)。
 - **转录检查依赖 SDK** — `getSessionInfo` 无返回会被视为转录缺失,因此没有可提取摘要的转录同样会被拒绝。
 - **操作者环境的透传** — `HTTPS_PROXY`、`HTTP_PROXY`、`NODE_EXTRA_CA_CERTS`、`NODE_OPTIONS` 与 `CLAUDE_ENV_FILE` 不会被清除:它们属于操作者自己的环境。代理加自定义 CA 可以读取登录流量,`NODE_OPTIONS` 或 `CLAUDE_ENV_FILE` 可以在子进程中运行代码;请保持宿主上这些变量干净。
 - **斜杠命令封装只对驱动做过测试,未对真实 CLI 验证** — 封装后的提示永远不会以 `/` 开头;真实 CLI 如何处理提示中间的斜杠词,以及 `@path`、`!` 与 `#` 前缀展开,等待实际演练确认。

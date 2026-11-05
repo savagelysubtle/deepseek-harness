@@ -183,6 +183,14 @@ export interface ClaudeCodeThrowawayTurnData {
   readonly at: number
 }
 
+/** The session's Claude context has taken in untrusted content; sticky until a fresh session replaces it. */
+export interface ClaudeCodeSessionTaintedData {
+  readonly version: ClaudeCodeEventVersion
+  /** Control-stripped, redacted, at most 200 characters. */
+  readonly reason: string
+  readonly at: number
+}
+
 /** How a claimed mailbox message ended. */
 export type ClaudeCodeMailOutcome = 'settled' | 'failed' | 'paused'
 
@@ -291,5 +299,10 @@ declare module '@deepseek-ai/dsh-session/types' {
      * @param data - the dsh turn number and time.
      */
     'claude-code/throwaway-turn': ClaudeCodeThrowawayTurnData
+    /**
+     * Marks the Claude session as tainted (it read files, fetched content, or took in tool output the policy calls untrusted).
+     * @param data - short redacted reason and time.
+     */
+    'claude-code/session-tainted': ClaudeCodeSessionTaintedData
   }
 }

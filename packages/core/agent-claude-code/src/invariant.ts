@@ -236,6 +236,11 @@ function applyEvent(trace: DriverTrace, event: SessionEvent, fail: InvariantFail
       amount(data, 'at', type, fail)
       return
     }
+    case 'claude-code/session-tainted': {
+      text(data, 'reason', type, fail, CLAUDE_CODE_MAX_REASON_CHARS)
+      amount(data, 'at', type, fail)
+      return
+    }
     default:
       fail(`unknown claude-code event type ${type}`)
   }
