@@ -5,9 +5,10 @@ import type { SeatToolContext } from '../../src/mcp/types.ts'
 /** A seat closure that records what it publishes and which taint marks it receives; override any field. */
 export function makeContext(
   overrides: Partial<SeatToolContext> = {},
-): SeatToolContext & { published: MailboxPublishInput[]; marks: string[] } {
+): SeatToolContext & { published: MailboxPublishInput[]; marks: string[]; warnings: string[] } {
   const published: MailboxPublishInput[] = []
   const marks: string[] = []
+  const warnings: string[] = []
   const context: SeatToolContext = {
     seat: 'lead-one',
     sendTo: ['ops-lead', 'sam'],
@@ -20,10 +21,11 @@ export function makeContext(
       return Promise.resolve('id-1')
     },
     newTraceId: () => 'fresh-trace',
+    warn: (message) => { warnings.push(message) },
     scrub: text => scrubText(text, { roots: ['/home/op'] }),
     ...overrides,
   }
-  return Object.assign(context, { published, marks })
+  return Object.assign(context, { published, marks, warnings })
 }
 
 /** The text of a tool result. */

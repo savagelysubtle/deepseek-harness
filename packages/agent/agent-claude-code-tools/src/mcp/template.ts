@@ -16,6 +16,12 @@ import type { SeatTool, SeatToolContext, SeatToolFactory } from './types.ts'
 /** Holds the tool factories a server can be built from. */
 export class SeatToolTemplate {
   private readonly factories = new Map<string, SeatToolFactory>()
+  private changes = 0
+
+  /** Counts successful registrations; a cache keyed on it notices a new tool. */
+  get version(): number {
+    return this.changes
+  }
 
   /**
    * Add a tool factory.
@@ -26,6 +32,7 @@ export class SeatToolTemplate {
   register(name: string, factory: SeatToolFactory): void {
     if (this.factories.has(name)) throw new Error(`agent-claude-code-tools: tool ${name} is already registered in the template`)
     this.factories.set(name, factory)
+    this.changes += 1
   }
 
   /**

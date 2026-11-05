@@ -242,7 +242,7 @@ describe('claude-code hire', () => {
     it.each([
       ['coder', ['--role', 'coder'], 'coder rows are refused until the sandbox (S6) and canary (S7) readiness exist'],
       ['a policy key on the command line (tools)', ['--role', 'lead', '--tools', 'x'], 'belong in the host profile only'],
-      ['a policy key on the command line (send-to)', ['--role', 'lead', '--send-to', 'x'], 'quarantines the seat'],
+      ['a policy key on the command line (send-to)', ['--role', 'lead', '--send-to', 'x'], 'the driver refuse the seat at create'],
       ['a policy key on the command line (allow-blocking)', ['--role', 'lead', '--allow-blocking'], 'belong in the host profile only'],
       ['a policy key on the command line (rules-dir)', ['--role', 'lead', '--rules-dir', 'x'], 'belong in the host profile only'],
       ['an unknown role', ['--role', 'boss'], 'unknown role'],

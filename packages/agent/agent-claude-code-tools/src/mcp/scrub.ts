@@ -6,7 +6,7 @@
  * @module @deepseek-ai/dsh-agent-claude-code-tools/mcp/scrub
  */
 
-/** Longest tool result text, in UTF-16 code units. */
+/** Longest tool result text, in code points. */
 export const MAX_RESULT_LENGTH = 4000
 
 /** What replaces a path under a protected root. */
@@ -44,5 +44,7 @@ export function scrubText(text: string, options: ScrubOptions): string {
   for (const root of roots) {
     out = out.replace(new RegExp(`${escapeRegExp(root.replace(/\/+$/, ''))}(?![\\w-]|\\.[\\w-])(?:/[^\\s'"\`<>)\\]}]*)?`, 'g'), REDACTED_PATH)
   }
-  return out.length > max ? `${out.slice(0, Math.max(0, max - TRUNCATED.length))}${TRUNCATED}` : out
+  // Cut on code points, never inside a surrogate pair.
+  const points = Array.from(out)
+  return points.length > max ? `${points.slice(0, Math.max(0, max - TRUNCATED.length)).join('')}${TRUNCATED}` : out
 }

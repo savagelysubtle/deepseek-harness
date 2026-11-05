@@ -13,6 +13,7 @@
  *   origin and the bridge appends each hop to `chain` itself.
  *   Stamping labels the message; it never denies the send.
  * - (f) the message goes through the mailbox publish API, which validates it.
+ * - a per-closure send counter caps one query at {@link MAX_SENDS_PER_TURN} sends (the 21st is refused).
  * - (g) the result text is short and names only the seat that was mailed.
  *
  * @module @deepseek-ai/dsh-agent-claude-code-tools/mcp/send
@@ -25,12 +26,16 @@ import { SEND_SCHEMA } from './schema.ts'
 import { defineSeatTool, textResult } from './types.ts'
 import type { SeatTool, SeatToolContext } from './types.ts'
 
+/** Most sends one server (one query) may make; the next is refused with a reason naming this cap. */
+export const MAX_SENDS_PER_TURN = 20
+
 /**
  * Build the `mailbox_send` tool over a seat's closure.
  * @param context - the seat closure; `context.seat` is the only source of `from`.
  * @returns the tool.
  */
 export function createSendTool(context: SeatToolContext): SeatTool {
+  let sends = 0
   const refuse = (why: string) => textResult(context, `mailbox_send refused: ${why}`, true)
   return defineSeatTool(context, {
     name: MAILBOX_SEND_TOOL,
@@ -49,6 +54,10 @@ export function createSendTool(context: SeatToolContext): SeatTool {
       if (input.blocking === true && !context.allowBlocking) {
         return refuse('blocking mail is not allowed for this seat (allow_blocking is not set in its host stanza)')
       }
+      if (sends >= MAX_SENDS_PER_TURN) {
+        return refuse(`this turn already sent ${MAX_SENDS_PER_TURN} messages, which is the most one turn may send`)
+      }
+      sends += 1
       const traceId = input.replyToTraceId ?? context.newTraceId()
       const message: MailboxPublishInput = {
         to: parseMailboxAddress(input.to),
@@ -61,7 +70,9 @@ export function createSendTool(context: SeatToolContext): SeatTool {
       try {
         await context.publish(message)
       } catch (error: unknown) {
-        return refuse(`the mailbox did not accept the message (${String(error)})`)
+        // The mailbox's own text stays host-side: it can name stores, paths or other seats.
+        context.warn(`agent-claude-code-tools: seat "${context.seat}": mailbox_send publish failed: ${String(error)}`)
+        return refuse('the mailbox rejected the message')
       }
       return textResult(context, `Sent to ${input.to}. Trace id ${traceId}.`)
     },

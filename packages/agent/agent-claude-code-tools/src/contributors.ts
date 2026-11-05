@@ -70,6 +70,12 @@ export function mcpToolName(name: string): string {
 export class ContributorRegistry {
   private readonly toolContributors = new Map<string, ToolContributor>()
   private readonly hookContributors = new Map<string, HookContributor>()
+  private changes = 0
+
+  /** Counts successful registrations; a cache keyed on it notices a new contributor. */
+  get version(): number {
+    return this.changes
+  }
 
   /**
    * Add tool names to the template.
@@ -82,6 +88,7 @@ export class ContributorRegistry {
       if (!TOOL_NAME_PATTERN.test(name)) throw new Error(`agent-claude-code-tools: tool contributor ${contributor.id}: ${JSON.stringify(name)} is not a valid tool name`)
     }
     this.toolContributors.set(contributor.id, { id: contributor.id, roles: [...contributor.roles], names: [...contributor.names] })
+    this.changes += 1
   }
 
   /**
@@ -92,6 +99,7 @@ export class ContributorRegistry {
   registerHookContributor(contributor: HookContributor): void {
     if (this.hookContributors.has(contributor.id)) throw new Error(`agent-claude-code-tools: hook contributor ${contributor.id} is already registered`)
     this.hookContributors.set(contributor.id, contributor)
+    this.changes += 1
   }
 
   /**

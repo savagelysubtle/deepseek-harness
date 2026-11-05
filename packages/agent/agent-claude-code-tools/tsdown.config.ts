@@ -1,3 +1,5 @@
+import { chmodSync } from 'node:fs'
+import { join } from 'node:path'
 import { defineConfig } from 'tsdown'
 
 const shared = {
@@ -17,5 +19,11 @@ const shared = {
  */
 export default defineConfig([
   { ...shared, entry: ['lib/types/index.js', 'lib/types/invariant.js'] },
-  { ...shared, entry: { 'seat-guard': 'lib/types/bin.js' } },
+  {
+    ...shared,
+    entry: { 'seat-guard': 'lib/types/bin.js' },
+    // The host attests the guard and refuses a group- or world-writable file; tsdown writes with the
+    // builder's umask (664 under 002), so pin the mode here instead of depending on the machine.
+    onSuccess: () => { chmodSync(join(import.meta.dirname, 'lib', 'seat-guard.js'), 0o644) },
+  },
 ])

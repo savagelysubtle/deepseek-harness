@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { openMailboxDatabase, SqliteMailboxStore } from '@deepseek-ai/dsh-mailbox-local'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createSendTool } from '../../src/mcp/send.ts'
+import { createSendTool, MAX_SENDS_PER_TURN } from '../../src/mcp/send.ts'
 import { makeContext, textOf } from './helpers.ts'
 
 const good = { to: 'ops-lead', body: 'status?' }
@@ -135,11 +135,26 @@ describe('mailbox_send (f) the real mailbox publish validation', () => {
     expect(lease?.message.chain).toBeUndefined()
   })
 
+  it('stores a reply under the delivered trace id and the store accepts it (shared trace ids are allowed)', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'cct-mbx-'))
+    const store = new SqliteMailboxStore(openMailboxDatabase(join(dir, 'mailbox.db')))
+    await store.publish({ to: 'lead-one' as never, from: 'ops-lead', payload: 'question?', traceId: 'trace-1' })
+    const context = makeContext({ publish: input => store.publish(input) })
+    const result = await createSendTool(context).handler({ ...good, replyToTraceId: 'trace-1' })
+    expect(result.isError).toBeUndefined()
+    const [lease] = await store.claim({ addresses: ['ops-lead' as never], limit: 5, staleClaimMs: 60_000 })
+    expect(lease?.message).toMatchObject({ to: 'ops-lead', from: 'lead-one', traceId: 'trace-1' })
+    // both rows share the id: the store keeps one row per message, not one per trace id.
+    expect((await store.lookupByTraceId('trace-1')).map(entry => entry.from).sort()).toEqual(['lead-one', 'ops-lead'])
+  })
+
   it('surfaces a publish rejection as an error result, not a throw', async () => {
     const context = makeContext({ publish: () => Promise.reject(new Error('mailbox publish: boom')) })
     const result = await createSendTool(context).handler(good)
     expect(result.isError).toBe(true)
-    expect(textOf(result)).toContain('did not accept the message (Error: mailbox publish: boom)')
+    expect(textOf(result)).toBe('mailbox_send refused: the mailbox rejected the message')
+    expect(textOf(result)).not.toContain('boom')
+    expect(context.warnings).toEqual(['agent-claude-code-tools: seat "lead-one": mailbox_send publish failed: Error: mailbox publish: boom'])
   })
 })
 
@@ -157,5 +172,28 @@ describe('mailbox_send (g) the result text', () => {
     const text = textOf(await createSendTool(makeContext({ scrub })).handler(good))
     expect(scrub).toHaveBeenCalled()
     expect(text).toBe('SENT TO OPS-LEAD. TRACE ID FRESH-TRACE.')
+  })
+})
+
+describe('mailbox_send per-turn cap', () => {
+  it('sends up to the cap and refuses the next naming it; a new closure starts again', async () => {
+    const context = makeContext()
+    const tool = createSendTool(context)
+    for (let sent = 0; sent < MAX_SENDS_PER_TURN; sent += 1) {
+      expect((await tool.handler(good)).isError).toBeUndefined()
+    }
+    expect(MAX_SENDS_PER_TURN).toBe(20)
+    const refused = await tool.handler(good)
+    expect(refused.isError).toBe(true)
+    expect(textOf(refused)).toContain('20 messages')
+    expect(context.published).toHaveLength(MAX_SENDS_PER_TURN)
+    expect((await createSendTool(context).handler(good)).isError).toBeUndefined()
+  })
+
+  it('does not count refused sends', async () => {
+    const context = makeContext()
+    const tool = createSendTool(context)
+    for (let attempt = 0; attempt < 25; attempt += 1) await tool.handler({ ...good, to: 'stranger' })
+    expect((await tool.handler(good)).isError).toBeUndefined()
   })
 })

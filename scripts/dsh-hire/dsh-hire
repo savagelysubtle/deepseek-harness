@@ -71,7 +71,7 @@ while [ $# -gt 0 ]; do
     --test)    TEST=1; CC_ONLY_FLAG="--test"; shift;;
     --reseed)  RESEED=1; CC_ONLY_FLAG="--reseed"; shift;;
     --tools|--send-to|--allow-blocking|--rules-dir)
-      die "$1 cannot be passed to dsh-hire: tools, send_to, allow_blocking and rules_dir belong in the host profile only (a registry row carrying one quarantines the seat); the printed stanza shows where the founder sets them";;
+      die "$1 cannot be passed to dsh-hire: tools, send_to, allow_blocking and rules_dir belong in the host profile only (a registry row carrying one makes the driver refuse the seat at create); the printed stanza shows where the founder sets them";;
     -h|--help) usage; exit 0;;
     *) die "unknown option: $1";;
   esac
@@ -527,7 +527,7 @@ cc_print_stanza() {
   fi
   local policy=""
   if [ "$ROLE" = lead ]; then
-    policy="    # Lead policy (host-private; never put these keys in the registry row, it would quarantine the seat).
+    policy="    # Lead policy (host-private; never put these keys in the registry row, the driver refuses the seat at create).
     tools: [mailbox_send, mailbox_directory]
     # send_to is empty = no recipients: the operator names roster seats this lead may mail.
     send_to: []

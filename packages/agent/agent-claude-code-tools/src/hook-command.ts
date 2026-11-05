@@ -7,6 +7,7 @@
 
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { attestFile } from './attest-guard.ts'
 import { isSeatName, isSha256 } from './grammar.ts'
 
 /** Seconds the CLI waits for the hook before treating it as failed. */
@@ -17,6 +18,9 @@ export const GUARD_MATCHER = 'Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|m
 
 /** Characters a path in the command line may use; nothing a shell or `env` could interpret. */
 const COMMAND_PATH = /^\/[A-Za-z0-9_@+=:,./-]*$/
+
+/** The absolute `env` the command starts with; never resolved through PATH. */
+export const ENV_PATH = '/usr/bin/env'
 
 /** Values the command line is built from. */
 export interface HookCommandInput {
@@ -32,6 +36,8 @@ export interface HookCommandInput {
   readonly sha256: string
   /** The seat's bare name. */
   readonly seat: string
+  /** Absolute path of `env`; default {@link ENV_PATH}. It must exist and pass `attestFile`. Tests inject another. */
+  readonly envPath?: string
 }
 
 /** One settings hook group (`matcher` plus command handlers). */
@@ -79,16 +85,17 @@ function assertGuardPath(path: string, allowSource: boolean): string {
 
 /**
  * Build the hook command line:
- * `env -u NODE_OPTIONS <node> <guard> --policy <path> --sha256 <hex> --seat <name>`.
+ * `/usr/bin/env -u NODE_OPTIONS <node> <guard> --policy <path> --sha256 <hex> --seat <name>`, where `env` is an
+ * absolute, attested path (a PATH lookup would let a planted `env` run first).
  * @param input - the values to interpolate.
  * @returns the command string.
- * @throws when any value fails its grammar, or the guard is a `.ts` file without `allowSourceGuard`.
+ * @throws when any value fails its grammar, `env` is missing or fails attestation, or the guard is a `.ts` file without `allowSourceGuard`.
  */
 export function buildHookCommand(input: HookCommandInput): string {
   if (!isSeatName(input.seat)) throw new Error(`agent-claude-code-tools: seat ${JSON.stringify(input.seat)} is not a valid seat name`)
   if (!isSha256(input.sha256)) throw new Error('agent-claude-code-tools: policy sha256 is not a lower-case hex digest')
   return [
-    'env', '-u', 'NODE_OPTIONS',
+    shellQuote(assertCommandPath('env path', attestFile(input.envPath ?? ENV_PATH, { access: 'exec' }).path)), '-u', 'NODE_OPTIONS',
     shellQuote(assertCommandPath('node path', input.nodePath)),
     shellQuote(assertGuardPath(input.guardPath ?? guardScriptPath(), input.allowSourceGuard === true)),
     '--policy', shellQuote(assertCommandPath('policy path', input.policyPath)),

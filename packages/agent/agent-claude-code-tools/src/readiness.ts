@@ -14,6 +14,12 @@ export const CODER_REQUIREMENTS: readonly ReadinessRequirement[] = ['sandbox', '
 /** Holds the registered readiness contributors. */
 export class ReadinessRegistry {
   private readonly contributors = new Map<string, ReadinessContributor>()
+  private changes = 0
+
+  /** Counts successful registrations; a cache keyed on it notices a new contributor. */
+  get version(): number {
+    return this.changes
+  }
 
   /**
    * Register a contributor.
@@ -23,6 +29,7 @@ export class ReadinessRegistry {
   register(contributor: ReadinessContributor): void {
     if (this.contributors.has(contributor.id)) throw new Error(`agent-claude-code-tools: readiness contributor ${contributor.id} is already registered`)
     this.contributors.set(contributor.id, { id: contributor.id, provides: contributor.provides })
+    this.changes += 1
   }
 
   /**

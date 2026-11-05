@@ -34,10 +34,10 @@ lead 模板恰好是 `mailbox_send` 和 `mailbox_directory`。主机条目的 `t
 - **(c) 回复标签。** 只有当 `replyToTraceId` 在驱动报告的已投递给该席位的 trace id 集合中时才被接受。它只是作为 trace id 复制到发出消息上的标签;绝不用于寻找目的地(没有 trace 查询,也没有基于 trace 的路由)。未知的 trace id 被拒绝。
 - **(d) 阻塞。** 除非主机条目设置 `allow_blocking: true`,否则 `blocking: true` 被拒绝。
 - **(e) 污染。** 来自被污染会话的发送带有 `tainted: true`,不带 `chain`:`from` 已经指明来源,桥接会自己把每一跳追加到 `chain`。**盖章只是给消息打标签,从不拒绝发送。** 未被污染的会话不作任何声明(缺省表示未声明,绝不表示干净)。将来任何返回邮件正文或其他外部内容的工具都必须调用上下文的 `markTainted`;`mailbox_directory` 返回的是操作员配置的席位名,所以不需要。
-- **(f) 校验。** 消息通过邮箱服务发布(`ctx.mailbox.publish`,发送时才查找),由它执行邮箱发布校验。发布被拒绝时,以错误结果返回给模型,而不是抛出。
+- **(f) 校验。** 消息通过邮箱服务发布(`ctx.mailbox.publish`,发送时才查找),由它执行邮箱发布校验。发布被拒绝时,以固定的错误结果返回给模型(邮箱自己的文字只写入主机日志),而不是抛出。
 - **(g) 结果文本。** 简短、经过清洗,且只点名被发送的那个席位(`Sent to <to>. Trace id <id>.`)。
 
-正文上限为 64 KiB 的 UTF-8(邮箱包自身没有声明上限,所以由本包设置)。
+正文上限为 64 KiB 的 UTF-8(邮箱包自身没有声明上限,所以由本包设置)。一个服务器(一次查询)最多可发送 `MAX_SENDS_PER_TURN` = 20 条消息;第 21 条会被拒绝,拒绝原因点明该上限,被拒绝的发送不计入。
 
 ### 就绪状态
 
@@ -48,8 +48,10 @@ lead 模板恰好是 `mailbox_send` 和 `mailbox_directory`。主机条目的 `t
 `src/bin.ts` 只是一个很薄的读取器,与守卫模块一起打包成随包发布的单个纯 JavaScript 文件 `lib/seat-guard.js`(`guardScriptPath()` 返回它;Node 不会在 `node_modules` 下剥离 TypeScript,所以 `.ts` 源码只能在工作区内使用,`buildHookCommand` 除非设置 `allowSourceGuard` 否则拒绝它)。`verifyGuardCommand(command)` 用策略必须拒绝的载荷运行生成的那条命令,并要求退出码 2 及守卫自己的 `seat-guard: denied` 原因;请在席位第一次查询之前调用。主机以原子方式写入 `<policyDir>/<seat>.json`(同目录临时文件、fsync、重命名;`writePolicyFile`),并得到这些字节的 SHA-256。钩子命令行由 `buildHookCommand` 构造:
 
 ```
-env -u NODE_OPTIONS <attested node> <attested guard script> --policy <path> --sha256 <hex> --seat <name>
+/usr/bin/env -u NODE_OPTIONS <attested node> <attested guard script> --policy <path> --sha256 <hex> --seat <name>
 ```
+
+`env` 是绝对路径 `/usr/bin/env`,与 node 一样经过验证,绝不通过 PATH 查找(SDK 没有按钩子设置的环境变量,命令行是固定它的唯一位置)。钩子并不直接运行包内的 `lib/seat-guard.js`:提供者把它复制到 `<policyDir>/seat-guard.js`(权限 0500;该目录必须是 0700 且属于主机用户,已存在但权限、属主不符或是符号链接的目录会被拒绝并给出补救办法),按源文件哈希验证该副本,并用副本路径构造命令。只有当副本的哈希或权限不一致时才会重写,且始终从首次使用时固定的源文件复制;源文件之后若有变化会被拒绝(`restart the host`),而不是被复制,因此被篡改的包文件无法到达席位。
 
 每个值都按严格语法检查(席位名 `^[a-z][a-z0-9-]{0,31}$`;路径为绝对、规范、无 shell 元字符)并加单引号;超时为 60 秒。构造命令之前,`attestFile` 会验证 node 二进制和守卫脚本:普通文件、属于操作员或 root、组和其他人不可写、所在目录链无他人可写、SHA-256 已固定。它沿用驱动 `attestClaudePath` 的规则,因为该函数拒绝脚本扩展名且无法参数化;哈希辅助函数用的是驱动自己的。
 
@@ -79,3 +81,11 @@ env -u NODE_OPTIONS <attested node> <attested guard script> --policy <path> --sh
 - **污染盖章只打标签,不拒绝。** 被操纵的受污染会话仍可在其 `send_to` 列表内发送。
 - **工具结果是经过清洗的文本。** 操作员 home 或席位 cwd 下的路径被替换为 `[path]`;其他路径原样通过。
 - **处理函数在主机进程中运行**,拥有主机的权限并接收由模型控制的参数;严格的模式、用闭包而非参数传递身份,以及 `send_to` 列表是仅有的围栏。
+- **钩子使用的 node 及其每一级父目录都不得对他人可写。** `attestFile` 始终拒绝对其他人可写的文件或目录(链中带粘滞位的目录如 `/tmp` 除外)。组可写位只有在该组是所有者的私有组时才被接受,并且直接读取 `/etc/passwd` 和 `/etc/group`(不经 NSS)来判断:所有者是运行用户或 root,该组与所有者的 passwd 条目同名,成员列表为空或仅有所有者,且没有其他 passwd 条目把该组作为主组。fnm 安装需要这一点(其版本目录权限为 775,属组是所有者的私有组)。如果任一数据库无法读取,或在其中找不到该用户(LDAP 等 NSS 账户),则适用严格规则,操作员需执行 `chmod g-w`。驱动自己的 `attestClaudePath` 不变。实机探测的第 0 项会打印拒绝信息。
+- **守卫文件的权限由构建固定。** tsdown 的 `onSuccess` 步骤把 `lib/seat-guard.js` 设为 0644,因为 664(umask 002)的文件会被同一验证拒绝;测试断言构建出的文件对组和其他人都不可写。
+- **实机探测所见:cwd 内的硬链接文件只由守卫拒绝。** CLI 自身的规则会读取它;若钩子失效放行,就没有其他东西阻止该读取。
+- **实机探测所见:Glob `lnk*/*` 被守卫拒绝仅仅是因为搜索目录包含 `.git`。** 在非 git 的 cwd 中守卫不会拒绝该模式(它只按静态前缀判断);CLI 对它没有返回任何文件。
+- **实机探测所见:服务器暴露但允许列表省略的 `mcp__dsh__` 工具仍会出现在 init 工具列表中**,且只由守卫拒绝。因此 provider 只用允许的工具构建服务器(`policy.tools`),暴露的集合与允许列表是同一个集合。
+- **邮箱拒绝以一句固定的话到达模型**(`mailbox_send refused: the mailbox rejected the message`);邮箱自己的文字只进入主机日志。
+- **验证运行最多会阻塞主机 15 秒。** `verifyGuardCommand` 是同步的,因为驱动的 `extend` 是同步的(已冻结的契约);它对每个守卫、node 和策略哈希只运行一次,而守卫的响应远低于一秒。改成异步需要修改驱动契约,留给后续切片。
+- **策略缓存以注册表为键。** 在席位策略被缓存之后才注册的贡献者、钩子组或工具会使版本计数器增加,下一次查询会重新生成策略。磁盘检查以非阻塞方式打开策略文件,仅当它是不超过 64 KiB 的普通文件时才读取。

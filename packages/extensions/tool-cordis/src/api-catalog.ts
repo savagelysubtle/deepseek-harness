@@ -3393,7 +3393,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ContributorRegistry',
-    declaration: 'export class ContributorRegistry {\n    registerToolContributor(contributor: ToolContributor): void;\n    registerHookContributor(contributor: HookContributor): void;\n    templateTools(role: PolicyRole): string[];\n    extraHookGroups(context: HookContext): Record<string, HookGroup[]>;\n}',
+    declaration: 'export class ContributorRegistry {\n    get version(): number;\n    registerToolContributor(contributor: ToolContributor): void;\n    registerHookContributor(contributor: HookContributor): void;\n    templateTools(role: PolicyRole): string[];\n    extraHookGroups(context: HookContext): Record<string, HookGroup[]>;\n}',
   },
   {
     name: 'CordisDynamicPackageId',
@@ -4357,7 +4357,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ReadinessRegistry',
-    declaration: 'export class ReadinessRegistry {\n    register(contributor: ReadinessContributor): void;\n    readiness(): PolicyReadiness;\n}',
+    declaration: 'export class ReadinessRegistry {\n    get version(): number;\n    register(contributor: ReadinessContributor): void;\n    readiness(): PolicyReadiness;\n}',
   },
   {
     name: 'ReadinessRequirement',
@@ -4589,7 +4589,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SeatToolContext',
-    declaration: 'export interface SeatToolContext {\n    readonly seat: string;\n    readonly sendTo: readonly string[];\n    readonly allowBlocking: boolean;\n    isTainted(): boolean;\n    markTainted(reason: string): void;\n    deliveredTraceIds(): ReadonlySet<string>;\n    publish(input: MailboxPublishInput, signal?: AbortSignal): Promise<unknown>;\n    newTraceId(): string;\n    scrub(text: string): string;\n}',
+    declaration: 'export interface SeatToolContext {\n    readonly seat: string;\n    readonly sendTo: readonly string[];\n    readonly allowBlocking: boolean;\n    isTainted(): boolean;\n    markTainted(reason: string): void;\n    deliveredTraceIds(): ReadonlySet<string>;\n    publish(input: MailboxPublishInput, signal?: AbortSignal): Promise<unknown>;\n    newTraceId(): string;\n    warn(message: string): void;\n    scrub(text: string): string;\n}',
   },
   {
     name: 'SeatToolFactory',
@@ -4605,7 +4605,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SeatToolTemplate',
-    declaration: 'export class SeatToolTemplate {\n    register(name: string, factory: SeatToolFactory): void;\n    names(): string[];\n    check(seat: string, requested: readonly string[]): void;\n    build(seat: string, requested: readonly string[], context: SeatToolContext): SeatTool[];\n}',
+    declaration: 'export class SeatToolTemplate {\n    get version(): number;\n    register(name: string, factory: SeatToolFactory): void;\n    names(): string[];\n    check(seat: string, requested: readonly string[]): void;\n    build(seat: string, requested: readonly string[], context: SeatToolContext): SeatTool[];\n}',
   },
   {
     name: 'ServerResponse',

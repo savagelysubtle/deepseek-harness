@@ -21,7 +21,7 @@ export function verifyGuardCommand(command: string): void {
     input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: PROBE_TOOL, tool_input: {} }),
     encoding: 'utf8',
     env: { PATH: process.env['PATH'] },
-    timeout: 60_000,
+    timeout: 15_000,
   })
   const stderr = result.stderr
   if (result.status !== 2) {

@@ -1,9 +1,12 @@
-import { chmodSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { SeatMutedByPolicyError } from '@deepseek-ai/dsh-agent-claude-code-driver'
 import type { ClaudeCodePolicy, PolicyQueryContext } from '@deepseek-ai/dsh-agent-claude-code-driver'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { attestFile } from '../src/attest-guard.ts'
+import { installGuardCopy } from '../src/guard-copy.ts'
 import { ContributorRegistry, GUARD_MATCHER } from '../src/index.ts'
 import * as Plugin from '../src/index.ts'
 import { createClaudeCodePolicy } from '../src/provider.ts'
@@ -71,6 +74,7 @@ function options(over: Partial<PolicyOptions> = {}): PolicyOptions & { published
     publish: (input) => { published.push(input); return Promise.resolve('id') },
     verify,
     newTraceId: () => 'fresh',
+    warn: () => undefined,
     ...over,
     published,
     ...over.verify === undefined ? { verify } : {},
@@ -213,6 +217,132 @@ describe('policy generation is cached per seat and cwd and heals itself', () => 
     const opts = options({ policyDir: join(blocker, 'policy') })
     expect(() => createClaudeCodePolicy(opts).extend(query(LEAD))).toThrow()
     expect(opts.verify).not.toHaveBeenCalled()
+  })
+})
+
+describe('the hook runs a host-owned copy of the guard (F1)', () => {
+  const commandOf = (ext: ReturnType<ClaudeCodePolicy['extend']>): string => (ext.settings?.hooks?.['PreToolUse'] as { hooks: { command: string }[] }[])[0]?.hooks[0]?.command ?? ''
+
+  it('copies the guard into the policy directory with mode 0500 and names the copy in the hook command', () => {
+    const opts = options()
+    const copy = join(opts.policyDir, 'seat-guard.js')
+    const command = commandOf(createClaudeCodePolicy(opts).extend(query(LEAD)))
+    expect(readFileSync(copy, 'utf8')).toBe(readFileSync(fakeGuard, 'utf8'))
+    expect(statSync(copy).mode & 0o777).toBe(0o500)
+    expect(command).toContain(`'${copy}'`)
+    expect(command).not.toContain(fakeGuard)
+    expect(command.startsWith("'/usr/bin/env' -u NODE_OPTIONS ")).toBe(true)
+  })
+
+  it('re-copies a tampered copy from the attested source and leaves an intact one alone', () => {
+    const opts = options()
+    const policy = createClaudeCodePolicy(opts)
+    policy.extend(query(LEAD))
+    const copy = join(opts.policyDir, 'seat-guard.js')
+    const inode = statSync(copy).ino
+    policy.extend(query(LEAD))
+    expect(statSync(copy).ino).toBe(inode)
+    chmodSync(copy, 0o700)
+    writeFileSync(copy, 'process.exit(0)\n')
+    chmodSync(copy, 0o500)
+    policy.extend(query(LEAD))
+    expect(readFileSync(copy, 'utf8')).toBe('// guard\n')
+    chmodSync(copy, 0o700)
+    writeFileSync(copy, 'process.exit(0)\n')
+    const command = commandOf(policy.extend(query(LEAD)))
+    expect(readFileSync(copy, 'utf8')).toBe('// guard\n')
+    expect(statSync(copy).mode & 0o777).toBe(0o500)
+    expect(command).toContain(copy)
+  })
+
+  it('refuses a copy that was replaced with a wrong-mode file even when the bytes match', () => {
+    const opts = options()
+    const policy = createClaudeCodePolicy(opts)
+    policy.extend(query(LEAD))
+    const copy = join(opts.policyDir, 'seat-guard.js')
+    chmodSync(copy, 0o700)
+    policy.extend(query(LEAD))
+    expect(statSync(copy).mode & 0o777).toBe(0o500)
+  })
+
+  it('never copies from a changed source', () => {
+    const opts = options()
+    const policy = createClaudeCodePolicy(opts)
+    policy.extend(query(LEAD))
+    const copy = join(opts.policyDir, 'seat-guard.js')
+    writeFileSync(fakeGuard, '// edited source\n')
+    chmodSync(copy, 0o700)
+    writeFileSync(copy, 'tampered\n')
+    expect(() => policy.extend(query(LEAD))).toThrow(/changed since this host attested it/)
+    expect(readFileSync(copy, 'utf8')).toBe('tampered\n')
+  })
+
+  it('refuses a source that changes between attestation and copy', () => {
+    const opts = options()
+    const copy = join(opts.policyDir, 'seat-guard.js')
+    mkdirSync(opts.policyDir, { recursive: true, mode: 0o700 })
+    const attested = attestFile(fakeGuard, { access: 'read' })
+    writeFileSync(fakeGuard, '// swapped\n')
+    expect(() => installGuardCopy(opts.policyDir, attested)).toThrow(/changed since this host attested it/)
+    expect(existsSync(copy)).toBe(false)
+  })
+
+  it('removes its temp file and throws when the copy cannot be renamed into place', () => {
+    const opts = options()
+    mkdirSync(join(opts.policyDir, 'seat-guard.js'), { recursive: true, mode: 0o700 })
+    expect(() => createClaudeCodePolicy(opts).extend(query(LEAD))).toThrow()
+    expect(readdirSync(opts.policyDir)).toEqual(['seat-guard.js'])
+  })
+
+  it('refuses a policy directory that is not mode 0700', () => {
+    const opts = options()
+    mkdirSync(opts.policyDir, { recursive: true })
+    chmodSync(opts.policyDir, 0o755)
+    expect(() => createClaudeCodePolicy(opts).extend(query(LEAD))).toThrow(/chmod 700/)
+  })
+})
+
+describe('policy cache keys on the registries (F5) and the file check never hangs (F4a)', () => {
+  it('a hook contributor registered after a cached entry yields a fresh policy', () => {
+    const opts = options()
+    const contributors = new ContributorRegistry()
+    const policy = createClaudeCodePolicy({ ...opts, contributors })
+    const before = policy.extend(query(LEAD))
+    expect(Object.keys(before.settings?.hooks ?? {})).toEqual(['PreToolUse'])
+    contributors.registerHookContributor({
+      id: 'late',
+      roles: ['lead'],
+      groups: () => ({ SessionStart: [{ matcher: '*', hooks: [{ type: 'command', command: 'true' }] }] }),
+    })
+    const after = policy.extend(query(LEAD))
+    expect(Object.keys(after.settings?.hooks ?? {}).sort()).toEqual(['PreToolUse', 'SessionStart'])
+  })
+
+  it('a readiness contributor or a tool registered later also bumps the version', () => {
+    const readiness = new ReadinessRegistry()
+    const template = createLeadTemplate()
+    const contributors = new ContributorRegistry()
+    const versions = (): number[] => [readiness.version, template.version, contributors.version]
+    const start = versions()
+    readiness.register({ id: 'a', provides: 'sandbox' })
+    template.register('ping', context => defineSeatTool(context, { name: 'ping', description: 'x', inputSchema: DIRECTORY_SCHEMA, handler: () => Promise.resolve(textResult(context, 'x')) }))
+    contributors.registerToolContributor({ id: 't', roles: ['coder'], names: ['ping'] })
+    expect(versions().every((value, index) => value > (start[index] ?? 0))).toBe(true)
+  })
+
+  it('treats a FIFO, a directory or an oversized file at the policy path as not intact and rewrites a regular file', () => {
+    const opts = options()
+    const policy = createClaudeCodePolicy(opts)
+    policy.extend(query(LEAD))
+    const file = join(opts.policyDir, 'lead-one.json')
+    const good = readFileSync(file, 'utf8')
+    writeFileSync(file, 'x'.repeat(70 * 1024))
+    policy.extend(query(LEAD))
+    expect(readFileSync(file, 'utf8')).toBe(good)
+    rmSync(file)
+    expect(spawnSync('/usr/bin/mkfifo', [file]).status).toBe(0)
+    expect(() => policy.extend(query(LEAD))).not.toThrow()
+    expect(readFileSync(file, 'utf8')).toBe(good)
   })
 })
 
@@ -364,17 +494,31 @@ describe('mounting', () => {
 
   it('looks the mailbox up at send time: a clear error without it, a real publish with it', async () => {
     const ctx = new Context()
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => undefined)
     const { node, guard } = installRealGuard(box.root)
     Plugin.apply(ctx, { policyDir: join(box.root, 'p'), home: box.home, nodePath: node, guardPath: guard })
     const policy = ctx.get('claudeCodePolicy') as ClaudeCodePolicy
     const ext = policy.extend(query(LEAD))
     const missing = await callThroughServer(ext.mcpServers?.dsh.instance, 'mailbox_send', { to: 'sam', body: 'x' })
-    expect(textOf(missing)).toContain('the mailbox service is not mounted')
+    expect(textOf(missing)).toBe('mailbox_send refused: the mailbox rejected the message')
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('the mailbox service is not mounted'))
     const publish = vi.fn(() => Promise.resolve('id'))
     ctx.provide('mailbox' as never, { publish } as never)
     const sent = await callThroughServer(policy.extend(query(LEAD)).mcpServers?.dsh.instance, 'mailbox_send', { to: 'sam', body: 'x' })
     expect(sent.isError).toBeUndefined()
     expect(publish).toHaveBeenCalledWith(expect.objectContaining({ from: 'lead-one', to: 'sam' }), undefined)
+  })
+
+  it('routes a mailbox rejection to the host logger, not to the model', async () => {
+    const ctx = new Context()
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => undefined)
+    const { node, guard } = installRealGuard(box.root)
+    Plugin.apply(ctx, { policyDir: join(box.root, 'p'), home: box.home, nodePath: node, guardPath: guard })
+    ctx.provide('mailbox' as never, { publish: () => Promise.reject(new Error('secret store detail')) } as never)
+    const ext = (ctx.get('claudeCodePolicy') as ClaudeCodePolicy).extend(query(LEAD))
+    const result = await callThroughServer(ext.mcpServers?.dsh.instance, 'mailbox_send', { to: 'sam', body: 'x' })
+    expect(textOf(result)).toBe('mailbox_send refused: the mailbox rejected the message')
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('secret store detail'))
   })
 
   it('defaults home, node and guard when the config leaves them out', () => {

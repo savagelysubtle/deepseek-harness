@@ -55,7 +55,7 @@ export function coderPolicy(box: Sandbox, tools: readonly string[] = ['Read', 'E
  * of assuming an earlier `pnpm run typecheck` left it behind.
  * @returns its absolute path.
  */
-function ensureBuiltGuard(): string {
+export function ensureBuiltGuard(): string {
   const path = guardScriptPath()
   if (!existsSync(path)) {
     const pkg = dirname(dirname(path))

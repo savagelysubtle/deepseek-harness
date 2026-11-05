@@ -24,6 +24,18 @@ describe('scrubText (table)', () => {
     expect(scrubText('/etc/hosts', { roots: ['/'] })).toBe('/etc/hosts')
   })
 
+  it('cuts on code points: an emoji at the boundary is kept whole or dropped whole, never split', () => {
+    const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+    // cap 20 minus the 15-character marker leaves 5 code points: 'abcd' and the emoji exactly fill it.
+    const kept = scrub(`abcd😀${'x'.repeat(30)}`, 20)
+    expect(kept).toBe('abcd😀... [truncated]')
+    expect(kept).not.toMatch(lone)
+    // one character earlier the emoji is the sixth code point and falls off whole.
+    const dropped = scrub(`abcde😀${'x'.repeat(30)}`, 20)
+    expect(dropped).toBe('abcde... [truncated]')
+    expect(dropped).not.toMatch(lone)
+  })
+
   it('caps the length and marks the cut', () => {
     const out = scrub('x'.repeat(MAX_RESULT_LENGTH + 500))
     expect(out).toHaveLength(MAX_RESULT_LENGTH)
@@ -54,7 +66,8 @@ describe('scrubText (property)', () => {
   it('is idempotent and never longer than the cap', () => {
     fc.assert(fc.property(fc.string({ unit: 'binary', maxLength: 6000 }), (text) => {
       const once = scrub(text)
-      expect(once.length).toBeLessThanOrEqual(MAX_RESULT_LENGTH)
+      expect(Array.from(once).length).toBeLessThanOrEqual(MAX_RESULT_LENGTH)
+      expect(once).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/)
       expect(scrub(once)).toBe(once)
     }), { numRuns: 200 })
   })

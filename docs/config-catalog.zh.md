@@ -254,7 +254,7 @@ export interface Config {
 }
 ```
 
-来源： [`packages/agent/agent-claude-code-tools/src/provider.ts:64`](../packages/agent/agent-claude-code-tools/src/provider.ts)
+来源： [`packages/agent/agent-claude-code-tools/src/provider.ts:66`](../packages/agent/agent-claude-code-tools/src/provider.ts)
 
 <a id="deepseek-aidsh-agent-default-model"></a>
 

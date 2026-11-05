@@ -252,7 +252,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/agent/agent-claude-code-tools/src/provider.ts:64`](../packages/agent/agent-claude-code-tools/src/provider.ts)
+Source: [`packages/agent/agent-claude-code-tools/src/provider.ts:66`](../packages/agent/agent-claude-code-tools/src/provider.ts)
 
 <a id="deepseek-aidsh-agent-default-model"></a>
 

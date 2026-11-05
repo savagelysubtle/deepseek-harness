@@ -9,7 +9,8 @@
  * @module @deepseek-ai/dsh-agent-claude-code-tools/attest-guard
  */
 
-import { accessSync, constants, realpathSync, statSync } from 'node:fs'
+import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs'
+import type { Stats } from 'node:fs'
 import { dirname, isAbsolute, resolve } from 'node:path'
 import { sha256File } from '@deepseek-ai/dsh-agent-claude-code-driver'
 
@@ -36,6 +37,47 @@ export interface AttestFileOptions {
   readonly uid?: number | undefined
   /** Pinned digest the content must match. */
   readonly expectedSha256?: string | undefined
+  /** The passwd database consulted for the private-group rule; default `/etc/passwd`. Injected by tests. */
+  readonly passwdPath?: string
+  /** The group database consulted for the private-group rule; default `/etc/group`. Injected by tests. */
+  readonly groupPath?: string
+}
+
+/** Split a passwd or group file into colon-separated records. */
+function records(text: string): string[][] {
+  return text.split('\n').filter(line => line !== '' && !line.startsWith('#')).map(line => line.split(':'))
+}
+
+/**
+ * Whether a group-writable bit on this file is harmless because the group is the owner's private one.
+ * The same uid already owns the file and can change its mode, so the group bit only matters when a second
+ * principal can act through the group. That is ruled out only when all of these hold, read straight from
+ * the databases (no NSS, no lookups): the owner is the running user or root (checked before this runs); the group with the file's
+ * gid is named exactly like the owner's passwd entry; its member list is empty or the owner alone; and no
+ * other passwd entry has that gid as its primary group. If either file cannot be read, or the owner or gid is
+ * not found there (NSS or LDAP accounts), the answer is no and the strict rule applies.
+ * @param stat - the file or directory stat.
+ * @param uid - the running user, when known.
+ * @param passwdPath - passwd database path.
+ * @param groupPath - group database path.
+ * @returns true when the group bit can be ignored.
+ */
+function isOwnersPrivateGroup(stat: Stats, uid: number | undefined, passwdPath: string, groupPath: string): boolean {
+  // The caller has already required the owner to be the running user or root, so only an unknown user is left to refuse.
+  if (uid === undefined) return false
+  let passwd: string[][]
+  let groups: string[][]
+  try {
+    passwd = records(readFileSync(passwdPath, 'utf8'))
+    groups = records(readFileSync(groupPath, 'utf8'))
+  } catch {
+    return false
+  }
+  const owner = passwd.find(entry => Number(entry[2]) === stat.uid)
+  const group = groups.find(entry => Number(entry[2]) === stat.gid)
+  if (owner === undefined || group === undefined || group[0] !== owner[0]) return false
+  if ((group[3] ?? '').split(',').some(member => member !== '' && member !== owner[0])) return false
+  return !passwd.some(entry => entry !== owner && Number(entry[3]) === stat.gid)
 }
 
 /**
@@ -63,7 +105,12 @@ export function attestFile(path: string, options: AttestFileOptions): AttestedFi
   const stat = statSync(realPath)
   if (!stat.isFile()) fail('it is not a regular file')
   if (uid !== undefined && stat.uid !== uid && stat.uid !== 0) fail(`it is owned by uid ${stat.uid}, neither the running user ${uid} nor root`)
-  if ((stat.mode & 0o022) !== 0) fail('it is group- or world-writable')
+  const passwdPath = options.passwdPath ?? '/etc/passwd'
+  const groupPath = options.groupPath ?? '/etc/group'
+  // World-writable is always refused; group-writable only when the group is the owner's private one.
+  const unsafe = (item: Stats): boolean => (item.mode & 0o002) !== 0
+    || ((item.mode & 0o020) !== 0 && !isOwnersPrivateGroup(item, uid, passwdPath, groupPath))
+  if (unsafe(stat)) fail('it is group- or world-writable')
   try {
     accessSync(realPath, options.access === 'exec' ? constants.X_OK : constants.R_OK)
   } catch {
@@ -72,7 +119,7 @@ export function attestFile(path: string, options: AttestFileOptions): AttestedFi
   for (const start of new Set([dirname(realPath), dirname(resolve(path))])) {
     for (let dir = start; ; dir = dirname(dir)) {
       const dirStat = statSync(dir)
-      if ((dirStat.mode & 0o022) !== 0 && (dirStat.mode & 0o1000) === 0) fail(`its directory ${dir} is group- or world-writable`)
+      if (unsafe(dirStat) && (dirStat.mode & 0o1000) === 0) fail(`its directory ${dir} is group- or world-writable`)
       if (uid !== undefined && dirStat.uid !== 0 && dirStat.uid !== uid) fail(`its directory ${dir} is owned by uid ${dirStat.uid}, neither the running user nor root`)
       if (dirname(dir) === dir) break
     }

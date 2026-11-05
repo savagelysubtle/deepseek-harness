@@ -40,6 +40,8 @@ export interface SeatToolContext {
   publish(input: MailboxPublishInput, signal?: AbortSignal): Promise<unknown>
   /** Mint a fresh trace id. */
   newTraceId(): string
+  /** Log a host-side warning; its text is never shown to the model. */
+  warn(message: string): void
   /** Scrub text on its way to the model. */
   scrub(text: string): string
 }

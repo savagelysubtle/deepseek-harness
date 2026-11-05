@@ -1,8 +1,8 @@
-import { chmodSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { serializePolicy, writePolicyFile } from '../src/policy-file.ts'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ensurePolicyDir, serializePolicy, writePolicyFile } from '../src/policy-file.ts'
 import { readPolicyFile, validatePolicy } from '../src/policy-read.ts'
 import { coderPolicy, makeSandbox } from './helpers.ts'
 import type { Sandbox } from './helpers.ts'
@@ -63,8 +63,40 @@ describe('writePolicyFile', () => {
 
   it('throws and leaves no temp file when the final rename fails', () => {
     mkdirSync(join(dir, 'coder-one.json'), { recursive: true })
+    chmodSync(dir, 0o700)
     expect(() => writePolicyFile(dir, coderPolicy(box))).toThrow()
     expect(readdirSync(dir)).toEqual(['coder-one.json'])
+  })
+})
+
+describe('ensurePolicyDir', () => {
+  it('creates a missing directory with mode 0700 and accepts it again', () => {
+    ensurePolicyDir(dir)
+    expect(statSync(dir).mode & 0o777).toBe(0o700)
+    ensurePolicyDir(dir)
+  })
+
+  it('refuses a directory with another mode, naming the remedy', () => {
+    mkdirSync(dir, { recursive: true })
+    chmodSync(dir, 0o755)
+    expect(() => { ensurePolicyDir(dir) }).toThrow(/mode 755, not 700; run chmod 700/)
+    expect(() => writePolicyFile(dir, coderPolicy(box))).toThrow(/chmod 700/)
+  })
+
+  it('refuses a symlink in place of the directory', () => {
+    mkdirSync(join(box.root, 'real'), { mode: 0o700 })
+    symlinkSync(join(box.root, 'real'), join(box.root, 'link'))
+    expect(() => { ensurePolicyDir(join(box.root, 'link')) }).toThrow(/not a plain directory/)
+  })
+
+  it('refuses a directory owned by someone else', () => {
+    mkdirSync(dir, { recursive: true })
+    const getuid = vi.spyOn(process, 'getuid').mockReturnValue((process.getuid?.() ?? 0) + 1)
+    try {
+      expect(() => { ensurePolicyDir(dir) }).toThrow(/is owned by uid/)
+    } finally {
+      getuid.mockRestore()
+    }
   })
 })
 

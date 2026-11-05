@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { FILE_TOOLS } from '../src/decide.ts'
-import { buildHookCommand, GUARD_MATCHER, guardHookGroup, guardScriptPath, HOOK_TIMEOUT_SECONDS, shellQuote } from '../src/hook-command.ts'
+import { buildHookCommand, ENV_PATH, GUARD_MATCHER, guardHookGroup, guardScriptPath, HOOK_TIMEOUT_SECONDS, shellQuote } from '../src/hook-command.ts'
 import type { HookCommandInput } from '../src/hook-command.ts'
 import { isSeatName, isSha256 } from '../src/grammar.ts'
 
@@ -8,9 +8,16 @@ const SHA = 'a'.repeat(64)
 const base: HookCommandInput = { nodePath: '/opt/node/bin/node', guardPath: '/opt/dsh/lib/seat-guard.js', policyPath: '/home/me/.dsh/policy/coder-one.json', sha256: SHA, seat: 'coder-one' }
 
 describe('buildHookCommand', () => {
+  it('starts with the absolute, attested env and never a PATH lookup', () => {
+    expect(buildHookCommand(base).startsWith("'/usr/bin/env' -u NODE_OPTIONS ")).toBe(true)
+    expect(ENV_PATH).toBe('/usr/bin/env')
+    expect(() => buildHookCommand({ ...base, envPath: '/nonexistent/env' })).toThrow(/cannot resolve it/)
+    expect(() => buildHookCommand({ ...base, envPath: 'env' })).toThrow(/absolute/)
+  })
+
   it('builds the exact command line', () => {
     expect(buildHookCommand(base)).toBe(
-      `env -u NODE_OPTIONS '/opt/node/bin/node' '/opt/dsh/lib/seat-guard.js' --policy '/home/me/.dsh/policy/coder-one.json' --sha256 ${SHA} --seat coder-one`,
+      `'/usr/bin/env' -u NODE_OPTIONS '/opt/node/bin/node' '/opt/dsh/lib/seat-guard.js' --policy '/home/me/.dsh/policy/coder-one.json' --sha256 ${SHA} --seat coder-one`,
     )
   })
 
