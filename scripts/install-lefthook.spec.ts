@@ -84,6 +84,7 @@ if (forbiddenConfigKey !== undefined) {
     if (error === null || typeof error !== 'object' || !('status' in error) || error.status !== 1) throw error
   }
 }
+// Like real lefthook, resolve the hooks path through git so GIT_CONFIG_* overrides apply.
 const hooksPath = execFileSync('git', ['config', '--get', 'core.hooksPath'], { encoding: 'utf8' }).trim()
 mkdirSync(hooksPath, { recursive: true })
 const running = join(hooksPath, '.fake-lefthook-running')
@@ -105,6 +106,10 @@ if (existsSync(running)) unlinkSync(running)
 if (process.env.DSH_TEST_LEFTHOOK_BREAK_WORKTREE_CONFIG === '1') {
   const configPath = execFileSync('git', ['rev-parse', '--git-path', 'config.worktree'], { encoding: 'utf8' }).trim()
   writeFileSync(configPath, '[invalid\\n')
+}
+if (process.env.DSH_TEST_LEFTHOOK_NOISE !== undefined) {
+  console.log(process.env.DSH_TEST_LEFTHOOK_NOISE)
+  console.error(process.env.DSH_TEST_LEFTHOOK_NOISE + ' (stderr)')
 }
 if (shouldFail) process.exit(77)
 `
@@ -147,6 +152,7 @@ function createFixture(names: { main?: string; linked?: string } = {}): Fixture 
     GIT_COMMITTER_NAME: 'Hooks Test',
     GIT_CONFIG_GLOBAL: join(container, 'global.gitconfig'),
     GIT_CONFIG_NOSYSTEM: '1',
+    DSH_FENCE_PIN_FILE: join(container, 'no-such-fence-pin'),
     HOME: container,
     XDG_CONFIG_HOME: join(container, '.config'),
   }
@@ -867,5 +873,252 @@ describe('worktree-local Lefthook installer', { timeout: 30_000 }, () => {
     expect(result.stderr).toContain('Git 2.26 or newer is required')
     expect(gitResult(fixture, fixture.main, ['config', '--get', 'extensions.worktreeConfig']).status).toBe(1)
     expect(existsSync(hooksPath(fixture, fixture.main))).toBe(false)
+  })
+
+  describe('fence mode', () => {
+    const fenceBanner = (dir: string): string => `lefthook: fence mode, hooks chained from ${dir}\n`
+
+    function createFenceDirectory(fixture: Fixture, targetName = 'fence'): string {
+      const fenceDirectory = join(fixture.container, 'fence-githooks')
+      const target = join(fixture.container, targetName)
+      write(target, '#!/bin/sh\nexit 0\n', 0o755)
+      mkdirSync(fenceDirectory, { recursive: true })
+      for (const name of ['pre-push', 'reference-transaction']) {
+        symlinkSync(target, join(fenceDirectory, name))
+      }
+      git(fixture, fixture.main, ['config', '--local', 'core.hooksPath', fenceDirectory])
+      return fenceDirectory
+    }
+
+    function expectFenceUntouched(fixture: Fixture, fenceDirectory: string): void {
+      expect(git(fixture, fixture.main, ['config', '--local', '--get', 'core.hooksPath'])).toBe(fenceDirectory)
+      expect(lstatSync(join(fenceDirectory, 'pre-push')).isSymbolicLink()).toBe(true)
+      expect(readFileSync(join(fenceDirectory, 'pre-push'), 'utf8')).toBe('#!/bin/sh\nexit 0\n')
+      expect(existsSync(join(fenceDirectory, 'pre-commit'))).toBe(false)
+    }
+
+    it('chains from a structurally detected fence directory without writing core.hooksPath', async () => {
+      const fixture = createFixture()
+      const fenceDirectory = createFenceDirectory(fixture)
+
+      const result = await runInstaller(fixture, fixture.main)
+
+      expect(result.status, result.stderr).toBe(0)
+      expect(result.stdout).toBe(fenceBanner(fenceDirectory))
+      expect(gitResult(fixture, fixture.main, ['config', '--worktree', '--get', 'core.hooksPath']).status).toBe(1)
+      expectFenceUntouched(fixture, fenceDirectory)
+      const owned = hooksPath(fixture, fixture.main)
+      expect(readFileSync(join(owned, 'pre-commit'), 'utf8')).toContain('main-worktree-config')
+      expect(existsSync(join(owned, '.dsh-lefthook-owned'))).toBe(true)
+      expect(git(fixture, fixture.main, ['config', '--worktree', '--get', 'merge.dsh-translation-pairing.driver']))
+        .toBe(pairingMergeDriver)
+    })
+
+    it('detects the fence directory from a readable pin file', async () => {
+      const fixture = createFixture()
+      const fenceDirectory = join(fixture.container, 'pinned-githooks')
+      mkdirSync(fenceDirectory)
+      write(join(fenceDirectory, 'pre-push'), '#!/bin/sh\nexit 0\n', 0o755)
+      git(fixture, fixture.main, ['config', '--local', 'core.hooksPath', fenceDirectory])
+      const pin = join(fixture.container, 'pin')
+      write(pin, `version=1\ngithooks_dir=${fenceDirectory}\n`)
+
+      const result = await runInstaller(fixture, fixture.main, { DSH_FENCE_PIN_FILE: pin })
+
+      expect(result.status, result.stderr).toBe(0)
+      expect(result.stdout).toBe(fenceBanner(fenceDirectory))
+      expect(gitResult(fixture, fixture.main, ['config', '--worktree', '--get', 'core.hooksPath']).status).toBe(1)
+      expect(readFileSync(join(fenceDirectory, 'pre-push'), 'utf8')).toBe('#!/bin/sh\nexit 0\n')
+      expect(existsSync(join(hooksPath(fixture, fixture.main), 'pre-commit'))).toBe(true)
+    })
+
+    it('does not trust the structure when a readable pin names a different directory', async () => {
+      const fixture = createFixture()
+      createFenceDirectory(fixture)
+      const pin = join(fixture.container, 'pin')
+      write(pin, `githooks_dir=${join(fixture.container, 'elsewhere')}\n`)
+
+      const result = await runInstaller(fixture, fixture.main, { DSH_FENCE_PIN_FILE: pin })
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('refusing to replace user-owned core.hooksPath')
+    })
+
+    it('refuses a directory whose symlinks do not resolve to a file named fence', async () => {
+      const fixture = createFixture()
+      const fenceDirectory = createFenceDirectory(fixture, 'not-the-fence')
+
+      const result = await runInstaller(fixture, fixture.main)
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('refusing to replace user-owned core.hooksPath')
+      expect(result.stdout).toBe('')
+      expectFenceUntouched(fixture, fenceDirectory)
+    })
+
+    it('unsets a stale owned worktree core.hooksPath in fence mode', async () => {
+      const fixture = createFixture()
+      const first = await runInstaller(fixture, fixture.main)
+      expect(first.status, first.stderr).toBe(0)
+      const owned = hooksPath(fixture, fixture.main)
+      expect(git(fixture, fixture.main, ['config', '--worktree', '--get', 'core.hooksPath'])).toBe(owned)
+      const fenceDirectory = createFenceDirectory(fixture)
+
+      const result = await runInstaller(fixture, fixture.main)
+
+      expect(result.status, result.stderr).toBe(0)
+      expect(result.stdout).toBe(fenceBanner(fenceDirectory))
+      expect(result.stderr).toContain('unset stale worktree core.hooksPath')
+      expect(gitResult(fixture, fixture.main, ['config', '--worktree', '--get', 'core.hooksPath']).status).toBe(1)
+      expectFenceUntouched(fixture, fenceDirectory)
+    })
+
+    it('still refuses a foreign worktree core.hooksPath in fence mode', async () => {
+      const fixture = createFixture()
+      const fenceDirectory = createFenceDirectory(fixture)
+      git(fixture, fixture.main, ['config', 'extensions.worktreeConfig', 'true'])
+      git(fixture, fixture.main, ['config', '--worktree', 'core.hooksPath', 'foreign-hooks'])
+
+      const result = await runInstaller(fixture, fixture.main)
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('refusing to replace worktree-scoped core.hooksPath')
+      expect(git(fixture, fixture.main, ['config', '--worktree', '--get', 'core.hooksPath'])).toBe('foreign-hooks')
+      expectFenceUntouched(fixture, fenceDirectory)
+    })
+
+    it.skipIf(process.platform === 'win32').for(['file', 'symlink', 'directory'] as const)(
+      'refuses the override env when the local hooks directory holds a reference-transaction %s',
+      async (kind) => {
+        const fixture = createFixture()
+        const customDirectory = join(fixture.container, 'custom-githooks')
+        const entry = join(customDirectory, 'reference-transaction')
+        if (kind === 'file') write(entry, '#!/bin/sh\nexit 0\n', 0o755)
+        else if (kind === 'directory') mkdirSync(entry, { recursive: true })
+        else {
+          mkdirSync(customDirectory, { recursive: true })
+          symlinkSync(join(fixture.container, 'anywhere'), entry)
+        }
+        git(fixture, fixture.main, ['config', '--local', 'core.hooksPath', customDirectory])
+
+        const result = await runInstaller(fixture, fixture.main, {
+          DSH_LEFTHOOK_ALLOW_HOOKS_PATH_OVERRIDE: '1',
+        })
+
+        expect(result.status).toBe(1)
+        expect(result.stderr).toContain('reference-transaction')
+        expect(result.stderr).toContain('or remove the fence first')
+        expect(gitResult(fixture, fixture.main, ['config', '--get', 'extensions.worktreeConfig']).status).toBe(1)
+        expect(git(fixture, fixture.main, ['config', '--local', '--get', 'core.hooksPath'])).toBe(customDirectory)
+      },
+    )
+
+    it('refuses the override env over a tilde core.hooksPath and treats it as non-fence otherwise', async () => {
+      const fixture = createFixture()
+      git(fixture, fixture.main, ['config', '--local', 'core.hooksPath', '~/githooks'])
+
+      const refusedOverride = await runInstaller(fixture, fixture.main, {
+        DSH_LEFTHOOK_ALLOW_HOOKS_PATH_OVERRIDE: '1',
+      })
+      expect(refusedOverride.status).toBe(1)
+      expect(refusedOverride.stderr).toContain('starts with `~`')
+
+      const plain = await runInstaller(fixture, fixture.main)
+      expect(plain.status).toBe(1)
+      expect(plain.stderr).toContain('refusing to replace user-owned core.hooksPath')
+      expect(plain.stdout).toBe('')
+    })
+
+    it.for([
+      ['CRLF line endings', (dir: string) => `version=1\r\ngithooks_dir=${dir}\r\n`, true],
+      ['a trailing slash', (dir: string) => `githooks_dir=${dir}/\n`, true],
+      ['a commented-out key before the real key', (dir: string) => `# githooks_dir=/nope\ngithooks_dir=${dir}\n`, true],
+      ['only a commented-out key', (dir: string) => `# githooks_dir=${dir}\n`, false],
+      ['a readable pin lacking the key', () => 'version=1\n', false],
+    ] as const)('parses the pin file with %s', async ([, pinContent, expectFence]) => {
+      const fixture = createFixture()
+      // The directory also satisfies the structural rule: a readable pin must still be authoritative.
+      const fenceDirectory = createFenceDirectory(fixture)
+      const pin = join(fixture.container, 'pin')
+      write(pin, pinContent(fenceDirectory))
+
+      const result = await runInstaller(fixture, fixture.main, { DSH_FENCE_PIN_FILE: pin })
+
+      if (expectFence) {
+        expect(result.status, result.stderr).toBe(0)
+        expect(result.stdout).toBe(fenceBanner(fenceDirectory))
+      } else {
+        expect(result.status).toBe(1)
+        expect(result.stderr).toContain('refusing to replace user-owned core.hooksPath')
+      }
+      expectFenceUntouched(fixture, fenceDirectory)
+    })
+
+    it('rolls back a stale worktree value and reports lefthook output when lefthook fails', async () => {
+      const fixture = createFixture()
+      const first = await runInstaller(fixture, fixture.main)
+      expect(first.status, first.stderr).toBe(0)
+      const owned = hooksPath(fixture, fixture.main)
+      const worktreeConfig = join(gitDirectory(fixture, fixture.main), 'config.worktree')
+      const before = readFileSync(worktreeConfig, 'utf8')
+      const fenceDirectory = createFenceDirectory(fixture)
+
+      const result = await runInstaller(fixture, fixture.main, {
+        DSH_TEST_LEFTHOOK_FAIL: '1',
+        DSH_TEST_LEFTHOOK_NOISE: 'lefthook noise',
+      })
+
+      expect(result.status).toBe(1)
+      expect(result.stdout).toBe('')
+      expect(result.stderr).toContain('lefthook noise')
+      expect(git(fixture, fixture.main, ['config', '--worktree', '--get', 'core.hooksPath'])).toBe(owned)
+      expect(readFileSync(worktreeConfig, 'utf8').split('\n').filter(line => line !== '').sort())
+        .toEqual(before.split('\n').filter(line => line !== '').sort())
+      expectFenceUntouched(fixture, fenceDirectory)
+    })
+
+    it.skipIf(process.platform === 'win32')(
+      'rejects an effective core.hooksPath that is not the fence directory and rolls back',
+      async () => {
+        const fixture = createFixture()
+        const first = await runInstaller(fixture, fixture.main)
+        expect(first.status, first.stderr).toBe(0)
+        const owned = hooksPath(fixture, fixture.main)
+        const fenceDirectory = createFenceDirectory(fixture)
+        const realGit = commandResult('which', ['git'], fixture.main, fixture.env).stdout.trim()
+        const fakeBin = join(fixture.container, 'lying-bin')
+        write(
+          join(fakeBin, 'git'),
+          `#!/bin/sh\ncase "$*" in *--show-scope*core.hooksPath*) printf 'global\\0file:/x\\0/elsewhere\\0'; exit 0;; esac\nexec "${realGit}" "$@"\n`,
+          0o755,
+        )
+
+        const result = await runInstaller(fixture, fixture.main, {
+          PATH: `${fakeBin}:${fixture.env.PATH ?? ''}`,
+        })
+
+        expect(result.status).toBe(1)
+        expect(result.stdout).toBe('')
+        expect(result.stderr).toContain('the effective core.hooksPath is not the fence directory')
+        expect(git(fixture, fixture.main, ['config', '--worktree', '--get', 'core.hooksPath'])).toBe(owned)
+        expectFenceUntouched(fixture, fenceDirectory)
+      },
+    )
+
+    it('installs a linked worktree into its own git directory in fence mode', async () => {
+      const fixture = createFixture()
+      const fenceDirectory = createFenceDirectory(fixture)
+
+      const result = await runInstaller(fixture, fixture.linked)
+
+      expect(result.status, result.stderr).toBe(0)
+      expect(result.stdout).toBe(fenceBanner(fenceDirectory))
+      const linkedHooks = hooksPath(fixture, fixture.linked)
+      expect(linkedHooks).not.toBe(hooksPath(fixture, fixture.main))
+      expect(readFileSync(join(linkedHooks, 'pre-commit'), 'utf8')).toContain('linked-worktree-config')
+      expect(existsSync(hooksPath(fixture, fixture.main))).toBe(false)
+      expect(gitResult(fixture, fixture.linked, ['config', '--worktree', '--get', 'core.hooksPath']).status).toBe(1)
+      expectFenceUntouched(fixture, fenceDirectory)
+    })
   })
 })
