@@ -194,10 +194,10 @@ const DSH_ALLOW_ENTRY = /^mcp__dsh__[a-z][a-z0-9_]{0,63}$/
 const DSH_TOOL_PREFIX = 'mcp__dsh__'
 
 /**
- * A working directory the path grammar can state unambiguously: no glob, negation, comment, brace or escape
- * characters, no whitespace or controls.
+ * A working directory the path grammar can state unambiguously: an allowlist of ASCII letters, digits and
+ * `. _ / @ + -` only, so no shell, glob, quote, separator, whitespace, control or non-ASCII character.
  */
-const SAFE_CWD = /^\/[^*?[\]!#{}\\\p{Cc}\p{Z}]+$/u
+const SAFE_CWD = /^\/[A-Za-z0-9._/@+-]+$/
 
 /** Cut a refused value down for an error message. */
 function shown(value: unknown): string {

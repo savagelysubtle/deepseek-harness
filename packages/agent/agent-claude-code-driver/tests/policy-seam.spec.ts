@@ -68,7 +68,7 @@ describe('allow grammar', () => {
     expect(() => buildQueryOptions(base('lead', ext({ allow: ['mcp__dsh__a'] })))).toThrow(/names a dsh tool but no dsh server was supplied/)
   })
 
-  it.each(['/work/my seat', '/work/se*at', '/work/se[a]t', '/work/!seat', '/work/#seat', '/work/{seat}', '/work/se\\at', '/work/se\nat', '/work/seat/', '/'])(
+  it.each(['/work/my seat', '/work/se*at', '/work/se[a]t', '/work/!seat', '/work/#seat', '/work/{seat}', '/work/se\\at', '/work/se\nat', '/work/seat/', '/', '/work/se$at', '/work/se;at', '/work/se(at)', "/work/se'at", '/work/se,at', '/work/se"at', '/work/se`at', '/work/se|at', '/work/se&at', '/work/se<at', '/work/s\u00e9at'])(
     'refuses every path entry when the cwd %j cannot be stated unambiguously',
     (cwd) => {
       const unsafe = `Read(//${cwd.slice(1)}/**)`
@@ -266,6 +266,52 @@ describe('the policy service is read at use time', () => {
     expect(reads.mock.calls.length).toBeGreaterThanOrEqual(2)
   })
 
+  it('re-checks the policy after the binding lookup: one that stops serving meanwhile refuses before anything is claimed', async () => {
+    const h = await harness()
+    let reads = 0
+    ;(h.deps as { policy: unknown }).policy = () => { reads += 1; return reads >= 2 ? stubPolicy({}, []) : stubPolicy() }
+    const agent = h.agent()
+    agent.followup(mailMessage('hi', 'm-stale'))
+    await agent.whenIdle()
+    expect(reads).toBe(2)
+    expect(h.queries).toHaveLength(0)
+    expect(h.state.leases).toEqual([])
+    expect(lastEnd(agent).error).toMatchObject({ code: CLAUDE_CODE_TURN_ERROR_CODES.policy })
+    expect(agent.session.events.some(event => event.type === 'step/start')).toBe(false)
+    expect(agent.session.events.some(event => event.type === 'user/message')).toBe(false)
+  })
+
+  it('uses the policy object read right before the query, not the one the turn started with', async () => {
+    const h = await harness()
+    const first = { ...stubPolicy(), extend: vi.fn(() => ({})) }
+    const fresh = { ...stubPolicy(), extend: vi.fn(() => ({})) }
+    let reads = 0
+    ;(h.deps as { policy: unknown }).policy = () => { reads += 1; return reads >= 3 ? fresh : first }
+    const agent = h.agent()
+    agent.followup(userMessage('hi'))
+    const query = await h.query(0)
+    await tick(5)
+    query.emit(init([]))
+    query.emit(resultMessage({ user_message_uuids: query.uuids() }))
+    await agent.whenIdle()
+    expect(reads).toBe(3)
+    expect(first.extend).not.toHaveBeenCalled()
+    expect(fresh.extend).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses the query when the policy stops serving between the claim flush and the query', async () => {
+    const h = await harness()
+    let reads = 0
+    ;(h.deps as { policy: unknown }).policy = () => { reads += 1; return reads >= 3 ? stubPolicy({}, []) : stubPolicy() }
+    const agent = h.agent()
+    agent.followup(mailMessage('hi', 'm-late'))
+    await agent.whenIdle()
+    expect(h.queries).toHaveLength(0)
+    expect(lastEnd(agent).error).toMatchObject({ code: CLAUDE_CODE_TURN_ERROR_CODES.policy })
+    // the mail was already claimed by then, so its lease fails visibly like a kill-switch caught at the same point
+    expect(h.state.leases).toEqual([expect.stringMatching(/^fail:m-late:.*is refused/)])
+  })
+
   it('leaves the mail queued when the role cannot be served, and never reads the policy for a mail-only seat', async () => {
     const h = await harness()
     h.state.policy = stubPolicy({}, [])
@@ -360,6 +406,58 @@ describe('the init tool assertion', () => {
     expect(agent.session.events.filter(event => event.type === 'claude-code/refused')).toHaveLength(1)
   })
 
+  it('fails closed on an assistant tool call that arrives before any init', async () => {
+    const h = await harness()
+    h.state.policy = policy()
+    const { agent } = await runTurn(h, (query) => {
+      query.autoInit = false
+      query.emit({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }] } } as never)
+    }, mailMessage('hi', 'm-pre-a'))
+    expect(lastEnd(agent).error).toMatchObject({ code: CLAUDE_CODE_TURN_ERROR_CODES.toolSet })
+    expect(lastEnd(agent).error?.message).toContain('no system/init before first assistant message')
+    expect(h.state.leases).toEqual([expect.stringMatching(/^fail:m-pre-a:.*tool set the policy did not expect/)])
+    // the unvetted message was not mapped, so no session taint or tool record came from it
+    expect(agent.session.events.some(event => event.type === 'claude-code/session-tainted')).toBe(false)
+    expect(agent.session.events.filter(event => event.type === 'claude-code/refused').map(event => (event.data as { detail: string }).detail))
+      .toEqual(['tool set mismatch: no system/init before first assistant message'])
+  })
+
+  it('fails closed on a result that arrives before any init', async () => {
+    const h = await harness()
+    h.state.policy = policy()
+    const { agent } = await runTurn(h, (query) => {
+      query.autoInit = false
+      query.emit(resultMessage({ user_message_uuids: query.uuids() }))
+    }, mailMessage('hi', 'm-pre-r'))
+    expect(lastEnd(agent).error).toMatchObject({ code: CLAUDE_CODE_TURN_ERROR_CODES.toolSet })
+    expect(lastEnd(agent).error?.message).toContain('no system/init before first result message')
+    expect(h.state.leases).toEqual([expect.stringMatching(/^fail:m-pre-r:/)])
+  })
+
+  it('fails closed before init for a mail-only seat too', async () => {
+    const h = await harness()
+    const agent = h.agent({ config: seatConfig({ role: 'mail-only' }) })
+    agent.followup(userMessage('hello'))
+    const query = await h.query(0)
+    await tick(5)
+    query.autoInit = false
+    query.emit(resultMessage({ user_message_uuids: query.uuids() }))
+    await agent.whenIdle()
+    expect(lastEnd(agent).error).toMatchObject({ code: CLAUDE_CODE_TURN_ERROR_CODES.toolSet })
+  })
+
+  it('re-checks a second init after a matching first one', async () => {
+    const h = await harness()
+    h.state.policy = policy()
+    const { agent } = await runTurn(h, (query) => {
+      query.emit(init(['mcp__dsh__a']))
+      query.emit(init(['mcp__dsh__a', 'Bash']))
+      query.emit(resultMessage({ user_message_uuids: query.uuids() }))
+    })
+    expect(lastEnd(agent).error).toMatchObject({ code: CLAUDE_CODE_TURN_ERROR_CODES.toolSet })
+    expect(lastEnd(agent).error?.message).toContain('Bash')
+  })
+
   it('lets a matching init through, in any order', async () => {
     const h = await harness()
     h.state.policy = stubPolicy({ mcpServers: { dsh: SERVER as never }, allow: ['mcp__dsh__a', 'mcp__dsh__b'] })
@@ -396,13 +494,34 @@ describe('tainted mail keeps its guarantee with the S5 options present', () => {
     expect(lastEnd(agent).kind).toBe('completed')
   })
 
-  it('serves a tainted mail even when the policy service is absent, because the throwaway needs none', async () => {
+  it('serves a tainted mail for a mail-only seat even when the policy service is absent', async () => {
     const h = await harness()
     h.state.policy = undefined
-    const { agent } = await runTurn(h, (q) => {
-      q.emit(init([]))
-      q.emit(resultMessage({ user_message_uuids: q.uuids() }))
-    }, mailMessage('portal', 'm-t2', { tainted: true }))
+    const agent = h.agent({ config: seatConfig({ role: 'mail-only' }) })
+    agent.followup(mailMessage('portal', 'm-t2', { tainted: true }))
+    const query = await h.query(0)
+    await tick(5)
+    query.emit(init([]))
+    query.emit(resultMessage({ user_message_uuids: query.uuids() }))
+    await agent.whenIdle()
     expect(lastEnd(agent).kind).toBe('completed')
+  })
+
+  it.each<['lead' | 'coder', string, () => ClaudeCodePolicy | undefined, RegExp]>([
+    ['lead', 'absent', () => undefined, /policy service absent/],
+    ['lead', 'not ready for the role', () => stubPolicy({}, []), /the policy service is not ready for it/],
+    ['coder', 'not ready for the role', () => stubPolicy({}, ['lead']), /role "coder" is refused/],
+  ])('refuses a tainted mail for a %s seat when the policy is %s: same visible reason, nothing claimed or settled', async (role, _label, policy, message) => {
+    const h = await harness()
+    h.state.policy = policy()
+    const agent = h.agent({ config: seatConfig({ role }) })
+    agent.followup(mailMessage('portal', 'm-t3', { tainted: true }))
+    await agent.whenIdle()
+    expect(h.queries).toHaveLength(0)
+    expect(h.state.leases).toEqual([])
+    expect(lastEnd(agent).error).toMatchObject({ code: CLAUDE_CODE_TURN_ERROR_CODES.policy })
+    expect(lastEnd(agent).error?.message).toMatch(message)
+    expect(agent.session.events.some(event => event.type === 'claude-code/throwaway-turn')).toBe(false)
+    expect(agent.session.events.filter(event => event.type === 'claude-code/refused')).toHaveLength(1)
   })
 })

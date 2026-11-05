@@ -285,6 +285,8 @@ class LiveTurn {
   expectedTools: readonly string[] | undefined
   /** Why the init message's tool list was refused; the query was aborted. */
   toolMismatch: string | undefined
+  /** A `system/init` message has arrived; until then no assistant or result message is trusted. */
+  initSeen = false
   /** Every mail in the turn was a duplicate, so no query ran. */
   noQuery = false
   /** Steered messages claimed but not yet pushed (waiting for their claim records to be durable). */
@@ -417,6 +419,12 @@ function untilOf(deps: SeatAgentDeps, reset: number | undefined): number {
   return Math.min(reset !== undefined && reset > now ? reset : now + deps.defaultPauseMs, now + MAX_PAUSE_MS)
 }
 
+/** Whether the log's last turn started and never ended: the process died inside it. */
+function endedMidTurn(session: Session): boolean {
+  const start = session.events.findLastIndex(event => event.type === 'turn/start')
+  return start !== -1 && !session.events.slice(start + 1).some(event => event.type === 'turn/end')
+}
+
 /** The pause still in force according to the last `claude-code/paused` record of a session; 0 when none. */
 function restoredPause(session: Session, deps: SeatAgentDeps): number {
   const until = (session.events.findLast(event => event.type === 'claude-code/paused')?.data as { until?: unknown } | undefined)?.until
@@ -482,6 +490,11 @@ export class ClaudeCodeSeatAgent implements Agent {
     this.pausedUntil = restoredPause(session, deps)
     this.mail = new MailLog(session)
     this.sessionTaint = (session.events.findLast(event => event.type === 'claude-code/session-tainted')?.data as { reason?: string } | undefined)?.reason
+    // A crash mid-turn may have lost the taint record with the turn's unflushed events: restore fail closed.
+    if (this.sessionTaint === undefined && endedMidTurn(session)) {
+      this.sessionTaint = 'restored-mid-turn'
+      this.rec('claude-code/session-tainted', { reason: this.sessionTaint, at: deps.now() })
+    }
     // A step that started is a query (or an all-duplicate turn): rebuild the call window the process lost.
     gate.seed(seat, session.events.filter(event => event.type === 'step/start').map(event => event.time))
     this.digestKey = deps.digestKey ?? randomBytes(32)
@@ -525,9 +538,14 @@ export class ClaudeCodeSeatAgent implements Agent {
     this.sessionTaint = sanitizeFreeText(reason, MAX_REASON_CHARS) || 'unspecified'
     this.rec('claude-code/session-tainted', { reason: this.sessionTaint, at: this.deps.now() })
     // Best effort: a crash before the next flush would otherwise restore the session as clean.
-    void this.deps.flush(this.session).catch((error: unknown) => {
+    const lost = (error: unknown): void => {
       this.deps.warn(`agent-claude-code-driver: could not make the session taint durable: ${errText(error)}`)
-    })
+    }
+    try {
+      void this.deps.flush(this.session).catch(lost)
+    } catch (error: unknown) {
+      lost(error)
+    }
   }
 
   /**
@@ -928,7 +946,12 @@ export class ClaudeCodeSeatAgent implements Agent {
   /** Inspect one SDK message for turn-level facts. */
   private observe(phase: RunningPhase, live: LiveTurn, message: SDKMessage): void {
     if (this.killSwitchUp()) this.tripKillSwitch(live)
-    if (message.type === 'system' && message.subtype === 'init') this.checkInitTools(live, message.tools)
+    if (message.type === 'system' && message.subtype === 'init') {
+      live.initSeen = true
+      this.checkInitTools(live, message.tools)
+    } else if ((message.type === 'assistant' || message.type === 'result') && this.requireInit(live, message.type)) {
+      return
+    }
     live.mapper?.map(message)
     if (message.type === 'rate_limit_event') {
       const info = message.rate_limit_info
@@ -974,7 +997,22 @@ export class ClaudeCodeSeatAgent implements Agent {
   private checkInitTools(live: LiveTurn, reported: unknown): void {
     if (live.expectedTools === undefined || live.toolMismatch !== undefined) return
     const mismatch = toolSetMismatch(live.expectedTools, reported)
-    if (mismatch === undefined) return
+    if (mismatch !== undefined) this.failToolSet(live, mismatch)
+  }
+
+  /**
+   * Fail closed when a message that can start or end a tool call arrives before any `system/init`: the tool list
+   * was never checked, so nothing the query does is trusted.
+   * @returns true when the query was just aborted for it.
+   */
+  private requireInit(live: LiveTurn, kind: string): boolean {
+    if (live.expectedTools === undefined || live.initSeen || live.toolMismatch !== undefined) return false
+    this.failToolSet(live, `no system/init before first ${kind} message`)
+    return true
+  }
+
+  /** Record a tool-set refusal, then abort and tear the query down. */
+  private failToolSet(live: LiveTurn, mismatch: string): void {
     live.toolMismatch = mismatch
     this.rec('claude-code/refused', { reason: 'admission', detail: `tool set mismatch: ${mismatch}`, at: this.deps.now() })
     this.deps.warn(`agent-claude-code-driver: seat "${this.seat}": ${mismatch}; the query was aborted`)
@@ -1283,8 +1321,8 @@ export class ClaudeCodeSeatAgent implements Agent {
       this.gate.acquire(this.seat, this)
       holdsGate = true
       const plan = this.planClaim()
-      // A lead or coder turn needs the policy service as registered right now; a throwaway turn takes no policy.
-      const policy = plan.tainted || this.config.role === 'mail-only' ? undefined : this.requirePolicy()
+      // A lead or coder turn, throwaway or not, needs the policy service as registered right now.
+      this.requirePolicy()
       // Mark the turn before any of its messages are logged, so no re-seed digest can carry its untrusted text.
       if (plan.tainted && !this.rec('claude-code/throwaway-turn', { turnIndex: turn, at: this.deps.now() })) {
         unmarkedTainted = true
@@ -1296,6 +1334,8 @@ export class ClaudeCodeSeatAgent implements Agent {
       // Tainted mail never touches the seat's Claude session: a fresh id, nothing bound, nothing resumed.
       binding = plan.tainted ? { kind: 'first', sdkSessionId: randomUUID() } : await this.resolveBinding()
       signal.throwIfAborted()
+      // The binding await can outlast a policy change: look again before anything is claimed (a refusal keeps the mail queued).
+      this.requirePolicy()
 
       const claimed = this.inbox.claim(plan.target, turn)
       const run = this.screenClaimed(claimed, mailIds)
@@ -1311,6 +1351,8 @@ export class ClaudeCodeSeatAgent implements Agent {
         live.noQuery = true
       } else {
         const active = live
+        // The claim flush above can outlast a policy change too: the query uses the object read here, not an earlier one.
+        const policy = this.requirePolicy()
         active.mapper = new StreamMapper({
           record: (type, data) => { this.rec(type, data) },
           assistantText: (text) => { this.appendAssistant(turn, text) },
@@ -1329,7 +1371,7 @@ export class ClaudeCodeSeatAgent implements Agent {
           env: this.deps.childEnv(),
           abortController: phase.abort,
           spawn: this.makeSpawn(live),
-          extension: policy === undefined ? undefined : context => this.extendPolicy(policy, context),
+          extension: plan.tainted || policy === undefined ? undefined : context => this.extendPolicy(policy, context),
           controls: {
             isTurnTainted: () => this.isTurnTainted(),
             markTurnTainted: (why) => { this.markTurnTainted(why) },
@@ -1402,7 +1444,8 @@ export class ClaudeCodeSeatAgent implements Agent {
    * The policy service for a lead or coder turn, after checking that it can serve the role right now. A failure is a
    * loud refusal (record, warning through the turn error) and leaves the mail queued, like a kill switch.
    */
-  private requirePolicy(): ClaudeCodePolicy {
+  private requirePolicy(): ClaudeCodePolicy | undefined {
+    if (this.config.role === 'mail-only') return undefined
     const policy = this.deps.policy?.()
     try {
       assertRoleServable(this.config.role, this.seat, policy)
@@ -1410,7 +1453,7 @@ export class ClaudeCodeSeatAgent implements Agent {
       this.rec('claude-code/refused', { reason: 'admission', detail: errText(error), at: this.deps.now() })
       throw new ClaudeCodeDriverError(CLAUDE_CODE_TURN_ERROR_CODES.policy, errText(error))
     }
-    return policy as ClaudeCodePolicy
+    return policy
   }
 
   /** Ask the policy for its contribution; a seat it leaves with no tools is muted, loudly, instead of started. */

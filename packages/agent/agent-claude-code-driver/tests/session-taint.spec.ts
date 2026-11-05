@@ -91,6 +91,55 @@ describe('session taint', () => {
     expect(taintRecords(again.session)).toHaveLength(1)
   })
 
+  it('restores a log whose last turn never ended as tainted, and writes why', async () => {
+    const h = await harness()
+    const session = h.session('crashed')
+    session.append('turn/start', { turn: 1 })
+    const agent = h.agent({ session })
+    expect(agent.isTurnTainted()).toBe(true)
+    expect(taintRecords(session).map(record => record.reason)).toEqual(['restored-mid-turn'])
+    // reloading the same log again does not write a second record
+    expect(h.agent({ session }).isTurnTainted()).toBe(true)
+    expect(taintRecords(session)).toHaveLength(1)
+  })
+
+  it('does not taint a restored log whose last turn ended, or one with no turns', async () => {
+    const h = await harness()
+    const ended = h.session('ended')
+    ended.append('turn/start', { turn: 1 })
+    ended.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    expect(h.agent({ session: ended }).isTurnTainted()).toBe(false)
+    expect(h.agent({ session: h.session('empty') }).isTurnTainted()).toBe(false)
+    expect(taintRecords(ended)).toEqual([])
+  })
+
+  it('keeps an earlier recorded taint instead of writing restored-mid-turn over it', async () => {
+    const h = await harness()
+    const session = h.session('both')
+    session.append('claude-code/session-tainted', { version: 1, reason: 'tool:Read', at: 1 } as never)
+    session.append('turn/start', { turn: 1 })
+    h.agent({ session })
+    expect(taintRecords(session).map(record => record.reason)).toEqual(['tool:Read'])
+  })
+
+  it('never lets a flush that throws synchronously escape into the turn', async () => {
+    const h = await harness()
+    ;(h.deps as { flush: unknown }).flush = () => { throw new Error('disk gone') }
+    const agent = h.agent()
+    expect(() => { agent.markTurnTainted('read a hostile file') }).not.toThrow()
+    expect(agent.isTurnTainted()).toBe(true)
+    expect(h.warnings.join('\n')).toContain('could not make the session taint durable: disk gone')
+  })
+
+  it('warns when the flush rejects', async () => {
+    const h = await harness()
+    h.state.flushError = new Error('io error')
+    const agent = h.agent()
+    agent.markTurnTainted('read a hostile file')
+    await tick(5)
+    expect(h.warnings.join('\n')).toContain('could not make the session taint durable: io error')
+  })
+
   it('is cleared only by a fresh session, which has a new log', async () => {
     const h = await harness()
     const tainted = h.agent()

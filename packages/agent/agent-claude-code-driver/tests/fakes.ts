@@ -22,6 +22,7 @@ import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import { defaultAdmission } from '../src/admission.ts'
 import type { MailAdmission } from '../src/admission.ts'
 import { buildChildEnv, forbiddenEnvPresent } from '../src/env.ts'
+import { expectedInitTools } from '../src/options.ts'
 import { ProcessLedger } from '../src/ledger.ts'
 import type { ClaudeCodePolicy, PolicyExtension } from '../src/policy-contract.ts'
 import type { LedgerProcessOps } from '../src/ledger.ts'
@@ -122,7 +123,16 @@ export class FakeQuery {
     })()
   }
 
+  /** When true (default), an assistant or result message sent before any init gets the expected init first. */
+  autoInit = true
+  private initEmitted = false
+
   emit(message: SDKMessage): void {
+    if (message.type === 'system' && message.subtype === 'init') this.initEmitted = true
+    else if (this.autoInit && !this.initEmitted && (message.type === 'assistant' || message.type === 'result')) {
+      this.initEmitted = true
+      this.out.push({ type: 'system', subtype: 'init', tools: expectedInitTools(this.options) } as unknown as SDKMessage)
+    }
     this.out.push(message)
     this.waiter?.resolve(undefined)
   }
