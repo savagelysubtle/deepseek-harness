@@ -49,6 +49,17 @@ export interface MailboxRelaySource {
   readonly blocking?: boolean
   /** Correlation id threaded from the publisher, when present. */
   readonly traceId?: string
+  /**
+   * Taint the bridge asserted for this delivery: the message's own `tainted`
+   * OR a non-`seat` sender class. Additive only: a hop can set it, never
+   * clear it. Absent means provenance was not asserted, never clean.
+   */
+  readonly tainted?: boolean
+  /**
+   * Sender hops, oldest first: the message's incoming `chain` plus this hop's
+   * sender. Absent means provenance was not asserted, never clean.
+   */
+  readonly chain?: readonly string[]
 }
 
 /**

@@ -24,10 +24,16 @@ import type { MailboxClock, MessageRow } from './types.ts'
 /**
  * On-disk schema version of the mailbox database. Monotonic: an open against
  * a file stamped with any other version — newer or older — rejects loud
- * instead of migrating in place. Version 3 added the inbound-scan index the
- * reply-detection reads poll on.
+ * instead of migrating in place — except the one forward step below. Version 3
+ * added the inbound-scan index the reply-detection reads poll on. Version 4
+ * added the nullable `tainted` and `chain` provenance columns; a version-3
+ * file migrates forward to 4 in place at open (additive `ALTER TABLE`, older
+ * rows read back as "provenance not asserted"). Any other version rejects.
  */
-export const SCHEMA_VERSION = 3
+export const SCHEMA_VERSION = 4
+
+/** The one version this build upgrades in place to {@link SCHEMA_VERSION}. */
+const MIGRATABLE_FROM_VERSION = 3
 
 /** Meta-table key stamping {@link SCHEMA_VERSION}. */
 const SCHEMA_VERSION_KEY = 'schema_version'
@@ -50,6 +56,8 @@ const CREATE_SCHEMA = `
     payload      TEXT,
     trace_id     TEXT,
     blocking     INTEGER,
+    tainted      INTEGER CHECK (tainted IN (0, 1)),
+    chain        TEXT,
     state        TEXT NOT NULL CHECK (state IN ('pending', 'claimed', 'done', 'failed')),
     created_at   INTEGER NOT NULL,
     claimed_at   INTEGER,
@@ -66,8 +74,9 @@ const CREATE_SCHEMA = `
 /**
  * Open a mailbox database and ensure its schema. An empty file (or absent
  * path, which SQLite creates) initializes at {@link SCHEMA_VERSION}; a
- * non-empty file must already be a mailbox store stamped at exactly this
- * build's version, else the open fails naming the mismatch.
+ * non-empty file must already be a mailbox store stamped at this build's
+ * version, or at version 3, which migrates forward in place to it; any other
+ * version fails the open naming the mismatch.
  * @param path - the SQLite database file to open (`:memory:` for tests).
  * @returns the open handle with all tables and indexes ensured.
  */
@@ -137,13 +146,29 @@ function assertCompatibleSchema(db: DatabaseSync, path: string): void {
   if (row === undefined || !/^\d+$/.test(row.value)) {
     throw new Error(`mailbox database at "${path}" has no readable schema version stamp`)
   }
+  if (Number(row.value) === MIGRATABLE_FROM_VERSION) {
+    migrateV3ToV4(db)
+    return
+  }
   if (Number(row.value) !== SCHEMA_VERSION) {
     throw new Error(`mailbox database at "${path}" has schema version ${row.value}, incompatible with this build (${SCHEMA_VERSION})`)
   }
 }
 
+/**
+ * Forward-only v3 to v4 step: add the nullable provenance columns and restamp.
+ * Existing rows keep `NULL` in both, which reads back as "not asserted".
+ * Runs inside the open transaction, so a failure leaves the file at v3.
+ * @param db - the handle, inside the open `BEGIN IMMEDIATE` transaction.
+ */
+function migrateV3ToV4(db: DatabaseSync): void {
+  db.exec('ALTER TABLE messages ADD COLUMN tainted INTEGER CHECK (tainted IN (0, 1))')
+  db.exec('ALTER TABLE messages ADD COLUMN chain TEXT')
+  db.prepare('UPDATE mailbox_meta SET value = ? WHERE key = ?').run(String(SCHEMA_VERSION), SCHEMA_VERSION_KEY)
+}
+
 /** Columns a claim needs to rebuild the message; kept narrow on purpose. */
-type ClaimRow = Pick<MessageRow, 'id' | 'to_address' | 'from_address' | 'type' | 'subject' | 'payload' | 'trace_id' | 'blocking' | 'created_at'>
+type ClaimRow = Pick<MessageRow, 'id' | 'to_address' | 'from_address' | 'type' | 'subject' | 'payload' | 'trace_id' | 'blocking' | 'tainted' | 'chain' | 'created_at'>
 
 /**
  * Reconstruct a {@link MailboxMessage} from a claim-selected row. `NULL`
@@ -164,7 +189,24 @@ function rowToMessage(row: ClaimRow): MailboxMessage {
     ...row.payload !== null ? { payload: JSON.parse(row.payload) as unknown } : {},
     ...row.trace_id !== null ? { traceId: row.trace_id } : {},
     ...row.blocking === 1 ? { blocking: true } : {},
+    // NULL = provenance not asserted: never default to false / [].
+    ...row.tainted !== null ? { tainted: row.tainted === 1 } : {},
+    ...row.chain !== null ? { chain: parseChain(row.chain) } : {},
   }
+}
+
+/**
+ * Decode a stored `chain` column. Throws on a non-array-of-strings so the
+ * claim path isolates the row as malformed, like an unparsable payload.
+ * @param text - the JSON text stored by publish.
+ * @returns the hop list, oldest first.
+ */
+function parseChain(text: string): readonly string[] {
+  const parsed = JSON.parse(text) as unknown
+  if (!Array.isArray(parsed) || !parsed.every(hop => typeof hop === 'string')) {
+    throw new Error('stored chain is not a string array')
+  }
+  return parsed
 }
 
 /**
@@ -291,13 +333,21 @@ export class SqliteMailboxStore implements MailboxProvider {
   publish(message: MailboxPublishInput, signal?: AbortSignal): Promise<MailboxMessageId> {
     try {
       signal?.throwIfAborted()
+      // Provenance is validated at write time so the sender sees the error,
+      // rather than a poisoned row surfacing at claim.
+      if (message.tainted !== undefined && typeof message.tainted !== 'boolean') {
+        throw new TypeError('mailbox publish: tainted must be a boolean when present')
+      }
+      if (message.chain !== undefined && !(Array.isArray(message.chain) && message.chain.every(hop => typeof hop === 'string'))) {
+        throw new TypeError('mailbox publish: chain must be an array of strings when present')
+      }
       const id = randomUUID() as MailboxMessageId
       // JSON.stringify throws on circular payloads before any write happens, so
       // a non-serializable body never lands half-stored.
       const payload = message.payload === undefined ? null : JSON.stringify(message.payload)
       this.db.prepare(`
-        INSERT INTO messages (id, to_address, from_address, type, subject, payload, trace_id, blocking, state, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        INSERT INTO messages (id, to_address, from_address, type, subject, payload, trace_id, blocking, tainted, chain, state, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
       `).run(
         id,
         message.to,
@@ -307,6 +357,8 @@ export class SqliteMailboxStore implements MailboxProvider {
         payload,
         message.traceId ?? null,
         message.blocking === true ? 1 : null,
+        message.tainted === undefined ? null : message.tainted ? 1 : 0,
+        message.chain === undefined ? null : JSON.stringify(message.chain),
         this.clock(),
       )
       return Promise.resolve(id)
@@ -327,7 +379,7 @@ export class SqliteMailboxStore implements MailboxProvider {
     let began = true
     try {
       const rows = this.db.prepare(`
-        SELECT id, to_address, from_address, type, subject, payload, trace_id, blocking, created_at
+        SELECT id, to_address, from_address, type, subject, payload, trace_id, blocking, tainted, chain, created_at
         FROM messages
         WHERE to_address IN (${placeholders})
           AND (state = 'pending' OR (state = 'claimed' AND claimed_at <= ?))

@@ -162,15 +162,25 @@ export function relayText(lease: MailboxLease, senderClass: SenderClass): string
  * the message does not have it: the source is merge-extensible and older
  * logged rows predate these fields, so absence must stay a readable state.
  * `senderClass` is always present — the caller derives it for every delivery.
+ * `tainted` and `chain` follow the additive-only provenance rule in the body:
+ * omitted for a seat-class message that asserts neither, so that default
+ * source is unchanged.
  * @param lease - the claimed lease being delivered.
  * @param senderClass - the caller-derived sender class for this message.
  * @returns the attribution object merged into the delivered user turn.
  */
 export function relaySource(lease: MailboxLease, senderClass: SenderClass): MailboxMessageSource {
-  const { id, to, from, traceId, subject, blocking } = lease.message
+  const { id, to, from, traceId, subject, blocking, tainted, chain } = lease.message
   if (id === undefined) {
     throw new Error(`mailbox bridge: claimed message for "${to}" has no provider id and cannot be delivered`)
   }
+  // Additive-only provenance: taint can be set here, never cleared. A non-seat
+  // sender class always asserts taint, whatever the message claims (a forged
+  // `tainted: false` still reads external). A seat sender with no assertion
+  // stays absent, which means "not asserted", never clean. The chain grows by
+  // this hop's sender whenever any provenance is in play.
+  const effectiveTainted = senderClass !== 'seat' ? true : tainted
+  const effectiveChain = chain !== undefined || effectiveTainted !== undefined ? [...chain ?? [], from] : undefined
   return {
     kind: 'mailbox',
     form: 'relay',
@@ -181,6 +191,8 @@ export function relaySource(lease: MailboxLease, senderClass: SenderClass): Mail
     ...subject !== undefined ? { subject } : {},
     ...blocking !== undefined ? { blocking } : {},
     ...traceId !== undefined ? { traceId } : {},
+    ...effectiveTainted !== undefined ? { tainted: effectiveTainted } : {},
+    ...effectiveChain !== undefined ? { chain: effectiveChain } : {},
   }
 }
 

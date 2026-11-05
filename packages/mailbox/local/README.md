@@ -18,7 +18,7 @@ The local mailbox provider: one SQLite database file (over `node:sqlite`'s `Data
 - **Single winner per claim** — the immediate transaction plus the conditional update means concurrent claimers of one message observe exactly one winner; losers see it gone from their candidate set.
 - **At-least-once delivery** — a lease held longer than `filter.staleClaimMs` becomes claimable again under a NEW claim token, so the old ref can never settle a successor's delivery. Consumers tolerate duplicate claims.
 - **`done` stores the admission envelope verbatim** — `{ deliveredAt, messageId }` where `messageId` must equal the leased row's id; settlement records inbox admission only, never business results.
-- **Schema ownership is loud** — `mailbox_meta.schema_version` must equal this build's monotonic version; an empty file initializes at v1, any other non-mailbox file or version rejects the open (and therefore the plugin mount).
+- **Schema ownership is loud** — `mailbox_meta.schema_version` must equal this build's monotonic version (currently 4); an empty file initializes at the current version, a v3 file migrates forward in place at open (two added nullable provenance columns), and any other non-mailbox file or version rejects the open (and therefore the plugin mount).
 
 
 ## Guest access (`dsh-mailbox` bin)

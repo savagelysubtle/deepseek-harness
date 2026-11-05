@@ -146,7 +146,7 @@ type MailboxOutcome =
 | `lookupByTraceId(traceId, signal?)` | 读取携带该关联 id 的每一条存储消息，不限生命周期状态；此纯读取回答"这条消息后来怎样了"，不作任何认领。 |
 | `lookupInboundSince(address, sinceMs, signal?)` | 读取在某一时刻之后准入、发往某一地址的每一条存储消息，不限生命周期状态；此纯读取是回复检测的另一半，能看到已被其他消费者认领或落定的邮件。 |
 
-地址解析策略（chair-to-chair 别名）叠加在文法之上：保留的 `AddressResolutionExtension = never` 在 [`provider.ts`](../../packages/mailbox/mailbox/src/provider.ts) 中标记该扩展点，目前没有任何解析策略随附发布。随附的存储是 [dsh-mailbox-local](../../packages/mailbox/local)，以提供方名称 `local` 注册：基于 `node:sqlite` 的单个 SQLite 文件，其单调 `SCHEMA_VERSION` 戳记（当前为 3）使打开任何外来、更旧或更新的数据库响亮失败而非就地迁移，其守卫式事务认领保证每条消息恰有一个赢家（[sqlite.ts](../../packages/mailbox/local/src/sqlite.ts)）。
+地址解析策略（chair-to-chair 别名）叠加在文法之上：保留的 `AddressResolutionExtension = never` 在 [`provider.ts`](../../packages/mailbox/mailbox/src/provider.ts) 中标记该扩展点，目前没有任何解析策略随附发布。随附的存储是 [dsh-mailbox-local](../../packages/mailbox/local)，以提供方名称 `local` 注册：基于 `node:sqlite` 的单个 SQLite 文件，其单调 `SCHEMA_VERSION` 戳记（当前为 4）允许版本 3 的文件在打开时就地向前迁移（新增两个可为空的来源列 `tainted` 与 `chain`），并使打开任何其他外来、更旧或更新的数据库响亮失败，其守卫式事务认领保证每条消息恰有一个赢家（[sqlite.ts](../../packages/mailbox/local/src/sqlite.ts)）。
 
 `claimableAddresses` 是接缝为唤醒驱动器保留的发现操作；今天没有任何唤醒驱动器随附发布——桥把每一条已准入的投递都拼接进活跃回合，因此宿主旁没有任何东西在轮询存储寻找可认领的工作（[architecture.md](../architecture.md) § "会话日志"中的一次写入规则）。
 
