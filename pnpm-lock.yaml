@@ -912,6 +912,18 @@ importers:
         specifier: workspace:^
         version: link:../../subprocess/subprocess
 
+  packages/agent/agent-claude-code-tools:
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-agent-claude-code-driver':
+        specifier: workspace:^
+        version: link:../agent-claude-code-driver
+      '@deepseek-ai/dsh-invariants':
+        specifier: workspace:^
+        version: link:../../runtime-diagnostics/invariants
+
   packages/agui/ag-ui:
     dependencies:
       '@deepseek-ai/schemastery':

@@ -106,6 +106,7 @@ flowchart TD
   subgraph group_agent["packages/agent"]
     pkg_agent_claude_code_driver["agent-claude-code-driver"]
     pkg_agent_claude_code_registry["agent-claude-code-registry"]
+    pkg_agent_claude_code_tools["agent-claude-code-tools"]
   end
   subgraph group_agui["packages/agui"]
     pkg_ag_ui["ag-ui"]
@@ -1257,6 +1258,8 @@ flowchart TD
   pkg_agent_claude_code_registry --> pkg_agent_claude_code_driver
   pkg_agent_claude_code_registry --> pkg_invariants
   pkg_agent_claude_code_registry --> pkg_mailbox
+  pkg_agent_claude_code_tools --> pkg_agent_claude_code_driver
+  pkg_agent_claude_code_tools --> pkg_invariants
   pkg_api_remotes --> pkg_agent
   pkg_api_remotes --> pkg_agent_presets
   pkg_api_remotes --> pkg_api_gateway
@@ -1809,6 +1812,7 @@ flowchart TD
 | [`workflow-remote`](../packages/workflow/workflow-remote) | `workflow` | [`agent`](../packages/core/agent), [`invariants`](../packages/runtime-diagnostics/invariants), [`session`](../packages/core/session), [`tool-workflow-run`](../packages/workflow/tool-workflow-run), [`typert-protocol`](../packages/typert/protocol), [`workflow-run-store`](../packages/workflow/workflow-run-store), [`workflow-yaml`](../packages/workflow/workflow-yaml) |
 | [`subagent-dsh-sdk`](../packages/subagent/subagent-dsh-sdk) | `subagent` | [`agent`](../packages/core/agent), [`config-guard`](../packages/util/config-guard), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`sdk-client`](../packages/sdk/client), [`session`](../packages/core/session), [`subagent`](../packages/subagent/subagent), [`subprocess`](../packages/subprocess/subprocess) |
 | [`agent-claude-code-registry`](../packages/agent/agent-claude-code-registry) | `agent` | [`agent`](../packages/core/agent), [`agent-claude-code-driver`](../packages/agent/agent-claude-code-driver), [`invariants`](../packages/runtime-diagnostics/invariants), [`mailbox`](../packages/mailbox/mailbox) |
+| [`agent-claude-code-tools`](../packages/agent/agent-claude-code-tools) | `agent` | [`agent-claude-code-driver`](../packages/agent/agent-claude-code-driver), [`invariants`](../packages/runtime-diagnostics/invariants) |
 | [`api-remotes`](../packages/api/remotes) | `api` | [`agent`](../packages/core/agent), [`agent-presets`](../packages/preset/agent-presets), [`api-gateway`](../packages/api/gateway), [`commands`](../packages/interaction/commands), [`cordis-host-runner`](../packages/extensions/cordis-host-runner), [`credentials`](../packages/credentials/credentials), [`goal`](../packages/goal/goal), [`host-plugin-inventory`](../packages/host/plugin-inventory), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`mcp-client`](../packages/mcp/mcp-client), [`mcp-status`](../packages/mcp/mcp-status), [`message-feedback`](../packages/feedback/message-feedback), [`session`](../packages/core/session), [`session-persistence`](../packages/session/session-persistence), [`settings`](../packages/settings/settings), [`typert-registry`](../packages/typert/registry), [`workflow-remote`](../packages/workflow/workflow-remote) |
 | [`acp-demo`](../packages/examples/acp-demo) | `examples` | [`acp`](../packages/acp/acp), [`agent-instructions`](../packages/context/agent-instructions), [`agent-spine-demo`](../packages/examples/agent-spine-demo), [`app-boot`](../packages/boot/app-boot), [`invariants`](../packages/runtime-diagnostics/invariants), [`session-checkpoint-policy`](../packages/session/session-checkpoint-policy), [`session-persistence-jsonl`](../packages/session/session-persistence-jsonl), [`session-query`](../packages/session-query/session-query), [`session-query-sqlite`](../packages/session-query/session-query-sqlite), [`tools`](../packages/core/tools) |
 | [`host-apiproxy`](../packages/host/apiproxy) | `host` | [`agent-presets`](../packages/preset/agent-presets), [`cordis-host-runner`](../packages/extensions/cordis-host-runner), [`invariants`](../packages/runtime-diagnostics/invariants), [`mcp-status`](../packages/mcp/mcp-status), [`workflow-remote`](../packages/workflow/workflow-remote) |
