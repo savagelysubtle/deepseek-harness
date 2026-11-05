@@ -946,6 +946,8 @@ export class ClaudeCodeSeatAgent implements Agent {
   /** Inspect one SDK message for turn-level facts. */
   private observe(phase: RunningPhase, live: LiveTurn, message: SDKMessage): void {
     if (this.killSwitchUp()) this.tripKillSwitch(live)
+    // After a tool-set refusal the query is being torn down: whatever was already buffered is not mapped or recorded.
+    if (live.toolMismatch !== undefined) return
     if (message.type === 'system' && message.subtype === 'init') {
       live.initSeen = true
       this.checkInitTools(live, message.tools)
@@ -995,8 +997,8 @@ export class ClaudeCodeSeatAgent implements Agent {
 
   /** Abort the query when its init message reports a tool set other than the expected one. */
   private checkInitTools(live: LiveTurn, reported: unknown): void {
-    if (live.expectedTools === undefined || live.toolMismatch !== undefined) return
-    const mismatch = toolSetMismatch(live.expectedTools, reported)
+    // The expected set is stored before the query exists, so it is always set once messages flow.
+    const mismatch = toolSetMismatch(live.expectedTools as readonly string[], reported)
     if (mismatch !== undefined) this.failToolSet(live, mismatch)
   }
 
@@ -1006,7 +1008,7 @@ export class ClaudeCodeSeatAgent implements Agent {
    * @returns true when the query was just aborted for it.
    */
   private requireInit(live: LiveTurn, kind: string): boolean {
-    if (live.expectedTools === undefined || live.initSeen || live.toolMismatch !== undefined) return false
+    if (live.expectedTools === undefined || live.initSeen) return false
     this.failToolSet(live, `no system/init before first ${kind} message`)
     return true
   }

@@ -422,6 +422,18 @@ describe('the init tool assertion', () => {
       .toEqual(['tool set mismatch: no system/init before first assistant message'])
   })
 
+  it('maps, taints and records nothing that was buffered after a tool-set mismatch', async () => {
+    const h = await harness()
+    h.state.policy = policy()
+    const { agent } = await runTurn(h, (query) => {
+      query.emit(init(['mcp__dsh__a', 'Bash']))
+      query.emit({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }] } } as never)
+    }, mailMessage('hi', 'm-buffered'))
+    expect(lastEnd(agent).error).toMatchObject({ code: CLAUDE_CODE_TURN_ERROR_CODES.toolSet })
+    expect(agent.session.events.some(event => event.type === 'claude-code/session-tainted')).toBe(false)
+    expect(agent.session.events.some(event => event.type === 'claude-code/tool-call')).toBe(false)
+  })
+
   it('fails closed on a result that arrives before any init', async () => {
     const h = await harness()
     h.state.policy = policy()
