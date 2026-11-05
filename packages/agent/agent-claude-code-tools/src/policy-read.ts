@@ -7,7 +7,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import type { PolicyFileV1 } from '@deepseek-ai/dsh-agent-claude-code-driver'
 import { isSeatName } from './grammar.ts'
@@ -15,9 +15,18 @@ import { isSeatName } from './grammar.ts'
 /** The only policy file version this package reads (tied to the contract's `PolicyFileV1['v']`). */
 export const SUPPORTED_POLICY_VERSION: PolicyFileV1['v'] = 1
 
+/** Largest policy file the guard will read. */
+export const MAX_POLICY_BYTES = 64 * 1024
+
+/** The policy file as the tools package reads and writes it: the contract's v1 plus one optional flag. */
+export type ToolsPolicyFile = PolicyFileV1 & {
+  /** When absent or true, Grep and Glob over a directory that holds an existing protected location are denied. */
+  readonly denyDirsContainingProtected?: boolean
+}
+
 /** Result of reading or validating a policy file. */
 export type PolicyReadResult =
-  | { readonly ok: true; readonly policy: PolicyFileV1 }
+  | { readonly ok: true; readonly policy: ToolsPolicyFile }
   | { readonly ok: false; readonly reason: string }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -47,10 +56,19 @@ export function validatePolicy(value: unknown): PolicyReadResult {
   if (!absolutes(allowedRoots)) return { ok: false, reason: 'policy allowedRoots is not a list of absolute paths' }
   if (!absolutes(deniedPrefixes)) return { ok: false, reason: 'policy deniedPrefixes is not a list of absolute paths' }
   if (!strings(tools)) return { ok: false, reason: 'policy tools is not a list of tool names' }
+  const flag = value['denyDirsContainingProtected']
+  if (flag !== undefined && typeof flag !== 'boolean') return { ok: false, reason: 'policy denyDirsContainingProtected is not a boolean' }
   return {
     ok: true,
     policy: {
-      v: SUPPORTED_POLICY_VERSION, seat, role, cwd, allowedRoots: [...allowedRoots], deniedPrefixes: [...deniedPrefixes], tools: [...tools],
+      v: SUPPORTED_POLICY_VERSION,
+      seat,
+      role,
+      cwd,
+      allowedRoots: [...allowedRoots],
+      deniedPrefixes: [...deniedPrefixes],
+      tools: [...tools],
+      ...flag === undefined ? {} : { denyDirsContainingProtected: flag },
     },
   }
 }
@@ -64,10 +82,17 @@ export function validatePolicy(value: unknown): PolicyReadResult {
  */
 export function readPolicyFile(path: string, expectedSeat: string, expectedSha256: string): PolicyReadResult {
   let bytes: Buffer
+  let fd = -1
   try {
-    bytes = readFileSync(path)
+    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK)
+    const stat = fstatSync(fd)
+    if (!stat.isFile()) return { ok: false, reason: 'policy file is not a regular file' }
+    if (stat.size > MAX_POLICY_BYTES) return { ok: false, reason: `policy file is larger than ${MAX_POLICY_BYTES} bytes` }
+    bytes = readFileSync(fd)
   } catch (error: unknown) {
     return { ok: false, reason: `policy file unreadable (${String((error as NodeJS.ErrnoException).code)})` }
+  } finally {
+    if (fd !== -1) closeSync(fd)
   }
   if (createHash('sha256').update(bytes).digest('hex') !== expectedSha256) {
     return { ok: false, reason: 'policy file hash does not match the host record' }

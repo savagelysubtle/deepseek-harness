@@ -27,6 +27,7 @@
   "files": [
     "lib/index.js",
     "lib/invariant.js",
+    "lib/seat-guard.js",
     "lib/types/**/*.d.ts"
   ],
   "license": "MIT",

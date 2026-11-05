@@ -1,14 +1,16 @@
 import { spawnSync } from 'node:child_process'
-import { linkSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { copyFileSync, linkSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { MAX_STDIN_BYTES } from '../src/guard-core.ts'
 import { writePolicyFile } from '../src/policy-file.ts'
 import { coderPolicy, makeSandbox } from './helpers.ts'
 import type { Sandbox } from './helpers.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const BIN = join(here, '..', 'bin', 'seat-guard.ts')
+const BIN = join(here, '..', 'src', 'bin.ts')
+const BUILT = join(here, '..', 'lib', 'seat-guard.js')
 
 let box: Sandbox
 let args: string[]
@@ -24,8 +26,8 @@ afterEach(() => {
   box.cleanup()
 })
 
-function run(toolName: string, toolInput: unknown, argv: string[] = args, stdin?: string) {
-  const result = spawnSync(process.execPath, [BIN, ...argv], {
+function run(toolName: string, toolInput: unknown, argv: string[] = args, stdin?: string, script = BIN) {
+  const result = spawnSync(process.execPath, [script, ...argv], {
     input: stdin ?? JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: toolName, tool_input: toolInput }),
     encoding: 'utf8',
     env: { PATH: process.env['PATH'] ?? '' },
@@ -82,8 +84,49 @@ describe('seat-guard as a child process', () => {
   })
 })
 
+describe('size caps in the child process', () => {
+  it('denies a payload above 1 MiB after reading only one byte past the cap', () => {
+    const result = run('Read', {}, args, 'x'.repeat(MAX_STDIN_BYTES + 1))
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain('larger than 1048576 bytes')
+  })
+
+  it('denies an oversized policy file', () => {
+    writeFileSync(args[1] ?? '', ' '.repeat(70 * 1024))
+    const result = run('Read', {})
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain('policy file is larger than')
+  })
+})
+
+describe('the built guard (lib/seat-guard.js)', () => {
+  function installed(): string {
+    const dir = join(box.root, 'node_modules', '@deepseek-ai', 'dsh-agent-claude-code-tools', 'lib')
+    mkdirSync(dir, { recursive: true })
+    const target = join(dir, 'seat-guard.js')
+    copyFileSync(BUILT, target)
+    return target
+  }
+
+  it('runs from under node_modules, where Node refuses to strip TypeScript, and denies with exit 2', () => {
+    const script = installed()
+    const denied = run('Read', { file_path: '/etc/passwd' }, args, undefined, script)
+    expect(denied.status).toBe(2)
+    expect(denied.stdout).toBe('')
+    expect(denied.stderr).toMatch(/^seat-guard: denied: .*outside/)
+    expect(run('Read', { file_path: join(box.cwd, 'src', 'a.ts') }, args, undefined, script)).toEqual({ status: 0, stdout: '', stderr: '' })
+    expect(run('Bash', { command: 'ls' }, args, undefined, script).status).toBe(2)
+  })
+
+  it('is one self-contained file that imports only node builtins', () => {
+    const imports = readFileSync(BUILT, 'utf8').split('\n').filter(line => /^import /.test(line))
+    expect(imports.length).toBeGreaterThan(0)
+    for (const line of imports) expect(line).toMatch(/from "node:/)
+  })
+})
+
 describe('static guarantee: the hook has no allow output path', () => {
-  const sources = ['bin/seat-guard.ts', 'src/guard-core.ts', 'src/decide.ts', 'src/path-guard.ts', 'src/policy-read.ts', 'src/grammar.ts']
+  const sources = ['src/bin.ts', 'src/guard-core.ts', 'src/decide.ts', 'src/path-guard.ts', 'src/policy-read.ts', 'src/grammar.ts', 'src/stdin.ts']
     .map(file => [file, readFileSync(join(here, '..', file), 'utf8')] as const)
 
   it.each(sources)('%s prints no decision', (_file, text) => {
@@ -92,9 +135,9 @@ describe('static guarantee: the hook has no allow output path', () => {
 
   it('writes only to stderr and only in the bin', () => {
     const [bin] = sources[0] ?? ['', '']
-    expect(bin).toBe('bin/seat-guard.ts')
+    expect(bin).toBe('src/bin.ts')
     for (const [file, text] of sources) {
-      expect(/process\.stderr\.write/.test(text)).toBe(file === 'bin/seat-guard.ts')
+      expect(/process\.stderr\.write/.test(text)).toBe(file === 'src/bin.ts')
     }
   })
 })

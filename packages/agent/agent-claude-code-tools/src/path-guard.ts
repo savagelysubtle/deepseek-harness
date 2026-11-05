@@ -16,6 +16,9 @@ const UNSAFE_PATH_CHARS = /[*?[\]!#{}\\()\s\u0000-\u0008\u000e-\u001f\u007f]/
 /** Characters that start a glob segment. */
 const GLOB_CHARS = /[*?[\]{}!()]/
 
+/** A group opener, separator or `~` that makes the next character start a new path inside a brace or extglob group. */
+const GROUP_ESCAPE = /[{(,|][/~]/
+
 /** Thrown when a directory cannot be used safely inside a generated permission rule. */
 export class UnsafePathError extends Error {
   /** What was refused (for example `cwd` or `home`). */
@@ -57,12 +60,12 @@ function deny(reason: string): Verdict {
 
 /**
  * Whether `target` is `root` or lies below it, compared by whole segments.
- * @param root - absolute directory (never `/`).
+ * @param root - absolute directory.
  * @param target - absolute path.
  * @returns true when inside.
  */
 export function isInside(root: string, target: string): boolean {
-  return target === root || target.startsWith(root + sep)
+  return root === sep || target === root || target.startsWith(root + sep)
 }
 
 /**
@@ -171,9 +174,72 @@ export function checkGlob(scope: GuardScope, pattern: string): Verdict {
   if (pattern.includes('\0')) return deny('glob contains a NUL byte')
   if (pattern.startsWith('~')) return deny('glob starts with ~')
   if (pattern.includes('..')) return deny('glob contains ..')
+  if (GROUP_ESCAPE.test(pattern)) return deny('glob alternatives may not start a new path')
+  if (hasSlashInsideGroup(pattern)) return deny('glob groups may not contain a path separator')
+  return checkPath(scope, globStaticPrefix(pattern))
+}
+
+/** Whether a `/` appears between an opening `{` or `(` and its matching close (nesting counted). */
+function hasSlashInsideGroup(pattern: string): boolean {
+  let depth = 0
+  for (const char of pattern) {
+    if (char === '{' || char === '(') depth += 1
+    else if ((char === '}' || char === ')') && depth > 0) depth -= 1
+    else if (char === '/' && depth > 0) return true
+  }
+  return false
+}
+
+/**
+ * The fixed directory part of a glob: every segment before the first one with a glob character
+ * (`.` for a relative glob that starts with one, `/` for an absolute one).
+ * @param pattern - the glob as written.
+ * @returns the static prefix, relative or absolute as written.
+ */
+export function globStaticPrefix(pattern: string): string {
   const segments = pattern.split('/')
   const firstGlob = segments.findIndex(segment => GLOB_CHARS.test(segment))
   const fixed = (firstGlob === -1 ? segments : segments.slice(0, firstGlob)).join('/')
-  const prefix = isAbsolute(pattern) ? (fixed === '' ? sep : fixed) : (fixed === '' ? '.' : fixed)
-  return checkPath(scope, prefix)
+  return isAbsolute(pattern) ? (fixed === '' ? sep : fixed) : (fixed === '' ? '.' : fixed)
+}
+
+/**
+ * Whether searching `dir` recursively would reach a protected location that exists: the directory
+ * (after symlink resolution) is, or lies above, an existing denied prefix.
+ * @param scope - the confinement.
+ * @param dir - the effective search directory (absolute, or relative to the cwd).
+ * @returns the protected prefix it would reach, or undefined.
+ */
+export function reachesProtected(scope: GuardScope, dir: string): string | undefined {
+  const resolved = realOrAncestor(isAbsolute(dir) ? resolve(dir) : resolve(scope.cwd, dir))
+  if ('deny' in resolved) return undefined
+  return scope.deniedPrefixes.find((prefix) => {
+    const realPrefix = realOrUndefined(prefix)
+    return realPrefix !== undefined && (isInside(resolved.real, prefix) || isInside(resolved.real, realPrefix))
+  })
+}
+
+/**
+ * Refuse a working directory on a case-insensitive filesystem: if a protected entry exists under
+ * the cwd and its upper-case spelling resolves too, the deny rules (matched case-sensitively) and
+ * the real files disagree.
+ * @param cwd - the canonical cwd.
+ * @param names - protected entry names relative to the cwd.
+ * @param lstat - lstat implementation (replaceable for tests).
+ * @throws {UnsafePathError} when an entry answers to its upper-case name.
+ */
+export function assertCaseSensitiveEntries(cwd: string, names: readonly string[], lstat: (path: string) => unknown = lstatSync): void {
+  for (const name of names) {
+    try {
+      lstat(join(cwd, name))
+    } catch {
+      continue
+    }
+    try {
+      lstat(join(cwd, name.toUpperCase()))
+    } catch {
+      continue
+    }
+    throw new UnsafePathError('cwd', cwd, `case-insensitive filesystem: ${name} also answers to ${name.toUpperCase()}, so deny rules would not match; use a case-sensitive filesystem`)
+  }
 }

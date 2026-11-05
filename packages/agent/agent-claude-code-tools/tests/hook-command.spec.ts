@@ -1,16 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import { FILE_TOOLS } from '../src/decide.ts'
-import { buildHookCommand, GUARD_MATCHER, guardHookGroup, HOOK_TIMEOUT_SECONDS, shellQuote } from '../src/hook-command.ts'
+import { buildHookCommand, GUARD_MATCHER, guardHookGroup, guardScriptPath, HOOK_TIMEOUT_SECONDS, shellQuote } from '../src/hook-command.ts'
 import type { HookCommandInput } from '../src/hook-command.ts'
 import { isSeatName, isSha256 } from '../src/grammar.ts'
 
 const SHA = 'a'.repeat(64)
-const base: HookCommandInput = { nodePath: '/opt/node/bin/node', guardPath: '/opt/dsh/bin/seat-guard.ts', policyPath: '/home/me/.dsh/policy/coder-one.json', sha256: SHA, seat: 'coder-one' }
+const base: HookCommandInput = { nodePath: '/opt/node/bin/node', guardPath: '/opt/dsh/lib/seat-guard.js', policyPath: '/home/me/.dsh/policy/coder-one.json', sha256: SHA, seat: 'coder-one' }
 
 describe('buildHookCommand', () => {
   it('builds the exact command line', () => {
     expect(buildHookCommand(base)).toBe(
-      `env -u NODE_OPTIONS '/opt/node/bin/node' '/opt/dsh/bin/seat-guard.ts' --policy '/home/me/.dsh/policy/coder-one.json' --sha256 ${SHA} --seat coder-one`,
+      `env -u NODE_OPTIONS '/opt/node/bin/node' '/opt/dsh/lib/seat-guard.js' --policy '/home/me/.dsh/policy/coder-one.json' --sha256 ${SHA} --seat coder-one`,
     )
   })
 
@@ -27,6 +27,21 @@ describe('buildHookCommand', () => {
     ['policy path', { policyPath: '/a/b;c' }],
   ])('refuses a bad %s', (_label, patch) => {
     expect(() => buildHookCommand({ ...base, ...patch })).toThrow(/agent-claude-code-tools/)
+  })
+})
+
+describe('guard script resolution', () => {
+  it('defaults to the built lib/seat-guard.js and offers the source only on request', () => {
+    expect(guardScriptPath()).toMatch(/agent-claude-code-tools\/lib\/seat-guard\.js$/)
+    expect(guardScriptPath('built')).toBe(guardScriptPath())
+    expect(guardScriptPath('source')).toMatch(/agent-claude-code-tools\/src\/bin\.ts$/)
+    expect(buildHookCommand({ nodePath: base.nodePath, policyPath: base.policyPath, sha256: base.sha256, seat: base.seat })).toContain(`'${guardScriptPath()}'`)
+  })
+
+  it('refuses TypeScript source unless allowed', () => {
+    const source = guardScriptPath('source')
+    expect(() => buildHookCommand({ ...base, guardPath: source })).toThrow(/TypeScript source/)
+    expect(buildHookCommand({ ...base, guardPath: source, allowSourceGuard: true })).toContain(source)
   })
 })
 

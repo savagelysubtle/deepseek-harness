@@ -29,6 +29,9 @@ const DEFAULT_DEPS: GuardDeps = { decide }
 
 const MAX_REASON = 300
 
+/** Largest hook payload the guard accepts. */
+export const MAX_STDIN_BYTES = 1024 * 1024
+
 function refuse(reason: string): GuardOutcome {
   const line = reason.replace(/[\r\n]+/g, ' ').slice(0, MAX_REASON)
   return { code: 2, reason: `seat-guard: denied: ${line}` }
@@ -67,6 +70,7 @@ export function runGuard(
   try {
     const args = parseArgs(input.argv)
     if (typeof args === 'string') return refuse(args)
+    if (Buffer.byteLength(input.stdin) > MAX_STDIN_BYTES) return refuse(`hook input is larger than ${MAX_STDIN_BYTES} bytes`)
     const read = readPolicyFile(args.policy, args.seat, args.sha256)
     if (!read.ok) return refuse(read.reason)
     let payload: unknown

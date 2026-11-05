@@ -1,8 +1,9 @@
 import { linkSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { MAX_POLICY_BYTES } from '../src/policy-read.ts'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { decide } from '../src/decide.ts'
-import { runGuard } from '../src/guard-core.ts'
+import { MAX_STDIN_BYTES, runGuard } from '../src/guard-core.ts'
 import { writePolicyFile } from '../src/policy-file.ts'
 import { coderPolicy, makeSandbox } from './helpers.ts'
 import type { Sandbox } from './helpers.ts'
@@ -120,5 +121,59 @@ describe('runGuard deny reasons (exit 2)', () => {
     const outcome = call('Read', { file_path: `${'x'.repeat(500)}/\n/../y` })
     expect(outcome.code).toBe(2)
     expect(outcome.reason.length).toBeLessThanOrEqual(400)
+  })
+})
+
+describe('size caps', () => {
+  it('denies a hook payload above the cap and a policy file above the cap', () => {
+    const big = runGuard({ argv, stdin: 'x'.repeat(MAX_STDIN_BYTES + 1) })
+    expect(big).toEqual({ code: 2, reason: `seat-guard: denied: hook input is larger than ${MAX_STDIN_BYTES} bytes` })
+    writeFileSync(policyPath, ' '.repeat(MAX_POLICY_BYTES + 1))
+    expect(call('Read', {}).reason).toContain('policy file is larger than')
+  })
+
+  it('denies a policy path that is a directory', () => {
+    expect(call('Read', {}, ['--policy', box.cwd, '--sha256', argv[3] ?? '', '--seat', 'coder-one']).reason).toContain('not a regular file')
+  })
+})
+
+describe('directories that contain protected locations', () => {
+  beforeEach(() => {
+    mkdirSync(join(box.cwd, '.git'))
+  })
+
+  it('denies Grep and Glob whose search directory is above .git', () => {
+    for (const [tool, input] of [
+      ['Grep', {}], ['Grep', { path: '.' }], ['Grep', { pattern: 'x', path: box.cwd }], ['Glob', { pattern: '**/*' }],
+      ['Glob', { pattern: `${box.cwd}/**` }], ['Glob', { pattern: '*.ts' }], ['Glob', {}],
+    ] as const) {
+      const outcome = call(tool, input)
+      expect(outcome.code, `${tool} ${JSON.stringify(input)}`).toBe(2)
+      expect(outcome.reason).toContain('contains the protected location')
+    }
+  })
+
+  it('allows Grep and Glob inside a subdirectory', () => {
+    for (const [tool, input] of [
+      ['Grep', { path: 'src' }], ['Glob', { pattern: 'src/**/*.ts' }], ['Glob', { pattern: '*.ts', path: 'src' }], ['Glob', { path: 'src' }],
+      ['Glob', { pattern: `${box.cwd}/src/**` }],
+    ] as const) {
+      expect(call(tool, input), `${tool} ${JSON.stringify(input)}`).toEqual(allowed)
+    }
+  })
+
+  it('allows them again when the policy turns the check off, and rejects a non-boolean flag', () => {
+    const off = writePolicyFile(join(box.root, 'policy-off'), { ...coderPolicy(box), denyDirsContainingProtected: false })
+    const offArgs = ['--policy', off.path, '--sha256', off.sha256, '--seat', 'coder-one']
+    expect(call('Grep', {}, offArgs)).toEqual(allowed)
+    expect(call('Glob', { pattern: '**/*' }, offArgs)).toEqual(allowed)
+    expect(() => writePolicyFile(join(box.root, 'policy-bad'), { ...coderPolicy(box), denyDirsContainingProtected: 'no' as never })).toThrow(/denyDirsContainingProtected/)
+  })
+})
+
+describe('glob alternatives', () => {
+  it('denies path-starting alternatives', () => {
+    expect(call('Glob', { pattern: '{/etc/passwd,x}' }).code).toBe(2)
+    expect(call('Grep', { glob: '@(/etc/x|y)' }).code).toBe(2)
   })
 })

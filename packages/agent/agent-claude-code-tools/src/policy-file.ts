@@ -11,9 +11,9 @@ import { createHash, randomBytes } from 'node:crypto'
 import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, rmSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
 import { POLICY_FILE_VERSION } from '@deepseek-ai/dsh-agent-claude-code-driver'
-import type { PolicyFileV1 } from '@deepseek-ai/dsh-agent-claude-code-driver'
 import { isSeatName } from './grammar.ts'
 import { validatePolicy } from './policy-read.ts'
+import type { ToolsPolicyFile } from './policy-read.ts'
 
 /** Where a policy file landed and the hash of its exact bytes. */
 export interface WrittenPolicyFile {
@@ -28,7 +28,7 @@ export interface WrittenPolicyFile {
  * @param policy - the policy.
  * @returns the exact file text.
  */
-export function serializePolicy(policy: PolicyFileV1): string {
+export function serializePolicy(policy: ToolsPolicyFile): string {
   return `${JSON.stringify({
     v: POLICY_FILE_VERSION,
     seat: policy.seat,
@@ -37,6 +37,7 @@ export function serializePolicy(policy: PolicyFileV1): string {
     allowedRoots: policy.allowedRoots,
     deniedPrefixes: policy.deniedPrefixes,
     tools: policy.tools,
+    ...policy.denyDirsContainingProtected === undefined ? {} : { denyDirsContainingProtected: policy.denyDirsContainingProtected },
   })}\n`
 }
 
@@ -47,7 +48,7 @@ export function serializePolicy(policy: PolicyFileV1): string {
  * @returns the path and the SHA-256 of the written bytes.
  * @throws when the seat or policy is invalid or any filesystem step fails; nothing partial is left at the final path.
  */
-export function writePolicyFile(dir: string, policy: PolicyFileV1): WrittenPolicyFile {
+export function writePolicyFile(dir: string, policy: ToolsPolicyFile): WrittenPolicyFile {
   if (!isSeatName(policy.seat)) throw new Error(`agent-claude-code-tools: seat ${JSON.stringify(policy.seat)} is not a valid seat name`)
   const checked = validatePolicy(policy)
   if (!checked.ok) throw new Error(`agent-claude-code-tools: refusing to write an invalid policy (${checked.reason})`)

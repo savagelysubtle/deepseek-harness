@@ -113,6 +113,12 @@ describe('readPolicyFile and validatePolicy', () => {
     expect(!result.ok && result.reason).toContain(fragment)
   })
 
+  it('serialises the optional flag only when set', () => {
+    expect(serializePolicy(coderPolicy(box))).not.toContain('denyDirsContainingProtected')
+    expect(serializePolicy({ ...coderPolicy(box), denyDirsContainingProtected: false })).toContain('"denyDirsContainingProtected":false')
+    expect(validatePolicy({ ...coderPolicy(box), denyDirsContainingProtected: 1 })).toEqual({ ok: false, reason: 'policy denyDirsContainingProtected is not a boolean' })
+  })
+
   it('validatePolicy accepts a lead policy with empty lists', () => {
     const lead = { v: 1, seat: 'lead-1', role: 'lead', cwd: '/a', allowedRoots: [], deniedPrefixes: ['/b'], tools: ['mcp__dsh__x'] }
     expect(validatePolicy(lead)).toEqual({ ok: true, policy: lead })

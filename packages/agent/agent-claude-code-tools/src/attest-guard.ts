@@ -39,7 +39,10 @@ export interface AttestFileOptions {
 }
 
 /**
- * Verify a file the hook will execute.
+ * Verify a file the hook will execute. Deliberate deviation from the driver's `attestClaudePath`: a
+ * file owned by root is accepted as well as one owned by the operator (so a distribution-installed
+ * `node` under `/usr/bin` can be attested); the driver demands operator ownership of the claude binary.
+ * Everything else (regular file, not group/world-writable, safe directory chain, pinned SHA-256) matches.
  * @param path - the configured absolute path.
  * @param options - access kind, owner and optional pinned digest.
  * @returns the attestation.

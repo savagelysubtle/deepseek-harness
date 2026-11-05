@@ -21,7 +21,7 @@ let input: SeatPolicyInput
 beforeEach(() => {
   box = makeSandbox()
   const nodeCopy = join(box.root, 'node')
-  const guardCopy = join(box.root, 'seat-guard.ts')
+  const guardCopy = join(box.root, 'seat-guard.js')
   writeFileSync(nodeCopy, '#!/bin/sh\n', { mode: 0o755 })
   writeFileSync(guardCopy, '// guard\n', { mode: 0o755 })
   chmodSync(nodeCopy, 0o755)
@@ -51,10 +51,25 @@ describe('generateRules', () => {
         `Read(/${box.home}/.agents/**)`, `Read(/${box.cwd}/.git/**)`, `Edit(/${box.cwd}/.claude/**)`,
         `Edit(/${box.cwd}/.mcp.json)`, `Read(/${box.cwd}/.husky/**)`,
       ]) expect(rules.deny).toContain(expected)
-      expect(rules.deny).toHaveLength(20)
-      expect(rules.deny.every(entry => /^(Read|Edit)\(\/\//.test(entry))).toBe(true)
+      expect(rules.deny).toHaveLength(36)
+      expect(rules.deny.every(entry => /^(Read|Edit)\(\/\/[^/]/.test(entry))).toBe(true)
       expect(rules.deniedPrefixes).toHaveLength(10)
     }
+  })
+
+  it('emits the exact // + path-without-leading-slash form, bare and /** for directories', () => {
+    const rules = generateRules('coder', box.cwd, box.home)
+    const cwd = box.cwd.slice(1)
+    const home = box.home.slice(1)
+    expect(rules.allow).toEqual([`Read(//${cwd}/**)`, `Edit(//${cwd}/**)`])
+    expect(rules.allow[0]).toMatch(/^Read\(\/\/tmp\/cct-[A-Za-z0-9]+\/proj\/\*\*\)$/)
+    expect(rules.deny).toContain(`Read(//${home}/.claude/**)`)
+    expect(rules.deny).toContain(`Read(//${home}/.claude)`)
+    expect(rules.deny).toContain(`Edit(//${home}/.claude.json)`)
+    expect(rules.deny).toContain(`Edit(//${home}/.config/gh/**)`)
+    expect(rules.deny).toContain(`Edit(//${cwd}/.git)`)
+    expect(rules.deny).toContain(`Edit(//${cwd}/.git/**)`)
+    expect(rules.deny.some(entry => entry.includes('///'))).toBe(false)
   })
 
   it('gives a coder Read/Edit over the cwd only, a lead nothing', () => {
@@ -71,6 +86,7 @@ describe('generateRules', () => {
     symlinkSync(box.cwd, join(box.root, 'linked'))
     expect(() => generateRules('coder', join(box.root, 'linked'), box.home)).toThrow(/not canonical/)
     expect(() => generateRules('coder', box.cwd, join(box.root, '{home}'))).toThrow(UnsafePathError)
+    expect(() => generateRules('coder', box.home, box.home)).toThrow(/home directory itself/)
     mkdirSync(join(box.home, '.ssh', 'work'), { recursive: true })
     expect(() => generateRules('coder', join(box.home, '.ssh', 'work'), box.home)).toThrow(/protected location/)
   })
@@ -101,6 +117,11 @@ describe('contributors and readiness', () => {
     expect(registry.extraHookGroups({ seat: 'x', role: 'coder' })).toEqual({ PreToolUse: [group('a'), group('b')], PostToolUse: [group('p')] })
     expect(registry.extraHookGroups({ seat: 'x', role: 'lead' })).toEqual({ PreToolUse: [group('c')] })
     expect(() => { registry.registerHookContributor({ id: 'a', roles: [], groups: () => ({}) }) }).toThrow(/already registered/)
+  })
+
+  it('accepts a cwd holding a protected entry on a case-sensitive filesystem', () => {
+    mkdirSync(join(box.cwd, '.git'))
+    expect(generateRules('coder', box.cwd, box.home).deniedPrefixes).toContain(join(box.cwd, '.git'))
   })
 
   it('serves lead always and coder only with sandbox, canary and rules-hooks', () => {
@@ -158,6 +179,25 @@ describe('generateSeatPolicy', () => {
     const policy = generateSeatPolicy({ ...input, host: { tools: ['extra_tool', MAILBOX_SEND_TOOL] } })
     expect(policy.tools).toEqual(['mcp__dsh__mailbox_send', 'mcp__dsh__extra_tool'])
     expect((policy.settings.hooks as { PreToolUse: { matcher: string }[] }).PreToolUse.map(group => group.matcher)).toHaveLength(2)
+  })
+
+  it('writes the dir-search flag only when turned off and rejects a non-boolean', () => {
+    expect('denyDirsContainingProtected' in buildPolicyFile(input)).toBe(false)
+    const off = generateSeatPolicy({ ...input, denyDirsContainingProtected: false })
+    expect(readPolicyFile(off.policyPath, 'lead-one', off.policySha256)).toMatchObject({ ok: true, policy: { denyDirsContainingProtected: false } })
+  })
+
+  it('passes rules in instead of recomputing them', () => {
+    const rules = generateRules('lead', box.cwd, box.home)
+    expect(buildPolicyFile(input, rules).deniedPrefixes).toEqual(rules.deniedPrefixes)
+  })
+
+  it('refuses a .ts guard unless the source guard is explicitly allowed', () => {
+    const tsGuard = join(box.root, 'seat-guard.ts')
+    writeFileSync(tsGuard, '// g\n', { mode: 0o755 })
+    const attested = attestFile(tsGuard, { access: 'read' })
+    expect(() => generateSeatPolicy({ ...input, guard: attested })).toThrow(/TypeScript source/)
+    expect(generateSeatPolicy({ ...input, guard: attested, allowSourceGuard: true }).policyPath).toContain('lead-one.json')
   })
 
   it('mutes a seat with no tool left', () => {

@@ -5,7 +5,8 @@
  * @module @deepseek-ai/dsh-agent-claude-code-tools/hook-command
  */
 
-import { resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { isSeatName, isSha256 } from './grammar.ts'
 
 /** Seconds the CLI waits for the hook before treating it as failed. */
@@ -21,8 +22,10 @@ const COMMAND_PATH = /^\/[A-Za-z0-9_@+=:,./-]*$/
 export interface HookCommandInput {
   /** Absolute path of the attested node binary. */
   readonly nodePath: string
-  /** Absolute path of the attested guard script. */
-  readonly guardPath: string
+  /** Absolute path of the attested guard script: the built `lib/seat-guard.js` (default, see {@link guardScriptPath}). */
+  readonly guardPath?: string
+  /** Allow a `.ts` guard (in-workspace tests only: Node refuses to strip types under `node_modules`). */
+  readonly allowSourceGuard?: boolean
   /** Absolute path of the policy file. */
   readonly policyPath: string
   /** SHA-256 of the policy file content. */
@@ -37,6 +40,18 @@ export interface HookGroup {
   readonly matcher?: string
   /** Command handlers. */
   readonly hooks: readonly { readonly type: 'command'; readonly command: string; readonly timeout?: number }[]
+}
+
+/**
+ * Where the guard script lives in this package: the bundled plain-JavaScript `lib/seat-guard.js` that
+ * ships in the published files, or (when explicitly requested, for tests inside the workspace) the
+ * TypeScript source `src/bin.ts`.
+ * @param kind - `built` (default) or `source`.
+ * @returns the absolute path.
+ */
+export function guardScriptPath(kind: 'built' | 'source' = 'built'): string {
+  const root = dirname(dirname(fileURLToPath(import.meta.url)))
+  return kind === 'built' ? join(root, 'lib', 'seat-guard.js') : join(root, 'src', 'bin.ts')
 }
 
 /**
@@ -55,12 +70,19 @@ function assertCommandPath(label: string, value: string): string {
   return value
 }
 
+function assertGuardPath(path: string, allowSource: boolean): string {
+  if (!allowSource && path.endsWith('.ts')) {
+    throw new Error(`agent-claude-code-tools: guard ${JSON.stringify(path)} is TypeScript source, which cannot run from an installed package; use the built lib/seat-guard.js`)
+  }
+  return assertCommandPath('guard path', path)
+}
+
 /**
  * Build the hook command line:
  * `env -u NODE_OPTIONS <node> <guard> --policy <path> --sha256 <hex> --seat <name>`.
  * @param input - the values to interpolate.
  * @returns the command string.
- * @throws when any value fails its grammar.
+ * @throws when any value fails its grammar, or the guard is a `.ts` file without `allowSourceGuard`.
  */
 export function buildHookCommand(input: HookCommandInput): string {
   if (!isSeatName(input.seat)) throw new Error(`agent-claude-code-tools: seat ${JSON.stringify(input.seat)} is not a valid seat name`)
@@ -68,7 +90,7 @@ export function buildHookCommand(input: HookCommandInput): string {
   return [
     'env', '-u', 'NODE_OPTIONS',
     shellQuote(assertCommandPath('node path', input.nodePath)),
-    shellQuote(assertCommandPath('guard path', input.guardPath)),
+    shellQuote(assertGuardPath(input.guardPath ?? guardScriptPath(), input.allowSourceGuard === true)),
     '--policy', shellQuote(assertCommandPath('policy path', input.policyPath)),
     '--sha256', input.sha256,
     '--seat', input.seat,

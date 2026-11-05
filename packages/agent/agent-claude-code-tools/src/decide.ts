@@ -6,9 +6,10 @@
  * @module @deepseek-ai/dsh-agent-claude-code-tools/decide
  */
 
-import type { PolicyFileV1 } from '@deepseek-ai/dsh-agent-claude-code-driver'
-import { checkGlob, checkPath } from './path-guard.ts'
+import { isAbsolute, join } from 'node:path'
+import { checkGlob, checkPath, globStaticPrefix, reachesProtected } from './path-guard.ts'
 import type { Verdict } from './path-guard.ts'
+import type { ToolsPolicyFile } from './policy-read.ts'
 
 /** Every native file tool a seat could hold. */
 export const FILE_TOOLS: readonly string[] = ['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Grep', 'Glob']
@@ -24,13 +25,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * Judge one tool call against the seat's policy.
  * An `mcp__` tool must be named in the policy tool list. Any other tool must be in the list too, and
  * every path-valued input (`file_path`, `path`, `notebook_path`; the Glob `pattern`; the Grep `glob`)
- * must stay inside the policy's roots and out of its protected prefixes.
+ * must stay inside the policy's roots and out of its protected prefixes. Unless the policy turns it off, a Grep or
+ * Glob whose effective search directory lies above an existing protected location is denied too.
  * @param policy - the validated policy file.
  * @param toolName - the `tool_name` from the hook input.
  * @param toolInput - the `tool_input` from the hook input.
  * @returns pass, or a deny with a one-line reason.
  */
-export function decide(policy: PolicyFileV1, toolName: unknown, toolInput: unknown): Verdict {
+export function decide(policy: ToolsPolicyFile, toolName: unknown, toolInput: unknown): Verdict {
   if (typeof toolName !== 'string' || toolName === '') return { ok: false, reason: 'tool_name is missing' }
   if (!policy.tools.includes(toolName)) return { ok: false, reason: `tool ${toolName} is not granted to this seat` }
   if (toolName.startsWith('mcp__')) return { ok: true }
@@ -48,6 +50,14 @@ export function decide(policy: PolicyFileV1, toolName: unknown, toolInput: unkno
     if (typeof glob !== 'string') return { ok: false, reason: `${globKey} of ${toolName} is not a string` }
     const verdict = checkGlob(policy, glob)
     if (!verdict.ok) return { ok: false, reason: `${globKey}: ${verdict.reason}` }
+  }
+  if (policy.denyDirsContainingProtected !== false && (toolName === 'Grep' || toolName === 'Glob')) {
+    const searchPath = toolInput['path']
+    const base = typeof searchPath === 'string' ? searchPath : '.'
+    const pattern = toolName === 'Glob' && typeof glob === 'string' ? glob : undefined
+    const dir = pattern === undefined ? base : isAbsolute(pattern) ? globStaticPrefix(pattern) : join(base, globStaticPrefix(pattern))
+    const hit = reachesProtected(policy, dir)
+    if (hit !== undefined) return { ok: false, reason: `search directory contains the protected location ${hit}; search a subdirectory` }
   }
   return { ok: true }
 }

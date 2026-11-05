@@ -9,7 +9,7 @@
 
 import { join } from 'node:path'
 import type { PolicyRole } from './contributors.ts'
-import { assertCanonicalDir, isInside, UnsafePathError } from './path-guard.ts'
+import { assertCanonicalDir, assertCaseSensitiveEntries, isInside, UnsafePathError } from './path-guard.ts'
 
 /** Home-relative locations a seat may never read or write. Directories end in `/**` in rules. */
 const HOME_DENIED: readonly { readonly rel: string; readonly dir: boolean }[] = [
@@ -46,10 +46,12 @@ export interface GeneratedRules {
  * @param tool - `Read` or `Edit`.
  * @param abs - absolute path.
  * @param dir - whether to cover everything below it.
- * @returns for example `Read(//home/me/.ssh/**)`.
+ * @returns the entries for the path: for a directory both the bare path (a worktree `.git` is a file) and `/**`;
+ *   the `//` prefix replaces the path's leading slash, for example `Read(//home/me/.ssh)` and `Read(//home/me/.ssh/**)`.
  */
-function rule(tool: 'Read' | 'Edit', abs: string, dir: boolean): string {
-  return `${tool}(/${abs}${dir ? '/**' : ''})`
+function rule(tool: 'Read' | 'Edit', abs: string, dir: boolean): string[] {
+  const bare = `${tool}(/${abs})`
+  return dir ? [bare, `${tool}(/${abs}/**)`] : [bare]
 }
 
 /**
@@ -58,11 +60,14 @@ function rule(tool: 'Read' | 'Edit', abs: string, dir: boolean): string {
  * @param cwd - the seat's working directory; must be canonical and free of pattern characters.
  * @param home - the operator's home directory; same requirement.
  * @returns the rules plus the matching absolute prefixes and roots for the policy file.
- * @throws {UnsafePathError} when `cwd` or `home` is unusable in a rule, or the cwd sits inside a protected home location.
+ * @throws {UnsafePathError} when `cwd` or `home` is unusable in a rule, the cwd is the home directory or sits inside a
+ *   protected home location, or the cwd is on a case-insensitive filesystem.
  */
 export function generateRules(role: PolicyRole, cwd: string, home: string): GeneratedRules {
   assertCanonicalDir('cwd', cwd)
   assertCanonicalDir('home', home)
+  if (cwd === home) throw new UnsafePathError('cwd', cwd, 'it is the home directory itself; start the seat in a project directory below it')
+  assertCaseSensitiveEntries(cwd, CWD_DENIED.map(entry => entry.rel))
   const deniedPrefixes: string[] = []
   const deny: string[] = []
   const entries = [
@@ -70,14 +75,14 @@ export function generateRules(role: PolicyRole, cwd: string, home: string): Gene
     ...CWD_DENIED.map(entry => ({ abs: join(cwd, entry.rel), dir: entry.dir })),
   ]
   for (const entry of entries) {
-    if (isInside(entry.abs, cwd)) throw new UnsafePathError('cwd', cwd, `it sits inside the protected location ${entry.abs}`)
+    if (isInside(entry.abs, cwd)) throw new UnsafePathError('cwd', cwd, `it sits inside the protected location ${entry.abs}; start the seat in a project directory elsewhere`)
     deniedPrefixes.push(entry.abs)
-    deny.push(rule('Read', entry.abs, entry.dir), rule('Edit', entry.abs, entry.dir))
+    deny.push(...rule('Read', entry.abs, entry.dir), ...rule('Edit', entry.abs, entry.dir))
   }
   const coder = role === 'coder'
   return {
     deny,
-    allow: coder ? [rule('Read', cwd, true), rule('Edit', cwd, true)] : [],
+    allow: coder ? [`Read(/${cwd}/**)`, `Edit(/${cwd}/**)`] : [],
     deniedPrefixes,
     allowedRoots: coder ? [cwd] : [],
   }

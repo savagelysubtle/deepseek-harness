@@ -9,14 +9,16 @@
 
 import { createHash } from 'node:crypto'
 import { SeatMutedByPolicyError } from '@deepseek-ai/dsh-agent-claude-code-driver'
-import type { ExtensionSettings, PolicyFileV1, PolicyHostSeatFields } from '@deepseek-ai/dsh-agent-claude-code-driver'
+import type { ExtensionSettings, PolicyHostSeatFields } from '@deepseek-ai/dsh-agent-claude-code-driver'
 import type { AttestedFile } from './attest-guard.ts'
 import { CODER_NATIVE_TOOLS, mcpToolName } from './contributors.ts'
 import type { ContributorRegistry, PolicyRole } from './contributors.ts'
 import { buildHookCommand, guardHookGroup } from './hook-command.ts'
 import type { HookGroup } from './hook-command.ts'
 import { writePolicyFile } from './policy-file.ts'
+import type { ToolsPolicyFile } from './policy-read.ts'
 import { generateRules } from './rules.ts'
+import type { GeneratedRules } from './rules.ts'
 
 /** Inputs of {@link buildPolicyFile}. */
 export interface PolicyInput {
@@ -32,6 +34,12 @@ export interface PolicyInput {
   readonly host: PolicyHostSeatFields
   /** Tool and hook contributors. */
   readonly contributors: ContributorRegistry
+  /**
+   * Set to false to let Grep and Glob search directories that contain protected locations. Default
+   * (absent) is true: such a search is denied. Only a live probe showing the tools skip hidden
+   * directories justifies turning it off.
+   */
+  readonly denyDirsContainingProtected?: boolean
 }
 
 /** Inputs of {@link generateSeatPolicy}. */
@@ -40,8 +48,10 @@ export interface SeatPolicyInput extends PolicyInput {
   readonly policyDir: string
   /** The attested node binary the hook runs under. */
   readonly node: AttestedFile
-  /** The attested guard script. */
+  /** The attested guard script; the built `lib/seat-guard.js` (see `guardScriptPath`). */
   readonly guard: AttestedFile
+  /** Allow a `.ts` guard source (in-workspace tests only; it cannot run from an installed package). */
+  readonly allowSourceGuard?: boolean
 }
 
 /** Everything one seat's query needs from the policy. */
@@ -77,17 +87,27 @@ function resolveDshTools(input: PolicyInput): string[] {
 /**
  * Build the policy file contents for a seat.
  * @param input - host-private inputs.
+ * @param rules - the generated rules (computed from the input when omitted).
  * @returns the policy.
  * @throws {SeatMutedByPolicyError} when the seat is left with no tool at all.
  * @throws {UnsafePathError} when the cwd or home cannot be used in rules.
  */
-export function buildPolicyFile(input: PolicyInput): PolicyFileV1 {
-  const rules = generateRules(input.role, input.cwd, input.home)
+export function buildPolicyFile(
+  input: PolicyInput,
+  rules: GeneratedRules = generateRules(input.role, input.cwd, input.home),
+): ToolsPolicyFile {
   const dsh = resolveDshTools(input).map(mcpToolName)
   const tools = [...input.role === 'coder' ? CODER_NATIVE_TOOLS : [], ...dsh]
   if (tools.length === 0) throw new SeatMutedByPolicyError(input.seat, 'the host entry lists no tool that the role template offers')
   return {
-    v: 1, seat: input.seat, role: input.role, cwd: input.cwd, allowedRoots: rules.allowedRoots, deniedPrefixes: rules.deniedPrefixes, tools,
+    v: 1,
+    seat: input.seat,
+    role: input.role,
+    cwd: input.cwd,
+    allowedRoots: rules.allowedRoots,
+    deniedPrefixes: rules.deniedPrefixes,
+    tools,
+    ...input.denyDirsContainingProtected === false ? { denyDirsContainingProtected: false } : {},
   }
 }
 
@@ -99,8 +119,8 @@ export function buildPolicyFile(input: PolicyInput): PolicyFileV1 {
  * @throws on an unusable cwd or home, a muted seat, an invalid hook value or a failed write.
  */
 export function generateSeatPolicy(input: SeatPolicyInput): SeatPolicy {
-  const policy = buildPolicyFile(input)
   const rules = generateRules(input.role, input.cwd, input.home)
+  const policy = buildPolicyFile(input, rules)
   const written = writePolicyFile(input.policyDir, policy)
   const command = buildHookCommand({
     nodePath: input.node.realPath,
@@ -108,6 +128,7 @@ export function generateSeatPolicy(input: SeatPolicyInput): SeatPolicy {
     policyPath: written.path,
     sha256: written.sha256,
     seat: input.seat,
+    allowSourceGuard: input.allowSourceGuard === true,
   })
   const extra = input.contributors.extraHookGroups({ seat: input.seat, role: input.role })
   const hooks: Record<string, readonly HookGroup[]> = { ...extra, PreToolUse: [guardHookGroup(command), ...extra['PreToolUse'] ?? []] }

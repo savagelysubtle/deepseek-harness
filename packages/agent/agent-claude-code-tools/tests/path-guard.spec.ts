@@ -1,7 +1,9 @@
 import { linkSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { assertCanonicalDir, checkGlob, checkPath, isInside, UnsafePathError } from '../src/path-guard.ts'
+import {
+  assertCanonicalDir, assertCaseSensitiveEntries, checkGlob, checkPath, globStaticPrefix, isInside, reachesProtected, UnsafePathError,
+} from '../src/path-guard.ts'
 import type { GuardScope } from '../src/path-guard.ts'
 import { makeSandbox } from './helpers.ts'
 import type { Sandbox } from './helpers.ts'
@@ -30,6 +32,7 @@ describe('isInside', () => {
     expect(isInside('/a/b', '/a/b/c')).toBe(true)
     expect(isInside('/a/b', '/a/bb')).toBe(false)
     expect(isInside('/a/b', '/a')).toBe(false)
+    expect(isInside('/', '/a/b')).toBe(true)
   })
 })
 
@@ -160,5 +163,71 @@ describe('checkGlob', () => {
   it('denies a pattern that goes through a symlink out of the cwd', () => {
     symlinkSync(box.outside, join(box.cwd, 'outdir'))
     expect(denied(checkGlob(scope, 'outdir/**'))).toMatch(/outside/)
+  })
+})
+
+describe('checkGlob alternatives', () => {
+  it.each([
+    '{/etc/passwd,x}', '@(/etc/x|y)', '{a,/etc/x}', '+(a|/b)', '{a,~/x}', '!(a|~b)', '{src/a,src/b}/*', '@(a/b|c)', '{a,{b/c,d}}',
+  ])('denies the group trick %s', (pattern) => {
+    expect(checkGlob(scope, pattern).ok).toBe(false)
+  })
+
+  it('keeps ordinary groups and brackets working', () => {
+    for (const pattern of ['**/*.{ts,js}', 'src/@(a|b).ts', 'a)/b', '{a,b}', 'src/[ab]/x']) {
+      expect(checkGlob(scope, pattern)).toEqual({ ok: true })
+    }
+  })
+
+  it('documents that a symlinked directory behind a leading group is judged by the tool, not the guard', () => {
+    symlinkSync(box.outside, join(box.cwd, 'lnk'))
+    expect(checkGlob(scope, '{lnk,x}/*')).toEqual({ ok: true })
+    expect(denied(checkGlob(scope, 'lnk/*'))).toMatch(/outside/)
+  })
+
+  it('computes the static prefix', () => {
+    expect(globStaticPrefix('/a/b/*.ts')).toBe('/a/b')
+    expect(globStaticPrefix('/**')).toBe('/')
+    expect(globStaticPrefix('**/x')).toBe('.')
+    expect(globStaticPrefix('src/lib/x.ts')).toBe('src/lib/x.ts')
+  })
+})
+
+describe('reachesProtected', () => {
+  it('finds an existing protected location below the directory only', () => {
+    mkdirSync(join(box.cwd, '.git'))
+    expect(reachesProtected(scope, '.')).toBe(join(box.cwd, '.git'))
+    expect(reachesProtected(scope, box.cwd)).toBe(join(box.cwd, '.git'))
+    expect(reachesProtected(scope, '/')).toBe(join(box.cwd, '.git'))
+    expect(reachesProtected(scope, 'src')).toBeUndefined()
+    expect(reachesProtected(scope, '.git')).toBe(join(box.cwd, '.git'))
+  })
+
+  it('ignores protected locations that do not exist and directories that cannot be resolved', () => {
+    expect(reachesProtected(scope, '.')).toBeUndefined()
+    symlinkSync(join(box.cwd, 'loop-b'), join(box.cwd, 'loop-a'))
+    symlinkSync(join(box.cwd, 'loop-a'), join(box.cwd, 'loop-b'))
+    expect(reachesProtected(scope, 'loop-a')).toBeUndefined()
+  })
+})
+
+describe('assertCaseSensitiveEntries', () => {
+  it('passes on a case-sensitive filesystem with and without the entries', () => {
+    expect(() => { assertCaseSensitiveEntries(box.cwd, ['.git', '.husky']) }).not.toThrow()
+    mkdirSync(join(box.cwd, '.git'))
+    expect(() => { assertCaseSensitiveEntries(box.cwd, ['.git', '.husky']) }).not.toThrow()
+  })
+
+  it('refuses when an existing entry also answers to its upper-case name', () => {
+    expect(() => { assertCaseSensitiveEntries(box.cwd, ['.git'], () => ({})) }).toThrow(/case-insensitive filesystem/)
+  })
+
+  it('continues when only the entry exists or neither does', () => {
+    const onlyLower = (path: string): unknown => {
+      if (path.endsWith('.GIT')) throw new Error('ENOENT')
+      return {}
+    }
+    expect(() => { assertCaseSensitiveEntries(box.cwd, ['.git'], onlyLower) }).not.toThrow()
+    expect(() => { assertCaseSensitiveEntries(box.cwd, ['.git'], () => { throw new Error('ENOENT') }) }).not.toThrow()
   })
 })
