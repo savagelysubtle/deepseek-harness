@@ -3907,7 +3907,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'MailboxMessage',
-    declaration: 'export interface MailboxMessage {\n    readonly id?: MailboxMessageId;\n    readonly to: MailboxAddress;\n    readonly from: string;\n    readonly sentAt: number;\n    readonly type?: string;\n    readonly subject?: string;\n    readonly payload?: unknown;\n    readonly traceId?: string;\n    readonly blocking?: boolean;\n}',
+    declaration: 'export interface MailboxMessage {\n    readonly id?: MailboxMessageId;\n    readonly to: MailboxAddress;\n    readonly from: string;\n    readonly sentAt: number;\n    readonly type?: string;\n    readonly subject?: string;\n    readonly payload?: unknown;\n    readonly traceId?: string;\n    readonly blocking?: boolean;\n    readonly tainted?: boolean;\n    readonly chain?: readonly string[];\n}',
   },
   {
     name: 'MailboxMessageId',

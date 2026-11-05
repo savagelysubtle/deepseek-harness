@@ -42,6 +42,11 @@ export { mailFrom } from './admission.ts'
 
 export { assertBinaryUnchanged, attestClaudePath, BinaryPins, sha256File } from './attest.ts'
 export type { AttestOptions, BinaryAttestation } from './attest.ts'
+export { POLICY_FILE_VERSION, SeatMutedByPolicyError } from './policy-contract.ts'
+export type {
+  ClaudeCodePolicy, PolicyExtension, PolicyFileV1, PolicyHostSeatFields, PolicyQueryContext, PolicyReadiness,
+  ReadinessContributor, ReadinessRequirement,
+} from './policy-contract.ts'
 export { allowlistSettings, buildQueryOptions } from './options.ts'
 export type {
   BuildQueryOptionsInput, ExtensionSettings, QueryBinding, QueryOptionsContext, QueryOptionsExtension,
