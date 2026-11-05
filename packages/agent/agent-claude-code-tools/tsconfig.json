@@ -15,7 +15,13 @@
       "path": "../../../vendor/cordis"
     },
     {
+      "path": "../../../vendor/schemastery"
+    },
+    {
       "path": "../agent-claude-code-driver"
+    },
+    {
+      "path": "../../mailbox/mailbox"
     },
     {
       "path": "../../runtime-diagnostics/invariants"

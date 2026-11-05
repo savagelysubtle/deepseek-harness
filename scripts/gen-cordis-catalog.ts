@@ -78,6 +78,7 @@ export const SERVICE_PAGE: Record<string, string> = {
   claudeCodeSeatSource: 'mailbox.md',
   claudeCodeMailHooks: 'mailbox.md',
   claudeCodePolicy: 'mailbox.md',
+  claudeCodePolicyRegistries: 'mailbox.md',
   mailbox: 'mailbox.md',
   memory: 'memory.md',
   permissionPresets: 'permission-presets.md',

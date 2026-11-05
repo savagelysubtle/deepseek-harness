@@ -171,7 +171,7 @@ export interface ClaudeCodeHostSeat {
   model: string
   /** Optional reasoning effort. */
   effort?: ClaudeCodeEffort
-  /** Tool surface. Only `mail-only` is accepted until the permission slice (S5) lands; any other role is refused. */
+  /** Tool surface. `lead` and `coder` are accepted only while the policy service serves them (checked at use time). */
   role: ClaudeCodeRole
   /** Hard cap on agentic turns for one query; defaults to 25. */
   max_turns?: number
@@ -193,6 +193,14 @@ export interface ClaudeCodeHostSeat {
   admit_from_ceiling: string[]
   /** Founder-authorised session id for a reseed: the one new id the driver accepts in place of the pinned one. */
   session_id?: string
+  /** Policy: exact dsh tool names the seat may call (`lead` and `coder` only). */
+  tools?: string[]
+  /** Policy: seats this seat may mail (`lead` and `coder` only). */
+  send_to?: string[]
+  /** Policy: whether the seat may send blocking mail (`lead` and `coder` only). */
+  allow_blocking?: boolean
+  /** Policy: absolute path of the control-plane rule hook scripts (`coder` only). */
+  rules_dir?: string
 }
 
 /** The `claude_code` block of a seat registry row, as written in config. */
@@ -224,7 +232,27 @@ export type ClaudeCodeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 export type ClaudeCodeRole = 'coder' | 'lead' | 'mail-only'
 ```
 
-Source: [`packages/agent/agent-claude-code-driver/src/index.ts:155`](../packages/agent/agent-claude-code-driver/src/index.ts)
+Source: [`packages/agent/agent-claude-code-driver/src/index.ts:167`](../packages/agent/agent-claude-code-driver/src/index.ts)
+
+<a id="deepseek-aidsh-agent-claude-code-tools"></a>
+
+## `@deepseek-ai/dsh-agent-claude-code-tools`
+
+```ts config-catalog
+/** Deployment configuration of the provider plugin. */
+export interface Config {
+  /** Absolute directory the per-seat policy files are written into; owned by the host, created with mode 0700. */
+  policyDir: string
+  /** The operator's home directory; defaults to the real path of the running user's home. */
+  home?: string
+  /** The node binary the guard hook runs under; defaults to the running node. Attested before first use. */
+  nodePath?: string
+  /** The built guard script; defaults to this package's `lib/seat-guard.js`. Attested before first use. */
+  guardPath?: string
+}
+```
+
+Source: [`packages/agent/agent-claude-code-tools/src/provider.ts:64`](../packages/agent/agent-claude-code-tools/src/provider.ts)
 
 <a id="deepseek-aidsh-agent-default-model"></a>
 

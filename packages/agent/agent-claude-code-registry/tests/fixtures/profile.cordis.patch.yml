@@ -45,5 +45,19 @@
             # session_id: <new session id>   # founder reseed ONLY: the one new id the driver
             #                                # accepts in place of the pinned one (hire --reseed
             #                                # prints it). The seat's call window is kept.
+    # The permission-policy provider (OP #292, slice S5). It registers `ctx.claudeCodePolicy`, which the
+    # driver reads at use time, so it may sit before or after the driver. Without it a `lead` or `coder`
+    # row is refused ("policy service absent") and only `mail-only` seats run. A `lead` host entry above
+    # would add, next to `role: lead`:
+    #   tools: [mailbox_send, mailbox_directory]   # exact dsh tools it may call (empty mutes the seat)
+    #   send_to: [ops-lead]                        # the only seats it may mail (empty refuses every send)
+    #   allow_blocking: false                      # optional: may it send blocking mail
+    # A `coder` row stays refused until the sandbox, canary and rules-hooks contributors exist (S6, S7).
+    - id: agent-claude-code-tools
+      name: '@deepseek-ai/dsh-agent-claude-code-tools'
+      config:
+        # Where the per-seat policy files are written (created with mode 0700). Host-owned; a seat
+        # cannot write it, and the guard hook pins each file by its SHA-256.
+        policyDir: /home/me/.dsh/claude-code/policy
     - id: agent-claude-code-registry
       name: '@deepseek-ai/dsh-agent-claude-code-registry'

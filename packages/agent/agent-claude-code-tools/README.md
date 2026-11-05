@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-The **permission policy core** for [Claude Code seats](../agent-claude-code-driver/README.md). It turns host-private inputs (the host seat's policy fields, the working directory, the seat name; never a registry row) into the rulebook one seat runs under: permission rules, a second-layer `PreToolUse` hook, and the file that hook reads. It is pure policy code with no cordis plugin of its own; the provider that serves it to the driver as `ctx.claudeCodePolicy` is a later part of the same slice. The contract types it implements live in the driver (`policy-contract.ts`).
+The **permission policy core** for [Claude Code seats](../agent-claude-code-driver/README.md). It turns host-private inputs (the host seat's policy fields, the working directory, the seat name; never a registry row) into the rulebook one seat runs under: permission rules, a second-layer `PreToolUse` hook, and the file that hook reads. The package is also the cordis plugin that serves it to the driver as `ctx.claudeCodePolicy`, together with the per-seat `dsh` MCP tool server (`mailbox_send`, `mailbox_directory`); see below. The contract types it implements live in the driver (`policy-contract.ts`).
 
 ## What it generates
 
@@ -11,6 +11,37 @@ The **permission policy core** for [Claude Code seats](../agent-claude-code-driv
 - **Settings** (`generateSeatPolicy`): `{settings, allow, disallowedTools, tools, fences}` where `settings` holds the guard hook plus `permissions.deny`, `allow` holds `mcp__dsh__<name>` entries (and the cwd `Read`/`Edit` rules for a coder), and `fences` repeats `dontAsk`, `settingSources: []`, `strictMcpConfig: true`. Only the SHA-256 of the result (`settingsSha256`) is meant to be logged. There is no `canUseTool`: it is never called under `dontAsk`, so the hook is the second layer.
 - **Tools.** The lead template is exactly `mailbox_send` and `mailbox_directory` (as `mcp__dsh__mailbox_send` and `mcp__dsh__mailbox_directory`). The host seat's `tools` list cuts the template down; a seat left with no tool throws `SeatMutedByPolicyError` from the driver contract. Later slices append names and hook groups through `ContributorRegistry.registerToolContributor` and `registerHookContributor` without editing this package.
 - **Readiness** (`ReadinessRegistry`). `lead` is servable as soon as the policy service exists. `coder` is servable only when contributors providing `sandbox`, `canary` and `rules-hooks` have all registered; `missing` names what is absent.
+
+## The dsh tool server and the provider
+
+The package is also a cordis plugin (`name: agent-claude-code-tools`, config `policyDir`, optional `home`, `nodePath`, `guardPath`). Mounting it registers the `claudeCodePolicy` service the driver reads at use time, so it may mount before or after the driver. Per query (`extend`) the provider:
+
+1. refuses a `mail-only` seat, and a role the readiness registry cannot serve;
+2. pins the seat's working directory: the first query fixes it, and any later query whose `cwd` differs by even one character throws;
+3. checks the host stanza's `tools` against the tool template and the policy template, and mutes the seat (`SeatMutedByPolicyError`, naming every missing name) before anything is written;
+4. attests the node binary and the guard script (re-checked on every query), generates the seat's policy once per seat, cwd and host fields, and rewrites the policy file atomically when it is missing or changed on disk; a write failure throws and the driver leaves the mail queued;
+5. runs `verifyGuardCommand` on the exact hook command the first time it sees a node, guard and policy hash combination, and throws on failure, so a guard that cannot start (which would fail open) never gets a server handed out;
+6. returns `{settings, mcpServers: {dsh}, allow}` with a fresh server for this query. `allow` is exactly `mcp__dsh__<name>` for each exposed tool (plus the cwd `Read`/`Edit` rules for a coder) and nothing else, because the driver fails a turn whose CLI-reported tool list differs. The driver itself switches auto-memory off; the provider does not return that setting.
+
+The server (`createSeatMcpServer`) is the SDK's in-process server named `dsh`, one per seat per query. Every tool is built over its own closure (the seat's own agent id, `send_to`, `allow_blocking`, the live taint and delivered-trace controls), so two servers never share state. Input schemas are strict zod objects: an unknown key (`from`, `seat`, `tainted`, `chain`, anything) is rejected by the SDK layer before the handler runs, never stripped. Every schema is converted to JSON Schema at construction and must come out as a closed object; one that cannot convert throws then, not at call time. Every string a tool returns goes through the scrubber (control characters other than newline and tab removed, any path under the operator home or the seat cwd replaced by `[path]`, length capped at 4000).
+
+The lead template is exactly `mailbox_send` and `mailbox_directory`. The host stanza's `tools` must be a subset of it (an unknown name, or an empty list, mutes the seat). `check_inbox`, `await` and tracker tools are not offered: mail is delivered by the driver, and deferred-result machinery belongs to S6. S6 and S7 append tools by registering a factory on a `SeatToolTemplate` and a name on the `ContributorRegistry`, without editing S5 files.
+
+### `mailbox_send` rules
+
+- **(a) Identity.** `from` is the seat's own mailbox agent id captured when the server was built. It is never read from input and is never the Claude session id.
+- **(b) Destination.** The message goes to `to` and nowhere else, and `to` must be in the host stanza's `send_to`. An empty `send_to` refuses every send with a reason naming the stanza key `send_to`.
+- **(c) Reply label.** `replyToTraceId` is accepted only if it is in the set of trace ids the driver reports as delivered to this seat. It is a label copied onto the outgoing message as its trace id; it is never used to find a destination (there is no trace lookup and no trace-based routing). An unknown trace id is refused.
+- **(d) Blocking.** `blocking: true` is refused unless the host stanza sets `allow_blocking: true`.
+- **(e) Taint.** A send from a tainted session carries `tainted: true` and no `chain`: `from` already names the origin, and the bridge appends each hop to `chain` itself. **Stamping labels the message; it never denies the send.** An untainted session asserts nothing (absent means not asserted, never clean). Any future tool that returns mail bodies or other external content must call the context's `markTainted`; `mailbox_directory` returns operator-configured seat names, so it does not.
+- **(f) Validation.** The message is published through the mailbox service (`ctx.mailbox.publish`, looked up at send time), which applies the mailbox publish validation. A rejected publish comes back to the model as an error result, not a throw.
+- **(g) Result text.** Short, scrubbed, and it names only the seat that was mailed (`Sent to <to>. Trace id <id>.`).
+
+The body is capped at 64 KiB of UTF-8 (the mailbox packages declare no limit of their own, so this package sets one).
+
+### Readiness story
+
+A `lead` needs nothing beyond this plugin. A `coder` needs contributors providing `sandbox`, `canary` and `rules-hooks`; none exists yet (S6 and S7 build them), so a coder policy reports not-ready and the driver refuses the seat at create with the missing names. That is the intended S5 behaviour: no contributor is faked.
 
 ## The seat-guard hook
 
@@ -28,7 +59,7 @@ The hook reads the `PreToolUse` JSON on stdin and checks `tool_input.file_path`,
 
 ## Tests
 
-`tests/` uses real temporary directories (symlink out of the cwd, hard link, `..`, `/a/b` against `/a/bb`, glob-character cwd, new-file parent checks) and runs the hook as a child process on stdin fixtures. Per-file 100% coverage is enforced by the repository coverage gate.
+`tests/` uses real temporary directories (symlink out of the cwd, hard link, `..`, `/a/b` against `/a/bb`, glob-character cwd, new-file parent checks) and runs the hook as a child process on stdin fixtures. The provider and tool specs (`tests/provider.spec.ts`, `tests/mcp/**`) call the tools through the SDK server's own request handler so its input validation runs, publish into a real SQLite mailbox, and run the real guard proof (see the limitation on the built guard). Per-file 100% coverage is enforced by the repository coverage gate.
 
 ## Known Limitations and Deferred Work
 
@@ -42,3 +73,9 @@ The hook reads the `PreToolUse` JSON on stdin and checks `tool_input.file_path`,
 - **Rule matching is not provable offline.** The SDK exports no permission evaluator, so the generated rule strings are proven against the real CLI only by the live probe of the slice; the hook is the layer unit tests can fully exercise.
 - **A path guard cannot see the shell.** Native `Bash` is disallowed; the shell sandbox is a later slice.
 - **Pattern characters in a cwd are refused, not escaped.** Move the work to a path without them.
+- **The guard is a build output.** `lib/seat-guard.js` is gitignored and produced by `pnpm run typecheck` (or the package build). A provider whose guard file is missing never returns an extension (the attestation refuses it); tests that exec the guard build it first when it is absent.
+- **A coder policy is not-ready until S6 and S7.** The provider reports it and the driver refuses the seat; nothing here fakes the `sandbox`, `canary` and `rules-hooks` contributors.
+- **The registries are shared through a service, in either mount order.** `claudeCodePolicyRegistries` is `{readiness, contributors, tools}`, the same instances the policy uses. A later plugin that lists `claudeCodePolicyRegistries` in its `inject` is started once the provider is mounted, whichever mounts first. Registering a tool takes two steps: a factory on `tools` and the name on `contributors` for the roles that may have it (a name in only one of them mutes the seat with the missing name).
+- **Taint stamping labels, it does not deny.** A manipulated tainted session can still send within its `send_to` list.
+- **Tool results are text and scrubbed.** Paths under the operator home or the seat cwd are replaced by `[path]`; other paths pass through.
+- **Handlers run in the host process** with the host's authority, taking model-controlled arguments; strict schemas, closures instead of arguments and the `send_to` list are the only fences.

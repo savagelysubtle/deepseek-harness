@@ -41,6 +41,7 @@
     "@deepseek-ai/cordis": "workspace:^",
     "@deepseek-ai/dsh-agent": "workspace:^",
     "@deepseek-ai/dsh-agent-claude-code-driver": "workspace:^",
+    "@deepseek-ai/dsh-agent-claude-code-tools": "workspace:^",
     "@deepseek-ai/dsh-invariants": "workspace:^",
     "@deepseek-ai/dsh-llm": "workspace:^",
     "@deepseek-ai/dsh-mailbox": "workspace:^",

@@ -1,5 +1,5 @@
 /**
- * The example profile patch parses, its driver row passes the driver's own Config schema, and the glue
+ * The example profile patch parses, its driver and tools-provider rows pass their packages' own Config schemas, and the glue
  * row carries no config (host config is founder-owned; the registry row carries routing and admission only).
  */
 
@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import * as yaml from 'js-yaml'
 import * as Driver from '@deepseek-ai/dsh-agent-claude-code-driver'
+import * as Tools from '@deepseek-ai/dsh-agent-claude-code-tools'
 
 interface Row {
   id: string
@@ -22,9 +23,10 @@ function rows(): Row[] {
 }
 
 describe('profile.cordis.patch.yml', () => {
-  it('inserts the driver row and the glue row, in that order', () => {
+  it('inserts the driver row, the tools provider row and the glue row, in that order', () => {
     expect(rows().map(row => row.name)).toEqual([
       '@deepseek-ai/dsh-agent-claude-code-driver',
+      '@deepseek-ai/dsh-agent-claude-code-tools',
       '@deepseek-ai/dsh-agent-claude-code-registry',
     ])
   })
@@ -40,8 +42,16 @@ describe('profile.cordis.patch.yml', () => {
     expect(seat?.session_id).toBeUndefined()
   })
 
+  it('gives the tools provider row a Config the provider accepts', () => {
+    const config = Tools.Config((rows()[1] as Row).config as never)
+    expect(config.policyDir).toBe('/home/me/.dsh/claude-code/policy')
+    expect(config.nodePath).toBeUndefined()
+    expect(config.guardPath).toBeUndefined()
+    expect(Tools.name).toBe('agent-claude-code-tools')
+  })
+
   it('gives the registry glue row no config at all', () => {
-    const glue = rows()[1] as Row
+    const glue = rows()[2] as Row
     expect('config' in glue).toBe(false)
   })
 })
