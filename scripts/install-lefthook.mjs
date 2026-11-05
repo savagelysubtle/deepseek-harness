@@ -9,11 +9,13 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  realpathSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import lefthookPackage from 'lefthook/package.json' with { type: 'json' }
 
 const MINIMUM_GIT = [2, 26, 0]
@@ -26,6 +28,10 @@ const INSTALL_LOCK_TIMEOUT_MS = 30_000
 const INSTALL_LOCK_INITIALIZATION_TIMEOUT_MS = 5_000
 const INSTALL_LOCK_POLL_MS = 50
 const ALLOW_HOOKS_PATH_OVERRIDE = 'DSH_LEFTHOOK_ALLOW_HOOKS_PATH_OVERRIDE'
+const FENCE_PIN_PATH_ENV = 'DSH_FENCE_PIN_FILE'
+const DEFAULT_FENCE_PIN_PATH = '/etc/dsh-fence/pin'
+const FENCE_HOOK_TARGET = 'fence'
+const FENCE_REQUIRED_HOOKS = ['pre-push', 'reference-transaction']
 const REPOSITORY_EXTENSION_PATTERN = '^extensions\\.'
 const PAIRING_MERGE_DRIVER_CONFIG = [
   ['merge.dsh-translation-pairing.name', 'DeepSeek Harness bilingual pairing records'],
@@ -551,15 +557,115 @@ function environmentWithoutCommandGitConfig() {
   return env
 }
 
-function runLefthook(root, lefthook) {
+function runLefthook(root, lefthook, fenceHooksPath) {
   const args = ['install', '--force']
   const env = environmentWithoutCommandGitConfig()
+  if (fenceHooksPath !== undefined) {
+    // Fence mode: lefthook must write into the owned directory while the
+    // fence's local core.hooksPath stays untouched. The override lives on the
+    // child environment only, never in any config file.
+    env.GIT_CONFIG_COUNT = '1'
+    env.GIT_CONFIG_KEY_0 = 'core.hooksPath'
+    env.GIT_CONFIG_VALUE_0 = fenceHooksPath
+  }
+  // Fence mode captures lefthook's output: its "Installing hooks anyway in
+  // <fence dir>" line is misleading there. It is replayed only on failure.
+  const stdio = fenceHooksPath === undefined ? 'inherit' : ['inherit', 'pipe', 'pipe']
+  const options = { cwd: root, encoding: 'utf8', env, stdio }
   // Node refuses to spawn Windows `.cmd` shims directly; the quoted path is
   // re-parsed by cmd.exe, while POSIX can execute its extensionless shim.
   const result = process.platform === 'win32'
-    ? spawnSync(`"${lefthook}"`, args, { cwd: root, env, stdio: 'inherit', shell: true })
-    : spawnSync(lefthook, args, { cwd: root, env, stdio: 'inherit' })
-  if (result.status !== 0) throw commandFailure(lefthook, args, result)
+    ? spawnSync(`"${lefthook}"`, args, { ...options, shell: true })
+    : spawnSync(lefthook, args, options)
+  if (result.status !== 0) {
+    if (fenceHooksPath !== undefined) {
+      if (result.stdout) process.stderr.write(result.stdout)
+      if (result.stderr) process.stderr.write(result.stderr)
+    }
+    throw commandFailure(lefthook, args, result)
+  }
+}
+
+function localHooksPathDirectory(root) {
+  const result = git(['config', '--local', '--get', 'core.hooksPath'], root, { allowStatuses: [1] })
+  if (result.status !== 0) return undefined
+  const value = stripGitLineTerminator(result.stdout)
+  if (value === '') return undefined
+  // git's raw --get does not expand `~`, so a `~` value cannot be resolved here:
+  // it is never fence mode, and the override env must not be honoured over it.
+  if (value === '~' || value.startsWith('~/')) {
+    if (process.env[ALLOW_HOOKS_PATH_OVERRIDE] === '1') {
+      throw new Error(
+        `refusing ${ALLOW_HOOKS_PATH_OVERRIDE}=1: local core.hooksPath ${JSON.stringify(value)} starts with `
+        + '`~`, which cannot be checked for a fence directory; unset the override variable and set '
+        + 'core.hooksPath to an absolute path',
+      )
+    }
+    return undefined
+  }
+  return resolve(root, value)
+}
+
+function realpathIfPresent(path) {
+  try {
+    return realpathSync(path)
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT' || errorCode(error) === 'ENOTDIR') return undefined
+    throw error
+  }
+}
+
+function readFencePin() {
+  const pinPath = process.env[FENCE_PIN_PATH_ENV] ?? DEFAULT_FENCE_PIN_PATH
+  let content
+  try {
+    content = readFileSync(pinPath, 'utf8')
+  } catch (error) {
+    if (['ENOENT', 'EACCES', 'EPERM', 'ENOTDIR', 'EISDIR'].includes(errorCode(error))) return undefined
+    throw error
+  }
+  const match = /^githooks_dir=(.*)$/m.exec(content)
+  return { githooksDir: match === null ? undefined : match[1].trim() }
+}
+
+function directoryHasFenceSymlinks(directory) {
+  return FENCE_REQUIRED_HOOKS.every((name) => {
+    const entry = join(directory, name)
+    const entryStat = lstatIfPresent(entry)
+    if (entryStat === undefined || !entryStat.isSymbolicLink()) return false
+    const target = realpathIfPresent(entry)
+    return target !== undefined && statSync(target).isFile() && basename(target) === FENCE_HOOK_TARGET
+  })
+}
+
+// Fence mode: the local core.hooksPath names the fence's githooks directory.
+// A readable pin file is authoritative; otherwise the directory structure is.
+// Spoofing only makes lefthook yield its hooks path, which is harmless.
+function detectFenceDirectory(root) {
+  const directory = localHooksPathDirectory(root)
+  if (directory === undefined) return undefined
+  const pin = readFencePin()
+  // A readable pin is authoritative: when it lacks the key or names another
+  // directory the structural rule is NOT consulted.
+  if (pin !== undefined) {
+    if (pin.githooksDir === undefined || pin.githooksDir === '') return undefined
+    const pinned = realpathIfPresent(pin.githooksDir)
+    const actual = realpathIfPresent(directory)
+    return pinned !== undefined && pinned === actual ? directory : undefined
+  }
+  return directoryHasFenceSymlinks(directory) ? directory : undefined
+}
+
+function refuseOverrideOverReferenceTransaction(root) {
+  const directory = localHooksPathDirectory(root)
+  if (directory === undefined) return
+  if (lstatIfPresent(join(directory, 'reference-transaction')) === undefined) return
+  throw new Error(
+    `refusing ${ALLOW_HOOKS_PATH_OVERRIDE}=1: core.hooksPath ${JSON.stringify(directory)} holds a `
+    + 'reference-transaction hook, so it looks like a fence directory that must not be replaced; '
+    + `unset ${ALLOW_HOOKS_PATH_OVERRIDE}; hooks chain through the fence automatically, `
+    + 'or remove the fence first',
+  )
 }
 
 function configSource(entry) {
@@ -744,8 +850,11 @@ async function main() {
         || ownedHooksDirectory?.hooksPath === worktreePath
         || copiedWorktreePathIsOwned
       )
+    const fenceDirectory = detectFenceDirectory(root)
     const effectiveEntry = effectiveConfigEntry(root, 'core.hooksPath')
-    if (effectiveEntry !== undefined) {
+    if (fenceDirectory !== undefined) {
+      if (effectiveEntry?.scope === 'command') refuseScopedHooksPath(effectiveEntry)
+    } else if (effectiveEntry !== undefined) {
       const effectivePathIsOwned = effectiveEntry.scope === 'worktree'
         && effectiveEntry.value === worktreePath
         && directWorktreePathIsOwned
@@ -760,6 +869,8 @@ async function main() {
         if (process.env[ALLOW_HOOKS_PATH_OVERRIDE] !== '1') {
           refuseInheritedHooksPath(effectiveEntry)
         }
+        // Non-fence branch on purpose: a detected fence never reaches the override path.
+        refuseOverrideOverReferenceTransaction(root)
       }
     }
     const migration = planWorktreeConfigMigration(root, commonConfigPath)
@@ -775,10 +886,42 @@ async function main() {
     applyWorktreeConfigMigration(root, commonConfigPath, migration)
 
     let pathChanged = false
+    let staleWorktreeValueUnset = false
     let rollbackPairingMergeDriver = () => {}
     try {
       probePairingMergeDriver(root)
       rollbackPairingMergeDriver = installPairingMergeDriver(root, worktreeConfigPath)
+      if (fenceDirectory !== undefined) {
+        if (worktreePath !== undefined) {
+          // The owned directory was validated above; the value is stale.
+          git(['config', '--worktree', '--unset-all', 'core.hooksPath'], root)
+          staleWorktreeValueUnset = true
+          console.error(`lefthook: fence mode, unset stale worktree core.hooksPath ${worktreePath}`)
+        }
+        const remaining = includedFileConfigEntries(root, worktreeConfigPath, 'core.hooksPath')
+        if (remaining.length > 0) {
+          throw new Error(
+            'fence mode: a worktree-scope core.hooksPath is still present; remove it with '
+            + '`git config --worktree --unset-all core.hooksPath` and rerun the installer',
+          )
+        }
+        const effective = effectiveConfigEntry(root, 'core.hooksPath')
+        if (
+          effective === undefined
+          || effective.scope !== 'local'
+          || realpathIfPresent(resolve(root, effective.value)) !== realpathIfPresent(fenceDirectory)
+        ) {
+          throw new Error(
+            'fence mode: the effective core.hooksPath is not the fence directory '
+            + `(${effective === undefined ? 'unset' : `${effective.scope}: ${JSON.stringify(effective.value)}`}); `
+            + 'remove the overriding setting (for example a global or system core.hooksPath) and rerun the installer',
+          )
+        }
+        runLefthook(root, lefthook, hooksPath)
+        updateOwnershipMarker(ownedHooksDirectory.markerPath, hooksPath)
+        console.log(`lefthook: fence mode, hooks chained from ${fenceDirectory}`)
+        return
+      }
       git(['config', '--worktree', 'core.hooksPath', hooksPath], root)
       pathChanged = worktreePath !== hooksPath
       const installedEntry = effectiveConfigEntry(root, 'core.hooksPath')
@@ -794,6 +937,13 @@ async function main() {
       updateOwnershipMarker(ownedHooksDirectory.markerPath, hooksPath)
     } catch (error) {
       const rollbackErrors = []
+      if (staleWorktreeValueUnset) {
+        try {
+          git(['config', '--worktree', 'core.hooksPath', worktreePath], root)
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError)
+        }
+      }
       if (pathChanged) {
         try {
           if (worktreePath === undefined) {
