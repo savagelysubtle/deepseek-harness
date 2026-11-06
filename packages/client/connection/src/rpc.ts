@@ -56,6 +56,12 @@ export interface HostConnectionRpc {
 export interface HostConnectionHandle {
   /** Generic RPC channel registry. */
   readonly rpc: HostConnectionRpc
+  /**
+   * Mint a single-use, 10-minute launch code the browser exchanges for the per-boot caller
+   * token (OP-270). The launcher builds `http://127.0.0.1:<port>/#dsh-boot=<code>` from it.
+   * @returns the plaintext launch code; never log it outside the launcher's own printed URL.
+   */
+  mintLaunchCode(): string
 }
 
 /** Client caller for logical RPC channels carried by the current transport. */

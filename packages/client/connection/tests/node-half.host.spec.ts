@@ -655,8 +655,9 @@ describe('connection node half over a real HTTP server', () => {
       for (const method of ['llm.providers', 'llm.models', 'agentPreset.list', 'agentPreset.select']) {
         expect([method, await call(port, method, 'harness.example')]).toEqual([method, 404])
       }
-      // Loopback reaches everything, configuration included.
-      expect(await call(port, 'settings.describe', `127.0.0.1:${String(port)}`)).toBe(404)
+      // Loopback passes the loopback pin; without the per-boot token (OP-270) it is 401, not 403.
+      // (The token-bearing success path is covered end to end in caller-gate.host.spec.ts.)
+      expect(await call(port, 'settings.describe', `127.0.0.1:${String(port)}`)).toBe(401)
     } finally {
       await close()
       await dispose()

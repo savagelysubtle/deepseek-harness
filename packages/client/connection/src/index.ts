@@ -6,7 +6,8 @@ import type {} from '@deepseek-ai/dsh-attachment'
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
 import { API_PATH, HOST_EVENTS_PATH, MUX_EVENTS_PATH } from './api-path.ts'
-import { bridge, DEFAULT_MAX_REQUEST_BODY_BYTES } from './http-bridge.ts'
+import { bridge, DEFAULT_MAX_REQUEST_BODY_BYTES, type FetchHandler } from './http-bridge.ts'
+import { authCookieHeader, authCookieName, readCookie } from './caller-token.ts'
 import { assertTrustedAuthority, isTrustedApiRequest } from './api-request-trust.ts'
 import { isLoopbackAddress } from './loopback-hostname.ts'
 import { HostConnectionService } from './rpc-host.ts'
@@ -23,6 +24,24 @@ export type {
 export { HostConnectionService } from './rpc-host.ts'
 
 export { API_PATH, HOST_EVENTS_PATH, MUX_EVENTS_PATH } from './api-path.ts'
+export {
+  authCookieHeader, authCookieName, createCallerAuth, LAUNCH_CODE_TTL_MS, readCookie,
+  type CallerAuth, type CallerAuthOptions,
+} from './caller-token.ts'
+
+/** Loopback-only POST that trades a single-use launch code for the per-boot token cookie (OP-270). */
+export const AUTH_EXCHANGE_PATH = `${API_PATH}/auth.exchange`
+
+/** 401 body for a privileged call without a valid per-boot token: plain words, no token value. */
+export const CALLER_TOKEN_REQUIRED_MESSAGE =
+  'dsh: this action needs the per-boot token. Reopen dsh from the launcher link (a token from a previous boot stops working).'
+
+/** 401 body for a launch code that is wrong, already used, or older than its lifetime. */
+export const LAUNCH_CODE_REJECTED_MESSAGE =
+  'dsh: this launch code is invalid, already used, or expired. Reopen dsh from the launcher link.'
+
+/** Minimum gap between two server warnings about refused privileged calls. */
+const REFUSAL_WARN_INTERVAL_MS = 10_000
 
 /** Stable Cordis plugin name. */
 export const name = 'client-connection'
@@ -151,6 +170,34 @@ const PRIVILEGED_METHODS = new Set([
   'workflow/reject',
   'workflow/attachUi',
   'workflow/detachUi',
+  // OP-270: the rest of the capability surface that a same-user process with plain `curl` could
+  // otherwise drive. `org.write*` rewrites the org registry (seats, edges); `worktree.*` creates,
+  // locks and removes git work areas; `host.createDirectory` writes the host filesystem;
+  // `session.sendAll` injects a prompt into every live session and `session.stopAll` /
+  // `stopTree` kill them. Left open on purpose, because non-browser callers need them or they
+  // add no capability beyond `session.create`: `mailbox.publish`, `session.create`,
+  // `session.prompt`, `subagent.prompt`, `session.history`, `session.rename`, `mcp/status`.
+  'org.write',
+  'org.writeServed',
+  'worktree.create',
+  'worktree.remove',
+  'worktree.lock',
+  'host.createDirectory',
+  'session.sendAll',
+  'session.stopAll',
+  'session.stopTree',
+])
+
+/**
+ * Methods that need the per-boot token but are NOT pinned to loopback: they stay reachable under
+ * the same `trustedHosts` Host fence as before, and a valid token is added on top (OP-270). Both
+ * read the host filesystem (`host.listDirectory` lists any directory, `session.export` downloads a
+ * session log). The token is only ever issued to a loopback browser, so in practice a LAN client
+ * (no cookie) is refused with 401 here; the token never widens who may call.
+ */
+const TOKEN_REQUIRED_METHODS = new Set([
+  'session.export',
+  'host.listDirectory',
 ])
 
 /**
@@ -171,20 +218,24 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
   for (const entry of trustedHosts) assertTrustedAuthority(entry)
   if (ctx.get('apiProxy') !== undefined) assertImageBodyCapacity(ctx, maxRequestBodyBytes)
   const connection = new HostConnectionService(ctx, trustedHosts)
-  const fetchHandler = connection.createSharedFetchHandler(API_PATH, {
-    async fetch(request, peerIsLoopback) {
+  const callerAuth = connection.callerAuth
+  let lastRefusalWarnAt = Number.NEGATIVE_INFINITY
+  let suppressedRefusals = 0
+  /** Rate-limited server warning for a refused call; names the method, never a token or code. */
+  const warnRefusal = (what: string): void => {
+    const now = Date.now()
+    if (now - lastRefusalWarnAt < REFUSAL_WARN_INTERVAL_MS) {
+      suppressedRefusals += 1
+      return
+    }
+    const suppressed = suppressedRefusals > 0 ? ` (${String(suppressedRefusals)} similar refusals suppressed)` : ''
+    lastRefusalWarnAt = now
+    suppressedRefusals = 0
+    ctx.logger.warn(`client-connection: refused ${what}${suppressed}`)
+  }
+  const sharedFetch = connection.createSharedFetchHandler(API_PATH, {
+    async fetch(request, peerIsLoopback, callerAuthenticated = false) {
       const pathname = new URL(request.url).pathname
-      const method = pathname.startsWith(`${API_PATH}/`)
-        ? pathname.slice(API_PATH.length + 1)
-        : undefined
-      if (method !== undefined
-        && PRIVILEGED_METHODS.has(method)
-        // The pin is the raw socket peer (fail closed), never a header: a LAN caller can send
-        // `Host: localhost`, and `X-Forwarded-For` is deliberately not consulted. The Host
-        // check stays as the second, DNS-rebinding half.
-        && (!peerIsLoopback || !isTrustedApiRequest(request, []))) {
-        return new Response('forbidden', { status: 403 })
-      }
       if (request.method === 'GET' && (pathname === MUX_EVENTS_PATH || pathname === HOST_EVENTS_PATH)) {
         return new Response('upgrade required', {
           status: 426,
@@ -193,9 +244,43 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
       }
       const apiProxy = ctx.get('apiProxy')
       if (apiProxy === undefined) return new Response('not found', { status: 404 })
-      return toFetchHandler(apiProxy).fetch(request, undefined, peerIsLoopback)
+      return toFetchHandler(apiProxy).fetch(request, undefined, peerIsLoopback, callerAuthenticated)
     },
   })
+  // The gate runs OUTSIDE the shared handler so it also covers endpoints that an interceptor
+  // (for example `workflow/*`) claims before the fallback is reached.
+  const fetchHandler: FetchHandler = {
+    async fetch(request, peerIsLoopback) {
+      const pathname = new URL(request.url).pathname
+      if (pathname === AUTH_EXCHANGE_PATH) {
+        return exchangeLaunchCode(request, peerIsLoopback, code => callerAuth.exchange(code), warnRefusal)
+      }
+      const method = pathname.startsWith(`${API_PATH}/`)
+        ? pathname.slice(API_PATH.length + 1)
+        : undefined
+      // Loopback-pinned means: raw socket peer loopback AND a loopback Host with no trusted-host
+      // list. The peer is the raw socket (fail closed), never a header: a LAN caller can send
+      // `Host: localhost`, and `X-Forwarded-For` is deliberately not consulted.
+      const loopbackPinned = peerIsLoopback && isTrustedApiRequest(request, [])
+      // A valid token only counts from a loopback-pinned caller: the token never widens who may call.
+      const callerAuthenticated = loopbackPinned && callerAuth.verify(requestToken(request))
+      if (method !== undefined && PRIVILEGED_METHODS.has(method)) {
+        if (!loopbackPinned) return new Response('forbidden', { status: 403 })
+        if (!callerAuthenticated) {
+          warnRefusal(`privileged call ${method}: missing or stale caller token`)
+          return tokenRequiredResponse()
+        }
+      } else if (method !== undefined && TOKEN_REQUIRED_METHODS.has(method)) {
+        // Same Host fence as every /api request (already applied by the route); only the token is added.
+        // A token is honoured from a trusted LAN peer too, hence verify() directly rather than the pin.
+        if (!callerAuth.verify(requestToken(request))) {
+          warnRefusal(`token-required call ${method}: missing or stale caller token`)
+          return tokenRequiredResponse()
+        }
+      }
+      return sharedFetch.fetch(request, peerIsLoopback, callerAuthenticated)
+    },
+  }
   const route: WebRoute = {
     kind: 'prefix',
     path: API_PATH,
@@ -233,5 +318,67 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
     apiCtx.effect(() => () => downlinks.close(), 'client-connection: WebSocket downlinks')
     registerDownlink(MUX_EVENTS_PATH, (req, socket, head) => { downlinks.handleMux(req, socket, head) })
     registerDownlink(HOST_EVENTS_PATH, (req, socket, head) => { downlinks.handleHost(req, socket, head) })
+  })
+}
+
+/** The per-boot token the request carries in its `dsh_auth_<port>` cookie, or undefined. */
+function requestToken(request: Request): string | undefined {
+  const host = request.headers.get('host')
+  if (host === null) return undefined
+  let port: string
+  try {
+    port = new URL(`http://${host}`).port
+  } catch {
+    return undefined
+  }
+  return readCookie(request.headers.get('cookie'), authCookieName(port))
+}
+
+function tokenRequiredResponse(): Response {
+  return new Response(CALLER_TOKEN_REQUIRED_MESSAGE, {
+    status: 401,
+    headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+  })
+}
+
+/**
+ * `POST /api/auth.exchange`: trade a single-use launch code for the per-boot token cookie.
+ * Loopback peer and loopback Host only (403 otherwise); the token travels only in `Set-Cookie`,
+ * never in the body.
+ */
+async function exchangeLaunchCode(
+  request: Request,
+  peerIsLoopback: boolean,
+  exchange: (code: unknown) => string | undefined,
+  warnRefusal: (what: string) => void,
+): Promise<Response> {
+  if (!peerIsLoopback || !isTrustedApiRequest(request, [])) return new Response('forbidden', { status: 403 })
+  if (request.method !== 'POST') return new Response('method not allowed', { status: 405, headers: { allow: 'POST' } })
+  const mediaType = request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase()
+  if (mediaType !== 'application/json') return new Response('content type must be application/json', { status: 415 })
+  let body: unknown
+  try {
+    body = await request.json()
+  } catch {
+    return new Response('body is not JSON', { status: 400 })
+  }
+  const code = typeof body === 'object' && body !== null ? (body as { code?: unknown }).code : undefined
+  const token = exchange(code)
+  if (token === undefined) {
+    warnRefusal('launch code exchange: invalid, replayed or expired code')
+    return new Response(LAUNCH_CODE_REJECTED_MESSAGE, {
+      status: 401,
+      headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+    })
+  }
+  // isTrustedApiRequest above proved a Host header exists and parses.
+  const port = new URL(`http://${request.headers.get('host') ?? ''}`).port
+  return new Response(JSON.stringify({ ok: true }), {
+    status: 200,
+    headers: {
+      'content-type': 'application/json',
+      'cache-control': 'no-store',
+      'set-cookie': authCookieHeader(authCookieName(port), token),
+    },
   })
 }
