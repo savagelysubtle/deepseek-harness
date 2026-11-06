@@ -7,8 +7,11 @@
     "bwrap",
     "icacls",
     "musl-gcc",
+    "pgrep",
     "python3",
     "sandbox-exec",
+    "systemctl",
+    "systemd-run",
     "tar",
     "taskkill",
     "where.exe"
