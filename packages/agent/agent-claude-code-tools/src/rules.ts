@@ -59,13 +59,23 @@ function rule(tool: 'Read' | 'Edit', abs: string, dir: boolean): string[] {
  * @param role - `lead` gets the deny set only; `coder` also gets Read/Edit limited to the cwd.
  * @param cwd - the seat's working directory; must be canonical and free of pattern characters.
  * @param home - the operator's home directory; same requirement.
+ * @param policyDir - the host's policy directory (canonical, existing); denied like the protected home locations when given.
  * @returns the rules plus the matching absolute prefixes and roots for the policy file.
- * @throws {UnsafePathError} when `cwd` or `home` is unusable in a rule, the cwd is the home directory or sits inside a
- *   protected home location, or the cwd is on a case-insensitive filesystem.
+ * @throws {UnsafePathError} when `cwd` or `home` is unusable in a rule, the cwd contains the policy directory, the cwd is the
+ *   home directory or sits inside a protected home location, the cwd is inside the policy directory, or the cwd is on a
+ *   case-insensitive filesystem.
  */
-export function generateRules(role: PolicyRole, cwd: string, home: string): GeneratedRules {
+export function generateRules(role: PolicyRole, cwd: string, home: string, policyDir?: string): GeneratedRules {
   assertCanonicalDir('cwd', cwd)
   assertCanonicalDir('home', home)
+  if (policyDir !== undefined) {
+    assertCanonicalDir('policyDir', policyDir)
+    // A cwd holding the policy directory would expose the policy files and the guard copy to anything that
+    // can write the cwd (the sandboxed shell).
+    if (isInside(cwd, policyDir)) {
+      throw new UnsafePathError('cwd', cwd, `it contains the policy directory ${policyDir}; keep the policy directory outside every seat working directory`)
+    }
+  }
   if (cwd === home) throw new UnsafePathError('cwd', cwd, 'it is the home directory itself; start the seat in a project directory below it')
   assertCaseSensitiveEntries(cwd, CWD_DENIED.map(entry => entry.rel))
   const deniedPrefixes: string[] = []
@@ -73,6 +83,9 @@ export function generateRules(role: PolicyRole, cwd: string, home: string): Gene
   const entries = [
     ...HOME_DENIED.map(entry => ({ abs: join(home, entry.rel), dir: entry.dir })),
     ...CWD_DENIED.map(entry => ({ abs: join(cwd, entry.rel), dir: entry.dir })),
+    // The 0700 policy directory (policy files and the 0500 guard copy) is denied to file tools as defence in depth;
+    // a cwd that contains it or sits inside it is refused.
+    ...policyDir === undefined ? [] : [{ abs: policyDir, dir: true }],
   ]
   for (const entry of entries) {
     if (isInside(entry.abs, cwd)) throw new UnsafePathError('cwd', cwd, `it sits inside the protected location ${entry.abs}; start the seat in a project directory elsewhere`)

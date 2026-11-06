@@ -3148,6 +3148,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type AgentStatus = \'idle\' | \'running\';',
   },
   {
+    name: 'AlwaysTaint',
+    declaration: 'export interface AlwaysTaint {\n    readonly taint: \'always\';\n    readonly taintReason?: undefined;\n}',
+  },
+  {
     name: 'ApprovalOutcome',
     declaration: 'export type ApprovalOutcome = \'allowed-once\' | \'rejected\' | \'cancelled\' | \'unavailable\';',
   },
@@ -4164,6 +4168,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface ModelModalityMap {\n    text: \'text\';\n    image: \'image\';\n}',
   },
   {
+    name: 'NeverTaint',
+    declaration: 'export interface NeverTaint {\n    readonly taint: \'never\';\n    readonly taintReason: string;\n}',
+  },
+  {
     name: 'NodeFailureRecord',
     declaration: 'export interface NodeFailureRecord {\n    readonly code: string;\n    readonly message: string;\n    readonly remedy: string;\n}',
   },
@@ -4540,6 +4548,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type ScopeKey = object;',
   },
   {
+    name: 'ScrubRoot',
+    declaration: 'export type ScrubRoot = \'home\' | \'cwd\';',
+  },
+  {
     name: 'SearchFileMatches',
     declaration: 'export interface SearchFileMatches {\n    path: string;\n    matches: SearchLineMatch[];\n}',
   },
@@ -4572,6 +4584,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SeatDriverRowChanged {\n    readonly seat: string;\n    readonly changed: readonly string[];\n}',
   },
   {
+    name: 'SeatScrubOptions',
+    declaration: 'export interface SeatScrubOptions {\n    readonly scrubRoots?: readonly ScrubRoot[];\n    readonly maxLength?: number;\n}',
+  },
+  {
     name: 'SeatSenderClass',
     declaration: 'export type SeatSenderClass = typeof SEAT_SENDER_CLASSES[number];',
   },
@@ -4585,11 +4601,15 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SeatTool',
-    declaration: 'export interface SeatTool {\n    readonly name: string;\n    readonly description: string;\n    readonly inputSchema: z.ZodType;\n    handler(input: unknown): Promise<SeatToolResult>;\n}',
+    declaration: 'export type SeatTool = SeatToolBase & TaintDeclaration;',
+  },
+  {
+    name: 'SeatToolBase',
+    declaration: 'export interface SeatToolBase {\n    readonly name: string;\n    readonly description: string;\n    readonly inputSchema: z.ZodType;\n    handler(input: unknown, signal?: AbortSignal): Promise<SeatToolResult>;\n}',
   },
   {
     name: 'SeatToolContext',
-    declaration: 'export interface SeatToolContext {\n    readonly seat: string;\n    readonly sendTo: readonly string[];\n    readonly allowBlocking: boolean;\n    isTainted(): boolean;\n    markTainted(reason: string): void;\n    deliveredTraceIds(): ReadonlySet<string>;\n    publish(input: MailboxPublishInput, signal?: AbortSignal): Promise<unknown>;\n    newTraceId(): string;\n    warn(message: string): void;\n    scrub(text: string): string;\n}',
+    declaration: 'export interface SeatToolContext {\n    readonly seat: string;\n    readonly sendTo: readonly string[];\n    readonly allowBlocking: boolean;\n    readonly cwd: string;\n    isTainted(): boolean;\n    markTainted(reason: string): void;\n    deliveredTraceIds(): ReadonlySet<string>;\n    publish(input: MailboxPublishInput, signal?: AbortSignal): Promise<unknown>;\n    newTraceId(): string;\n    warn(message: string): void;\n    scrub(text: string, options?: SeatScrubOptions): string;\n}',
   },
   {
     name: 'SeatToolFactory',
@@ -5158,6 +5178,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'TableValueOf',
     declaration: 'export type TableValueOf<S extends DomainSpec, N extends keyof S[\'tables\']> = S[\'tables\'][N] extends DomainTableSpec<string, infer V> ? V : never;',
+  },
+  {
+    name: 'TaintDeclaration',
+    declaration: 'export type TaintDeclaration = AlwaysTaint | NeverTaint;',
   },
   {
     name: 'TerminalBackend',

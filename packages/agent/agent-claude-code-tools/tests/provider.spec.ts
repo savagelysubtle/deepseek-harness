@@ -14,6 +14,7 @@ import type { PolicyOptions } from '../src/provider.ts'
 import { ReadinessRegistry } from '../src/readiness.ts'
 import { createLeadTemplate } from '../src/mcp/template.ts'
 import { defineSeatTool, textResult } from '../src/mcp/types.ts'
+import type { SeatScrubOptions } from '../src/mcp/types.ts'
 import { DIRECTORY_SCHEMA } from '../src/mcp/schema.ts'
 import { installRealGuard, makeSandbox } from './helpers.ts'
 import type { Sandbox } from './helpers.ts'
@@ -142,15 +143,15 @@ describe('the tools see the live query, not a snapshot', () => {
   it('wires markTainted through to the driver for any future tool that reads external content', async () => {
     const template = createLeadTemplate()
     template.register('peek', context => defineSeatTool(context, {
-      name: 'peek', description: 'reads external content', inputSchema: DIRECTORY_SCHEMA,
-      handler: async () => { context.markTainted('read mail body'); return textResult(context, 'body') },
+      name: 'peek', description: 'reads external content', inputSchema: DIRECTORY_SCHEMA, taint: 'always',
+      handler: async () => textResult(context, 'body'),
     }))
     const contributors = new ContributorRegistry()
     contributors.registerToolContributor({ id: 'peek', roles: ['lead'], names: ['peek'] })
     const q = query({ tools: ['peek'] })
     const ext = createClaudeCodePolicy(options({ template, contributors })).extend(q)
     await callThroughServer(ext.mcpServers?.dsh.instance, 'peek', {})
-    expect(q.marks).toEqual(['read mail body'])
+    expect(q.marks).toEqual(['tool:peek'])
     expect(ext.allow).toEqual(['mcp__dsh__peek'])
   })
 
@@ -325,7 +326,7 @@ describe('policy cache keys on the registries (F5) and the file check never hang
     const versions = (): number[] => [readiness.version, template.version, contributors.version]
     const start = versions()
     readiness.register({ id: 'a', provides: 'sandbox' })
-    template.register('ping', context => defineSeatTool(context, { name: 'ping', description: 'x', inputSchema: DIRECTORY_SCHEMA, handler: () => Promise.resolve(textResult(context, 'x')) }))
+    template.register('ping', context => defineSeatTool(context, { name: 'ping', description: 'x', inputSchema: DIRECTORY_SCHEMA, taint: 'never', taintReason: 'test tool returning a constant', handler: () => Promise.resolve(textResult(context, 'x')) }))
     contributors.registerToolContributor({ id: 't', roles: ['coder'], names: ['ping'] })
     expect(versions().every((value, index) => value > (start[index] ?? 0))).toBe(true)
   })
@@ -423,7 +424,7 @@ describe('muting', () => {
   it('an unknown tool name throws with the names, and so does a name the policy template does not offer', () => {
     expect(() => createClaudeCodePolicy(options()).extend(query({ tools: ['mailbox_send', 'mailbox_await', 'bash'] }))).toThrow(/cannot provide: mailbox_await, bash/)
     const template = createLeadTemplate()
-    template.register('extra', context => defineSeatTool(context, { name: 'extra', description: 'x', inputSchema: DIRECTORY_SCHEMA, handler: async () => textResult(context, 'x') }))
+    template.register('extra', context => defineSeatTool(context, { name: 'extra', description: 'x', inputSchema: DIRECTORY_SCHEMA, taint: 'never', taintReason: 'test tool returning a constant', handler: async () => textResult(context, 'x') }))
     let caught: unknown
     try {
       createClaudeCodePolicy(options({ template })).extend(query({ tools: ['extra'] }))
@@ -460,6 +461,195 @@ describe('readiness and roles', () => {
 
   it('a mail-only seat takes no policy', () => {
     expect(() => createClaudeCodePolicy(options()).extend(query(LEAD, { role: 'mail-only' }))).toThrow(/mail-only/)
+  })
+})
+
+describe('the seat closure: cwd and scrub roots', () => {
+  /** A tool that reports the closure's cwd and scrubs a fixed text with the requested options. */
+  function probeTemplate(text: () => string, scrubOptions?: SeatScrubOptions) {
+    const template = createLeadTemplate()
+    template.register('probe', context => defineSeatTool(context, {
+      name: 'probe', description: 'x', inputSchema: DIRECTORY_SCHEMA, taint: 'never', taintReason: 'test tool returning a constant',
+      handler: async () => textResult(context, `${context.cwd}|${text()}`, false, scrubOptions),
+    }))
+    const contributors = new ContributorRegistry()
+    contributors.registerToolContributor({ id: 'probe', roles: ['lead'], names: ['probe'] })
+    return { template, contributors }
+  }
+  async function run(scrubOptions: SeatScrubOptions | undefined, text: () => string): Promise<string> {
+    const { template, contributors } = probeTemplate(text, scrubOptions)
+    const ext = createClaudeCodePolicy(options({ template, contributors })).extend(query({ tools: ['probe'] }))
+    return textOf(await callThroughServer(ext.mcpServers?.dsh.instance, 'probe', {}))
+  }
+
+  it('hands every tool the pinned cwd', async () => {
+    expect(await run(undefined, () => 'x')).toBe('[path]|x')
+  })
+
+  it('scrubs home and cwd by default (the mailbox tools\' behaviour)', async () => {
+    expect(await run(undefined, () => `${box.home}/a ${box.cwd}/b`)).toBe('[path]|[path] [path]')
+  })
+
+  it('a tool scrubbing with roots [home] leaves the cwd readable', async () => {
+    expect(await run({ scrubRoots: ['home'] }, () => `${box.home}/a ${box.cwd}/b`)).toBe(`${box.cwd}|[path] ${box.cwd}/b`)
+  })
+
+  it('a tool scrubbing with roots [cwd] leaves the home readable', async () => {
+    expect(await run({ scrubRoots: ['cwd'] }, () => `${box.home}/a ${box.cwd}/b`)).toBe(`[path]|${box.home}/a [path]`)
+  })
+
+  it('refuses an empty or unknown scrub root list: at least one root is required (the handler throws, the SDK reports it)', async () => {
+    expect(await run({ scrubRoots: [] }, () => 'x')).toMatch(/at least one of "home" and "cwd"/)
+    expect(await run({ scrubRoots: ['tmp' as never] }, () => 'x')).toMatch(/at least one of/)
+  })
+
+  it('refuses a maxLength that is not a positive safe integer of at most 1 MiB, and accepts the bounds', async () => {
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 1.5, 2 * 1_048_576, Number.MAX_SAFE_INTEGER + 2]) {
+      expect(await run({ maxLength: bad }, () => 'x')).toMatch(/maxLength must be a positive integer of at most 1048576/)
+    }
+    expect(await run({ maxLength: 1_048_576 }, () => 'x')).toBe('[path]|x')
+    expect(await run({ maxLength: 1000 }, () => 'x')).toBe('[path]|x')
+  })
+
+  describe('a cwd under the home directory, roots [home]', () => {
+    let nested: string
+    beforeEach(() => {
+      nested = join(box.home, 'clones', 'seat-one')
+      mkdirSync(nested, { recursive: true })
+    })
+
+    async function nestedRun(text: () => string, roots: SeatScrubOptions['scrubRoots'], maxLength?: number): Promise<string> {
+      const scrub: SeatScrubOptions = {
+        ...roots === undefined ? {} : { scrubRoots: roots },
+        ...maxLength === undefined ? {} : { maxLength },
+      }
+      const { template, contributors } = probeTemplate(text, scrub)
+      const ext = createClaudeCodePolicy(options({ template, contributors })).extend(query({ tools: ['probe'] }, { cwd: nested }))
+      return textOf(await callThroughServer(ext.mcpServers?.dsh.instance, 'probe', {}))
+    }
+
+    it('keeps a path inside the cwd and still redacts a sibling path under the home', async () => {
+      const out = await nestedRun(() => `${nested}/src/a.ts ${nested} ${box.home}/clones/other/x ${box.home}/.ssh/id`, ['home'])
+      expect(out).toBe(`${nested}|${nested}/src/a.ts ${nested} [path] [path]`)
+    })
+
+    it('does not treat a longer sibling name as inside the cwd, and still caps the length and strips controls', async () => {
+      expect(await nestedRun(() => `${nested}-two/x`, ['home'])).toBe(`${nested}|[path]`)
+      expect(await nestedRun(() => `a\u0000b ${nested}/f ${'z'.repeat(60)}`, ['home'], 40)).toMatch(/^.{1,40}$/su)
+      expect(await nestedRun(() => `${nested}/f\u0000g`, ['home'])).toBe(`${nested}|${nested}/fg`)
+    })
+
+    it('strips controls before matching, so a NUL cannot disguise a sibling name as the cwd', async () => {
+      expect(await nestedRun(() => `${nested}\u0000-two/x`, ['home'])).toBe(`${nested}|[path]`)
+    })
+
+    it('a path that climbs out of the cwd with a .. segment is not inside it; a dotted name is', async () => {
+      expect(await nestedRun(() => `${nested}/../.ssh/id`, ['home'])).toBe(`${nested}|[path]`)
+      expect(await nestedRun(() => `${nested}/a/../../x ok ${nested}/..`, ['home'])).toBe(`${nested}|[path] ok [path]`)
+      expect(await nestedRun(() => `${nested}/a/..b/c ${nested}/.hidden`, ['home'])).toBe(`${nested}|${nested}/a/..b/c ${nested}/.hidden`)
+      expect(await nestedRun(() => `${nested}/../x then ${nested}/ok`, ['home'])).toBe(`${nested}|[path] then ${nested}/ok`)
+    })
+
+    it('with cwd among the roots, the cwd is redacted again', async () => {
+      expect(await nestedRun(() => `${nested}/src`, ['home', 'cwd'])).toBe('[path]|[path]')
+    })
+  })
+
+  it('honours a longer length cap than the mailbox default', async () => {
+    const long = 'y'.repeat(5000)
+    expect((await run(undefined, () => long)).length).toBeLessThan(4100)
+    expect((await run({ maxLength: 20_000 }, () => long)).length).toBeGreaterThan(5000)
+  })
+})
+
+describe('allowedCwdRoots (plugin-side cwd pin)', () => {
+  it('serves a cwd inside a root, including the root itself, and refuses one outside', () => {
+    const inside = createClaudeCodePolicy(options({ allowedCwdRoots: [box.root] }))
+    expect(inside.extend(query(LEAD)).allow).toContain('mcp__dsh__mailbox_send')
+    expect(createClaudeCodePolicy(options({ allowedCwdRoots: [box.cwd] })).extend(query(LEAD)).allow).toBeDefined()
+    const outside = createClaudeCodePolicy(options({ allowedCwdRoots: [box.outside] }))
+    expect(() => outside.extend(query(LEAD))).toThrow(/is not inside an allowed cwd root/)
+    // whole segments: /a/proj is not inside /a/pro
+    const prefixOnly = createClaudeCodePolicy(options({ allowedCwdRoots: [box.cwd.slice(0, -1)] }))
+    expect(() => prefixOnly.extend(query(LEAD))).toThrow(/allowed cwd root/)
+  })
+
+  it('an empty list refuses every seat; absent means no pin', () => {
+    expect(() => createClaudeCodePolicy(options({ allowedCwdRoots: [] })).extend(query(LEAD))).toThrow(/allowed cwd root/)
+    expect(createClaudeCodePolicy(options()).extend(query(LEAD))).toBeDefined()
+  })
+
+  it('refuses a root that is not absolute, not normalised, or the filesystem root, at construction', () => {
+    for (const root of ['relative/dir', '/a/../b', '/a/b/', '/']) {
+      expect(() => createClaudeCodePolicy(options({ allowedCwdRoots: [root] }))).toThrow(/allowedCwdRoots entry/)
+    }
+  })
+
+  it('is part of the plugin config and reaches the policy', async () => {
+    expect(Plugin.Config({ policyDir: '/x', allowedCwdRoots: ['/a'] }).allowedCwdRoots).toEqual(['/a'])
+    const ctx = new Context()
+    Plugin.apply(ctx, { policyDir: join(box.root, 'p'), home: box.home, nodePath: fakeNode, guardPath: fakeGuard, allowedCwdRoots: [box.outside] })
+    const policy = ctx.get('claudeCodePolicy') as ClaudeCodePolicy
+    expect(() => policy.extend(query(LEAD))).toThrow(/allowed cwd root/)
+    expect(() => { Plugin.apply(new Context(), { policyDir: join(box.root, 'p'), allowedCwdRoots: ['rel'] }) }).toThrow(/allowedCwdRoots entry/)
+  })
+})
+
+describe('the policy directory is denied to file tools', () => {
+  it('is in the denied prefixes and the deny rules of a generated policy, and a cwd inside it is refused', () => {
+    const opts = options()
+    createClaudeCodePolicy(opts).extend(query(LEAD))
+    const file = JSON.parse(readFileSync(join(opts.policyDir, 'lead-one.json'), 'utf8')) as { deniedPrefixes: string[] }
+    expect(file.deniedPrefixes).toContain(opts.policyDir)
+    mkdirSync(join(opts.policyDir, 'work'))
+    expect(() => createClaudeCodePolicy(opts).extend(query(LEAD, { cwd: join(opts.policyDir, 'work') }))).toThrow(/inside the policy directory/)
+    expect(() => createClaudeCodePolicy(opts).extend(query(LEAD, { cwd: opts.policyDir }))).toThrow(/inside the policy directory/)
+  })
+
+  it('refuses a cwd that contains the policy directory, naming both paths, before any pin', () => {
+    const policyDir = join(box.cwd, 'state', 'policy')
+    const policy = createClaudeCodePolicy(options({ policyDir }))
+    let message = ''
+    try {
+      policy.extend(query(LEAD))
+    } catch (error: unknown) {
+      message = (error as Error).message
+    }
+    expect(message).toContain(JSON.stringify(box.cwd))
+    expect(message).toContain(JSON.stringify(policyDir))
+    expect(message).toContain('contains or is inside the policy directory')
+    expect(existsSync(policyDir)).toBe(false)
+    // an unrelated sibling cwd is still served afterwards: nothing was pinned
+    expect(policy.extend(query(LEAD, { cwd: box.outside })).allow).toContain('mcp__dsh__mailbox_send')
+  })
+})
+
+describe('readiness after the S6 sandbox contributor (changelog item 12)', () => {
+  const coder = (): PolicyQueryContext => query({ tools: ['mailbox_send'], send_to: ['sam'] }, { role: 'coder', seat: 'coder-one' })
+
+  it('coder is still refused with exactly canary and rules-hooks missing', () => {
+    const readiness = new ReadinessRegistry()
+    readiness.register({ id: 'sandbox-bwrap-seat', provides: 'sandbox' })
+    const policy = createClaudeCodePolicy(options({ readiness }))
+    expect(policy.readiness().missing).toEqual(['canary', 'rules-hooks'])
+    expect([...policy.readiness().roles]).toEqual(['lead'])
+    expect(() => policy.extend(coder())).toThrow('agent-claude-code-tools: seat "coder-one": role coder is not ready (missing: canary, rules-hooks)')
+  })
+
+  it('a bogus second sandbox contributor satisfies neither canary nor rules-hooks, and lead is unchanged', () => {
+    const readiness = new ReadinessRegistry()
+    readiness.register({ id: 'sandbox-bwrap-seat', provides: 'sandbox' })
+    readiness.register({ id: 'sandbox-bogus', provides: 'sandbox' })
+    const policy = createClaudeCodePolicy(options({ readiness }))
+    expect(policy.readiness().missing).toEqual(['canary', 'rules-hooks'])
+    expect(() => policy.extend(coder())).toThrow(/missing: canary, rules-hooks/)
+    expect(policy.extend(query(LEAD)).allow).toEqual(['mcp__dsh__mailbox_send', 'mcp__dsh__mailbox_directory'])
+  })
+
+  it('registering the same contributor id twice fails loud', () => {
+    const readiness = new ReadinessRegistry()
+    readiness.register({ id: 'sandbox-bwrap-seat', provides: 'sandbox' })
+    expect(() => { readiness.register({ id: 'sandbox-bwrap-seat', provides: 'sandbox' }) }).toThrow(/already registered/)
   })
 })
 
@@ -540,7 +730,7 @@ describe('mounting', () => {
           registries.readiness.register({ id: 's6-sandbox', provides: 'sandbox' })
           registries.contributors.registerToolContributor({ id: 's6-tools', roles: ['coder'], names: ['bash_sandboxed'] })
           registries.tools.register('bash_sandboxed', context => defineSeatTool(context, {
-            name: 'bash_sandboxed', description: 'x', inputSchema: DIRECTORY_SCHEMA, handler: () => Promise.resolve(textResult(context, 'x')),
+            name: 'bash_sandboxed', description: 'x', inputSchema: DIRECTORY_SCHEMA, taint: 'always', handler: () => Promise.resolve(textResult(context, 'x')),
           }))
           seen.push('registered')
         },

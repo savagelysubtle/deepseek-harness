@@ -36,7 +36,7 @@ describe('SeatToolTemplate (the contributor seam)', () => {
   it('lets a later slice append a tool without editing S5 files, and refuses a duplicate', async () => {
     const template = createLeadTemplate()
     template.register('ping', context => defineSeatTool(context, {
-      name: 'ping', description: 'pong', inputSchema: DIRECTORY_SCHEMA, handler: () => Promise.resolve(textResult(context, 'pong')),
+      name: 'ping', description: 'pong', inputSchema: DIRECTORY_SCHEMA, taint: 'never', taintReason: 'test tool returning a constant', handler: () => Promise.resolve(textResult(context, 'pong')),
     }))
     expect(template.names()).toEqual(['mailbox_send', 'mailbox_directory', 'ping'])
     const [tool] = template.build('lead-one', ['ping'], makeContext())

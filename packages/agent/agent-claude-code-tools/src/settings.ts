@@ -15,7 +15,7 @@ import { CODER_NATIVE_TOOLS, mcpToolName } from './contributors.ts'
 import type { ContributorRegistry, PolicyRole } from './contributors.ts'
 import { buildHookCommand, guardHookGroup } from './hook-command.ts'
 import type { HookGroup } from './hook-command.ts'
-import { writePolicyFile } from './policy-file.ts'
+import { ensurePolicyDir, writePolicyFile } from './policy-file.ts'
 import type { ToolsPolicyFile } from './policy-read.ts'
 import { generateRules } from './rules.ts'
 import type { GeneratedRules } from './rules.ts'
@@ -32,6 +32,8 @@ export interface PolicyInput {
   readonly home: string
   /** Host-private policy fields of the seat. */
   readonly host: PolicyHostSeatFields
+  /** The host's policy directory; when given, file tools are denied it (it holds the policy file and the guard copy). */
+  readonly policyDir?: string
   /** Tool and hook contributors. */
   readonly contributors: ContributorRegistry
   /**
@@ -44,7 +46,7 @@ export interface PolicyInput {
 
 /** Inputs of {@link generateSeatPolicy}. */
 export interface SeatPolicyInput extends PolicyInput {
-  /** Directory the policy file is written into. */
+  /** Directory the policy file is written into; also denied to the seat's file tools. */
   readonly policyDir: string
   /** The attested node binary the hook runs under. */
   readonly node: AttestedFile
@@ -94,7 +96,7 @@ function resolveDshTools(input: PolicyInput): string[] {
  */
 export function buildPolicyFile(
   input: PolicyInput,
-  rules: GeneratedRules = generateRules(input.role, input.cwd, input.home),
+  rules: GeneratedRules = generateRules(input.role, input.cwd, input.home, input.policyDir),
 ): ToolsPolicyFile {
   const dsh = resolveDshTools(input).map(mcpToolName)
   const tools = [...input.role === 'coder' ? CODER_NATIVE_TOOLS : [], ...dsh]
@@ -119,7 +121,9 @@ export function buildPolicyFile(
  * @throws on an unusable cwd or home, a muted seat, an invalid hook value or a failed write.
  */
 export function generateSeatPolicy(input: SeatPolicyInput): SeatPolicy {
-  const rules = generateRules(input.role, input.cwd, input.home)
+  // Created (or checked 0700) first so the rules can require a canonical, existing policy directory.
+  ensurePolicyDir(input.policyDir)
+  const rules = generateRules(input.role, input.cwd, input.home, input.policyDir)
   const policy = buildPolicyFile(input, rules)
   const written = writePolicyFile(input.policyDir, policy)
   const command = buildHookCommand({

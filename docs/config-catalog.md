@@ -249,10 +249,16 @@ export interface Config {
   nodePath?: string
   /** The built guard script; defaults to this package's `lib/seat-guard.js`. Attested before first use. */
   guardPath?: string
+  /**
+   * Absolute directories every seat's working directory must sit inside (the clone root the host provisions);
+   * a seat started elsewhere is refused at `extend`. Absent means no extra pin. An empty list refuses every seat.
+   * Entries must be canonical paths (no symlinks): they are compared lexically with the seat's canonical cwd.
+   */
+  allowedCwdRoots?: string[]
 }
 ```
 
-Source: [`packages/agent/agent-claude-code-tools/src/provider.ts:66`](../packages/agent/agent-claude-code-tools/src/provider.ts)
+Source: [`packages/agent/agent-claude-code-tools/src/provider.ts:69`](../packages/agent/agent-claude-code-tools/src/provider.ts)
 
 <a id="deepseek-aidsh-agent-default-model"></a>
 
@@ -1970,7 +1976,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/sandbox/sandbox-local/src/index.ts:44`](../packages/sandbox/sandbox-local/src/index.ts)
+Source: [`packages/sandbox/sandbox-local/src/index.ts:47`](../packages/sandbox/sandbox-local/src/index.ts)
 
 <a id="deepseek-aidsh-sandbox-policy"></a>
 
