@@ -1,7 +1,10 @@
 /**
- * Reading a clone's `.git/config` through git itself, fail closed. Git parses the file (`--list -z --no-includes`);
- * this module spawns it with a scrubbed environment, an absolute binary, cwd `/`, a timeout and an output cap, and
- * grants only a run that returned no error, no signal, status 0, empty stderr and a fully parsed NUL-terminated
+ * Reading a clone's `.git/config` through git itself, fail closed. Git parses the file (`--list -z
+ * --no-includes`);
+ * this module spawns it with a scrubbed environment, an absolute binary, cwd `/`, a timeout and an
+ * output cap, and
+ * grants only a run that returned no error, no signal, status 0, empty stderr and a fully parsed
+ * NUL-terminated
  * output. Every other outcome throws a typed {@link CloneCheckError}.
  *
  * @module @deepseek-ai/dsh-agent-claude-code-seat-checks/git-config
@@ -30,7 +33,31 @@ export interface GitRunResult {
 export type RunGit = (gitPath: string, args: readonly string[]) => GitRunResult
 
 /** The remedy shown when git itself cannot be used. */
-const GIT_REMEDY = `Remedy: install git at /usr/bin/git or set gitPath in the agent-claude-code-seat-checks row; see the host log lines starting ${LOG_PREFIX}`
+const GIT_REMEDY = 'Remedy: install git at /usr/bin/git or set gitPath in the '
+  + 'agent-claude-code-seat-checks row; '
+  + `see the host log lines starting ${LOG_PREFIX}`
+
+const PRINTABLE_NAME = /^[A-Za-z0-9._/@+=:-]+$/u
+
+/**
+ * A seat-controlled name (a hook file name, a config key with its subsection) made safe to print in
+ * a refusal or a
+ * log line: names made of plain characters print as they are; anything else (spaces, shell
+ * metacharacters, control
+ * characters, newlines, non-ASCII) prints as its byte count and the hex of its first 32 bytes, so
+ * an operator
+ * can never paste it into a shell by accident.
+ * @param name - the raw name.
+ * @returns the printable form.
+ */
+export function printableName(name: string): string {
+  if (PRINTABLE_NAME.test(name)) return name
+  const bytes = Buffer.from(name)
+  const shown = bytes.subarray(0, 32).toString('hex')
+  const more = bytes.length > 32 ? '...' : ''
+  return `<unprintable name, ${bytes.length} bytes, hex ${shown}${more}; `
+    + 'do not paste it, use the find command below>'
+}
 
 /**
  * Build a refusal.
@@ -45,7 +72,8 @@ export function refusal(seat: string, code: string, what: string, remedy: string
 }
 
 /**
- * Run the real git: scrubbed environment, cwd `/`, no shell, timeout, output cap, SIGKILL on timeout.
+ * Run the real git: scrubbed environment, cwd `/`, no shell, timeout, output cap, SIGKILL on
+ * timeout.
  * @param gitPath - absolute path of git.
  * @param args - git arguments.
  * @returns the normalised result.
@@ -61,7 +89,8 @@ export const realRunGit: RunGit = (gitPath, args) => {
     stdio: ['ignore', 'pipe', 'pipe'],
     shell: false,
   })
-  return { error: result.error, signal: result.signal, status: result.status, stdout: typeof result.stdout === 'string' ? result.stdout : '',
+  return { error: result.error, signal: result.signal, status: result.status,
+    stdout: typeof result.stdout === 'string' ? result.stdout : '',
     stderr: typeof result.stderr === 'string' ? result.stderr : '' }
 }
 
@@ -78,23 +107,27 @@ function spawnErrorCode(error: Error & { readonly code?: string }): string {
 }
 
 /**
- * Split `git config --list -z` output into records. Each record is NUL-terminated; the key ends at the first
+ * Split `git config --list -z` output into records. Each record is NUL-terminated; the key ends at
+ * the first
  * newline (a key written without `=` has none), and a value may itself hold newlines.
  * @param seat - the seat's bare name, for the refusal.
  * @param stdout - git's output.
  * @returns the records.
- * @throws {CloneCheckError} with code `parse` when the output is empty, not NUL-terminated, not valid text or holds an empty key.
+ * @throws {CloneCheckError} with code `parse` when the output is empty, not NUL-terminated, not
+ *   valid text or holds an empty key.
  */
 export function parseConfigRecords(seat: string, stdout: string): ConfigRecord[] {
-  if (stdout === '' || !stdout.endsWith('\0')) {
-    throw refusal(seat, 'parse', 'git config printed output that is empty or not NUL-terminated', GIT_REMEDY)
-  }
-  if (stdout.includes('�')) throw refusal(seat, 'parse', 'git config printed bytes that are not valid UTF-8', GIT_REMEDY)
+  if (stdout === '') throw refusal(seat, 'parse', 'git config printed an empty config', GIT_REMEDY)
+  if (!stdout.endsWith('\0')) throw refusal(seat, 'parse',
+    'git config printed output that is not NUL-terminated', GIT_REMEDY)
+  if (stdout.includes('�')) throw refusal(seat, 'parse',
+    'git config printed bytes that are not valid UTF-8', GIT_REMEDY)
   const records: ConfigRecord[] = []
   for (const record of stdout.slice(0, -1).split('\0')) {
     const newline = record.indexOf('\n')
     const key = newline === -1 ? record : record.slice(0, newline)
-    if (key === '') throw refusal(seat, 'parse', 'git config printed a record with an empty key', GIT_REMEDY)
+    if (key === '') throw refusal(seat, 'parse', 'git config printed a record with an empty key',
+      GIT_REMEDY)
     records.push({ key, value: newline === -1 ? undefined : record.slice(newline + 1) })
   }
   return records
@@ -109,13 +142,22 @@ export function parseConfigRecords(seat: string, stdout: string): ConfigRecord[]
  * @returns the parsed records.
  * @throws {CloneCheckError} on any outcome that is not a clean, fully parsed run.
  */
-export function readGitConfig(seat: string, gitPath: string, configPath: string, run: RunGit): ConfigRecord[] {
+export function readGitConfig(seat: string, gitPath: string, configPath: string,
+  run: RunGit): ConfigRecord[] {
+  // The caller lstat-checked configPath just before this; a swap in the gap before git opens the
+  // file is accepted
+  // (the same uid can already rewrite the policy files), because this check is drift detection, not
+  // a security boundary.
   const result = run(gitPath, ['config', '--file', configPath, '--list', '-z', '--no-includes'])
   if (result.error !== undefined) {
-    throw refusal(seat, spawnErrorCode(result.error), `git could not read ${configPath} (${result.error.code ?? result.error.message})`, GIT_REMEDY)
+    throw refusal(seat, spawnErrorCode(result.error),
+      `git could not read ${configPath} (${result.error.code ?? result.error.message})`, GIT_REMEDY)
   }
-  if (result.signal !== null) throw refusal(seat, 'git-signal', `git was ended by ${result.signal} while reading ${configPath}`, GIT_REMEDY)
-  if (result.status !== 0) throw refusal(seat, 'git-exit', `git exited with status ${String(result.status)} reading ${configPath}`, GIT_REMEDY)
-  if (result.stderr !== '') throw refusal(seat, 'git-stderr', `git printed errors reading ${configPath}`, GIT_REMEDY)
+  if (result.signal !== null) throw refusal(seat, 'git-signal',
+    `git was ended by ${result.signal} while reading ${configPath}`, GIT_REMEDY)
+  if (result.status !== 0) throw refusal(seat, 'git-exit',
+    `git exited with status ${String(result.status)} reading ${configPath}`, GIT_REMEDY)
+  if (result.stderr !== '') throw refusal(seat, 'git-stderr',
+    `git printed errors reading ${configPath}`, GIT_REMEDY)
   return parseConfigRecords(seat, result.stdout)
 }

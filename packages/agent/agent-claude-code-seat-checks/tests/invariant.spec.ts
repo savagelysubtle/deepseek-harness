@@ -12,7 +12,8 @@ describe('invariant companion', () => {
       return dispose
     })
     const disposer = await apply({ invariants: { register } } as unknown as Context)
-    expect(register).toHaveBeenCalledWith('@deepseek-ai/dsh-agent-claude-code-seat-checks', expect.any(Function))
+    expect(register).toHaveBeenCalledWith('@deepseek-ai/dsh-agent-claude-code-seat-checks',
+      expect.any(Function))
     expect(disposer).toBe(dispose)
     expect(name).toBe('agent-claude-code-seat-checks-invariant')
     expect(inject).toEqual(['invariants'])

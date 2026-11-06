@@ -14,8 +14,10 @@ let box: TempRoot
 beforeEach(() => { box = tempRoot() })
 afterEach(() => { box.cleanup() })
 
-const OK: GuardProbeResult = { ok: true, nodeSha256: 'a'.repeat(64), guardSha256: 'b'.repeat(64), policySha256: 'c'.repeat(64) }
-const real: CloneInspectDeps = { gitPath: GIT, run: realRunGit, fs: realCloneFs }
+const OK: GuardProbeResult = { ok: true, nodeSha256: 'a'.repeat(64), guardSha256: 'b'.repeat(64),
+  policySha256: 'c'.repeat(64) }
+const real: CloneInspectDeps = { gitPath: GIT, run: realRunGit, fs: realCloneFs,
+  remoteUrlAllow: ['/srv/'] }
 
 describe('runBootCanary', () => {
   it('passes the per-hook timeout to the probe and returns its result unchanged', async () => {
@@ -30,9 +32,11 @@ describe('runBootCanary', () => {
   })
 
   it('maps a rejecting probe to code error (the service is supposed never to reject)', async () => {
-    expect(await runBootCanary({ probe: () => Promise.reject(new Error('bang')) }, 10)).toEqual({ ok: false, code: 'error', reason: 'bang' })
+    expect(await runBootCanary({ probe: () => Promise.reject(new Error('bang')) },
+      10)).toEqual({ ok: false, code: 'error', reason: 'bang' })
     const reason: unknown = 'text'
-    expect(await runBootCanary({ probe: () => { throw reason } }, 10)).toEqual({ ok: false, code: 'error', reason: 'text' })
+    expect(await runBootCanary({ probe: () => { throw reason } }, 10)).toEqual({ ok: false,
+      code: 'error', reason: 'text' })
   })
 })
 
@@ -43,37 +47,47 @@ describe('selfTestCloneChecker', () => {
   })
 
   it('fails naming the scenario when the checker accepts a hostile clone', () => {
-    // A runner that reports a clean config whatever the file holds cannot see the config-based hostile scenarios.
+    // A runner that reports a clean config whatever the file holds cannot see the config-based
+    // hostile scenarios.
     const blind: RunGit = () => okResult('core.filemode\ntrue\0')
-    expect(() => { selfTestCloneChecker({ ...real, run: blind }) }).toThrow(/scenario "core\.hooksPath" expected config-key but got a pass/)
+    expect(() => { selfTestCloneChecker({ ...real,
+      run: blind }) }).toThrow(/scenario "core\.hooksPath" expected config-key but got a pass/)
   })
 
   it('fails when the checker refuses the clean clone', () => {
     const paranoid: RunGit = () => okResult('core.hookspath\n/x\0')
-    expect(() => { selfTestCloneChecker({ ...real, run: paranoid }) }).toThrow(/scenario "clean clone" expected a pass but got config-key/)
+    expect(() => { selfTestCloneChecker({ ...real,
+      run: paranoid }) }).toThrow(/scenario "clean clone" expected a pass but got config-key/)
   })
 
   it('fails when a hostile scenario is refused for the wrong reason', () => {
     const wrong: RunGit = (gitPath, args) => (
-      readFileSync(args[2] as string, 'utf8').includes('hooksPath') ? okResult('core.bare\ntrue\0') : realRunGit(gitPath, args)
+      readFileSync(args[2] as string,
+        'utf8').includes('hooksPath') ? okResult('core.bare\ntrue\0') : realRunGit(gitPath, args)
     )
     expect(() => { selfTestCloneChecker({ ...real, run: wrong }) })
       .toThrow(/scenario "core\.hooksPath" expected config-key but got config-value/)
   })
 
   it.each([
-    ['git-missing', 'ENOENT'], ['timeout', 'ETIMEDOUT'], ['enobufs', 'ENOBUFS'], ['eacces', 'EACCES'],
-  ])('propagates the environment failure %s instead of reporting a wrong verdict', (code, errno) => {
-    const run: RunGit = () => ({ error: errorWithCode(errno), signal: null, status: null, stdout: '', stderr: '' })
-    expect(() => { selfTestCloneChecker({ ...real, run }) }).toThrow(expect.objectContaining({ code }))
+    ['git-missing', 'ENOENT'], ['timeout', 'ETIMEDOUT'], ['enobufs', 'ENOBUFS'], ['eacces',
+      'EACCES'],
+  ])('propagates the environment failure %s instead of reporting a wrong verdict', (code,
+    errno) => {
+    const run: RunGit = () => ({ error: errorWithCode(errno), signal: null, status: null,
+      stdout: '', stderr: '' })
+    expect(() => { selfTestCloneChecker({ ...real,
+      run }) }).toThrow(expect.objectContaining({ code }))
   })
 
   it.each([
-    ['git-signal', { signal: 'SIGKILL' as const, status: null }], ['git-exit', { status: 2 }], ['git-stderr', { stderr: 'x' }],
+    ['git-signal', { signal: 'SIGKILL' as const, status: null }], ['git-exit', { status: 2 }],
+    ['git-stderr', { stderr: 'x' }],
     ['git-error', { error: errorWithCode('EIO') }], ['parse', { stdout: '' }],
   ])('propagates %s', (code, over) => {
     const run: RunGit = () => ({ ...okResult('core.filemode\ntrue\0'), ...over })
-    expect(() => { selfTestCloneChecker({ ...real, run }) }).toThrow(expect.objectContaining({ code }))
+    expect(() => { selfTestCloneChecker({ ...real,
+      run }) }).toThrow(expect.objectContaining({ code }))
   })
 
   it('propagates an unexpected non-check error and still cleans up', () => {
@@ -82,7 +96,7 @@ describe('selfTestCloneChecker', () => {
     expect(readdirSync(box.root)).toEqual([])
   })
 
-  it('works with a git script that behaves like git for these inputs (sanity of the harness itself)', () => {
+  it('works through a wrapper script that behaves like git (sanity of the harness)', () => {
     const script = join(box.root, 'git')
     writeFileSync(script, '#!/bin/sh\nexec /usr/bin/git "$@"\n')
     chmodSync(script, 0o755)

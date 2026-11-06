@@ -15,7 +15,8 @@ export const name = 'agent-claude-code-seat-checks-invariant'
 export const inject = ['invariants']
 
 /**
- * No runtime invariant: the package writes no session record and owns no durable data; the refusals are typed
+ * No runtime invariant: the package writes no session record and owns no durable data; the refusals
+ * are typed
  * `CloneCheckError`s and the registration order, pinned by this package's specs.
  */
 const install: InvariantInstaller = () => {}

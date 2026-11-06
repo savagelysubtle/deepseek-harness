@@ -59,6 +59,7 @@ describe('profile.cordis.patch.yml', () => {
     expect(config.enabled).toBe(true)
     expect(config.gitPath).toBeUndefined()
     expect(config.canaryTimeoutMs).toBe(20_000)
+    expect(config.remoteUrlAllow).toEqual(['/home/me/src/deepseek-harness/'])
     expect(SeatChecks.name).toBe('agent-claude-code-seat-checks')
   })
 

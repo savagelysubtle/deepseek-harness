@@ -2,7 +2,8 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { CloneCheckError } from '@deepseek-ai/dsh-agent-claude-code-tools'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { parseConfigRecords, readGitConfig, realRunGit, refusal } from '../src/git-config.ts'
+import { parseConfigRecords, printableName, readGitConfig, realRunGit,
+  refusal } from '../src/git-config.ts'
 import type { RunGit } from '../src/git-config.ts'
 import { CLEAN_CONFIG, errorWithCode, failing, GIT, okResult, tempRoot } from './helpers.ts'
 import type { TempRoot } from './helpers.ts'
@@ -27,8 +28,10 @@ function code(run: RunGit): string {
 describe('readGitConfig: grants only a clean run', () => {
   it('passes the exact argument vector to the injected runner', () => {
     const run = vi.fn<RunGit>(() => okResult('core.filemode\ntrue\0'))
-    expect(readGitConfig('s', GIT, '/x/.git/config', run)).toEqual([{ key: 'core.filemode', value: 'true' }])
-    expect(run).toHaveBeenCalledWith(GIT, ['config', '--file', '/x/.git/config', '--list', '-z', '--no-includes'])
+    expect(readGitConfig('s', GIT, '/x/.git/config', run)).toEqual([{ key: 'core.filemode',
+      value: 'true' }])
+    expect(run).toHaveBeenCalledWith(GIT, ['config', '--file', '/x/.git/config', '--list', '-z',
+      '--no-includes'])
   })
 
   it('grants a plain successful run', () => {
@@ -38,13 +41,15 @@ describe('readGitConfig: grants only a clean run', () => {
 
 describe('readGitConfig: every other outcome refuses with its own code', () => {
   it.each([
-    ['ENOENT', 'git-missing'], ['EACCES', 'eacces'], ['EPERM', 'eacces'], ['ETIMEDOUT', 'timeout'], ['ENOBUFS', 'enobufs'], ['EIO', 'git-error'],
+    ['ENOENT', 'git-missing'], ['EACCES', 'eacces'], ['EPERM', 'eacces'], ['ETIMEDOUT', 'timeout'],
+    ['ENOBUFS', 'enobufs'], ['EIO', 'git-error'],
   ])('spawn error %s -> %s', (errno, expected) => {
     expect(code(failing({ error: errorWithCode(errno) }))).toBe(expected)
   })
 
   it('maps an error without a code to git-error and names its message', () => {
-    expect(() => readGitConfig('s', GIT, '/x/.git/config', failing({ error: errorWithCode(undefined, 'weird') }))).toThrow('weird')
+    expect(() => readGitConfig('s', GIT, '/x/.git/config', failing({ error: errorWithCode(undefined,
+      'weird') }))).toThrow('weird')
   })
 
   it('an error wins even when status and output look fine', () => {
@@ -83,7 +88,33 @@ describe('readGitConfig: every other outcome refuses with its own code', () => {
   })
 })
 
+describe('printableName', () => {
+  it.each(['pre-commit', 'remote.origin.url', 'a/b@c+d=e:f-g_h'.replace('_',
+    '.')])('prints %s as it is', (name) => {
+    expect(printableName(name)).toBe(name)
+  })
+
+  it.each(['x;rm -rf ~', '$(id)', 'a b', 'a\nb', 'a`b`', 'caf\u00e9',
+    ''])('replaces %j by a byte count and hex', (name) => {
+    const shown = printableName(name)
+    expect(shown).toMatch(/^<unprintable name, \d+ bytes, hex [0-9a-f]*(\.\.\.)?; do not paste it/)
+    expect(shown).not.toMatch(/[;$`\n ](rm|\(id\))/)
+    expect(shown).not.toContain('\n')
+  })
+
+  it('cuts a long name to 32 bytes of hex and says so', () => {
+    const shown = printableName(`${'a'.repeat(40)} b`)
+    expect(shown).toContain('42 bytes')
+    expect(shown).toContain(`${'61'.repeat(32)}...`)
+  })
+})
+
 describe('parseConfigRecords', () => {
+  it('says "empty config" for empty output and "not NUL-terminated" for a cut-off one', () => {
+    expect(() => parseConfigRecords('s', '')).toThrow('an empty config')
+    expect(() => parseConfigRecords('s', 'a.b\nc')).toThrow('not NUL-terminated')
+  })
+
   it('splits on the first newline only, so a value may hold newlines', () => {
     expect(parseConfigRecords('s', 'user.name\nA\nB\0core.filemode\ntrue\0')).toEqual([
       { key: 'user.name', value: 'A\nB' }, { key: 'core.filemode', value: 'true' },
@@ -99,9 +130,13 @@ describe('parseConfigRecords', () => {
   })
 
   it.each([
-    ['empty', ''], ['no final NUL', 'a.b\nc'], ['replacement character', 'a.b\nc�\0'], ['empty key', '\nvalue\0'], ['empty record', 'a.b\nc\0\0'],
+    ['no final NUL', 'a.b\nc'],
+    ['replacement character', 'a.b\nc\uFFFD\0'],
+    ['empty key', '\nvalue\0'],
+    ['empty record', 'a.b\nc\0\0'],
   ])('refuses %s with code parse', (_label, stdout) => {
-    expect(() => parseConfigRecords('s', stdout)).toThrow(expect.objectContaining({ code: 'parse' }))
+    expect(() => parseConfigRecords('s',
+      stdout)).toThrow(expect.objectContaining({ code: 'parse' }))
   })
 })
 
@@ -132,17 +167,20 @@ describe('realRunGit', () => {
     expect(records).toEqual([{ key: 'include.path', value: extra }])
   })
 
-  it('ignores the host environment: parameters, global config and counted config do not leak in', () => {
-    const file = join(box.root, 'config')
-    writeFileSync(file, '[core]\n\tfilemode = true\n')
-    vi.stubEnv('GIT_CONFIG_PARAMETERS', '\'core.hookspath=/evil\'')
-    vi.stubEnv('GIT_CONFIG_COUNT', '1')
-    vi.stubEnv('GIT_CONFIG_KEY_0', 'core.hookspath')
-    vi.stubEnv('GIT_CONFIG_VALUE_0', '/evil')
-    expect(readGitConfig('s', GIT, file, realRunGit)).toEqual([{ key: 'core.filemode', value: 'true' }])
-  })
+  it('ignores the host environment: parameters, global config and counted config do not leak in',
+    () => {
+      const file = join(box.root, 'config')
+      writeFileSync(file, '[core]\n\tfilemode = true\n')
+      vi.stubEnv('GIT_CONFIG_PARAMETERS', '\'core.hookspath=/evil\'')
+      vi.stubEnv('GIT_CONFIG_COUNT', '1')
+      vi.stubEnv('GIT_CONFIG_KEY_0', 'core.hookspath')
+      vi.stubEnv('GIT_CONFIG_VALUE_0', '/evil')
+      expect(readGitConfig('s', GIT, file, realRunGit)).toEqual([{ key: 'core.filemode',
+        value: 'true' }])
+    })
 
   it('refuses a config file that does not exist (git exits non-zero)', () => {
-    expect(() => readGitConfig('s', GIT, join(box.root, 'missing'), realRunGit)).toThrow(expect.objectContaining({ code: 'git-exit' }))
+    expect(() => readGitConfig('s', GIT, join(box.root, 'missing'),
+      realRunGit)).toThrow(expect.objectContaining({ code: 'git-exit' }))
   })
 })

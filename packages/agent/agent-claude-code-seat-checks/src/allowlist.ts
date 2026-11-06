@@ -1,13 +1,18 @@
 /**
- * The allowlist applied to what `git config --list -z` printed for a clone. Git parses the file; this module only
- * judges already-normalised keys and values. Anything not listed is refused with its key named, because a key
- * outside the list can make a later host-side git command run code (`core.hooksPath`, `core.fsmonitor`, `filter.*`,
+ * The allowlist applied to what `git config --list -z` printed for a clone. Git parses the file;
+ * this module only
+ * judges already-normalised keys and values. Anything not listed is refused with its key named,
+ * because a key
+ * outside the list can make a later host-side git command run code (`core.hooksPath`,
+ * `core.fsmonitor`, `filter.*`,
  * `remote.*.uploadpack`, `credential.helper`, `include.path`, and so on).
  *
  * @module @deepseek-ai/dsh-agent-claude-code-seat-checks/allowlist
  */
 
-/** One record of `git config --list -z`: the key and, unless the key was a bare boolean, its value. */
+/**
+ * One record of `git config --list -z`: the key and, unless the key was a bare boolean, its value.
+ */
 export interface ConfigRecord {
   /** The key as git printed it. */
   readonly key: string
@@ -15,10 +20,15 @@ export interface ConfigRecord {
   readonly value: string | undefined
 }
 
-/** Why a record was refused: `config-key` (the key is not listed) or `config-value` (the key is listed but the value is not). */
+/**
+ * Why a record was refused: `config-key` (the key is not listed), `config-value` (the key is listed
+ * but the value is not)
+ * or `remote-url-not-allowed` (the url is well formed but the operator's `remoteUrlAllow` does not
+ * cover it).
+ */
 export interface AllowlistViolation {
   /** Machine-readable code. */
-  readonly code: 'config-key' | 'config-value'
+  readonly code: 'config-key' | 'config-value' | 'remote-url-not-allowed'
   /** The key involved. */
   readonly key: string
   /** What is wrong, without the remedy. */
@@ -39,30 +49,52 @@ const PLAIN_KEYS: ReadonlySet<string> = new Set([
 
 const FALSE_VALUES: ReadonlySet<string> = new Set(['false', 'no', 'off', '0', ''])
 const CONTROL = /[\u0000-\u001f\u007f]/u
-const WEB_URL = /^(?:https|ssh):\/\/(?:[A-Za-z0-9][A-Za-z0-9._~%+-]*@)?[A-Za-z0-9][A-Za-z0-9.-]*(?::\d+)?(?:\/[^\s]*)?$/u
-const SCP_URL = /^(?:[A-Za-z0-9][A-Za-z0-9._~%+-]*@)?[A-Za-z0-9][A-Za-z0-9.-]*:(?!\/\/)[^\s:][^\s]*$/u
+const USERINFO = '(?:[A-Za-z0-9][A-Za-z0-9._~%+-]*@)?'
+const HOST = '[A-Za-z0-9][A-Za-z0-9.-]*'
+const WEB_URL = new RegExp(`^(?:https|ssh)://${USERINFO}${HOST}(?::\\d+)?(?:/[^\\s]*)?$`, 'u')
+const SCP_URL = new RegExp(`^${USERINFO}${HOST}:(?!//)[^\\s:][^\\s]*$`, 'u')
 const PLAIN_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u
 const REMOTE_KEY = /^remote\.(.+)\.(url|fetch)$/u
 const BRANCH_KEY = /^branch\.(.+)\.(remote|merge)$/u
 
-function violation(code: AllowlistViolation['code'], key: string, reason: string): AllowlistViolation {
+function violation(code: AllowlistViolation['code'], key: string,
+  reason: string): AllowlistViolation {
   return { code, key, reason }
 }
 
 function remoteUrlProblem(value: string): string | undefined {
-  if (value.includes('::')) return 'a value containing `::` selects a remote helper that runs a program'
+  if (value.includes('::')) {
+    return 'a value containing `::` selects a remote helper that runs a program'
+  }
   if (CONTROL.test(value)) return 'the value holds a control character'
   if (value.startsWith('/')) return undefined
   if (WEB_URL.test(value) || SCP_URL.test(value)) return undefined
-  return 'the url must be an absolute local path, an https:// or ssh:// url, or an scp-style host:path'
+  return 'the url must be an absolute local path, an https:// or ssh:// url, or scp-style host:path'
+}
+
+/**
+ * Whether the operator's list covers a url: an exact entry, or an entry ending in `/` that the url
+ * starts with.
+ * An empty list covers nothing.
+ * @param allow - the `remoteUrlAllow` entries.
+ * @param value - the remote url.
+ * @returns true when covered.
+ */
+function urlAllowed(allow: readonly string[], value: string): boolean {
+  return allow.some(entry => value === entry || (entry.endsWith('/') && value.startsWith(entry)))
 }
 
 /**
  * Judge the records of one clone's config.
  * @param records - the parsed `git config --list -z` output.
+ * @param remoteUrlAllow - exact urls or `/`-suffixed prefixes a remote url must match; empty
+ *   refuses every remote url.
  * @returns the first violation, or `undefined` when every record is allowed.
  */
-export function checkConfigRecords(records: readonly ConfigRecord[]): AllowlistViolation | undefined {
+export function checkConfigRecords(
+  records: readonly ConfigRecord[],
+  remoteUrlAllow: readonly string[],
+): AllowlistViolation | undefined {
   for (const record of records) {
     const key = record.key.toLowerCase()
     if (key === 'core.bare') {
@@ -74,10 +106,15 @@ export function checkConfigRecords(records: readonly ConfigRecord[]): AllowlistV
     if (PLAIN_KEYS.has(key)) continue
     if (REMOTE_KEY.test(key)) {
       const kind = (REMOTE_KEY.exec(key) as RegExpExecArray)[2]
-      if (record.value === undefined) return violation('config-value', record.key, 'the key has no value')
+      if (record.value === undefined) return violation('config-value', record.key,
+        'the key has no value')
       if (kind === 'url') {
         const problem = remoteUrlProblem(record.value)
         if (problem !== undefined) return violation('config-value', record.key, problem)
+        if (!urlAllowed(remoteUrlAllow, record.value)) {
+          return violation('remote-url-not-allowed', record.key,
+            'the url is not covered by remoteUrlAllow in the seat-checks row')
+        }
       } else if (CONTROL.test(record.value)) {
         return violation('config-value', record.key, 'the value holds a control character')
       }
@@ -85,11 +122,14 @@ export function checkConfigRecords(records: readonly ConfigRecord[]): AllowlistV
     }
     if (BRANCH_KEY.test(key)) {
       const kind = (BRANCH_KEY.exec(key) as RegExpExecArray)[2]
-      if (record.value === undefined) return violation('config-value', record.key, 'the key has no value')
+      if (record.value === undefined) return violation('config-value', record.key,
+        'the key has no value')
       if (kind === 'remote' && !PLAIN_NAME.test(record.value)) {
-        return violation('config-value', record.key, 'branch.<name>.remote must be a plain remote name')
+        return violation('config-value', record.key,
+          'branch.<name>.remote must be a plain remote name')
       }
-      if (kind === 'merge' && CONTROL.test(record.value)) return violation('config-value', record.key, 'the value holds a control character')
+      if (kind === 'merge' && CONTROL.test(record.value)) return violation('config-value',
+        record.key, 'the value holds a control character')
       continue
     }
     return violation('config-key', record.key, 'the key is not on the allowlist for a coder clone')

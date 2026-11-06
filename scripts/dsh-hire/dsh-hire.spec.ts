@@ -288,6 +288,8 @@ describe('claude-code hire', () => {
         '1. git clone --no-hardlinks <src> <clone>',
         '2. Assert <clone>/.git is a directory (not a worktree file) and',
         '   <clone>/.git/objects/info/alternates is absent.',
+        '   Set remoteUrlAllow in the agent-claude-code-seat-checks row to <src> (exact, or a prefix ending in /);',
+        '   an empty list refuses every clone that has a remote url.',
         '3. In <clone>: pnpm install --offline --ignore-scripts --config.package-import-method=copy',
         '   (dependencies are copied, never hardlinked from the store; there is no network inside the sandbox;',
         "   --ignore-scripts keeps the repo's postinstall from writing git hooks into the clone)",

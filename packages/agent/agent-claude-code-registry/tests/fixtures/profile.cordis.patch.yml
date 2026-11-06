@@ -67,5 +67,9 @@
         # `enabled: false` registers nothing (coder seats stay not-ready), `gitPath` defaults to the
         # first of /usr/bin/git and /usr/local/bin/git, `canaryTimeoutMs` defaults to 20000.
         enabled: true
+        # Remote urls a coder clone may carry (exact values, or prefixes ending in `/`). Empty refuses
+        # every clone that has a remote url, so set it to the source repository.
+        remoteUrlAllow:
+          - /home/me/src/deepseek-harness/
     - id: agent-claude-code-registry
       name: '@deepseek-ai/dsh-agent-claude-code-registry'

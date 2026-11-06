@@ -1,11 +1,13 @@
-import { chmodSync, linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync,
+  writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { GitRunResult, RunGit } from '../src/git-config.ts'
 
 /** The config `git clone` writes, plus nothing else. */
 export const CLEAN_CONFIG = [
-  '[core]', '\trepositoryformatversion = 0', '\tfilemode = true', '\tbare = false', '\tlogallrefupdates = true',
+  '[core]', '\trepositoryformatversion = 0', '\tfilemode = true', '\tbare = false',
+  '\tlogallrefupdates = true',
   '[remote "origin"]', '\turl = /srv/example.git', '\tfetch = +refs/heads/*:refs/remotes/origin/*',
   '[branch "main"]', '\tremote = origin', '\tmerge = refs/heads/main', '',
 ].join('\n')
@@ -61,7 +63,8 @@ export function failing(over: Partial<GitRunResult>): RunGit {
   return () => ({ ...okResult('core.filemode\ntrue\0'), ...over })
 }
 
-export function errorWithCode(code: string | undefined, message = 'boom'): Error & { code?: string } {
+export function errorWithCode(code: string | undefined,
+  message = 'boom'): Error & { code?: string } {
   const error: Error & { code?: string } = new Error(message)
   if (code !== undefined) error.code = code
   return error
