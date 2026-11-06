@@ -20,18 +20,24 @@ function escapeLiteral(c: string): string {
   return REGEX_META.has(c) ? `\\${c}` : c
 }
 
+/** One compiled glob token. `seg` is a whole-segment double star followed by its slash, `tail` a trailing one. */
+type GlobToken =
+  | { readonly kind: 'lit'; readonly char: string }
+  | { readonly kind: 'one' | 'star' | 'deep' | 'seg' | 'tail' }
+
 /**
- * Compile an absolute, already-normalised glob pattern into an anchored RegExp. A double star
- * that is a whole path segment matches any depth including zero segments (a pattern with a
- * double-star segment between `a` and `b` matches both `a/b` and `a/x/y/b`); a trailing
- * double-star segment matches anything below its parent but not the parent itself. A double
- * star elsewhere inside a segment is `.*`, `*` is any run of non-`/` characters, `?` is exactly
- * one non-`/` character and everything else is literal.
- * @param pattern - the absolute glob pattern to compile.
- * @returns the compiled regular expression, anchored with `^` and `$`.
+ * Split an absolute, already-normalised glob pattern into tokens. A double star that is a whole
+ * path segment matches any depth including zero segments (`seg`, taking its slash with it, so a
+ * pattern with such a segment between `a` and `b` matches both `a/b` and `a/x/y/b`); at the end
+ * of the pattern it matches anything below its parent but not the parent itself (`tail`). A
+ * double star elsewhere inside a segment is `deep` (any characters), `*` is `star` (any run of
+ * non-`/` characters), `?` is `one` (exactly one non-`/` character) and everything else is
+ * literal. Consecutive `seg` tokens are collapsed into one: they mean the same thing.
+ * @param pattern - the absolute glob pattern.
+ * @returns the tokens in order.
  */
-export function globToRegExp(pattern: string): RegExp {
-  let source = ''
+function tokenizeGlob(pattern: string): GlobToken[] {
+  const tokens: GlobToken[] = []
   let i = 0
   while (i < pattern.length) {
     const c = pattern.charAt(i)
@@ -42,27 +48,80 @@ export function globToRegExp(pattern: string): RegExp {
       const wholeSegment = (i === 0 || pattern.charAt(i - 1) === '/') && (stars === pattern.length || pattern.charAt(stars) === '/')
       if (double && wholeSegment) {
         if (stars === pattern.length) {
-          source += '.+'
+          // A segment wildcard right before a trailing one adds nothing.
+          if (tokens.at(-1)?.kind === 'seg') tokens.pop()
+          tokens.push({ kind: 'tail' })
         } else {
-          source += '(?:[^/]+/)*'
           stars++
+          if (tokens.at(-1)?.kind !== 'seg') tokens.push({ kind: 'seg' })
         }
-        i = stars
-        continue
+      } else {
+        tokens.push({ kind: double ? 'deep' : 'star' })
       }
-      source += double ? '.*' : '[^/]*'
       i = stars
-      continue
-    }
-    if (c === '?') {
-      source += '[^/]'
+    } else {
+      tokens.push(c === '?' ? { kind: 'one' } : { kind: 'lit', char: c })
       i++
-      continue
     }
-    source += escapeLiteral(c)
-    i++
   }
+  return tokens
+}
+
+/**
+ * Compile an absolute, already-normalised glob pattern into an anchored RegExp (see
+ * {@link tokenizeGlob} for the semantics). Prefer {@link patternMatches} for matching: a regex
+ * built from many wildcards can backtrack polynomially, the matcher behind `patternMatches`
+ * cannot.
+ * @param pattern - the absolute glob pattern to compile.
+ * @returns the compiled regular expression, anchored with `^` and `$`.
+ */
+export function globToRegExp(pattern: string): RegExp {
+  const sources: Record<string, string> = { one: '[^/]', star: '[^/]*', deep: '.*', seg: '(?:[^/]+/)*', tail: '.+' }
+  const source = tokenizeGlob(pattern)
+    .map(token => (token.kind === 'lit' ? escapeLiteral(token.char) : (sources[token.kind] ?? '')))
+    .join('')
   return new RegExp(`^${source}$`)
+}
+
+/**
+ * Match a path against a glob without backtracking blow-up: dynamic programming over
+ * (token, position) pairs, each visited at most once, so the cost is bounded by
+ * tokens x path length however many wildcards the pattern has.
+ * @param pattern - the absolute glob pattern.
+ * @param path - the absolute path.
+ * @returns true when the whole path matches.
+ */
+function globMatches(pattern: string, path: string): boolean {
+  const tokens = tokenizeGlob(pattern)
+  const width = path.length + 1
+  const failed = new Set<number>()
+  const walk = (t: number, n: number): boolean => {
+    const key = t * width + n
+    if (failed.has(key)) return false
+    const token = tokens[t]
+    let ok: boolean
+    if (token === undefined) {
+      ok = n === path.length
+    } else if (token.kind === 'lit') {
+      ok = path.charAt(n) === token.char && n < path.length && walk(t + 1, n + 1)
+    } else if (token.kind === 'one') {
+      ok = n < path.length && path.charAt(n) !== '/' && walk(t + 1, n + 1)
+    } else if (token.kind === 'star') {
+      ok = walk(t + 1, n) || (n < path.length && path.charAt(n) !== '/' && walk(t, n + 1))
+    } else if (token.kind === 'deep') {
+      ok = walk(t + 1, n) || (n < path.length && walk(t, n + 1))
+    } else if (token.kind === 'tail') {
+      ok = n < path.length && (walk(t + 1, n + 1) || walk(t, n + 1))
+    } else {
+      // seg: zero segments, or one more non-empty segment plus its slash.
+      let end = n
+      while (end < path.length && path.charAt(end) !== '/') end++
+      ok = walk(t + 1, n) || (end > n && end < path.length && walk(t, end + 1))
+    }
+    if (!ok) failed.add(key)
+    return ok
+  }
+  return walk(0, 0)
 }
 
 /**
@@ -109,7 +168,7 @@ export function patternMatches(absPattern: string, absPath: string): boolean {
     if (absPattern === '/') return true
     return absPath === absPattern || absPath.startsWith(`${absPattern}/`)
   }
-  return globToRegExp(absPattern).test(absPath)
+  return globMatches(absPattern, absPath)
 }
 
 /** One seat's slice of the tree: its mailbox name plus the absolute patterns it owns. */
@@ -204,7 +263,7 @@ export function formatOwnerLookup(lookup: OwnerLookup): string {
   return lines.join('\n')
 }
 
-/** File-visit budget the overlap scan enforces across all seats and patterns. */
+/** Budget of distinct paths (files and directories) per seat that the overlap scan may visit, summed over all seats. */
 export const DEFAULT_MAX_SCAN_FILES = 200000
 
 /** One seat pair that shares at least one owned path. */
@@ -221,10 +280,10 @@ export interface OverlapPair {
 
 /** Result of scanning the tree for territory overlaps. */
 export interface OverlapReport {
-  /** True when the scan stopped at the file limit and may be incomplete. */
+  /** True when the scan stopped at the path limit and may be incomplete. */
   readonly capped: boolean
-  /** File paths visited across all seats and patterns. */
-  readonly scannedFiles: number
+  /** Distinct paths (files and directories) visited, counted once per seat, summed over all seats. */
+  readonly scannedPaths: number
   /** Paths matched by at least two seats' territories. */
   readonly overlappingPaths: number
   /** Seat pairs with shared paths, sorted by `a` then `b`. */
@@ -265,23 +324,24 @@ function recordExample(examples: string[], path: string): void {
 }
 
 /**
- * Visit every file below one glob-free prefix, iteratively. A prefix that is itself a file
- * counts as one file entry; directories named `node_modules` or `.git` are skipped, symlinks
- * count as file entries and are never descended into, and unreadable or missing directories
- * are ignored.
+ * Visit the glob-free prefix and every path below it, iteratively: files, symlinks (counted as
+ * entries, never descended into) and directories, including empty ones, so a directory that
+ * the owner lookup would call owned by two seats is found too. Directories named `node_modules`
+ * or `.git` are skipped, and unreadable or missing directories are ignored.
  * @param prefix - absolute directory or file path without glob characters.
- * @param visit - callback per file path; return false to stop the whole walk.
+ * @param visit - callback per path; return false to stop the whole walk.
  * @returns false when the walk was stopped early, true otherwise.
  */
-function walkFiles(prefix: string, visit: (path: string) => boolean): boolean {
+function walkPaths(prefix: string, visit: (path: string) => boolean): boolean {
   let info: Stats
   try {
     info = statSync(prefix)
   } catch {
     return true
   }
-  if (info.isFile()) return visit(prefix)
-  if (!info.isDirectory()) return true
+  if (!info.isFile() && !info.isDirectory()) return true
+  if (!visit(prefix)) return false
+  if (info.isFile()) return true
   const stack: string[] = [prefix]
   for (let dir = stack.pop(); dir !== undefined; dir = stack.pop()) {
     let entries: Dirent[]
@@ -294,6 +354,7 @@ function walkFiles(prefix: string, visit: (path: string) => boolean): boolean {
       const path = dir === '/' ? `/${entry.name}` : `${dir}/${entry.name}`
       if (entry.isDirectory()) {
         if (entry.name === 'node_modules' || entry.name === '.git') continue
+        if (!visit(path)) return false
         stack.push(path)
       } else if (!visit(path)) {
         return false
@@ -306,7 +367,7 @@ function walkFiles(prefix: string, visit: (path: string) => boolean): boolean {
 /**
  * Scan the tree for paths covered by more than one seat's territory. Synchronous: for every
  * territory pattern the scan walks the pattern's glob-free static prefix, counting each visited
- * file into a counter shared across all seats and patterns; when the counter would exceed the
+ * path (file or directory) into a counter shared across all seats and patterns; when the counter would exceed the
  * limit the whole scan stops and the report is marked capped.
  * @param registry - the parsed org registry.
  * @param options - scan options; `maxFiles` caps visited paths, default {@link DEFAULT_MAX_SCAN_FILES}.
@@ -316,16 +377,21 @@ export function findOverlaps(registry: OrgRegistry, options: { readonly maxFiles
   const maxFiles = options.maxFiles ?? DEFAULT_MAX_SCAN_FILES
   const table = buildTerritories(registry)
   const pathSeats = new Map<string, Set<string>>()
-  let scannedFiles = 0
+  let scannedPaths = 0
   let capped = false as boolean
   for (const territory of table.territories) {
+    // A path reachable through two of one seat's patterns is counted against the cap once.
+    const seenBySeat = new Set<string>()
     for (const pattern of territory.patterns) {
-      if (!walkFiles(staticPrefix(pattern), (path) => {
-        if (scannedFiles >= maxFiles) {
-          capped = true
-          return false
+      if (!walkPaths(staticPrefix(pattern), (path) => {
+        if (!seenBySeat.has(path)) {
+          if (scannedPaths >= maxFiles) {
+            capped = true
+            return false
+          }
+          scannedPaths++
+          seenBySeat.add(path)
         }
-        scannedFiles++
         if (patternMatches(pattern, path)) {
           const seats = pathSeats.get(path)
           if (seats === undefined) pathSeats.set(path, new Set([territory.seat]))
@@ -358,7 +424,7 @@ export function findOverlaps(registry: OrgRegistry, options: { readonly maxFiles
   const sorted = [...pairMap.entries()].sort((x, y) => (x[0] < y[0] ? -1 : 1))
   return {
     capped,
-    scannedFiles,
+    scannedPaths,
     overlappingPaths,
     pairs: sorted.map(([, pair]) => ({ a: pair.a, b: pair.b, count: pair.count, examples: [...pair.examples] })),
     seatsWithTerritory: table.territories.length,
@@ -375,7 +441,7 @@ export function findOverlaps(registry: OrgRegistry, options: { readonly maxFiles
  */
 export function formatOverlapReport(report: OverlapReport): string {
   const lines: string[] = []
-  if (report.capped) lines.push(`The scan was capped after ${report.scannedFiles} files; the result below may be incomplete.`)
+  if (report.capped) lines.push(`The scan was capped after ${report.scannedPaths} paths; the result below may be incomplete.`)
   if (report.overlappingPaths === 0) {
     lines.push('No overlaps: no path is owned by more than one seat.')
   } else {

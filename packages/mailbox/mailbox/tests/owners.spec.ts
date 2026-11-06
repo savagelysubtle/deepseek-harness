@@ -135,15 +135,16 @@ describe('owner lookup and overlap scan (three seats, two overlap)', () => {
     const report = findOverlaps(registry)
     expect(report.capped).toBe(false)
     expect(report.seatsWithTerritory).toBe(3)
-    expect(report.overlappingPaths).toBe(3)
+    // Shared: the directory src/shared/deep, the file below it, and src/shared/s1.ts and s2.ts (src/shared itself is beta-only).
+    expect(report.overlappingPaths).toBe(4)
     expect(report.pairs).toHaveLength(1)
-    expect(report.pairs[0]).toMatchObject({ a: 'alpha', b: 'beta', count: 3 })
+    expect(report.pairs[0]).toMatchObject({ a: 'alpha', b: 'beta', count: 4 })
     expect(report.pairs[0]?.examples).toEqual([
-      join(root, 'src/shared/deep/s3.ts'), join(root, 'src/shared/s1.ts'), join(root, 'src/shared/s2.ts'),
+      join(root, 'src/shared/deep'), join(root, 'src/shared/deep/s3.ts'), join(root, 'src/shared/s1.ts'),
     ])
     const text = formatOverlapReport(report)
-    expect(text.split('\n')[0]).toBe('3 path(s) are owned by more than one seat.')
-    expect(text).toContain(`alpha and beta: 3 shared paths, e.g. ${join(root, 'src/shared/deep/s3.ts')}`)
+    expect(text.split('\n')[0]).toBe('4 path(s) are owned by more than one seat.')
+    expect(text).toContain(`alpha and beta: 4 shared paths, e.g. ${join(root, 'src/shared/deep')}`)
     expect(text).toContain('Note: skipped quarantined seat(s): eve.')
     expect(text).not.toContain('gamma')
   })
@@ -167,7 +168,7 @@ describe('owner lookup and overlap scan (three seats, two overlap)', () => {
     const { registry } = fixture()
     const report = findOverlaps(registry, { maxFiles: 2 })
     expect(report.capped).toBe(true)
-    expect(formatOverlapReport(report).split('\n')[0]).toMatch(/^The scan was capped after \d+ files; the result below may be incomplete\.$/)
+    expect(formatOverlapReport(report).split('\n')[0]).toMatch(/^The scan was capped after \d+ paths; the result below may be incomplete\.$/)
   })
 
   it('skips node_modules and .git and does not follow symlinks', () => {
@@ -175,7 +176,76 @@ describe('owner lookup and overlap scan (three seats, two overlap)', () => {
     const report = findOverlaps(registry)
     const all = report.pairs.flatMap(pair => pair.examples)
     expect(all.some(path => path.includes('node_modules') || path.includes('/.git/'))).toBe(false)
-    expect(report.scannedFiles).toBeLessThan(40)
+    expect(report.scannedPaths).toBeLessThan(40)
     expect(findOwners(registry, join(root, 'src/node_modules/skip.ts')).owners).toEqual(['alpha'])
+  })
+
+  it('lists a directory that the owner lookup calls doubly owned, empty directories included', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-owners-'))
+    roots.push(root)
+    mkdirSync(join(root, 'a/x'), { recursive: true })
+    mkdirSync(join(root, 'a/y'), { recursive: true })
+    touch(join(root, 'a/f.txt'))
+    const registry = parseOrgRegistry(`baseDir: ${root}\nseats:\n  A: { cwd: ., owns: ["a/*"] }\n  B: { cwd: ., owns: ["a/x"] }\n`)
+    expect(findOwners(registry, join(root, 'a/x')).owners).toEqual(['A', 'B'])
+    const report = findOverlaps(registry)
+    expect(report.overlappingPaths).toBe(1)
+    expect(report.pairs).toEqual([{ a: 'A', b: 'B', count: 1, examples: [join(root, 'a/x')] }])
+  })
+
+  it('does not make a seat overlap itself through two of its own patterns', () => {
+    const { root } = fixture()
+    const registry = parseOrgRegistry(
+      `baseDir: ${root}\nseats:\n  alpha: { cwd: ., owns: ["src/**", "src/*.ts"] }\n  beta: { cwd: ., owns: ["src/shared/**"] }\n`,
+    )
+    const report = findOverlaps(registry)
+    expect(report.pairs).toHaveLength(1)
+    expect(report.pairs[0]).toMatchObject({ a: 'alpha', b: 'beta', count: 4 })
+    // Two patterns of one seat reach the same paths: they are counted once against the cap.
+    const alphaOnly = parseOrgRegistry(`baseDir: ${root}\nseats:\n  alpha: { cwd: ., owns: ["src/**", "src/**"] }\n`)
+    const once = parseOrgRegistry(`baseDir: ${root}\nseats:\n  alpha: { cwd: ., owns: ["src/**"] }\n`)
+    expect(findOverlaps(alphaOnly).scannedPaths).toBe(findOverlaps(once).scannedPaths)
+    expect(findOverlaps(alphaOnly).overlappingPaths).toBe(0)
+  })
+})
+
+describe('glob compiler resists catastrophic backtracking', () => {
+  const deep = `/r/${Array.from({ length: 31 }, (_, i) => `d${i}`).join('/')}/nomatch.txt`
+
+  it('collapses consecutive whole-segment ** into a single group', () => {
+    expect(globToRegExp('/r/**/**/**/x').source).toBe(globToRegExp('/r/**/x').source)
+    expect(globToRegExp('/r/**/**').source).toBe(globToRegExp('/r/**').source)
+    expect(globToRegExp('/r/a**/**/x').source).not.toBe(globToRegExp('/r/a**/x').source)
+  })
+
+  it('answers fast for 14+ consecutive **/ against a deep non-matching path', () => {
+    const pattern = `/r/${'**/'.repeat(16)}x`
+    const started = performance.now()
+    expect(patternMatches(pattern, deep)).toBe(false)
+    expect(patternMatches(pattern, `${deep.replace('nomatch.txt', '')}x`)).toBe(true)
+    expect(performance.now() - started).toBeLessThan(500)
+  })
+
+  it('answers fast for alternating */**/ shapes and runs of *', () => {
+    const started = performance.now()
+    expect(patternMatches(`/r/${'*/**/'.repeat(8)}x`, deep)).toBe(false)
+    expect(patternMatches(`/r/${'*a'.repeat(10)}b`, `/r/${'a'.repeat(60)}`)).toBe(false)
+    expect(patternMatches('/r/*****/**/*****/x', deep)).toBe(false)
+    expect(performance.now() - started).toBeLessThan(500)
+  })
+
+  it('the backtracking-free matcher agrees with the compiled regex on ordinary shapes', () => {
+    const patterns = ['/r/a/**/b', '/r/a/**', '/r/**/x', '/r/src/*.ts', '/r/f?.md', '/r/a**b/c', '/r/**/m/**/x']
+    const paths = ['/r/a/b', '/r/a/x/y/b', '/r/a', '/r/a/x', '/r/x', '/r/q/x', '/r/src/a.ts', '/r/src/d/a.ts', '/r/fa.md', '/r/f.md',
+      '/r/aXb/c', '/r/a/q/b/c', '/r/m/x', '/r/a/m/b/m/x']
+    for (const pattern of patterns) {
+      for (const path of paths) expect(patternMatches(pattern, path), `${pattern} vs ${path}`).toBe(globToRegExp(pattern).test(path))
+    }
+  })
+
+  it('stays fast on a long path with many wildcards', () => {
+    const started = performance.now()
+    expect(patternMatches(`/r/${'*a'.repeat(12)}*b`, `/r/${'a'.repeat(3000)}`)).toBe(false)
+    expect(performance.now() - started).toBeLessThan(500)
   })
 })

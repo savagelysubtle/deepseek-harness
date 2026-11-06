@@ -67,7 +67,7 @@ describe('runOwners', () => {
     const result = await run({ path: undefined, overlaps: true }, { registryPath })
     expect(result.code).toBe(1)
     expect(result.err).toBe('')
-    expect(result.out).toBe(`1 path(s) are owned by more than one seat.\nalpha and beta: 1 shared paths, e.g. ${join(root, 'src/shared/s.ts')}\n`)
+    expect(result.out).toBe(`2 path(s) are owned by more than one seat.\nalpha and beta: 2 shared paths, e.g. ${join(root, 'src/shared')}, ${join(root, 'src/shared/s.ts')}\n`)
   })
 
   it('--overlaps exits 0 with plain words when nothing overlaps', async () => {
@@ -82,7 +82,7 @@ describe('runOwners', () => {
     const { registryPath } = setup()
     const result = await run({ path: undefined, overlaps: true }, { registryPath, maxFiles: 1 })
     expect(result.code).toBe(2)
-    expect(result.out).toMatch(/^The scan was capped after 1 files;/)
+    expect(result.out).toMatch(/^The scan was capped after 1 paths;/)
   })
 
   it('exits 2 on a usage error and on an unreadable registry, writing to stderr only', async () => {
