@@ -6,9 +6,12 @@
  * can run, and hands the driver a fresh in-process `dsh` server plus the exact allow list.
  *
  * Roles: `lead` needs nothing beyond this plugin. `coder` needs the sandbox, canary and rules-hooks
- * contributors. The sandbox one (S6) registers through `claudeCodePolicyRegistries`; canary and rules-hooks
- * (S7) do not exist yet, so a coder seat still reports not-ready and the driver refuses it at create. No
- * contributor is faked. `allowedCwdRoots` pins every seat's cwd under the host's clone root.
+ * contributors, all registered through `claudeCodePolicyRegistries` (sandbox by S6, canary and rules-hooks by
+ * the S7 seat-checks package); until all three are present the driver refuses a coder at create. A coder query
+ * also throws unless a clone check with id `clone-hooks-check` is registered, so readiness and enforcement cannot
+ * diverge, and every registered clone check runs on every query. The service `claudeCodeGuardProbe` runs the
+ * boot probe of the guard over the same attested artefacts seats use. `allowedCwdRoots` pins every seat's cwd
+ * under the host's clone root.
  *
  * @module @deepseek-ai/dsh-agent-claude-code-tools/provider
  */
@@ -25,7 +28,10 @@ import { SeatMutedByPolicyError } from '@deepseek-ai/dsh-agent-claude-code-drive
 import z from '@deepseek-ai/schemastery'
 import { assertAttestedUnchanged, attestFile } from './attest-guard.ts'
 import type { AttestedFile } from './attest-guard.ts'
+import { CLONE_HOOKS_CHECK_ID, CloneCheckError, CloneCheckRegistry } from './clone-checks.ts'
 import { ContributorRegistry, MCP_TOOL_PREFIX } from './contributors.ts'
+import { createGuardProbe, RESERVED_PROBE_SEAT } from './guard-probe.ts'
+import type { GuardProbe } from './guard-probe.ts'
 import { installGuardCopy } from './guard-copy.ts'
 import { guardScriptPath } from './hook-command.ts'
 import type { HookGroup } from './hook-command.ts'
@@ -53,12 +59,16 @@ export interface PolicyRegistries {
   readonly contributors: ContributorRegistry
   /** The tool factories a seat's server is built from; a name here must also be offered by `contributors`. */
   readonly tools: SeatToolTemplate
+  /** Synchronous checks of a seat's clone, run inside `extend` on every query; a coder needs `clone-hooks-check` here. */
+  readonly cloneChecks: CloneCheckRegistry
 }
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
     /** The registries behind `claudeCodePolicy`, provided by the policy provider plugin. */
     claudeCodePolicyRegistries: PolicyRegistries
+    /** The boot probe of the seat guard, provided by the policy provider plugin. */
+    claudeCodeGuardProbe: GuardProbe
   }
 }
 
@@ -108,6 +118,8 @@ export interface PolicyOptions {
   readonly publish: SeatToolContext['publish']
   /** Readiness contributors (S6, S7 register here); defaults to an empty registry. */
   readonly readiness?: ReadinessRegistry
+  /** Clone checks (the S7 seat-checks package registers here); defaults to an empty registry. */
+  readonly cloneChecks?: CloneCheckRegistry
   /** Tool and hook contributors; defaults to an empty registry (the base template only). */
   readonly contributors?: ContributorRegistry
   /** The tool factories; defaults to the lead template. */
@@ -215,8 +227,19 @@ function guardCommandOf(policy: SeatPolicy): string {
  * @returns the policy the driver consumes.
  */
 export function createClaudeCodePolicy(options: PolicyOptions): ClaudeCodePolicy {
+  return createPolicyParts(options).policy
+}
+
+/**
+ * Build the policy and the guard probe that share one attestation state, so the probe proves the very
+ * artefacts seats will run.
+ * @param options - directories, binaries, the mailbox publish function and the registries.
+ * @returns the policy the driver consumes and the boot probe.
+ */
+function createPolicyParts(options: PolicyOptions): { readonly policy: ClaudeCodePolicy; readonly probe: GuardProbe } {
   const readiness = options.readiness ?? new ReadinessRegistry()
   const contributors = options.contributors ?? new ContributorRegistry()
+  const cloneChecks = options.cloneChecks ?? new CloneCheckRegistry()
   const template = options.template ?? createLeadTemplate()
   const verify = options.verify ?? verifyGuardCommand
   for (const root of options.allowedCwdRoots ?? []) {
@@ -250,9 +273,10 @@ export function createClaudeCodePolicy(options: PolicyOptions): ClaudeCodePolicy
   const extend = (query: PolicyQueryContext): PolicyExtension => {
     const { seat, role, cwd } = query
     if (role === 'mail-only') throw new Error(`agent-claude-code-tools: seat "${seat}" has role mail-only, which takes no policy`)
+    if (seat === RESERVED_PROBE_SEAT) throw new Error(`agent-claude-code-tools: seat name "${seat}" is reserved for the guard boot probe`)
     const ready = readiness.readiness()
     if (!ready.roles.has(role)) {
-      throw new Error(`agent-claude-code-tools: seat "${seat}": role ${role} is not ready (missing: ${ready.missing.join(', ')})`)
+      throw new Error(`agent-claude-code-tools: seat "${seat}": role ${role} is not ready (missing: ${ready.missing.join(', ')})${readiness.notesText()}`)
     }
     if (options.allowedCwdRoots !== undefined && !options.allowedCwdRoots.some(root => isInside(root, cwd))) {
       throw new Error(`agent-claude-code-tools: seat "${seat}": working directory ${JSON.stringify(cwd)} is not inside an allowed cwd root`)
@@ -263,6 +287,18 @@ export function createClaudeCodePolicy(options: PolicyOptions): ClaudeCodePolicy
     const pinned = cwdPins.get(seat)
     if (pinned !== undefined && pinned !== cwd) {
       throw new Error(`agent-claude-code-tools: seat "${seat}": working directory ${JSON.stringify(cwd)} is not the pinned ${JSON.stringify(pinned)}`)
+    }
+    if (role === 'coder' && !cloneChecks.has(CLONE_HOOKS_CHECK_ID)) {
+      throw new CloneCheckError(seat, 'check-missing', `no ${CLONE_HOOKS_CHECK_ID} clone check is registered, so the clone cannot be checked; see the host log lines starting agent-claude-code-seat-checks:`)
+    }
+    for (const entry of cloneChecks.checksFor(role)) {
+      try {
+        entry.check({ seat, cwd })
+      } catch (error: unknown) {
+        if (error instanceof CloneCheckError) throw error
+        // Fail closed: a check that throws anything else has not approved the clone.
+        throw new CloneCheckError(seat, 'check-failed', `clone check ${entry.id} failed unexpectedly (${error instanceof Error ? error.name : 'error'})`)
+      }
     }
     const host: PolicyHostSeatFields = query.config.policy ?? {}
     const listed = host.tools ?? []
@@ -319,17 +355,21 @@ export function createClaudeCodePolicy(options: PolicyOptions): ClaudeCodePolicy
     return { settings: policy.settings, mcpServers: { dsh: server }, allow: policy.allow }
   }
 
+  const probe = createGuardProbe({ policyDir: options.policyDir, home: options.home, attest, policyIntact: policyFileIntact })
   return {
-    version: 1,
-    extend,
-    readiness: (): PolicyReadiness => readiness.readiness(),
+    policy: {
+      version: 1,
+      extend,
+      readiness: (): PolicyReadiness => readiness.readiness(),
+    },
+    probe,
   }
 }
 
 /**
  * Mount the provider: register `claudeCodePolicy` on the context. The mailbox service is looked up
  * when a message is sent, so the plugins may mount in either order. Also provides
- * `claudeCodePolicyRegistries` (the same instances the policy uses). The package's `apply` calls this.
+ * `claudeCodePolicyRegistries` (the same instances the policy uses) and `claudeCodeGuardProbe`. The package's `apply` calls this.
  * @param ctx - plugin context.
  * @param config - policy directory and optional home, node and guard paths.
  * @throws when `policyDir` or an explicit path is not absolute.
@@ -342,9 +382,11 @@ export function mountPolicyProvider(ctx: Context, config: Config): void {
     readiness: new ReadinessRegistry(),
     contributors: new ContributorRegistry(),
     tools: createLeadTemplate(),
+    cloneChecks: new CloneCheckRegistry(),
   }
-  const policy = createClaudeCodePolicy({
+  const { policy, probe } = createPolicyParts({
     readiness: registries.readiness,
+    cloneChecks: registries.cloneChecks,
     contributors: registries.contributors,
     template: registries.tools,
     policyDir: config.policyDir,
@@ -361,4 +403,5 @@ export function mountPolicyProvider(ctx: Context, config: Config): void {
   })
   ctx.provide('claudeCodePolicy', policy)
   ctx.provide('claudeCodePolicyRegistries', registries)
+  ctx.provide('claudeCodeGuardProbe', probe)
 }

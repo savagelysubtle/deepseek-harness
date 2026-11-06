@@ -22,7 +22,12 @@ export { isSeatName, isSha256, SEAT_NAME_PATTERN, SHA256_PATTERN, TOOL_NAME_PATT
 export { MAX_STDIN_BYTES, runGuard } from './guard-core.ts'
 export type { GuardDeps, GuardOutcome } from './guard-core.ts'
 export { buildHookCommand, ENV_PATH, GUARD_MATCHER, guardHookGroup, guardScriptPath, HOOK_TIMEOUT_SECONDS, shellQuote } from './hook-command.ts'
-export { verifyGuardCommand } from './verify-guard.ts'
+export { assertProbeOutcome, PROBE_TOOL, ProbeOutcomeError, runGuardHook, verifyGuardCommand, verifyGuardCommandAsync } from './verify-guard.ts'
+export type { ProbeExpectation, ProbeFailureCode, HookProbeOutcome, GuardHookRunOptions } from './verify-guard.ts'
+export { CLONE_HOOKS_CHECK_ID, CloneCheckError, CloneCheckRegistry } from './clone-checks.ts'
+export type { CloneCheck, CloneCheckContext } from './clone-checks.ts'
+export { createGuardProbe, RESERVED_PROBE_SEAT } from './guard-probe.ts'
+export type { GuardProbe, GuardProbeCode, GuardProbeDeps, GuardProbeResult } from './guard-probe.ts'
 export type { HookCommandInput, HookGroup } from './hook-command.ts'
 export {
   assertCanonicalDir, assertCaseSensitiveEntries, checkGlob, checkPath, globStaticPrefix, isInside, reachesProtected, UnsafePathError,

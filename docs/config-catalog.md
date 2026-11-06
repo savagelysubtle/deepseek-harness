@@ -274,7 +274,7 @@ export type ClaudeCodeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 export type ClaudeCodeRole = 'coder' | 'lead' | 'mail-only'
 ```
 
-Source: [`packages/agent/agent-claude-code-driver/src/index.ts:167`](../packages/agent/agent-claude-code-driver/src/index.ts)
+Source: [`packages/agent/agent-claude-code-driver/src/index.ts:169`](../packages/agent/agent-claude-code-driver/src/index.ts)
 
 <a id="deepseek-aidsh-agent-claude-code-tools"></a>
 
@@ -300,7 +300,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/agent/agent-claude-code-tools/src/provider.ts:69`](../packages/agent/agent-claude-code-tools/src/provider.ts)
+Source: [`packages/agent/agent-claude-code-tools/src/provider.ts:79`](../packages/agent/agent-claude-code-tools/src/provider.ts)
 
 <a id="deepseek-aidsh-agent-default-model"></a>
 
