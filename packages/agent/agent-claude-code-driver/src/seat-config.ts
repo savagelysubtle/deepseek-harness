@@ -260,7 +260,7 @@ export function assertRoleServable(role: ClaudeCodeRole, seat: string, policy: C
     return refuse(`the policy service could not report readiness (${error instanceof Error ? error.message : String(error)})`)
   }
   if (!ready) {
-    refuse(`the policy service is not ready for it${missing.length === 0 ? '' : ` (missing: ${missing.join(', ')})`}; coder seats wait for the sandbox, canary and rules-hooks contributors, and a retry works once the host logs the canary line (agent-claude-code-seat-checks: ...) and readiness lists coder`)
+    refuse(`the policy service is not ready for it${missing.length === 0 ? '' : ` (missing: ${missing.join(', ')})`}; coder seats wait for the sandbox, canary and rules-hooks contributors, and a retry works once the host logs the canary line (see host log lines starting agent-claude-code-seat-checks:) and readiness lists coder`)
   }
 }
 

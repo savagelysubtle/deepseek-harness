@@ -160,7 +160,9 @@ describe('role acceptance through the plugin', () => {
     const readiness = vi.fn(() => ({ roles: new Set(roles), missing }))
     const policy: ClaudeCodePolicy = { version: 1, extend: () => ({}), readiness }
     const { fiber, create } = await mount(policy, 'coder')
-    await expect(create('first')).rejects.toThrow(/missing: canary, rules-hooks\); coder seats wait.*a retry works once the host logs the canary line/)
+    await expect(create('first')).rejects.toThrow(
+      /missing: canary, rules-hooks\); coder seats wait.*see host log lines starting agent-claude-code-seat-checks:/,
+    )
     const afterFirst = readiness.mock.calls.length
     expect(afterFirst).toBeGreaterThan(0)
     await expect(create('second')).rejects.toThrow(/missing: canary, rules-hooks/)
@@ -198,10 +200,10 @@ describe('role acceptance through the plugin', () => {
 })
 
 describe('mail claimed before the policy extension throws', () => {
-  it.each<[string, () => Error]>([
-    ['a typed seat-muted refusal (what a clone check raises)', () => new SeatMutedByPolicyError('tester', 'clone hook state refused')],
-    ['an ordinary provider error', () => new Error('provider bug')],
-  ])('fails its lease once with the reason, never loses it and never re-runs the turn: %s', async (_label, thrown) => {
+  it.each<[string, () => Error, string]>([
+    ['a typed seat-muted refusal (what a clone check raises)', () => new SeatMutedByPolicyError('tester', 'clone hook state refused'), 'clone hook state refused'],
+    ['an ordinary provider error', () => new Error('provider bug'), 'provider bug'],
+  ])('fails its lease once with the reason, never loses it and never re-runs the turn: %s', async (_label, thrown, reasonText) => {
     const h = await harness()
     const extend = vi.fn(() => { throw thrown() })
     h.state.policy = { ...stubPolicy(), extend }
@@ -211,6 +213,8 @@ describe('mail claimed before the policy extension throws', () => {
     await agent.whenIdle()
     expect(h.queries).toHaveLength(0)
     expect(extend).toHaveBeenCalledTimes(1)
-    expect(h.state.leases).toEqual([expect.stringMatching(/^fail:m-claimed:.+/)])
+    expect(h.state.leases).toHaveLength(1)
+    expect(h.state.leases[0]).toMatch(/^fail:m-claimed:/)
+    expect(h.state.leases[0]).toContain(reasonText)
   })
 })
