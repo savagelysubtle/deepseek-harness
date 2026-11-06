@@ -64,6 +64,29 @@ describe('mailbox_send (c) replyToTraceId is a label, never a route', () => {
     expect(context.published).toHaveLength(0)
   })
 
+  it('tells the seat to reply without a trace id when no delivered mail carried one', async () => {
+    const context = makeContext({ deliveredTraceIds: () => new Set() })
+    const result = await createSendTool(context).handler({ ...good, replyToTraceId: 'trace-1' })
+    expect(result.isError).toBe(true)
+    expect(textOf(result)).toBe('mailbox_send refused: the incoming mail carried no trace id; reply without one')
+    expect(context.published).toHaveLength(0)
+  })
+
+  it('keeps the original refusal text when delivered ids exist but the id is not among them', async () => {
+    const context = makeContext()
+    const result = await createSendTool(context).handler({ ...good, replyToTraceId: 'trace-unknown' })
+    expect(result.isError).toBe(true)
+    expect(textOf(result)).toBe('mailbox_send refused: replyToTraceId is not the trace id of a message delivered to this seat')
+    expect(context.published).toHaveLength(0)
+  })
+
+  it('still sends when no replyToTraceId is given and the delivered set is empty', async () => {
+    const context = makeContext({ deliveredTraceIds: () => new Set() })
+    const result = await createSendTool(context).handler(good)
+    expect(result.isError).toBeUndefined()
+    expect(context.published).toHaveLength(1)
+  })
+
   it('mints a fresh trace id for an ordinary send', async () => {
     const context = makeContext()
     await createSendTool(context).handler(good)
