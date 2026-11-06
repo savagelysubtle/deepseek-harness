@@ -39,7 +39,7 @@ export type { GeneratedRules } from './rules.ts'
 export { buildPolicyFile, generateSeatPolicy } from './settings.ts'
 export type { PolicyInput, SeatPolicy, SeatPolicyInput } from './settings.ts'
 export { createDirectoryTool } from './mcp/directory.ts'
-export { createSeatMcpServer } from './mcp/server.ts'
+export { createSeatMcpServer, neverTaintTools } from './mcp/server.ts'
 export type { SeatServerInput } from './mcp/server.ts'
 export { assertConvertible, DIRECTORY_SCHEMA, MAX_BODY_BYTES, MAX_TRACE_ID_LENGTH, SEND_SCHEMA } from './mcp/schema.ts'
 export type { SendInput } from './mcp/schema.ts'
@@ -48,7 +48,10 @@ export { MAX_RESULT_LENGTH, REDACTED_PATH, scrubText } from './mcp/scrub.ts'
 export type { ScrubOptions } from './mcp/scrub.ts'
 export { createLeadTemplate, SeatToolTemplate } from './mcp/template.ts'
 export { defineSeatTool, textResult } from './mcp/types.ts'
-export type { SeatTool, SeatToolContext, SeatToolFactory, SeatToolResult } from './mcp/types.ts'
+export type {
+  AlwaysTaint, NeverTaint, ScrubRoot, SeatScrubOptions, SeatTool, SeatToolBase, SeatToolContext, SeatToolFactory, SeatToolResult,
+  TaintDeclaration,
+} from './mcp/types.ts'
 export { Config, createClaudeCodePolicy, mountPolicyProvider, name } from './provider.ts'
 export type { PolicyOptions, PolicyRegistries } from './provider.ts'
 

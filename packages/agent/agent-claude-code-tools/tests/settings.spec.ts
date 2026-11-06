@@ -7,6 +7,7 @@ import {
   BASE_TOOL_TEMPLATE, CODER_NATIVE_TOOLS, ContributorRegistry, MAILBOX_DIRECTORY_TOOL, MAILBOX_SEND_TOOL, mcpToolName,
 } from '../src/contributors.ts'
 import { UnsafePathError } from '../src/path-guard.ts'
+import { ensurePolicyDir } from '../src/policy-file.ts'
 import { readPolicyFile } from '../src/policy-read.ts'
 import { CODER_REQUIREMENTS, ReadinessRegistry } from '../src/readiness.ts'
 import { generateRules } from '../src/rules.ts'
@@ -25,6 +26,7 @@ beforeEach(() => {
   writeFileSync(nodeCopy, '#!/bin/sh\n', { mode: 0o755 })
   writeFileSync(guardCopy, '// guard\n', { mode: 0o755 })
   chmodSync(nodeCopy, 0o755)
+  ensurePolicyDir(join(box.root, 'state', 'policy'))
   input = {
     seat: 'lead-one',
     role: 'lead',
@@ -55,6 +57,32 @@ describe('generateRules', () => {
       expect(rules.deny.every(entry => /^(Read|Edit)\(\/\/[^/]/.test(entry))).toBe(true)
       expect(rules.deniedPrefixes).toHaveLength(10)
     }
+  })
+
+  it('denies the policy directory when given: four more rules, one more prefix', () => {
+    const policyDir = join(box.root, 'policy')
+    mkdirSync(policyDir)
+    const rules = generateRules('coder', box.cwd, box.home, policyDir)
+    expect(rules.deny).toHaveLength(40)
+    expect(rules.deniedPrefixes).toHaveLength(11)
+    expect(rules.deniedPrefixes).toContain(policyDir)
+    for (const tool of ['Read', 'Edit']) {
+      expect(rules.deny).toContain(`${tool}(//${policyDir.slice(1)})`)
+      expect(rules.deny).toContain(`${tool}(//${policyDir.slice(1)}/**)`)
+    }
+    expect(generateRules('coder', box.cwd, box.home).deniedPrefixes).not.toContain(policyDir)
+  })
+
+  it('refuses a cwd that is the policy directory or inside it, and a policy directory that is not canonical', () => {
+    const policyDir = join(box.root, 'pol')
+    mkdirSync(join(policyDir, 'work'), { recursive: true })
+    expect(() => generateRules('coder', policyDir, box.home, policyDir)).toThrow(/contains the policy directory/)
+    expect(() => generateRules('coder', join(policyDir, 'work'), box.home, policyDir)).toThrow(/protected location/)
+    const under = join(box.cwd, 'policy')
+    mkdirSync(under)
+    expect(() => generateRules('coder', box.cwd, box.home, under)).toThrow(/contains the policy directory/)
+    expect(() => generateRules('coder', box.cwd, box.home, join(box.root, 'missing'))).toThrow(UnsafePathError)
+    expect(() => generateRules('coder', box.cwd, box.home, 'relative')).toThrow(UnsafePathError)
   })
 
   it('emits the exact // + path-without-leading-slash form, bare and /** for directories', () => {
@@ -185,6 +213,14 @@ describe('generateSeatPolicy', () => {
     expect('denyDirsContainingProtected' in buildPolicyFile(input)).toBe(false)
     const off = generateSeatPolicy({ ...input, denyDirsContainingProtected: false })
     expect(readPolicyFile(off.policyPath, 'lead-one', off.policySha256)).toMatchObject({ ok: true, policy: { denyDirsContainingProtected: false } })
+  })
+
+  it('puts the policy directory in the written policy file\'s denied prefixes', () => {
+    const policy = generateSeatPolicy(input)
+    const read = readPolicyFile(policy.policyPath, 'lead-one', policy.policySha256)
+    expect(read).toMatchObject({ ok: true, policy: { deniedPrefixes: expect.arrayContaining([input.policyDir]) as unknown } })
+    expect((policy.settings.permissions?.deny ?? []).some(entry => entry === `Read(//${input.policyDir.slice(1)}/**)`)).toBe(true)
+    expect(buildPolicyFile({ ...input, policyDir: undefined } as never).deniedPrefixes).not.toContain(input.policyDir)
   })
 
   it('passes rules in instead of recomputing them', () => {

@@ -4,7 +4,7 @@
 
 [`dsh-sandbox`](../sandbox/) seam 的本地实现。它选择并缓存一个平台 runner：Linux 优先选择可工作的 `bwrap`，否则选择 Landlock；macOS 使用 Seatbelt；Windows 使用 ACL 受限令牌 runner。多个候选项会按顺序探测，只有一个候选项时则直接选择。
 
-包根目录导出默认及命名的 `LocalSandboxProvider` 插件和 `Config`；平台 profile builder 仍为内部实现。
+包根目录导出默认及命名的 `LocalSandboxProvider` 插件和 `Config`，以及 seat profile builder（`planSeatLaunch` 及其类型，见下文），以及 `RUNNER_FAILURE_RULES`（provider 上报的各 runner 致命诊断规则，导出后 seat 工具可用同一条规则判定 bwrap 启动失败）；平台 profile builder 仍为内部实现。
 
 不受支持的平台和不可用 runner 会以 `SANDBOX_UNAVAILABLE` 拒绝执行；执行绝不会静默回退为不受限制。每次包装都携带结构化 runner 失败规则，使消费方能够区分损坏的沙箱与命令失败。
 
@@ -16,6 +16,8 @@ Seatbelt profile 默认允许，但带 `(deny file-write*)` 和写入 allow-list
 
 Windows 档为每个工作区保留一个确定性写入 SID 和常驻 ACE，但为每个活跃的会话/工作区对分配一个随机私有临时目录，以及不同的 SID 和可撤销 ACE。因此，共享工作区的会话会共享预期的写权限，却不会继承彼此的临时目录权限。新的提供方总会选择新的临时路径和 SID，因此崩溃残留既无法阻止恢复的会话，也无法向其授权；runner 会为无 agent（智能体）的调用提供同样的逐调用隔离。如果工作区等于或包含平台临时根目录，调用会在任何 ACL 改动发生前失败，因为否则其可继承的工作区 ACE 会延伸到每个私有临时子目录。
 
+seat profile（`planSeatLaunch`，`src/seat-profile.ts`）是独立的 builder，而不是 `SandboxPolicy` 的一种模式：给定一次 seat 调用的输入，它返回精确的 `systemd-run --user --scope` + `bwrap` + `prlimit` argv，或带类型的 `SeatRefusalError`（`code`、`reason`、`remedy`）。沙箱根目录是被重新挂载为只读的空 tmpfs；`/usr` 与一份简短的 `/etc` 列表为只读，宿主的 `/usr/local` 被一个空的只读 tmpfs 遮蔽，`/tmp`（1 GiB）与 `/home/seat`（256 MiB）为 tmpfs，克隆目录以其真实路径读写绑定，整个 `.git` 与 `node_modules` 则只读绑定（`node_modules/.vite`、`.vite-temp`、`.cache` 为 tmpfs，需由 provisioning 事先创建）。命名空间涵盖 user（禁止嵌套 user 命名空间）、pid、net、ipc 与 uts；环境被清空，仅保留一组显式变量，并且启动本身在 `env -i` 下进行，因此无论调用方传入什么，bwrap 及其 init 都只拿到 `XDG_RUNTIME_DIR` 与 `PATH`。cgroup scope 为必需项：`TasksMax`（默认 1024，按线程计数）才是对 fork 炸弹的控制手段（RLIMIT_NPROC 只是摆设，并且刻意不设 RLIMIT_AS），通过 `MemorySwapMax=0` 禁用交换，tmpfs 页面计入 `MemoryMax`。unit 名称为 `dsh-seat.<seat>.<callid>`，因此任一部分含短横线也不会冲突。builder 只读取文件系统，并会拒绝：非规范的 `cwd`、worktree 式或带 alternates 的 `.git`、存在硬链接、setuid 或外部设备的条目、未完成 provisioning 的 `node_modules`、会暴露 `~/.claude`、`~/.dsh`、`~/.agents`、`~/.ssh`、`~/.config` 或其他凭据目录的绑定、缺失的 `XDG_RUNTIME_DIR`、缺失或被替换的 bwrap，以及已满的克隆磁盘。`classifyScopeStop` 固化了停止规则：只有 cgroup 目录消失才算成功。这些挂载只是限定工作区，并非密封。
+
 [`@deepseek-ai/node-addon-landlock-run`](https://www.npmjs.com/package/@deepseek-ai/node-addon-landlock-run) 提供平台 launcher、功能探测和 CLI 参数词汇。该提供方只负责模式到授权的映射与 runner 选择。把路径解析和探测解析保留在带版本的 binary 中，可防止约定漂移。
 
 ```yaml
@@ -23,7 +25,7 @@ Windows 档为每个工作区保留一个确定性写入 SID 和常驻 ACE，但
   name: '@deepseek-ai/dsh-sandbox-local'
 ```
 
-消费方：[`@deepseek-ai/dsh-bash-sandbox`](../../shell/bash-sandbox/)；可运行的默认组合见 [acp-agent 示例](../../../examples/acp-agent/)。
+消费方：[`@deepseek-ai/dsh-bash-sandbox`](../../shell/bash-sandbox/)（本包内的 seat profile 暂无消费方）；可运行的默认组合见 [acp-agent 示例](../../../examples/acp-agent/)。
 
 ## 模型体验
 
@@ -40,3 +42,5 @@ Windows 档为每个工作区保留一个确定性写入 SID 和常驻 ACE，但
 - **Seatbelt 依赖已弃用的 `sandbox-exec`**：macOS 仍会提供它，但若 Apple 移除该私有策略引擎，该提供方无法替换或探测。
 - **runner 选择在提供方生命周期内缓存**：安装、移除或修复 runner 后，必须重载插件才能改变选择。
 - **`runnerCommand` 是操作方断言**：配置的自定义 runner 会跳过功能探测，并假定它诚实实现与 bwrap 兼容的 profile；如果它本身是 Bash 脚本，其解释器启动发生在该脚本施加约束之前。
+- **seat profile 是受限工作区，而非密封**：工作树仍是持久化残留（钩子、脚本和配置可能在之后被宿主工具打开），因此运维人员绝不能在 seat 克隆内以项目信任方式运行 git、pnpm 或编辑器。预检只是检查时点状态：seat 仍可对其能看到的 inode 新建硬链接，并且目前还没有 seccomp 过滤器或克隆磁盘配额。
+- **磁盘下限只是调用前检查，而非上限**：实测在沙箱内 0.2 秒即可写入 1 GiB；调用期间的磁盘看门狗属于 bash runner，受限卷属于 S8。目前仍没有 seccomp 过滤器，`/proc` 仍会显示宿主的 `loadavg` 与 `meminfo`。在 `.git` 以只读方式挂载期间，对 `.git` 条目的硬链接检查只是双保险。

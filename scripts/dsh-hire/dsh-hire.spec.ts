@@ -265,6 +265,55 @@ describe('claude-code hire', () => {
       expect(backups(r)).toEqual([])
     })
 
+    it('the coder refusal prints the operator rules and provisioning steps, exit code unchanged', () => {
+      const r = rig()
+      const before = readRegistry(r)
+      const out = run(r, HIRE_CC(r, '--role', 'coder'))
+      expect(out.status).toBe(1)
+      expect(out.stderr.split('\n')[0]).toBe(
+        'dsh-hire: coder rows are refused until the sandbox (S6) and canary (S7) readiness exist; hire the seat as "lead" (mailbox tools only) or "mail-only" meanwhile',
+      )
+      const block = [
+        '',
+        "----- Operator rules for this seat's clone -----",
+        "1. A seat's clone is hostile by construction: nobody runs git, pnpm, node or an editor with",
+        '   project trust inside it, and nobody opens it in a Claude session.',
+        '2. Host-side git on a seat clone always runs',
+        '     git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.pager=cat',
+        '   with GIT_CONFIG_NOSYSTEM=1.',
+        '3. Work comes out by `git fetch` into a separate trusted checkout, or is reviewed as patch text.',
+        '4. Trust prompts for .mcp.json and .claude are never pre-accepted.',
+        '',
+        "----- Provisioning the clone (host side, before the seat's first turn) -----",
+        '1. git clone --no-hardlinks <src> <clone>',
+        '2. Assert <clone>/.git is a directory (not a worktree file) and',
+        '   <clone>/.git/objects/info/alternates is absent.',
+        '3. In <clone>: pnpm install --offline --config.package-import-method=copy',
+        '   (dependencies are copied, never hardlinked from the store; there is no network inside the sandbox)',
+        '4. In <clone>: mkdir -p node_modules/.vite node_modules/.vite-temp node_modules/.cache',
+        '   (the sandbox mounts scratch space there and refuses an unprovisioned clone)',
+        '5. find <clone> -type f -links +1 must print nothing.',
+        '6. Refuse the clone if it holds setuid or setgid files, or files on a different device.',
+        'The sandbox binds the whole .git and node_modules read-only, so the seat cannot commit or install.',
+        '',
+        'When S7 lifts this refusal the same rules apply to every coder clone.',
+        '',
+      ].join('\n')
+      expect(out.stderr.slice(out.stderr.indexOf('\n') + 1)).toBe(block)
+      expect(out.stdout).toBe('')
+      expect(readRegistry(r)).toBe(before)
+    })
+
+    it.each([['mail-only'], ['lead']])('%s output carries no operator rules or provisioning steps', (role) => {
+      const r = rig()
+      const out = run(r, HIRE_CC(r, '--role', role))
+      expect(out.status, out.stderr).toBe(0)
+      for (const text of ['Operator rules for this seat', 'Provisioning the clone', '--no-hardlinks', 'links +1']) {
+        expect(out.stdout).not.toContain(text)
+        expect(out.stderr).not.toContain(text)
+      }
+    })
+
     it('refuses --admit-from naming a seat that is not in the registry', () => {
       const r = rig()
       const out = run(r, HIRE_CC(r, '--admit-from', 'ghost'))

@@ -13,6 +13,7 @@ export function makeContext(
     seat: 'lead-one',
     sendTo: ['ops-lead', 'sam'],
     allowBlocking: false,
+    cwd: '/work/proj',
     isTainted: () => false,
     markTainted: (reason) => { marks.push(reason) },
     deliveredTraceIds: () => new Set(['trace-1']),

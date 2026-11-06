@@ -224,7 +224,7 @@ Source: [`packages/agent/agent-claude-code-driver/src/policy-contract.ts:63`](..
 
 The registries the policy reads, shared with later slices: S6 (sandbox) and S7 (canary) plugins register readiness contributors, extra tool names and tool factories here instead of editing S5 files.
 
-Source: [`packages/agent/agent-claude-code-tools/src/provider.ts:46`](../../packages/agent/agent-claude-code-tools/src/provider.ts)
+Source: [`packages/agent/agent-claude-code-tools/src/provider.ts:49`](../../packages/agent/agent-claude-code-tools/src/provider.ts)
 
 <a id="ctxclaudecodeseatsource--claudecodeseatsource"></a>
 

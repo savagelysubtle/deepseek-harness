@@ -4,7 +4,7 @@ English | [中文](README.zh.md)
 
 Local implementation of the [`dsh-sandbox`](../sandbox/) seam. It selects and caches one platform runner: Linux prefers a working `bwrap` then Landlock; macOS uses Seatbelt; Windows uses the ACL restricted-token runner. Multiple candidates are probed in order, while a sole candidate is selected directly.
 
-The package root exports the default and named `LocalSandboxProvider` plugin and `Config`; platform profile builders stay internal.
+The package root exports the default and named `LocalSandboxProvider` plugin and `Config`, plus the seat profile builder (`planSeatLaunch` and its types, below) and `RUNNER_FAILURE_RULES` (the per-runner fatal-diagnostic rules the provider reports, exported so a seat tool can classify a bwrap launch failure with the same rule); the platform profile builders stay internal.
 
 Unsupported platforms and unusable runners fail closed with `SANDBOX_UNAVAILABLE`; execution never silently falls through unconfined. Each wrap carries structured runner-failure rules so consumers can distinguish a broken sandbox from a command failure.
 
@@ -16,6 +16,8 @@ The Seatbelt profile is allow-default with `(deny file-write*)` plus write allow
 
 The Windows rung keeps one deterministic write SID and standing ACE per workspace, but gives every live session/workspace pair a random private temp directory with a distinct SID and revocable ACE. Sessions sharing a workspace therefore share its intended write authority without inheriting one another's temp authority. A fresh provider always chooses a new temp path and SID, so crash residue cannot block or authorize a resumed session; agentless calls receive the same per-invocation isolation from the runner. A workspace equal to or containing the platform temp root fails before any ACL mutation because its inheritable workspace ACE would otherwise reach every private temp child.
 
+The seat profile (`planSeatLaunch`, `src/seat-profile.ts`) is a separate, standalone builder, not a `SandboxPolicy` mode: given one seat call's inputs it returns the exact `systemd-run --user --scope` + `bwrap` + `prlimit` argv, or a typed `SeatRefusalError` (`code`, `reason`, `remedy`). The sandbox root is an empty tmpfs remounted read-only; `/usr` and a short `/etc` list are read-only, the host `/usr/local` is hidden behind an empty read-only tmpfs, `/tmp` (1 GiB) and `/home/seat` (256 MiB) are tmpfs, and the clone is bound read-write at its real path with the whole `.git` and `node_modules` bound read-only (tmpfs on `node_modules/.vite`, `.vite-temp`, `.cache`, which provisioning must create first). Namespaces cover user (nested user namespaces disabled), pid, net, ipc and uts; the environment is cleared down to an explicit set, and the launch itself runs under `env -i` so bwrap and its init start with only `XDG_RUNTIME_DIR` and `PATH` whatever the caller passes. The cgroup scope is required: `TasksMax` (default 1024, it counts threads) is the fork-bomb control (RLIMIT_NPROC is decorative, there is deliberately no RLIMIT_AS), swap is denied with `MemorySwapMax=0`, and tmpfs pages count against `MemoryMax`. The unit name is `dsh-seat.<seat>.<callid>`, so a dash in either part can never collide. The builder only reads the filesystem, and refuses a non-canonical `cwd`, a worktree-style or alternates-backed `.git`, hard-linked or setuid or foreign-device entries, an unprovisioned `node_modules`, binds that expose `~/.claude`, `~/.dsh`, `~/.agents`, `~/.ssh`, `~/.config` or other credential directories, a missing `XDG_RUNTIME_DIR`, a missing or replaced bwrap, and a full clone disk. `classifyScopeStop` encodes the stop rule: success only once the cgroup directory is gone. The mounts bound a workspace; they are not a seal.
+
 [`@deepseek-ai/node-addon-landlock-run`](https://www.npmjs.com/package/@deepseek-ai/node-addon-landlock-run) supplies the platform launcher, functional probe, and CLI argument vocabulary. This provider owns only mode-to-grant mapping and runner selection. Keeping path resolution and probe parsing with the versioned binary prevents contract drift.
 
 ```yaml
@@ -23,7 +25,7 @@ The Windows rung keeps one deterministic write SID and standing ACE per workspac
   name: '@deepseek-ai/dsh-sandbox-local'
 ```
 
-Consumers: [`@deepseek-ai/dsh-bash-sandbox`](../../shell/bash-sandbox/); see [the acp-agent example](../../../examples/acp-agent/) for the runnable default composition.
+Consumers: [`@deepseek-ai/dsh-bash-sandbox`](../../shell/bash-sandbox/) (the seat profile has no consumer in this package yet); see [the acp-agent example](../../../examples/acp-agent/) for the runnable default composition.
 
 ## Model Experience
 
@@ -40,3 +42,5 @@ No direct invalidation; the named consumer owns any request-prefix changes.
 - **Seatbelt depends on deprecated `sandbox-exec`** — macOS still ships it, but this provider cannot replace or probe that private policy engine if Apple removes it.
 - **Runner selection is cached for the provider lifetime** — installing, removing, or repairing a runner requires reloading the plugin before selection changes.
 - **`runnerCommand` is an operator assertion** — a configured custom runner skips functional probes and is assumed to implement the bwrap-compatible profile honestly; if it is itself a Bash script, its interpreter startup runs before that script applies confinement.
+- **The seat profile is a bounded workspace, not a seal** — the working tree stays a persistence residue (hooks, scripts and configs a host tool may later open), so operators must never run git, pnpm or an editor with project trust inside a seat clone. Preflight checks are time-of-check: a seat can still create new hard links to inodes it can see, and there is no seccomp filter or clone disk quota yet.
+- **The disk floor is a pre-call check, not a cap** — 1 GiB was measured written in 0.2 s inside the sandbox; the in-call disk watchdog belongs to the bash runner and a bounded volume to S8. There is no seccomp filter yet, and `/proc` still shows host `loadavg` and `meminfo`. The hard-link checks on `.git` entries are belt-and-braces while `.git` is mounted read-only.

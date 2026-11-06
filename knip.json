@@ -7,8 +7,11 @@
     "bwrap",
     "icacls",
     "musl-gcc",
+    "pgrep",
     "python3",
     "sandbox-exec",
+    "systemctl",
+    "systemd-run",
     "tar",
     "taskkill",
     "where.exe"
@@ -663,6 +666,15 @@
     "packages/agent/agent-claude-code-tools": {
       "entry": [
         "src/bin.ts",
+        "tests/**/*.spec.ts"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "tests/**/*.ts"
+      ]
+    },
+    "packages/agent/agent-claude-code-bash": {
+      "entry": [
         "tests/**/*.spec.ts"
       ],
       "project": [

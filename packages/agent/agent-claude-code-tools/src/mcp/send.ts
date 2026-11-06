@@ -41,6 +41,8 @@ export function createSendTool(context: SeatToolContext): SeatTool {
     name: MAILBOX_SEND_TOOL,
     description: 'Send mail to another seat. Only the seats mailbox_directory lists can be mailed. Your own identity is attached for you.',
     inputSchema: SEND_SCHEMA,
+    taint: 'never',
+    taintReason: 'returns only a trace id and the destination name the operator configured in send_to; no mail body or external content comes back',
     handler: async (input) => {
       if (context.sendTo.length === 0) {
         return refuse('this seat has no send_to entries in its host stanza (key send_to), so it cannot send mail')

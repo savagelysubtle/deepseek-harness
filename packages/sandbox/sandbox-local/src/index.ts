@@ -40,6 +40,9 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { AclWriteGrant, assertTempRootOutsideWorkspace, tempWriteSid, workspaceWriteSid } from '@deepseek-ai/dsh-sandbox-windows-acl'
 import { bwrapProfileArgs, landlockProfileArgs, seatbeltProfileArgs } from './profiles.ts'
 
+export { SEAT_DEFAULT_LIMITS, SEAT_FORBIDDEN_HOME_ENTRIES, SEAT_HOME, SEAT_NODE_MODULES_TMPFS, SeatRefusalError, attestBwrap, classifyScopeStop, planSeatLaunch } from './seat-profile.ts'
+export type { ScopeStopOutcome, SeatBwrapIdentity, SeatLaunchPlan, SeatLaunchResult, SeatLimits, SeatProfileSpec, SeatRefusalCode } from './seat-profile.ts'
+
 /** Plugin config. All optional — `static Config` supplies the defaults. */
 export interface Config {
   /**
@@ -228,7 +231,7 @@ const WINDOWS_ACL_RUNNER_FAILURE_EXIT = 127
  * assembled snapshot fixture at
  * `examples/acp-agent/tests/fixtures/partial-landlock-sandbox.ts`.
  */
-const RUNNER_FAILURE_RULES = {
+export const RUNNER_FAILURE_RULES = {
   bwrap: [{ fatalSignatures: ['bwrap: '] }],
   landlock: [{
     allowedExitCodes: [LAUNCHER_FAILURE_EXIT],
