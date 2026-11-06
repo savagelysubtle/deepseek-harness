@@ -200,14 +200,31 @@ describe('per-seat limits', () => {
 
   it('counts calls per seat across agents through the shared gate', () => {
     const gate = new SeatGate()
-    gate.noteCall('a', 1001)
-    gate.noteCall('a', 1500)
-    gate.noteCall('b', 1500)
+    gate.noteCall('a', 1001, 1000)
+    gate.noteCall('a', 1500, 1000)
+    gate.noteCall('b', 1500, 1000)
     expect(gate.callsInWindow('a', 2000, 1000)).toBe(2)
     expect(gate.callsInWindow('a', 2400, 1000)).toBe(1)
     expect(gate.callsInWindow('a', 9000, 1000)).toBe(0)
     expect(gate.callsInWindow('b', 2000, 1000)).toBe(1)
     expect(gate.callsInWindow('none', 2000, 1000)).toBe(0)
+  })
+
+  it('prunes expired calls when it saves, never an active one, and excludes the boundary', () => {
+    const written: Array<[string, readonly number[]]> = []
+    const gate = new SeatGate({ load: () => undefined, save: (seat, times) => { written.push([seat, times]) } })
+    gate.noteCall('a', 1000, 1000)
+    gate.noteCall('a', 1500, 1000)
+    // now - windowMs = 1000 here: the call at exactly 1000 is outside the window, the one at 1500 is inside.
+    gate.noteCall('a', 2000, 1000)
+    expect(written.at(-1)).toEqual(['a', [1500, 2000]])
+    // An active call (inside the window) is never dropped, however many are saved.
+    gate.noteCall('a', 2001, 1000)
+    gate.noteCall('a', 2002, 1000)
+    expect(written.at(-1)).toEqual(['a', [1500, 2000, 2001, 2002]])
+    expect(gate.callsInWindow('a', 2002, 1000)).toBe(4)
+    gate.noteCall('a', 9000, 1000)
+    expect(written.at(-1)).toEqual(['a', [9000]])
   })
 })
 

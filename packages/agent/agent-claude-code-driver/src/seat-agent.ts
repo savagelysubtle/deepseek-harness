@@ -212,28 +212,34 @@ export class SeatGate {
    * Seed a seat's call history, once: only when this process has no record of the seat yet, so a restart does not
    * reset the window and several agents of one seat do not count a call twice. The saved history (when the gate
    * has persistence and the seat has any) is the record, plus the log's queries older than all of it (made
-   * before saving began); otherwise the session log alone seeds it.
+   * before saving began); otherwise the session log alone seeds it. Times at or before `now - windowMs` are
+   * dropped, so a long-lived state file does not carry expired calls forever.
    * @param seat - seat key.
    * @param times - epoch milliseconds of the queries the log shows the seat started.
+   * @param now - epoch milliseconds.
+   * @param windowMs - window length.
    */
-  seed(seat: string, times: readonly number[]): void {
+  seed(seat: string, times: readonly number[], now: number, windowMs: number): void {
     if (this.calls.has(seat)) return
+    const live = (at: number): boolean => at > now - windowMs
     const saved = this.persistence?.load(seat)
     if (saved === undefined || saved.length === 0) {
-      this.calls.set(seat, [...times])
+      this.calls.set(seat, times.filter(live))
       return
     }
     const earliest = Math.min(...saved)
-    this.calls.set(seat, [...times.filter(at => at < earliest), ...saved])
+    this.calls.set(seat, [...times.filter(at => at < earliest), ...saved].filter(live))
   }
 
   /**
-   * Note that a seat started a query.
+   * Note that a seat started a query. Calls whose window has expired (at or before `now - windowMs`) are dropped
+   * before the list is kept and saved, so the persisted history stays bounded by the window.
    * @param seat - seat key.
    * @param now - epoch milliseconds.
+   * @param windowMs - window length.
    */
-  noteCall(seat: string, now: number): void {
-    const next = [...this.calls.get(seat) ?? [], now]
+  noteCall(seat: string, now: number, windowMs: number): void {
+    const next = [...(this.calls.get(seat) ?? []).filter(at => at > now - windowMs), now]
     this.calls.set(seat, next)
     this.persistence?.save(seat, next)
   }
@@ -496,7 +502,7 @@ export class ClaudeCodeSeatAgent implements Agent {
       this.rec('claude-code/session-tainted', { reason: this.sessionTaint, at: deps.now() })
     }
     // A step that started is a query (or an all-duplicate turn): rebuild the call window the process lost.
-    gate.seed(seat, session.events.filter(event => event.type === 'step/start').map(event => event.time))
+    gate.seed(seat, session.events.filter(event => event.type === 'step/start').map(event => event.time), deps.now(), config.callWindowMs)
     this.digestKey = deps.digestKey ?? randomBytes(32)
     this.scope = createScope(loopCtx, this)
     this.ctx = this.scope.ctx.extend({ agent: this })
@@ -1394,7 +1400,7 @@ export class ClaudeCodeSeatAgent implements Agent {
         // The awaits above (binding, flush) can outlast a switch set meanwhile: look once more right before the query.
         this.assertKillSwitchOff()
         for (const message of run) this.pushMessage(live, message)
-        this.gate.noteCall(this.seat, this.deps.now())
+        this.gate.noteCall(this.seat, this.deps.now(), this.config.callWindowMs)
         live.query = this.deps.query({ prompt: live.stream, options })
         this.pumpSteer(phase)
         // A flag file set while the query is busy inside one long tool call produces no stream message to notice it on.

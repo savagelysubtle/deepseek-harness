@@ -13,7 +13,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import { forbiddenEnvPresent } from '@deepseek-ai/dsh-agent-claude-code-driver'
 import type { ClaudeCodeHostSeat } from '@deepseek-ai/dsh-agent-claude-code-driver'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { seatRowHash } from '@deepseek-ai/dsh-mailbox'
+import { seatDriverKey, seatRowHash } from '@deepseek-ai/dsh-mailbox'
 import type { OrgRegistrySeat, SeatBinding } from '@deepseek-ai/dsh-mailbox'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import type { SeatRowsService } from '../src/index.ts'
@@ -86,7 +86,13 @@ export function fakeRows(initial: Record<string, OrgRegistrySeat>): SeatRowsServ
     table,
     current: (seat) => {
       const found = Object.hasOwn(table, seat) ? table[seat] : undefined
-      return found === undefined ? undefined : { row: found, rowHash: seatRowHash(found) }
+      if (found === undefined) return undefined
+      return {
+        rowHash: seatRowHash(found),
+        driver: seatDriverKey(found),
+        admit_from: found.admit_from ?? [],
+        admit_sender_classes: found.admit_sender_classes ?? [],
+      }
     },
   }
 }

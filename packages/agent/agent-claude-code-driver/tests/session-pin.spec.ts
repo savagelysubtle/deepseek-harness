@@ -165,17 +165,30 @@ describe('CallWindowStore and the persisted SeatGate', () => {
     const saved = new Map<string, number[]>([['ops', [100, 200]], ['empty', []]])
     const written: Array<[string, readonly number[]]> = []
     const gate = new SeatGate({ load: seat => saved.get(seat), save: (seat, times) => { written.push([seat, times]) } })
-    gate.seed('ops', [10, 150, 250])
+    gate.seed('ops', [10, 150, 250], 300, 1000)
     expect(gate.callsInWindow('ops', 300, 1000)).toBe(3)
-    gate.seed('ops', [1, 2, 3])
+    gate.seed('ops', [1, 2, 3], 300, 1000)
     expect(gate.callsInWindow('ops', 300, 1000)).toBe(3)
-    gate.seed('empty', [7, 8])
+    gate.seed('empty', [7, 8], 300, 1000)
     expect(gate.callsInWindow('empty', 300, 1000)).toBe(2)
-    gate.seed('fresh', [9])
+    gate.seed('fresh', [9], 300, 1000)
     expect(gate.callsInWindow('fresh', 300, 1000)).toBe(1)
-    gate.noteCall('ops', 290)
+    gate.noteCall('ops', 290, 1000)
     expect(written).toEqual([['ops', [10, 100, 200, 290]]])
     expect(new SeatGate().callsInWindow('ops', 300, 1000)).toBe(0)
+  })
+
+  it('drops expired times at seed, keeps every active one, and excludes the boundary', () => {
+    const saved = new Map<string, number[]>([['ops', [100, 500, 900]]])
+    const gate = new SeatGate({ load: seat => saved.get(seat), save: () => undefined })
+    // now - windowMs = 500: 10 and 100 are expired, 500 sits on the boundary (excluded), 900 is active.
+    gate.seed('ops', [10], 1500, 1000)
+    expect(gate.callsInWindow('ops', 1500, 1000)).toBe(1)
+    const written: Array<readonly number[]> = []
+    const again = new SeatGate({ load: seat => saved.get(seat), save: (_seat, times) => { written.push(times) } })
+    again.seed('ops', [], 1500, 1000)
+    again.noteCall('ops', 1500, 1000)
+    expect(written).toEqual([[900, 1500]])
   })
 })
 
@@ -305,7 +318,7 @@ describe('the gate seeds a restarted seat from its saved window (A5, agent level
     const now = h.state.now
     const dir = privateStateDir()
     const before = new SeatGate(new CallWindowStore(dir, () => undefined))
-    for (const n of [1, 2, 3]) before.noteCall('tester', now - n * 1000)
+    for (const n of [1, 2, 3]) before.noteCall('tester', now - n * 1000, 18_000_000)
     const restarted = new SeatGate(new CallWindowStore(dir, () => undefined))
     const empty = h.session('reseeded')
     new ClaudeCodeSeatAgent(h.ctx, empty.id, empty, 'tester', seatConfig(), '/work/seat', h.deps, restarted)

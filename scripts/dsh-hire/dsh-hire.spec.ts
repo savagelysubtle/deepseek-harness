@@ -191,6 +191,7 @@ describe('claude-code hire', () => {
     expect(out.stdout).toContain(`cwd: ${r.project('claudie')}`)
     expect(out.stdout).toContain(`claude_path: ${join(r.shims, 'claude')}`)
     expect(out.stdout).toContain('admit_from_ceiling: [alfred]')
+    expect(out.stdout).toContain('attests it is not externally exposed')
     expect(out.stdout).toContain('model: haiku')
     expect(out.stdout).toContain('role: mail-only')
     expect(out.stdout).toContain('must verify claude_path and its sha256 independently')

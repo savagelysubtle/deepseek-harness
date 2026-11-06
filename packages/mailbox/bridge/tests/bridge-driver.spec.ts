@@ -8,7 +8,7 @@
 
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { loadOrgRegistry, seatRowHash } from '@deepseek-ai/dsh-mailbox'
+import { admitsMail, loadOrgRegistry, seatRowHash } from '@deepseek-ai/dsh-mailbox'
 import * as bridge from '../src/index.ts'
 import {
   CC_TARGET, cleanupHarnesses, makeDriverHarness, rewriteRegistry, stubAgent, writeRegistry,
@@ -589,7 +589,7 @@ describe('the mailboxSeatRows service', () => {
     await bridge.apply(h.ctx, { addresses, orgRegistryPath, pollIntervalMs: 600_000, admitFrom: ['alice'] })
   }
 
-  it('answers with the bridge cache: the same row and hash a binding carries', async () => {
+  it('answers with the bridge cache: the same hash a binding carries, and a narrowed view', async () => {
     const path = writeRegistry(ccRegistry())
     const h = await makeDriverHarness({ registryPath: path })
     await mount(h, path)
@@ -599,13 +599,26 @@ describe('the mailboxSeatRows service', () => {
     const current = rows.current('target')!
     const parsed = (await loadOrgRegistry(path)).seats.target!
     expect(current.rowHash).toBe(seatRowHash(parsed))
-    expect(current.row).toEqual(parsed)
-    expect(Object.isFrozen(current.row)).toBe(true)
+    expect(current.driver).toBe('claude-code')
+    expect(current.admit_from).toEqual(parsed.admit_from)
+    expect(current.admit_sender_classes).toEqual(parsed.admit_sender_classes)
+    expect(Object.isFrozen(current)).toBe(true)
     expect(rows.current('nobody')).toBeUndefined()
 
     await h.publish('alice')
     await bridge.internals.drainOnce(h.ctx, h.spec({ addresses: ['target'], admitFrom: ['alice'] }))
     expect(bindingOf(h.calls[0]).rowHash).toBe(current.rowHash)
+  })
+
+  it('exposes no row, cwd, session id or tools, and the view still admits through admitsMail', async () => {
+    const path = writeRegistry(ccRegistry())
+    const h = await makeDriverHarness({ registryPath: path })
+    await mount(h, path)
+    const current = h.ctx.get('mailboxSeatRows')!.current('target')!
+    expect(Object.keys(current).sort()).toEqual(['admit_from', 'admit_sender_classes', 'driver', 'rowHash'])
+    for (const key of ['row', 'cwd', 'sessionId', 'tools']) expect(current).not.toHaveProperty(key)
+    expect(admitsMail(current, { from: 'alice', classes: ['seat'] })).toEqual({ allow: true })
+    expect(admitsMail(current, { from: 'mallory', classes: ['seat'] }).allow).toBe(false)
   })
 
   it('serves nothing for a quarantined seat', async () => {
