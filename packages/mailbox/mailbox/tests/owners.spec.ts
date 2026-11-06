@@ -60,19 +60,19 @@ describe('glob matcher', () => {
   })
 
   it('a pattern without glob characters owns the path and everything below it', () => {
-    expect(patternMatches('/r/docs', '/r/docs')).toBe(true)
-    expect(patternMatches('/r/docs', '/r/docs/a/b.md')).toBe(true)
-    expect(patternMatches('/r/docs', '/r/docs2/a.md')).toBe(false)
-    expect(patternMatches('/r/docs', '/r/doc')).toBe(false)
+    expect(patternMatches('/r/notes', '/r/notes')).toBe(true)
+    expect(patternMatches('/r/notes', '/r/notes/a/b.txt')).toBe(true)
+    expect(patternMatches('/r/notes', '/r/notes2/a.md')).toBe(false)
+    expect(patternMatches('/r/notes', '/r/doc')).toBe(false)
   })
 
   it('normalises relative against the cwd, keeps absolute as is, and drops trailing slashes', () => {
     expect(normalizeAbsolutePattern('src/**', '/w/seat')).toBe('/w/seat/src/**')
     expect(normalizeAbsolutePattern('./src/../lib/*.ts', '/w/seat')).toBe('/w/seat/lib/*.ts')
     expect(normalizeAbsolutePattern('/mnt/Dev/Coding/x/**', '/w/seat')).toBe('/mnt/Dev/Coding/x/**')
-    expect(normalizeAbsolutePattern('docs/', '/w/seat')).toBe('/w/seat/docs')
+    expect(normalizeAbsolutePattern('notes/', '/w/seat')).toBe('/w/seat/notes')
     // The trailing-slash form still owns the directory and below.
-    expect(patternMatches(normalizeAbsolutePattern('docs/', '/w/seat'), '/w/seat/docs/a.md')).toBe(true)
+    expect(patternMatches(normalizeAbsolutePattern('notes/', '/w/seat'), '/w/seat/notes/a.txt')).toBe(true)
   })
 })
 
@@ -89,18 +89,18 @@ describe('owner lookup and overlap scan (three seats, two overlap)', () => {
     writeFileSync(file, 'x')
   }
 
-  /** alpha owns src/**, beta owns src/shared/** and docs, gamma owns lib/*.ts; delta has no owns; eve is quarantined. */
+  /** alpha owns src/**, beta owns src/shared/** and notes, gamma owns lib/*.ts; delta has no owns; eve is quarantined. */
   function fixture(): { root: string; registry: ReturnType<typeof parseOrgRegistry> } {
     const root = mkdtempSync(join(tmpdir(), 'dsh-owners-'))
     roots.push(root)
-    for (const file of ['src/a.ts', 'src/shared/s1.ts', 'src/shared/s2.ts', 'src/shared/deep/s3.ts', 'docs/readme.md',
+    for (const file of ['src/a.ts', 'src/shared/s1.ts', 'src/shared/s2.ts', 'src/shared/deep/s3.ts', 'notes/readme.txt',
       'lib/x.ts', 'lib/y.js', 'lib/sub/z.ts', 'src/node_modules/skip.ts', 'src/.git/skip.ts']) touch(join(root, file))
     symlinkSync(join(root, 'src'), join(root, 'src', 'loop'))
     const text = [
       `baseDir: ${root}`,
       'seats:',
       '  alpha: { cwd: ., owns: ["src/**"] }',
-      '  beta: { cwd: ., owns: ["src/shared/**", "docs/"] }',
+      '  beta: { cwd: ., owns: ["src/shared/**", "notes/"] }',
       '  gamma: { cwd: ., owns: ["lib/*.ts"] }',
       '  delta: { cwd: . }',
       '  eve: { cwd: ., driver: claude-code, owns: ["src/**"], colour: red }',
@@ -127,7 +127,7 @@ describe('owner lookup and overlap scan (three seats, two overlap)', () => {
     expect(shared.owners).toEqual(['alpha', 'beta'])
     expect(formatOwnerLookup(shared).split('\n')[0]).toBe(`${join(root, 'src/shared/s1.ts')}: doubly owned by alpha, beta`)
     // A trailing slash on the asked path changes nothing.
-    expect(findOwners(registry, `${join(root, 'docs')}/`).owners).toEqual(['beta'])
+    expect(findOwners(registry, `${join(root, 'notes')}/`).owners).toEqual(['beta'])
   })
 
   it('--overlaps lists exactly the one overlapping pair', () => {
@@ -151,7 +151,7 @@ describe('owner lookup and overlap scan (three seats, two overlap)', () => {
 
   it('reports no overlaps in plain words when territories are disjoint', () => {
     const { root } = fixture()
-    const registry = parseOrgRegistry(`baseDir: ${root}\nseats:\n  a: { cwd: ., owns: ["lib/**"] }\n  b: { cwd: ., owns: ["docs"] }\n`)
+    const registry = parseOrgRegistry(`baseDir: ${root}\nseats:\n  a: { cwd: ., owns: ["lib/**"] }\n  b: { cwd: ., owns: ["notes"] }\n`)
     const report = findOverlaps(registry)
     expect(report.overlappingPaths).toBe(0)
     expect(formatOverlapReport(report)).toBe('No overlaps: no path is owned by more than one seat.')
