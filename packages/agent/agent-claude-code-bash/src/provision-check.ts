@@ -47,7 +47,7 @@ export function resolveWorkdir(clone: string, requested: string | undefined, fs:
   if (requested === undefined) return { ok: true, workdir: clone }
   if (requested.startsWith('-')) return { ok: false, reason: 'cwd must be an absolute path and may not start with "-"' }
   if (!isAbsolute(requested) || /[\0\n]/u.test(requested)) {
-    return { ok: false, reason: 'cwd must be an absolute path without NUL or newline characters' }
+    return { ok: false, reason: 'cwd must be an absolute path and may not contain a control character (NUL or newline)' }
   }
   let real: string
   let directory: boolean

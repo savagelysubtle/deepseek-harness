@@ -30,8 +30,12 @@ export const HOST_MAX_DEADLINE_S = 600
 /** Bytes kept per output stream (the tail); everything before is discarded while the command runs. */
 export const TAIL_BYTES = 64 * 1024
 
-/** Longest text the model receives in the output block, in code points (the scrub cap handed to the tools package). */
-export const MAX_OUTPUT_CHARS = 65_536
+/**
+ * Longest text the model receives in the output block, in code points (the scrub cap handed to the tools package).
+ * Kept at 32 Ki because a dense 64 KiB result (66,003 characters) exceeded the Claude Code CLI's MCP result token cap
+ * in the live probe, and the CLI spilled it to a file.
+ */
+export const MAX_OUTPUT_CHARS = 32_768
 
 /** How often the in-call disk watchdog samples free space. */
 export const WATCHDOG_INTERVAL_MS = 250

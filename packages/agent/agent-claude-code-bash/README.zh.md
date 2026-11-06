@@ -32,6 +32,14 @@
 
 超出范围的数字,以及非绝对或未规范化的路径,会在挂载时抛出 `BashConfigError`。
 
+## 操作员规则与克隆目录的 provisioning
+
+在真实 provisioning 的克隆目录上做的实机探测(知识库笔记 `Tech/DeepSeekHarness-S6-live-probe-run1-2026-11-05.md`)确立了以下规则,它们都不是本包的代码。
+
+- **沙箱内绝不要直接运行 `pnpm run <script>`。** pnpm 的 verify-deps-before-run 在碰到只读的根 `node_modules/.bin`(EROFS)之前,已经清空了 242 个子包的 `node_modules` 目录,破坏了克隆目录。`pnpm --config.verify-deps-before-run=false run <script>` 可正常工作。工具描述用一句话告诉模型这一点。provisioning 还应把该设置写入克隆目录的 `.npmrc`,让席位不可能忘记;这是 S8 的 provisioning 事项,不是本包要做的。
+- **pnpm 需要 corepack 缓存可读。** 以只读方式绑定 `~/.cache/node/corepack`:把 `corepackHome` 设为该路径,并加入 `roPaths`。这是 provisioning 要求,不是代码改动。
+- **超过约 32 Ki 字符的结果可能触发 Claude Code CLI 的 MCP 结果上限。** 一个密集的 64 KiB 结果(66,003 个字符)超过了 CLI 的 token 上限,CLI 把它转存到了文件,所以默认结果上限为 32,768 个字符。请把长输出重定向到克隆目录中的文件,并分段读取。
+
 ## 测试
 
 单元测试在伪造的环境(伪造的 spawn 接缝、文件系统和时钟)上运行,每个文件保持 100% 覆盖率。`tests/result.spec.ts` 把导入的 bwrap 失败规则与真实 `LocalSandboxProvider` 自己的规则固定为同一条。`tests/integration.spec.ts` 是一个 `describe.skipIf` 块:除非 bwrap、systemd 用户总线和用户命名空间都可用,否则跳过;可用时在真实的 `git clone --no-hardlinks` 克隆上运行真实工具(输出与退出码、截止时间终止、`setsid` 后没有孤儿、克隆目录之外写入失败、无网络)。
@@ -42,11 +50,11 @@
 
 #### What the model sees
 
-The coder sees one extra tool, `mcp__dsh__bash`, whose description says there is no network, that any command is allowed, that `.git` and `node_modules` are read-only, the deadline and kill behaviour, the 64 KiB output cap, to run `vitest` from the clone root, and that commands run one at a time; its input is a strict object of `command` (1 to 16000 characters), optional `cwd` and optional `timeout_s`, and its result is a host-written status block (every line begins `[dsh-bash`) followed by the sanitised `[dsh-bash stdout]` and `[dsh-bash stderr]` text, where any program line that imitates the marker is escaped with a leading backslash.
+The coder sees one extra tool, `mcp__dsh__bash`, whose description says there is no network, that any command is allowed, that `.git` and `node_modules` are read-only, the deadline and kill behaviour, the 64 KiB per-stream capture and the clip of a result to about 32 Ki characters, to run pnpm with `--config.verify-deps-before-run=false`, to run `vitest` from the clone root, and that commands run one at a time; its input is a strict object of `command` (1 to 16000 characters), optional `cwd` and optional `timeout_s`, and its result is a host-written status block (every line begins `[dsh-bash`) followed by the sanitised `[dsh-bash stdout]` and `[dsh-bash stderr]` text, where any program line that imitates the marker is escaped with a leading backslash.
 
 #### Token effect
 
-One tool description of a few hundred tokens is added to the coder's tool list, and each call returns at most 65536 characters of output plus the status block, so a noisy command costs up to that much context until the model redirects output to a file as the description advises.
+One tool description of a few hundred tokens is added to the coder's tool list, and each call returns at most 32768 characters of output plus the status block, so a noisy command costs up to that much context until the model redirects output to a file as the description advises.
 
 #### KV Cache effect
 
@@ -56,13 +64,13 @@ The tool description is a fixed string for a given config (`deadlineS` and `maxD
 
 - **本包不提供 `canary` 和 `rules-hooks`。** 本切片之后 coder 仍被拒绝;后续切片负责注册它们。
 - **bwrap 失败规则是导入的。** `RUNNER_FAILURE_RULES` 由 `@deepseek-ai/dsh-sandbox-local` 导出,本包直接使用其中的 `bwrap` 条目(由一个导入相等测试固定)。第二条规则,即 stderr 第一行以 `Failed to ` 开头且退出码非零(`systemd-run` 无法创建 scope),放在本包中,因为沙箱接缝自己的 runner 是 bwrap 而不是 `systemd-run`。
-- **只读主目录下的 corepack 与 pnpm。** corepack 不自动探测,pnpm 可能尝试写入主目录;在后续工作确定默认值之前,由操作员通过配置提供 `corepackHome` 或可写的缓存路径。
-- **MCP 调用超时没有调高。** 600 秒的截止上限加上停止阶梯可能超过 SDK 默认的 MCP 请求超时;调高(约 650 秒)是 driver 的后续工作。
+- **只读主目录下的 corepack 与 pnpm。** corepack 不自动探测;操作员以只读方式绑定其缓存(见上文操作员规则),否则只读主目录会让 pnpm 无处可写。由 provisioning 把 pnpm 设置写入克隆目录的 `.npmrc` 是 S8 事项。
+- **CLI 没有在宿主截止时间之前取消。** 在 Claude Code CLI 2.1.318 上实测:宿主截止时间设为 600 秒时,宿主在 600.3 秒触发,CLI 并未先取消,因此无需修改 MCP 超时。
 - **不报告 `pids.peak`。** 单元的任务数上限会被强制执行,但峰值没有回读到状态块。
 - **启动检查会阻塞挂载。** `systemctl` 调用和探测启动在挂载及每次重检时运行;卡住的用户总线由十秒超时切断,而不是无限等待。
 - **只做每席位串行。** 不同席位并行运行;需要并发命令的席位必须把它们串在同一个 `command` 中。
 - **超过 64 KiB 的输出被丢弃而不是存储。** runner 只保留每个流的尾部;描述告诉模型把大量输出重定向到克隆目录中的文件。
 - **重新加载会明确失败并留下旧工具。** 挂载两次会抛出 `already registered`;由于注册表不能反注册,旧宿主的工具会一直保持已注册并拒绝调用,直到宿主进程重启。卸载插件会中止所有进行中的调用(停止阶梯会结束它们的沙箱),并拒绝其余调用。
 - **程序可以强制重新检查。** 启动器规则只是启发式判断:向 stderr 打印 `bwrap: ` 或以 `Failed to ` 开头(区分大小写)的第一行并以非零码退出的命令,会被归类为启动器故障,把沙箱标记为降级,并使下一次调用重新运行启动检查(约 100 毫秒)。该检查是共享的,因此恶意席位可以让其他席位短暂等待;结论是"命令可能没有运行",绝不是对命令本身的断言。
-- **磁盘看门狗每 250 毫秒采样一次**,因此低于下限的超出量与写入速度成正比(在 NVMe 上实测约 130 MB);1 GiB 的下限就是余量。
+- **磁盘看门狗每 250 毫秒采样一次**,因此低于下限的超出量与写入速度成正比:在一次 650 秒的运行中,实测最多超出 500 MiB 余量 218 MiB;1 GiB 的下限只是余量,而不是上界。
 - **截断无法使伪造的状态行失去转义。** 输出先截取尾部,再对整段做净化和转义,因此保留下来的第一行总是被当作行首处理。

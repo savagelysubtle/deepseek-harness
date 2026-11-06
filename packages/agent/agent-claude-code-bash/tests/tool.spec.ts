@@ -57,7 +57,7 @@ describe('bash tool: definition', () => {
     const text = bashDescription(120, 600)
     for (const needle of [
       'NO network', 'any command runs', 'READ-ONLY', 'git add', 'default 120 s', 'at most 600 s', 'timeout_s', 'killed',
-      '64 KiB', 'Redirect long output into a file', 'Run vitest from the clone root', 'packages/*/*/tests', 'status block written by the host', 'one at a time',
+      '64 KiB', '32 Ki characters', 'verify-deps-before-run=false', 'damages the clone', 'Redirect long output into a file', 'Run vitest from the clone root', 'packages/*/*/tests', 'status block written by the host', 'one at a time',
     ]) {
       expect(text, needle).toContain(needle)
     }

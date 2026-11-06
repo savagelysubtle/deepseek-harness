@@ -21,7 +21,10 @@
  *   node --experimental-transform-types --disable-warning=ExperimentalWarning \
  *     packages/agent/agent-claude-code-bash/scripts/live-probe.mjs
  * (the flag is needed because the driver's built lib still imports a workspace .ts source.)
- * Env: PROBE_SCRATCH (output root), PROBE_DRY=1 (build everything, send no query), PROBE_CASES=direct,model,gate,sleep
+ * Output: each run writes under `<scratch>/s6-live-probe/<stamp>` (ROOT: the clones, the log, the policy files). ROOT is
+ *   kept on purpose so a failed row can be inspected afterwards; remove it with `rm -rf <scratch>/s6-live-probe/<stamp>`
+ *   (or the whole `<scratch>/s6-live-probe`) when done. Default scratch is `$TMPDIR/dsh-s6-live-probe`.
+ * Env: PROBE_SCRATCH (output root; default `os.tmpdir()/dsh-s6-live-probe`), PROBE_DRY=1 (build everything, send no query), PROBE_CASES=direct,model,gate,sleep
  *      or ids such as d5,m1 (default: direct,model,gate; `sleep` is the 650 s case and is opt-in because it takes
  *      about ten minutes), PROBE_NO_CLI_ONLY=1 (accepted for symmetry with S5; unused), PROBE_HARNESS_CLONE (path of
  *      the provisioned harness clone; default `<scratch>/s6-probe-clone`), PROBE_MIN_AVAILABLE_MB (default 6000).
@@ -35,7 +38,7 @@ import {
   appendFileSync, existsSync, lstatSync, linkSync, mkdirSync, readFileSync, realpathSync, rmSync, statfsSync, symlinkSync, unlinkSync, writeFileSync,
 } from 'node:fs'
 import { createServer } from 'node:net'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
@@ -57,7 +60,7 @@ const BUDGET_USD = 0.25
 const BASH = 'mcp__dsh__bash'
 const SEND = 'mcp__dsh__mailbox_send'
 const DRY = process.env['PROBE_DRY'] === '1'
-const SCRATCH = process.env['PROBE_SCRATCH'] ?? '/tmp/claude-1000/-home-steve/c6f4e9e0-d92b-414d-8460-bf2c782aa825/scratchpad'
+const SCRATCH = process.env['PROBE_SCRATCH'] ?? join(tmpdir(), 'dsh-s6-live-probe')
 const MIN_AVAILABLE_MB = Number(process.env['PROBE_MIN_AVAILABLE_MB'] ?? '6000')
 const WANTED = new Set((process.env['PROBE_CASES'] ?? 'direct,model,gate').split(','))
 const want = (id, group) => WANTED.has(id) || WANTED.has(group)
@@ -867,7 +870,17 @@ function report(extra) {
   return fails
 }
 
+// A signal or an unexpected throw must not leave a probe scope behind: the sweep (same filter, only `dsh-seat.probe-s6.*`)
+// runs from the signal handlers and from the `finally` below.
+for (const [name, code] of [['SIGINT', 130], ['SIGTERM', 143]]) {
+  process.once(name, () => {
+    sweepUnits()
+    process.exit(code)
+  })
+}
+
 let abort
+let leftover = []
 row('0 hook node + guard script pass attestFile', 'both attested', attestFindings.length === 0 ? 'both attested' : attestFindings.join(' || '), attestFindings.length === 0 ? 'PASS' : 'FAIL(attestation refused; probe continued unattested)')
 try {
   if (want('direct', 'direct') || [...WANTED].some(id => /^d\d+$/.test(id))) await directCases()
@@ -889,8 +902,9 @@ try {
 } catch (error) {
   if (!(error instanceof ProbeAbort)) throw error
   abort = `ABORTED ON FIRST SDK/AUTH ERROR: ${error.message}`
+} finally {
+  leftover = sweepUnits()
 }
-const leftover = sweepUnits()
 row('zz units created by the probe that survived', 'none', leftover.length === 0 ? 'none' : leftover.join(', '), pass(leftover.length === 0))
 const fails = report(abort)
 process.exit(abort !== undefined || fails > 0 ? 1 : 0)

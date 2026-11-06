@@ -32,6 +32,14 @@ Founder rulings this package implements: **no network; any command, with no comm
 
 Out-of-range numbers and non-absolute or non-normalised paths throw `BashConfigError` at mount.
 
+## Operator rules and clone provisioning
+
+Live probe on a real provisioned clone (vault note `Tech/DeepSeekHarness-S6-live-probe-run1-2026-11-05.md`) established these rules. None is code in this package.
+
+- **Never plain `pnpm run <script>` inside the sandbox.** pnpm's verify-deps-before-run emptied 242 per-package `node_modules` directories before it hit EROFS on the read-only root `node_modules/.bin`, damaging the clone. `pnpm --config.verify-deps-before-run=false run <script>` works. The tool description tells the model so in one sentence. Provisioning should also write that setting into the clone's `.npmrc` so a seat cannot forget it; that is an S8 provisioning item, not something this package does.
+- **pnpm needs corepack's cache readable.** Bind `~/.cache/node/corepack` read-only: set `corepackHome` to it and list it in `roPaths`. This is a provisioning requirement, not a code change.
+- **Results above roughly 32 Ki characters can hit the Claude Code CLI's MCP result cap.** A dense 64 KiB result (66,003 characters) exceeded the CLI's token cap and the CLI spilled it to a file, so the default result cap is 32,768 characters. Redirect long output to a file in the clone and read it in pieces.
+
 ## Tests
 
 Unit specs run against a fake world (a fake spawn seam, filesystem and clock) and hold 100% per-file coverage. `tests/result.spec.ts` pins the imported bwrap failure rule to the real `LocalSandboxProvider`'s own. `tests/integration.spec.ts` is one `describe.skipIf` block: it is skipped unless bwrap, the systemd user bus and user namespaces all work, and otherwise runs the real tool on a real `git clone --no-hardlinks` clone (output and exit code, deadline kill, no orphan behind `setsid`, a write outside the clone fails, no network).
@@ -42,11 +50,11 @@ Unit specs run against a fake world (a fake spawn seam, filesystem and clock) an
 
 #### What the model sees
 
-The coder sees one extra tool, `mcp__dsh__bash`, whose description says there is no network, that any command is allowed, that `.git` and `node_modules` are read-only, the deadline and kill behaviour, the 64 KiB output cap, to run `vitest` from the clone root, and that commands run one at a time; its input is a strict object of `command` (1 to 16000 characters), optional `cwd` and optional `timeout_s`, and its result is a host-written status block (every line begins `[dsh-bash`) followed by the sanitised `[dsh-bash stdout]` and `[dsh-bash stderr]` text, where any program line that imitates the marker is escaped with a leading backslash.
+The coder sees one extra tool, `mcp__dsh__bash`, whose description says there is no network, that any command is allowed, that `.git` and `node_modules` are read-only, the deadline and kill behaviour, the 64 KiB per-stream capture and the clip of a result to about 32 Ki characters, to run pnpm with `--config.verify-deps-before-run=false`, to run `vitest` from the clone root, and that commands run one at a time; its input is a strict object of `command` (1 to 16000 characters), optional `cwd` and optional `timeout_s`, and its result is a host-written status block (every line begins `[dsh-bash`) followed by the sanitised `[dsh-bash stdout]` and `[dsh-bash stderr]` text, where any program line that imitates the marker is escaped with a leading backslash.
 
 #### Token effect
 
-One tool description of a few hundred tokens is added to the coder's tool list, and each call returns at most 65536 characters of output plus the status block, so a noisy command costs up to that much context until the model redirects output to a file as the description advises.
+One tool description of a few hundred tokens is added to the coder's tool list, and each call returns at most 32768 characters of output plus the status block, so a noisy command costs up to that much context until the model redirects output to a file as the description advises.
 
 #### KV Cache effect
 
@@ -56,13 +64,13 @@ The tool description is a fixed string for a given config (`deadlineS` and `maxD
 
 - **`canary` and `rules-hooks` are not provided here.** A coder is still refused after this slice; the later slice registers them.
 - **The bwrap failure rule is imported.** `RUNNER_FAILURE_RULES` is exported by `@deepseek-ai/dsh-sandbox-local` and this package uses its `bwrap` entry directly (an import-equality test pins it). The second rule, a first stderr line starting `Failed to ` with a non-zero exit (`systemd-run` could not create the scope), lives here, because the sandbox seam's own runner is bwrap, not `systemd-run`.
-- **Corepack and pnpm under a read-only home.** Corepack is not auto-detected and pnpm may try to write under the home; the operator provides `corepackHome` or a writable cache path through config until a follow-up decides the default.
-- **The MCP call timeout is not raised.** The 600 s deadline ceiling plus the stop ladder can exceed the SDK's default MCP request timeout; raising it (to roughly 650 s) is a follow-up in the driver.
+- **Corepack and pnpm under a read-only home.** Corepack is not auto-detected; the operator binds its cache read-only (see Operator rules above) and a read-only home otherwise leaves pnpm nothing writable. Provisioning writing the pnpm setting into the clone's `.npmrc` is an S8 item.
+- **The CLI did not cancel before the host deadline.** Measured on Claude Code CLI 2.1.318: with a 600 s host deadline, the host deadline fired at 600.3 s and the CLI did not cancel first, so no MCP timeout change is needed.
 - **No `pids.peak` reporting.** The unit's task limit is enforced, but the peak count is not read back into the status block.
 - **The start-up check blocks mount.** `systemctl` calls and a probe launch run at mount and on each recheck; a hung user bus is cut off by a ten-second timeout rather than waiting.
 - **Per-seat serialisation only.** Different seats run in parallel; a seat that needs concurrent commands must chain them in one `command`.
 - **Output beyond 64 KiB is discarded, not stored.** The runner keeps only the tail of each stream; the description tells the model to redirect large output to a file in the clone.
 - **A reload fails loud and leaves the old tool behind.** Mounting twice throws `already registered`, and because the registries cannot unregister, the old host's tool stays registered and refusing until the host process restarts. Unloading the plugin aborts every in-flight call (the stop ladder ends its sandbox) and refuses the rest.
 - **A program can force a re-check.** The launcher rule is a heuristic: a command that prints `bwrap: ` or a first line `Failed to ` (case-sensitive) to stderr and exits non-zero is classified as a launcher failure, marks the sandbox degraded and makes the next call re-run the start-up check (about 100 ms). The check is shared, so a hostile seat can make other seats wait briefly on it; the verdict is "the command may not have run", never a claim about the command.
-- **The disk watchdog samples every 250 ms**, so the overshoot below the floor scales with write speed (about 130 MB was measured on NVMe); the 1 GiB floor is the margin.
+- **The disk watchdog samples every 250 ms**, so the overshoot below the floor scales with write speed: measured up to 218 MiB over the 500 MiB margin in a 650 s run; the 1 GiB floor is the margin, not a bound.
 - **A cut cannot unescape a forged status line.** The output is cut to its tail first, then sanitised and escaped as a whole, so the first retained line is always treated as a line start.

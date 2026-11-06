@@ -36,6 +36,9 @@ describe('resolveWorkdir', () => {
       const result = resolveWorkdir(clone, bad)
       expect(result.ok, bad).toBe(false)
     }
+    expect(resolveWorkdir(clone, `${clone}/a\nb`)).toEqual({
+      ok: false, reason: 'cwd must be an absolute path and may not contain a control character (NUL or newline)',
+    })
     expect(resolveWorkdir(clone, '-x')).toEqual({ ok: false, reason: 'cwd must be an absolute path and may not start with "-"' })
   })
 
