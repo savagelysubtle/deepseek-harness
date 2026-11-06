@@ -21,6 +21,17 @@ function exitCode(argv: string[]): number {
 afterEach(() => { vi.restoreAllMocks() })
 
 describe('parseDshArgs', () => {
+  it('routes dsh owners <path> and dsh owners --overlaps', () => {
+    expect(parse(['owners', 'src/a.ts'])).toEqual({ mode: 'owners', path: 'src/a.ts', overlaps: false })
+    expect(parse(['owners', '--overlaps'])).toEqual({ mode: 'owners', path: undefined, overlaps: true })
+  })
+
+  it('treats owners with a path and --overlaps, or with neither, as a usage error (exit 2)', () => {
+    expect(exitCode(['owners', '--overlaps', 'src'])).toBe(2)
+    expect(exitCode(['owners'])).toBe(2)
+    expect(exitCode(['--profile', 'tui', 'owners', 'x'])).not.toBe(0)
+  })
+
   it('routes profile boots and the web alias, handing the rest to the app', () => {
     expect(parse(['--profile', 'tui'])).toEqual({ mode: 'profile', profile: 'tui', patches: [], args: [] })
     expect(parse(['--profile', 'tui', '--patch', 'a.yml', '--patch', 'b.yml']))

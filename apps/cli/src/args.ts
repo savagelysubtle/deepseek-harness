@@ -44,8 +44,17 @@ interface PluginInvocation {
   args: string[]
 }
 
+/** Report which seat owns a path, or every overlap between seat territories (read-only). */
+interface OwnersInvocation {
+  mode: 'owners'
+  /** The path to look up; absent exactly when `overlaps` is set. */
+  path: string | undefined
+  /** List the overlaps between seat territories instead of looking up one path. */
+  overlaps: boolean
+}
+
 /** The resolved `dsh` invocation. Help, version, and errors exit inside {@link parseDshArgs}. */
-export type DshInvocation = ProfileInvocation | DumpConfigInvocation | PluginInvocation
+export type DshInvocation = ProfileInvocation | DumpConfigInvocation | PluginInvocation | OwnersInvocation
 
 /** Launcher flags shared by the default command and the `web` alias. */
 interface BootOptions {
@@ -69,6 +78,8 @@ Examples:
   dsh --profile tui --resume <session>       arguments after the launcher flags reach the app
   dsh --profile web --help                   the web app's own flags and help
   dsh plugin --profile tui add <package>     install a plugin into the tui profile
+  dsh owners <path>                          say which seat's declared territory covers a path
+  dsh owners --overlaps                      list seats whose territories share paths (exit 1 if any)
 `
 
 /**
@@ -178,6 +189,18 @@ export function parseDshArgs(argv: readonly string[], version: string): DshInvoc
       if (options.profile === '') program.error('error: --profile needs a name')
       if (args.length === 0) program.error('error: plugin needs pnpm arguments to forward (e.g. add <package>)')
       resolved = { mode: 'plugin', profile: options.profile, args }
+    })
+
+  const owners = program.command('owners').description('read-only: report which seat owns a path, or where seat territories overlap')
+  owners
+    .argument('[path]', 'the path to look up (relative to the current directory, or absolute)')
+    .option('--overlaps', 'list every pair of seats whose territories share paths; exits 1 when any overlap exists')
+    .action((path: string | undefined, options: { overlaps?: boolean }) => {
+      rejectParentOptions('owners')
+      const overlaps = options.overlaps === true
+      if (overlaps && path !== undefined) program.error('error: owners --overlaps takes no path argument', { exitCode: 2 })
+      if (!overlaps && (path === undefined || path === '')) program.error('error: owners needs a <path> or --overlaps', { exitCode: 2 })
+      resolved = { mode: 'owners', path, overlaps }
     })
 
   try {
