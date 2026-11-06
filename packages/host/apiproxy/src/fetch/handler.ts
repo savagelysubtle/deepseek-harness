@@ -194,12 +194,15 @@ function fullResponse(narrow: RpcResponse<unknown>): Response {
  * @param peerIsLoopback - the raw TCP peer fact threaded in from
  * {@link toFetchHandler}'s caller; placed on the `RpcRequest` handed to the
  * impl so a route can gate on it the same way the carrier does.
+ * @param callerAuthenticated - whether the carrier verified the per-boot caller
+ * token (OP-270); placed on the `RpcRequest` beside `peerIsLoopback`.
  */
 // K appears once in the signature but ties the UNARY_ROUTES[K] row lookup to its own
 // schema/invoke pairing; a union parameter degrades the row to an uninvokable intersection.
 // oxlint-disable-next-line typescript/no-unnecessary-type-parameters
 async function handleUnary<K extends keyof RpcMethodMap>(
   api: ApiProxy, method: K, message: ClientRequest, signal: AbortSignal, peerIsLoopback: boolean,
+  callerAuthenticated: boolean,
 ): Promise<Response> {
   const route = UNARY_ROUTES[method]
   const payload = route.schema.safeParse(message.payload)
@@ -207,7 +210,8 @@ async function handleUnary<K extends keyof RpcMethodMap>(
     return errorResponse(message.rpcId, { code: 'bad-request', message: `invalid payload for ${method}`, details: { issues: payload.error.issues } })
   }
   try {
-    return fullResponse(await route.invoke(api, { rpcId: message.rpcId, payload: payload.data, peerIsLoopback }, signal))
+    const request = { rpcId: message.rpcId, payload: payload.data, peerIsLoopback, callerAuthenticated }
+    return fullResponse(await route.invoke(api, request, signal))
   } catch (error: unknown) {
     // The impl never throws business errors; reaching here means the implementation itself crashed — 500, carrier layer.
     return new Response(`handler failure: ${String(error)}`, { status: 500 })
@@ -265,17 +269,25 @@ function sseResponse(frames: AsyncIterable<RpcRequest<MuxFrame | HostFrame>>): R
 /**
  * Wraps an ApiProxy into a pure fetch function (isomorphic point: feed the returned fetch straight to InProcessApiClient).
  * @param api - the host-side ApiProxy implementation.
- * @returns an object holding `fetch(Request, init?, peerIsLoopback?)`; paths outside /api/ return 404.
+ * @returns an object holding `fetch(Request, init?, peerIsLoopback?, callerAuthenticated?)`; paths outside /api/ return 404.
  */
 export function toFetchHandler(api: ApiProxy): {
-  fetch: (input: RequestInfo | URL, init?: RequestInit, peerIsLoopback?: boolean) => Promise<Response>
+  fetch: (
+    input: RequestInfo | URL, init?: RequestInit, peerIsLoopback?: boolean, callerAuthenticated?: boolean,
+  ) => Promise<Response>
 } {
   return {
     // Signature is a superset of global fetch — `typeof fetch` callers (InProcessApiClient)
     // keep working unchanged, while a carrier that has proven the peer loopback (the connection
     // package's real /api route) can additionally forward that in-process fact as a 3rd
-    // argument, never a header. Clients call in (url, init) form — normalize to Request first.
-    async fetch(input: RequestInfo | URL, init?: RequestInit, peerIsLoopback = false): Promise<Response> {
+    // argument, never a header. The 4th argument is the same kind of in-process fact: whether the
+    // carrier verified the per-boot caller token (OP-270). It defaults to FALSE — an absent argument
+    // is an unauthenticated caller, so every existing 3-argument caller fails closed on the
+    // capability-granting paths (approval answers, founder stamp) until it passes the fact.
+    // Clients call in (url, init) form — normalize to Request first.
+    async fetch(
+      input: RequestInfo | URL, init?: RequestInit, peerIsLoopback = false, callerAuthenticated = false,
+    ): Promise<Response> {
       const req = input instanceof Request ? input : new Request(input, init)
       const url = new URL(req.url)
       const path = url.pathname
@@ -327,7 +339,7 @@ export function toFetchHandler(api: ApiProxy): {
       if (path === '/api/respond') {
         const parsed = clientResponseSchema.safeParse(body)
         if (!parsed.success) return Response.json({ accepted: false, reason: 'bad-response' })
-        return Response.json(await api.respond(parsed.data))
+        return Response.json(await api.respond(parsed.data, { peerIsLoopback, callerAuthenticated }))
       }
 
       const method = methodFor(path.slice('/api/'.length))
@@ -345,7 +357,7 @@ export function toFetchHandler(api: ApiProxy): {
       if (message.method !== method) {
         return errorResponse(message.rpcId, { code: 'bad-request', message: `method "${message.method}" does not match path "${method}"`, details: { issues: [] } })
       }
-      return handleUnary(api, method, message, req.signal, peerIsLoopback)
+      return handleUnary(api, method, message, req.signal, peerIsLoopback, callerAuthenticated)
     },
   }
 }

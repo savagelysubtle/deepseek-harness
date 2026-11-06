@@ -27,7 +27,10 @@ export { RpcId } from './api/rpc.ts'
 export { toFetchHandler } from './fetch/handler.ts'
 export { AbstractApiClient, InProcessApiClient } from './fetch/client.ts'
 export type { IApiClient } from './fetch/client.ts'
-export { createApiProxy } from './api-proxy.ts'
+export {
+  APPROVAL_NEEDS_CALLER_TOKEN_MESSAGE, APPROVAL_NEEDS_LOOPBACK_MESSAGE,
+  createApiProxy, DEFAULT_ALLOW_NON_LOOPBACK_APPROVAL_ANSWERS,
+} from './api-proxy.ts'
 export type { ApiProxyDefaults } from './api-proxy.ts'
 // The worktree seam's consumer-facing contract and its adaptation over
 // @deepseek-ai/dsh-worktree, re-exported so composition authors resolve the

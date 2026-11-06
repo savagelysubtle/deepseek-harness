@@ -230,6 +230,27 @@ export interface RpcRequest<P> {
    * value as true.
    */
   readonly peerIsLoopback?: boolean
+  /**
+   * Whether the caller proved it holds the per-boot caller token (OP-270),
+   * decided by the connection carrier and threaded in as the 4th argument of
+   * the fetch handler, never read from a payload field or header by this
+   * package. Set ONLY by host-inbound unary dispatch; absent everywhere else.
+   * Absence means "not authenticated", the same as `false`: a consumer must
+   * test `=== true`, never treat a missing value as true.
+   */
+  readonly callerAuthenticated?: boolean
+}
+
+/**
+ * Facts about the caller of `ApiProxy.respond`, decided by the carrier from the
+ * real socket and the per-boot token (never from the request body). Both facts
+ * default to false when absent: an unauthenticated, non-loopback caller.
+ */
+export interface RespondCaller {
+  /** The raw TCP peer was independently proven loopback. */
+  readonly peerIsLoopback?: boolean
+  /** The caller presented the valid per-boot caller token. */
+  readonly callerAuthenticated?: boolean
 }
 
 /** Signature-layer narrow form, response side: rpcId always echoes the matching request. */
@@ -282,5 +303,11 @@ export type RpcMessage = ClientRequest | ServerResponse | ServerRequest | Client
  * Carrier receipt (not an RpcMessage — it belongs to the carrier layer, same
  * discipline as "HTTP status describes only the carrier"): the HTTP response
  * body of the POST carrying a client-response. Late/duplicate responses yield not-pending.
+ * `caller-not-authenticated` and `caller-not-loopback` are OP-270 refusals of an
+ * approval answer (or other capability-granting answer): the pending entry stays
+ * pending, and `message` is plain words the client must surface, never swallow.
  */
-export type RpcReceipt = { accepted: true } | { accepted: false; reason: 'not-pending' | 'bad-response' }
+export type RpcReceipt =
+  | { accepted: true }
+  | { accepted: false; reason: 'not-pending' | 'bad-response' }
+  | { accepted: false; reason: 'caller-not-authenticated' | 'caller-not-loopback'; message: string }

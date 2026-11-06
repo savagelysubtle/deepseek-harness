@@ -336,9 +336,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [],
       },
       {
-        signature: 'respond(message: ClientResponse): Promise<RpcReceipt>',
+        signature: 'respond( message: ClientResponse, caller?: { readonly peerIsLoopback?: boolean; readonly callerAuthenticated?: boolean }, ): Promise<RpcReceipt>',
         description: 'Response entry for server requests; not a domain method.',
-        parameters: [{ name: 'message', description: 'Client response carrying the server request\'s rpcId.' }],
+        parameters: [{ name: 'message', description: 'Client response carrying the server request\'s rpcId.' }, { name: 'caller', description: 'Carrier-decided caller facts (loopback peer, per-boot token; see `RespondCaller`); absent = unauthenticated. Approval answers (and the plan-review question, which grants capability) are refused without them.' }],
         returns: 'Transport receipt for the response delivery.',
       },
     ],
@@ -4499,11 +4499,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'RpcReceipt',
-    declaration: 'export type RpcReceipt = {\n    accepted: true;\n} | {\n    accepted: false;\n    reason: \'not-pending\' | \'bad-response\';\n};',
+    declaration: 'export type RpcReceipt = {\n    accepted: true;\n} | {\n    accepted: false;\n    reason: \'not-pending\' | \'bad-response\';\n} | {\n    accepted: false;\n    reason: \'caller-not-authenticated\' | \'caller-not-loopback\';\n    message: string;\n};',
   },
   {
     name: 'RpcRequest',
-    declaration: 'export interface RpcRequest<P> {\n    rpcId: RpcId;\n    payload: P;\n    readonly peerIsLoopback?: boolean;\n}',
+    declaration: 'export interface RpcRequest<P> {\n    rpcId: RpcId;\n    payload: P;\n    readonly peerIsLoopback?: boolean;\n    readonly callerAuthenticated?: boolean;\n}',
   },
   {
     name: 'RpcResponse',

@@ -118,7 +118,7 @@ import type {} from '@deepseek-ai/dsh-user-approval'
 import { approvalResponsePayloadSchema } from './api/approvals.schema.ts'
 import { imageLimitsProjectionSchema, sessionListMetadataProjectionSchema } from './api/sessions.schema.ts'
 import { questionResponsePayloadSchema } from './api/questions.schema.ts'
-import type { ClientResponse, RpcError, RpcReceipt, RpcRequest, RpcResponse } from './api/rpc.ts'
+import type { ClientResponse, RespondCaller, RpcError, RpcReceipt, RpcRequest, RpcResponse } from './api/rpc.ts'
 import { RpcId } from './api/rpc.ts'
 import type {
   AskUserQuestionAnswer, AskUserQuestionItem, AskUserQuestionRequest,
@@ -150,6 +150,25 @@ const SESSION_SEARCH_PROVIDER_CALL_LIMIT = 100
 const COLD_SUMMARY_BATCH_SIZE = 16
 /** Default maximum artifact size eligible for one cold blankness read. */
 export const DEFAULT_COLD_BLANK_PROBE_MAX_BYTES = 1024
+
+/**
+ * THE LAN SWITCH (OP-270): whether a trusted-host caller that is NOT on loopback
+ * may answer approvals (and the plan-review question) when it carries the
+ * per-boot caller token. Default REFUSE: the carrier is plain HTTP, and
+ * `trustedHosts` is a Host-header allowlist, not authentication, so a LAN peer
+ * can never answer an approval, token or not. Phone approvals over LAN would be
+ * a separate design; flipping this to true is the single place that permits
+ * them. Override per proxy through {@link ApiProxyDefaults.allowNonLoopbackApprovalAnswers}.
+ */
+export const DEFAULT_ALLOW_NON_LOOPBACK_APPROVAL_ANSWERS = false
+
+/** Reason text of the unauthenticated-approval refusal (surfaced to the client verbatim). */
+export const APPROVAL_NEEDS_CALLER_TOKEN_MESSAGE
+  = 'approval answers need the per-boot caller token; reopen dsh from the launcher link'
+
+/** Reason text of the non-loopback approval refusal under the default LAN switch. */
+export const APPROVAL_NEEDS_LOOPBACK_MESSAGE
+  = 'approval answers are accepted only from this machine; answering from another device is not enabled'
 
 /**
  * The profile `org.get` reads its two served-roster mounts from, when
@@ -885,6 +904,12 @@ export interface ApiProxyDefaults {
   /** Maximum artifact size eligible for one cold blankness read. */
   coldBlankProbeMaxBytes?: number
   /**
+   * The LAN switch: let a non-loopback caller that carries the per-boot token
+   * answer approvals. Defaults to {@link DEFAULT_ALLOW_NON_LOOPBACK_APPROVAL_ANSWERS}
+   * (false = refuse).
+   */
+  allowNonLoopbackApprovalAnswers?: boolean
+  /**
    * Whether handing a path to the native opener can work at all — the
    * `hasDocument` capability the preset roster reports, and the switch
    * between opening a preset directory and answering its path as text.
@@ -959,6 +984,31 @@ interface PendingQuestion {
   reject: (error: UserQuestionError) => void
   signal?: AbortSignal
   onAbort?: () => void
+}
+
+/**
+ * Whether answering this question grants capability: only the plan-review
+ * intent (approving leaves plan mode and re-opens write tools). Generic
+ * ask_user_question prompts carry no intent and stay open to any caller.
+ */
+function grantsCapability(pending: PendingQuestion): boolean {
+  return pending.questions.some(question => question.intent?.kind === 'plan-review')
+}
+
+/**
+ * The OP-270 gate for answers that grant capability. Returns the refusal
+ * receipt, or undefined when the caller may answer. Fails closed: an absent
+ * `caller`, or either fact not exactly `true`, is refused. Token first (an
+ * unauthenticated caller is told how to get one), then the LAN switch.
+ */
+function capabilityAnswerRefusal(caller: RespondCaller | undefined, allowNonLoopback: boolean): RpcReceipt | undefined {
+  if (caller?.callerAuthenticated !== true) {
+    return { accepted: false, reason: 'caller-not-authenticated', message: APPROVAL_NEEDS_CALLER_TOKEN_MESSAGE }
+  }
+  if (caller.peerIsLoopback !== true && !allowNonLoopback) {
+    return { accepted: false, reason: 'caller-not-loopback', message: APPROVAL_NEEDS_LOOPBACK_MESSAGE }
+  }
+  return undefined
 }
 
 /** Validate one answer batch against the exact question request it resolves. */
@@ -1418,6 +1468,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     ?? DEFAULT_COLD_BLANK_PROBE_MAX_BYTES
   const orgRegistryPath = defaults.orgRegistryPath ?? dshHomePath('org', 'registry.yml')
   const orgProfileName = defaults.orgProfileName ?? DEFAULT_ORG_PROFILE_NAME
+  const allowNonLoopbackApprovalAnswers = defaults.allowNonLoopbackApprovalAnswers
+    ?? DEFAULT_ALLOW_NON_LOOPBACK_APPROVAL_ANSWERS
   const orgProfileDir = defaults.orgProfileDir ?? resolveProfileDir(orgProfileName)
   // Both served-roster mounts (mailbox-bridge, tool-mailbox) live in this
   // SAME file — org.get's read and org.writeServed's write share one path.
@@ -2981,10 +3033,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         // Founder stamp minted ONLY when the raw TCP peer was independently
         // proven loopback (request.peerIsLoopback, set exclusively by
         // handleUnary from the real socket) — never from a payload field,
-        // header, config, or env var. founderStamped mirrors that mint
-        // decision back to the client as the hook for its on-screen
+        // header, config, or env var — AND the caller presented the per-boot
+        // caller token (request.callerAuthenticated, OP-270): loopback alone
+        // is reachable by any same-user process. founderStamped mirrors that
+        // mint decision back to the client as the hook for its on-screen
         // "not founder-stamped" indicator.
-        const founderStamped = request.peerIsLoopback === true
+        const founderStamped = request.peerIsLoopback === true && request.callerAuthenticated === true
         // Request identity and optional browser zone ride the exact durable user message.
         const source: MessageSource = {
           kind: 'user',
@@ -3245,8 +3299,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         // minted only when the raw TCP peer was independently proven
         // loopback (request.peerIsLoopback, set exclusively by handleUnary
         // from the real socket) — never from a payload field, header,
-        // config, or env var.
-        const founderStamped = request.peerIsLoopback === true
+        // config, or env var — and only when the caller also presented the
+        // per-boot caller token (request.callerAuthenticated, OP-270).
+        const founderStamped = request.peerIsLoopback === true && request.callerAuthenticated === true
         let sentCount = 0
         const failures: string[] = []
         for (const agent of roots) {
@@ -4594,11 +4649,15 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
     },
 
-    respond(message: ClientResponse): Promise<RpcReceipt> {
+    respond(message: ClientResponse, caller?: RespondCaller): Promise<RpcReceipt> {
       // Route by the echoed rpcId (the wire correlation): approvals first,
       // then questions — the two registries share one id space of UUIDs.
       const approval = pendingApprovals.get(message.rpcId)
       if (approval !== undefined) {
+        // OP-270: an approval answer grants capability. Refuse before any
+        // parsing, leaving the entry pending so the real UI can still answer.
+        const refusal = capabilityAnswerRefusal(caller, allowNonLoopbackApprovalAnswers)
+        if (refusal !== undefined) return Promise.resolve(refusal)
         if (!message.result.ok) return Promise.resolve({ accepted: false, reason: 'bad-response' })
         const parsed = approvalResponsePayloadSchema.safeParse(message.result.value)
         // The payload's audit correlation must match the entry the rpcId routed
@@ -4611,6 +4670,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       }
       const pending = pendingQuestions.get(message.rpcId)
       if (pending === undefined) return Promise.resolve({ accepted: false, reason: 'not-pending' })
+      // The plan-review question grants capability too: approving it leaves
+      // plan mode. Every other question stays answerable as before.
+      if (grantsCapability(pending)) {
+        const refusal = capabilityAnswerRefusal(caller, allowNonLoopbackApprovalAnswers)
+        if (refusal !== undefined) return Promise.resolve(refusal)
+      }
       if (!message.result.ok) {
         if (message.result.error.code !== 'cancelled') {
           return Promise.resolve({ accepted: false, reason: 'bad-response' })

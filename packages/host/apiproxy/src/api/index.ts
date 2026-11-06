@@ -46,9 +46,14 @@ export interface ApiProxy {
   /**
    * Response entry for server requests; not a domain method.
    * @param message - Client response carrying the server request's rpcId.
+   * @param caller - Carrier-decided caller facts (loopback peer, per-boot token; see `RespondCaller`); absent = unauthenticated.
+   *   Approval answers (and the plan-review question, which grants capability) are refused without them.
    * @returns Transport receipt for the response delivery.
    */
-  respond(message: ClientResponse): Promise<RpcReceipt>
+  respond(
+    message: ClientResponse,
+    caller?: { readonly peerIsLoopback?: boolean; readonly callerAuthenticated?: boolean },
+  ): Promise<RpcReceipt>
 }
 
 // ---- Domain interfaces and payload entities ----
@@ -91,6 +96,7 @@ export type { RpcRequest, RpcResponse } from './rpc.ts'
 export type {
   ClientRequest,
   ClientResponse,
+  RespondCaller,
   RpcMessage,
   RpcReceipt,
   ServerRequest,
