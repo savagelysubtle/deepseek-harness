@@ -68,6 +68,8 @@ export interface OrgRegistrySeat {
   readonly department?: string
   /** Restricts which tools the seat's agent may use; absent means unrestricted. */
   readonly tools?: OrgRegistrySeatTools
+  /** Advisory territory the seat owns, as a list of glob strings; omit the field for no declared territory. */
+  readonly owns?: readonly string[]
   /**
    * Which driver runs the seat; absent means `default` (the in-process agent
    * loop). Routing data only — every cost or trust setting of a non-default
@@ -184,6 +186,7 @@ export function parseOrgRegistry(text: string, options: OrgRegistryParseOptions 
     }
     const department = seat.department === undefined ? undefined : parseSeatDepartment(seat.department, name)
     const tools = seat.tools === undefined ? undefined : parseSeatTools(seat.tools, name)
+    const owns = seat.owns === undefined ? undefined : parseSeatOwns(seat.owns, name)
     const base: OrgRegistrySeat = {
       cwd: expandTilde(seat.cwd, home),
       ...seat.lead === undefined ? {} : { lead: seat.lead },
@@ -191,6 +194,7 @@ export function parseOrgRegistry(text: string, options: OrgRegistryParseOptions 
       ...seat.test === undefined ? {} : { test: seat.test },
       ...department === undefined ? {} : { department },
       ...tools === undefined ? {} : { tools },
+      ...owns === undefined ? {} : { owns },
     }
     const driverFields = parseSeatDriverFields(seat)
     drivers.set(name, seat.driver === CLAUDE_CODE_DRIVER)
@@ -621,6 +625,32 @@ function parseSeatDepartment(value: unknown, seatName: string): string {
 }
 
 /**
+ * Validate one seat's `owns` field and return the entries trimmed.
+ * @param value - the raw `owns` value.
+ * @param seatName - the seat, for the error message.
+ * @returns the trimmed territory entries.
+ * @throws when the value is not a non-empty list of non-empty strings, when an entry contains a ".."
+ *   segment, or when an absolute entry is outside /mnt/Dev/Coding.
+ */
+function parseSeatOwns(value: unknown, seatName: string): readonly string[] {
+  const label = `seats.${seatName}.owns`
+  assertStringArray(value, label)
+  const entries = value.map(entry => entry.trim())
+  if (entries.length === 0) {
+    throw new Error(`org registry field seats.${seatName}.owns must not be an empty list (omit the field for no declared territory)`)
+  }
+  for (const entry of entries) {
+    if (entry.split(/[/\\]/).some(segment => segment === '..')) {
+      throw new Error(`org registry field seats.${seatName}.owns entry ${JSON.stringify(entry)} must not contain a ".." segment`)
+    }
+    if (entry.startsWith('/') && entry !== '/mnt/Dev/Coding' && !entry.startsWith('/mnt/Dev/Coding/')) {
+      throw new Error(`org registry field seats.${seatName}.owns entry ${JSON.stringify(entry)} is absolute and outside /mnt/Dev/Coding`)
+    }
+  }
+  return entries
+}
+
+/**
  * Validate and shape one seat's `tools` field. Tool NAMES are not checked
  * against any real tool set here — this layer has no idea what tools exist,
  * and a name that is momentarily unavailable (a server down) is a legitimate
@@ -672,7 +702,7 @@ function assertStringArray(value: unknown, label: string): asserts value is read
 const CLAUDE_CODE_DRIVER: SeatDriverKey = 'claude-code'
 
 /** Row keys that are valid on any seat. */
-const GENERIC_SEAT_KEYS: ReadonlySet<string> = new Set(['cwd', 'lead', 'sessionId', 'test', 'department', 'tools'])
+const GENERIC_SEAT_KEYS: ReadonlySet<string> = new Set(['cwd', 'lead', 'sessionId', 'test', 'department', 'tools', 'owns'])
 
 /** Row keys the driver slice adds. */
 const DRIVER_SEAT_KEYS: ReadonlySet<string> = new Set(['driver', 'admit_from', 'admit_sender_classes'])
