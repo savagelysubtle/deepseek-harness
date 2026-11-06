@@ -80,6 +80,16 @@ interface MailboxMessage {
    * contract line: the blocking contract when true, the FYI contract otherwise.
    */
   readonly blocking?: boolean
+  /**
+   * Whether the sender's turn had read untrusted content. Absent means provenance is not asserted,
+   * never "clean": consumers may only ever add taint from other evidence, never clear it.
+   */
+  readonly tainted?: boolean
+  /**
+   * Sender hops, oldest first, appended to by each relaying seat. Absent means provenance is not
+   * asserted, never "clean". Additive only: a hop is never removed or rewritten.
+   */
+  readonly chain?: readonly string[]
 }
 ```
 

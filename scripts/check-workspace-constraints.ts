@@ -161,6 +161,9 @@ const packageFileExtras: Readonly<Record<string, readonly string[]>> = {
   // The wire contract subpath ships as its own bundle for the same Typert-generator
   // rationale (WorkflowListEntry), resolved through the package's ./wire export.
   '@deepseek-ai/dsh-workflow-remote': ['lib/wire.js'],
+  // The seat-guard PreToolUse hook is a standalone bundle that must run from an
+  // installed package (a missing file would make the hook fail open).
+  '@deepseek-ai/dsh-agent-claude-code-tools': ['lib/seat-guard.js'],
 }
 
 function sameStringList(actual: readonly string[] | undefined, expected: readonly string[]): boolean {
