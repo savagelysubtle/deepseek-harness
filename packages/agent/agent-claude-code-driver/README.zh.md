@@ -58,7 +58,7 @@ hostSeats:
 - **合并强制执行什么。** `mergeHostSeat` 用主机条目构造席位,并对它运行全部静态检查(模型白名单、fable 栅栏、限额)。它校验策略字段(`tools`、`send_to`、`allow_blocking`、`rules_dir`;mail-only 不带任何字段,`rules_dir` 仅限 coder),并拒绝携带其中任何一项的注册表条目(条目不是信任根);角色能否被服务留待之后对照策略服务判断。它要求 `claude_path` 的 realpath 位于某个 `claudePathPrefixes` 条目之下,要求条目的 `admit_from` 是 `admit_from_ceiling` 的子集,要求条目的 `cwd` 等于主机 `cwd` 固定值(工厂还会用该固定值核对收到的工作目录),并要求条目的驱动为 `claude-code`。主机条目与静态席位一样在挂载时校验、认证并固定,因此坏条目让挂载失败,而不是等到第一封邮件。同时出现在 `seats` 与 `hostSeats` 的席位会被拒绝。
 - **静态席位的不变量对经注册表路由的席位同样成立:** `settingSources: []`、`strictMcpConfig: true`、`tools: []`、二进制认证及其每回合复查、熔断开关和调用窗口。
 - **会话固定。** 经注册表路由的席位首次创建时使用的 dsh 会话 id 会固定在 `<stateDir>/claude-code-seat-sessions.json` 中(私有,与二进制固定相同)。相同 id 通过。不同的 id 以 `seat-session-changed: ... ask the founder to reseed` 拒绝,因此注册表写入者无法通过修改 `sessionId` 给席位换上全新的日志。与主机条目的 `session_id` 相等的不同 id 是创始人授权的重新播种:固定值随之移动,驱动记录一条警告。
-- **调用窗口在重新播种和重启后保留。** 每个席位的调用时间随发生保存在 `<stateDir>/claude-code-call-windows.json` 中(私有),重启后的闸门计入已保存的时间,而不只是当前会话的日志。因此重新播种无法重置窗口,重启主机也不能。写入失败会被记录,内存中的计数继续。损坏或非私有的调用窗口状态文件会阻止挂载,纯静态部署也一样(有意为之,以便大声失败)。
+- **调用窗口在重新播种和重启后保留。** 每个席位的调用时间随发生保存在 `<stateDir>/claude-code-call-windows.json` 中(私有),重启后的闸门计入已保存的时间,而不只是当前会话的日志。早于窗口的调用会在保存调用和播种历史时被清除(恰好一个窗口之前的边界算作已过期),因此文件不会无限增长,而窗口内的调用绝不会被丢弃。因此重新播种无法重置窗口,重启主机也不能。写入失败会被记录,内存中的计数继续。损坏或非私有的调用窗口状态文件会阻止挂载,纯静态部署也一样(有意为之,以便大声失败)。
 - **准入携带发送者。** 准入请求新增可选的 `from`,读取自邮件的 `source.from`;注册表胶水包的 `admit` 钩子据此应用条目的 `admit_from` 与 `admit_sender_classes`。
 
 ## 回合模型与转向

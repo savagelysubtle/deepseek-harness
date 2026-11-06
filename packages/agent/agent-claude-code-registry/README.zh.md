@@ -6,7 +6,7 @@
 
 它在上下文上提供两样东西:
 
-- **`ctx.claudeCodeSeatSource`。** 驱动遇到静态配置中没有的席位时调用。它接收邮箱桥放在 `agentOptions.seatBinding` 中的绑定(`{seat, rowHash, row}`),重新计算条目的哈希,与邮箱桥当前条目的哈希(`ctx.mailboxSeatRows.current(seat)`)比较,只有两者一致才返回 `{seat, row}`。它拒绝:没有绑定的请求(因此 api-proxy 和其他任何调用方都无法打开 Claude Code 席位)、缺少 `mailboxSeatRows` 服务、条目与自身哈希不符的绑定(伪造)、过期的绑定(邮箱桥绑定之后注册表条目已变化)、邮箱桥没有有效条目的席位,以及没有选择 `driver: claude-code` 的条目。
+- **`ctx.claudeCodeSeatSource`。** 驱动遇到静态配置中没有的席位时调用。它接收邮箱桥放在 `agentOptions.seatBinding` 中的绑定(`{seat, rowHash, row}`),重新计算条目的哈希,与邮箱桥当前条目的哈希(`ctx.mailboxSeatRows.current(seat)`,只返回条目哈希、驱动和两个准入列表,不含 cwd、会话 id 或工具)比较,只有两者一致才返回 `{seat, row}`。它拒绝:没有绑定的请求(因此 api-proxy 和其他任何调用方都无法打开 Claude Code 席位)、缺少 `mailboxSeatRows` 服务、条目与自身哈希不符的绑定(伪造)、过期的绑定(邮箱桥绑定之后注册表条目已变化)、邮箱桥没有有效条目的席位,以及没有选择 `driver: claude-code` 的条目。
 - **`ctx.claudeCodeMailHooks = { admit }`。** 驱动对每次 send 和 steer 运行 `admit`。它通过邮箱桥使用的同一个纯函数(`dsh-mailbox` 中的 `admitsMail`)应用条目的 `admit_from`(席位接受其邮件的席位;为空表示无人)与 `admit_sender_classes`。它失败即关闭:没有条目服务、未知席位、未标明发送者的邮件,或注册表没有对应名称的跳类别,一律拒绝。该对象**没有 `lease` 属性**:邮箱租约接收端属于后续切片,在此之前驱动保留自己的租约处理。
 
 ## 注册表条目能做什么、不能做什么
