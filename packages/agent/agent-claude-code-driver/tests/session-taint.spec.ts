@@ -254,6 +254,15 @@ describe('delivered trace ids', () => {
     expect(h.agent({ session: agent.session }).deliveredTraceIds()).toEqual(new Set(['trace-a', 'trace-b']))
   })
 
+  it('stays empty when the only relay mailbox message carries no trace id', async () => {
+    const h = await harness()
+    const agent = h.agent()
+    agent.followup(mailMessage('a', 'm-1'))
+    await finishTurn(await h.query(0))
+    await agent.whenIdle()
+    expect(agent.deliveredTraceIds().size).toBe(0)
+  })
+
   it('is empty for a fresh session', async () => {
     const h = await harness()
     expect(h.agent().deliveredTraceIds().size).toBe(0)

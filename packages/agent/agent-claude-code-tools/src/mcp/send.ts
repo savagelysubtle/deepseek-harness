@@ -50,8 +50,15 @@ export function createSendTool(context: SeatToolContext): SeatTool {
       if (!context.sendTo.includes(input.to)) {
         return refuse(`${input.to} is not in this seat's send_to list (use mailbox_directory)`)
       }
-      if (input.replyToTraceId !== undefined && !context.deliveredTraceIds().has(input.replyToTraceId)) {
-        return refuse('replyToTraceId is not the trace id of a message delivered to this seat')
+      if (input.replyToTraceId !== undefined) {
+        const delivered = context.deliveredTraceIds()
+        if (!delivered.has(input.replyToTraceId)) {
+          return refuse(
+            delivered.size === 0
+              ? 'the incoming mail carried no trace id; reply without one'
+              : 'replyToTraceId is not the trace id of a message delivered to this seat',
+          )
+        }
       }
       if (input.blocking === true && !context.allowBlocking) {
         return refuse('blocking mail is not allowed for this seat (allow_blocking is not set in its host stanza)')
