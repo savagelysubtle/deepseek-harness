@@ -14,7 +14,7 @@ import type { DatabaseSync } from 'node:sqlite'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
-import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import { defaultDshHome, dshHomePath, expandHomePath } from '@deepseek-ai/dsh-home-paths'
 import { openMailboxDatabase, SqliteMailboxStore } from './sqlite.ts'
 
 export { PROVIDER_NAME, SCHEMA_VERSION, SqliteMailboxStore, openMailboxDatabase } from './sqlite.ts'
@@ -51,6 +51,54 @@ export function resolveMailboxPath(configured?: string): string {
   // The sentinel stays unresolved: resolving it would name a literal file,
   // while SQLite reads bare `:memory:` as the in-process database.
   return trimmed === ':memory:' ? ':memory:' : resolve(trimmed)
+}
+
+/** Inputs of {@link shouldWarnLiveMailbox}. */
+export interface LiveMailboxGuardInput {
+  /** The resolved database path the mount is about to open. */
+  readonly resolvedPath: string
+  /** The REAL operating-system-derived harness home (`~/.dsh`), never `DSH_HOME`. */
+  readonly home: string
+  /** Raw `DSH_ORG_REGISTRY` value, if any. */
+  readonly registryEnv: string | undefined
+}
+
+/** Outcome of {@link shouldWarnLiveMailbox}. */
+export interface LiveMailboxGuardResult {
+  readonly warn: boolean
+  readonly message: string
+}
+
+/**
+ * Decide whether a mount would pair the LIVE mailbox database with a
+ * throwaway org registry (the mix that put test mail into the live queue).
+ * Warns only when the resolved path is `<home>/mailbox/mailbox.db`, the
+ * registry env is set, and it names a file other than `<home>/org/registry.yml`.
+ * Never throws: any failure inside the check yields "no warning".
+ * @param input - resolved path, real home, and raw registry env.
+ * @returns whether to warn, and the message naming both paths.
+ */
+export function shouldWarnLiveMailbox(input: LiveMailboxGuardInput): LiveMailboxGuardResult {
+  const none: LiveMailboxGuardResult = { warn: false, message: '' }
+  try {
+    const registryRaw = input.registryEnv?.trim()
+    if (registryRaw === undefined || registryRaw.length === 0) return none
+    const livePath = resolve(input.home, 'mailbox', 'mailbox.db')
+    const liveRegistry = resolve(input.home, 'org', 'registry.yml')
+    const registry = resolve(expandHomePath(registryRaw))
+    if (input.resolvedPath === ':memory:' || resolve(input.resolvedPath) !== livePath) return none
+    if (registry === liveRegistry) return none
+    return {
+      warn: true,
+      message:
+        `mailbox-local is opening the LIVE mailbox database ${livePath} while DSH_ORG_REGISTRY points at ${registry}, `
+        + `not the live registry ${liveRegistry}; test mail would land in the live queue. `
+        + 'To use a throwaway mailbox, set the mailbox-local config path (or DSH_HOME) to a temp directory, '
+        + 'or unset DSH_ORG_REGISTRY.',
+    }
+  } catch {
+    return none
+  }
 }
 
 /**
@@ -101,6 +149,17 @@ export class MailboxLocal extends Service {
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'mailboxLocal')
     const path = resolveMailboxPath(config.path)
+    // Advisory only: warn about live-mailbox + throwaway-registry, never refuse or throw.
+    try {
+      const guard = shouldWarnLiveMailbox({
+        resolvedPath: path,
+        home: defaultDshHome(),
+        registryEnv: process.env.DSH_ORG_REGISTRY,
+      })
+      if (guard.warn) ctx.logger.warn(guard.message)
+    } catch {
+      // The guard must never alter mount behavior.
+    }
     // Synchronous open: a foreign or incompatible database rejects the mount
     // itself, leaving nothing half-registered behind.
     this.store = new SqliteMailboxStore(openLocalMailbox(path))
