@@ -152,3 +152,118 @@ describe('API Remote Agent resolver races', () => {
     await ctx.fiber.dispose()
   })
 })
+
+describe('API Remote Agent resolver driver fence', () => {
+  /** Events a log holds for one driver; shapes only what recordedSeatDriver reads. */
+  const claudeCodeLog = [
+    { type: 'claude-code/session-bound' },
+    { type: 'assistant/message' },
+  ] as unknown as SessionEvent[]
+  const defaultLog = [{ type: 'request/header' }, { type: 'assistant/message' }] as unknown as SessionEvent[]
+  const unclaimedLog = [{ type: 'user/message' }] as unknown as SessionEvent[]
+  const mixedLog = [
+    { type: 'claude-code/session-bound' },
+    { type: 'request/header' },
+  ] as unknown as SessionEvent[]
+
+  it('refuses a cold resume of a claude-code log and names the remedy, before any setup or resume', async () => {
+    const ctx = await createContext()
+    const sessionId = sid('cold-claude-code')
+    const meta = header(sessionId)
+    provideSession(ctx, meta, () => Promise.resolve({ meta, events: claudeCodeLog }))
+    const resume = vi.spyOn(ctx.agents, 'resume')
+    const setup = vi.fn(() => (): void => {})
+
+    const result = await createApiRemoteAgentResolver(ctx, { setup })(sessionId)
+
+    expect(result).toMatchObject({ error: { code: 'agent-busy' } })
+    if (!('error' in result)) throw new Error('expected a refusal')
+    expect(result.error.message).toContain('"claude-code" driver history')
+    expect(result.error.message).toContain('reachable only through its own mail route')
+    expect(setup).not.toHaveBeenCalled()
+    expect(resume).not.toHaveBeenCalled()
+    await ctx.fiber.dispose()
+  })
+
+  it('refuses a mixed log the same way', async () => {
+    const ctx = await createContext()
+    const sessionId = sid('cold-mixed')
+    const meta = header(sessionId)
+    provideSession(ctx, meta, () => Promise.resolve({ meta, events: mixedLog }))
+    const resume = vi.spyOn(ctx.agents, 'resume')
+
+    const result = await createApiRemoteAgentResolver(ctx, {})(sessionId)
+
+    expect(result).toMatchObject({ error: { code: 'agent-busy' } })
+    expect(resume).not.toHaveBeenCalled()
+    await ctx.fiber.dispose()
+  })
+
+  it('refuses a live agent whose session log records a claude-code driver', async () => {
+    const ctx = await createContext()
+    const sessionId = sid('live-claude-code')
+    const session = { id: sessionId, header: header(sessionId), events: claudeCodeLog } as unknown as Session
+    ctx.agents.register(stubAgent(ctx, session))
+
+    const result = await createApiRemoteAgentResolver(ctx, {})(sessionId)
+
+    expect(result).toMatchObject({ error: { code: 'agent-busy' } })
+    if (!('error' in result)) throw new Error('expected a refusal')
+    expect(result.error.message).toContain('reachable only through its own mail route')
+    await ctx.fiber.dispose()
+  })
+
+  it('refuses the claude-code log through the Typert lookup too', async () => {
+    const ctx = await createContext()
+    const sessionId = sid('lookup-claude-code')
+    const meta = header(sessionId)
+    provideSession(ctx, meta, () => Promise.resolve({ meta, events: claudeCodeLog }))
+    const defaultProvider = ctx.typert.contexts.getHost('agent')
+    createApiRemoteAgentResolver(ctx, {})
+    await vi.waitFor(() => { expect(ctx.typert.contexts.getHost('agent')).not.toBe(defaultProvider) })
+    const provider = ctx.typert.contexts.getHost('agent')
+    if (provider === undefined) throw new Error('Agent Host Context provider was not mounted')
+
+    const resolution = provider.resolve(sessionId)
+    await expect(resolution).rejects.toBeInstanceOf(TypertLookupFailure)
+    await expect(resolution).rejects.toMatchObject({ failure: { code: 'agent-busy' } })
+    await ctx.fiber.dispose()
+  })
+
+  it('still resumes a default log and a log with no seat-driver record', async () => {
+    for (const [label, events] of [['default', defaultLog], ['unclaimed', unclaimedLog]] as const) {
+      const ctx = await createContext()
+      const sessionId = sid(`cold-${label}`)
+      const meta = header(sessionId)
+      let published: Session | undefined
+      provideSession(ctx, meta, () => {
+        published = ctx.sessions.create(sessionId, { meta: { cwd: '/proj' } })
+        return Promise.resolve({ meta, events })
+      })
+      const resume = vi.spyOn(ctx.agents, 'resume').mockImplementation(async () => {
+        if (published === undefined) throw new Error('Session was not published')
+        return { agent: stubAgent(ctx, published), dispose: () => Promise.resolve() }
+      })
+
+      const result = await createApiRemoteAgentResolver(ctx, {})(sessionId)
+
+      expect(result).toMatchObject({ agent: { id: sessionId } })
+      expect(resume).toHaveBeenCalledTimes(1)
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('still serves a live agent whose log is a default or unclaimed one', async () => {
+    for (const [label, events] of [['default', defaultLog], ['unclaimed', unclaimedLog]] as const) {
+      const ctx = await createContext()
+      const sessionId = sid(`live-${label}`)
+      const session = { id: sessionId, header: header(sessionId), events } as unknown as Session
+      ctx.agents.register(stubAgent(ctx, session))
+
+      const result = await createApiRemoteAgentResolver(ctx, {})(sessionId)
+
+      expect(result).toMatchObject({ agent: { id: sessionId } })
+      await ctx.fiber.dispose()
+    }
+  })
+})

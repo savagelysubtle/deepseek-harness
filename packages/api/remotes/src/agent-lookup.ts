@@ -3,6 +3,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentOptions, AgentSetup } from '@deepseek-ai/dsh-agent'
 import type { Session, SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
+import { recordedSeatDriver } from '@deepseek-ai/dsh-mailbox'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { TypertLookupFailure } from '@deepseek-ai/dsh-typert-protocol'
 import type {} from '@deepseek-ai/dsh-typert-registry'
@@ -50,6 +51,53 @@ export class ApiRemoteSubagentSessionOwnership extends Error {
   constructor(readonly sessionId: SessionId) {
     super(`session "${sessionId}" is a subagent session; use subagent delivery`)
   }
+}
+
+/**
+ * A session's recorded history belongs to another driver. The default agent
+ * loop never drives a Claude Code seat's log (or a log mixing both), so the
+ * resolver refuses rather than resume or serve it under the wrong driver.
+ */
+class ApiRemoteSessionDriverMismatch extends Error {
+  /**
+   * Construct the driver fence.
+   * @param sessionId - the session under judgment.
+   * @param recorded - the driver classification its log records.
+   */
+  constructor(readonly sessionId: SessionId, readonly recorded: string) {
+    super(
+      `session "${sessionId}" holds "${recorded}" driver history and cannot be opened or forked by the default agent loop; `
+      + 'a seat driven by another driver is reachable only through its own mail route',
+    )
+    this.name = 'ApiRemoteSessionDriverMismatch'
+  }
+}
+
+/**
+ * Build the caller-facing rejection for a driver mismatch.
+ * @param error - the fence that fired.
+ * @returns the existing `agent-busy` RPC shape, with the remedy in the message.
+ */
+function apiRemoteDriverMismatchError(error: ApiRemoteSessionDriverMismatch): ApiRemoteLookupError {
+  return {
+    code: 'agent-busy',
+    message: error.message,
+    details: { reason: 'this session belongs to another driver; reach it through its own mail route' },
+  }
+}
+
+/**
+ * Refuse a session whose log records a non-default driver.
+ * @param sessionId - the session under judgment.
+ * @param events - its stored or live events.
+ * @throws {@link ApiRemoteSessionDriverMismatch} when the log classifies as anything but the default driver or no claim.
+ */
+function assertApiRemoteDefaultDriverLog(
+  sessionId: SessionId,
+  events: Iterable<{ readonly type: string }>,
+): void {
+  const recorded = recordedSeatDriver(events)
+  if (recorded !== undefined && recorded !== 'default') throw new ApiRemoteSessionDriverMismatch(sessionId, recorded)
 }
 
 /**
@@ -130,6 +178,12 @@ export function createApiRemoteAgentResolver(
     if (hasApiRemoteSubagentOwner(ctx, live.session, live)) {
       return { error: apiRemoteSubagentOwnershipError(sessionId) }
     }
+    try {
+      assertApiRemoteDefaultDriverLog(sessionId, live.session.events)
+    } catch (error: unknown) {
+      if (error instanceof ApiRemoteSessionDriverMismatch) return { error: apiRemoteDriverMismatchError(error) }
+      throw error
+    }
     return { agent: live }
   }
 
@@ -148,6 +202,9 @@ export function createApiRemoteAgentResolver(
           if (hasApiRemoteSubagentOwner(ctx, { header: inspected.meta }, undefined)) {
             throw new ApiRemoteSubagentSessionOwnership(sessionId)
           }
+          // Before any setup or resume: the default loop must not replay a
+          // log another driver wrote.
+          assertApiRemoteDefaultDriverLog(sessionId, inspected.events)
           // Built from the inspected session before the published re-checks
           // below, so those stay adjacent to `resume` and a Host setup that
           // awaits (composing a preset, say) does not widen the collision
@@ -179,6 +236,9 @@ export function createApiRemoteAgentResolver(
       }
       if (error instanceof ApiRemoteSubagentSessionOwnership) {
         return { error: apiRemoteSubagentOwnershipError(error.sessionId) }
+      }
+      if (error instanceof ApiRemoteSessionDriverMismatch) {
+        return { error: apiRemoteDriverMismatchError(error) }
       }
       const fenced = fencedLiveAgent(sessionId)
       if (fenced !== undefined) return fenced
