@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, readdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { attestFile } from '../src/attest-guard.ts'
@@ -12,11 +12,13 @@ let box: Sandbox
 let node: string
 let guard: string
 let policyDir: string
+let logs: string[]
 
 beforeEach(() => {
   box = makeSandbox()
   ;({ node, guard } = installRealGuard(box.root))
   policyDir = join(box.root, 'policy')
+  logs = []
 })
 afterEach(() => {
   box.cleanup()
@@ -28,6 +30,7 @@ function deps(over: Partial<GuardProbeDeps> = {}): GuardProbeDeps {
     home: box.home,
     attest: () => ({ node: attestFile(node, { access: 'exec' }), guard: installGuardCopy(policyDir, attestFile(guard, { access: 'read' })) }),
     policyIntact: () => true,
+    log: (message) => { logs.push(message) },
     ...over,
   }
 }
@@ -38,7 +41,8 @@ function fakeGuard(edit: 'allow' | 'wrong' | 'protected', read: 'allow' | 'deny'
 const chunks = []
 process.stdin.on('data', c => chunks.push(c))
 process.stdin.on('end', () => {
-  const name = JSON.parse(Buffer.concat(chunks).toString()).tool_name
+  const input = JSON.parse(Buffer.concat(chunks).toString())
+  const name = input.tool_name
   const deny = (text) => { process.stderr.write('seat-guard: denied: ' + text); process.exit(2) }
   if (name === '__seat_guard_probe__') deny('tool __seat_guard_probe__ is not granted to this seat')
   if (name === 'Edit') {
@@ -54,8 +58,8 @@ process.stdin.on('end', () => {
 `)
 }
 
-async function run(over: Partial<GuardProbeDeps> = {}, signal?: AbortSignal): Promise<GuardProbeResult> {
-  return createGuardProbe(deps(over)).probe(signal)
+async function run(over: Partial<GuardProbeDeps> = {}, signal?: AbortSignal, timeoutMs?: number): Promise<GuardProbeResult> {
+  return createGuardProbe(deps(over)).probe(signal, timeoutMs)
 }
 
 function failure(result: GuardProbeResult): { code: string; reason: string } {
@@ -106,6 +110,34 @@ describe('guard probe', () => {
     expect(failure(await run({ shell, timeoutMs: 150 })).code).toBe('timeout')
   })
 
+  it('the per-call timeout overrides the provider default, and the default applies without it', async () => {
+    const shell = join(box.root, 'hang-shell')
+    writeFileSync(shell, '#!/bin/sh\nexec sleep 5\n')
+    chmodSync(shell, 0o755)
+    expect(failure(await run({ shell, timeoutMs: 60_000 }, undefined, 150)).code).toBe('timeout')
+    expect(failure(await run({ shell, timeoutMs: 150 })).code).toBe('timeout')
+  })
+
+  it('logs every failure in full at error level and nothing on success', async () => {
+    expect((await run()).ok).toBe(true)
+    expect(logs).toEqual([])
+    const result = failure(await run({ attest: () => { throw new Error('cannot resolve /secret/path') } }))
+    expect(logs).toEqual(['agent-claude-code-tools: guard probe FAILED attest: cannot resolve /secret/path'])
+    expect(result.reason).toContain('/secret/path')
+  })
+
+  it('hands the guard a CLI-shaped payload and the probe cwd', async () => {
+    const seen = join(box.root, 'seen.json')
+    fakeGuard('protected', 'allow', `require('node:fs').appendFileSync(${JSON.stringify(seen)}, JSON.stringify({ cwd: process.cwd(), input })+'\\n')`)
+    expect((await run()).ok).toBe(true)
+    const rows = readFileSync(seen, 'utf8').trim().split('\n').map(line => JSON.parse(line) as { cwd: string; input: Record<string, unknown> })
+    expect(rows).toHaveLength(1)
+    const row = rows[0] as { cwd: string; input: Record<string, unknown> }
+    expect(Object.keys(row.input).sort()).toEqual(['cwd', 'hook_event_name', 'permission_mode', 'session_id', 'tool_input', 'tool_name', 'tool_use_id', 'transcript_path'])
+    expect(row.input['cwd']).toBe(row.cwd)
+    expect(row.input['hook_event_name']).toBe('PreToolUse')
+  })
+
   it('code spawn: an abort ends the run as a failure', async () => {
     const controller = new AbortController()
     controller.abort()
@@ -152,6 +184,29 @@ describe('guard probe', () => {
   it('code changed: the node binary changes while the probe runs', async () => {
     fakeGuard('protected', 'allow', `require('node:fs').appendFileSync(${JSON.stringify(node)}, '# swapped\\n')`)
     expect(failure(await run())).toMatchObject({ code: 'changed' })
+  })
+
+  it('code changed: the guard copy changes while the probe runs', async () => {
+    const copy = join(policyDir, 'seat-guard.js')
+    fakeGuard('protected', 'allow', `require('node:fs').chmodSync(${JSON.stringify(copy)}, 0o700); require('node:fs').appendFileSync(${JSON.stringify(copy)}, '// swapped\\n')`)
+    expect(failure(await run())).toMatchObject({ code: 'changed' })
+  })
+
+  it('code control: a granted read that prints to stdout is refused', async () => {
+    fakeGuard('protected', 'allow', "process.stdout.write('hello')")
+    expect(failure(await run()).code).toBe('control')
+  })
+
+  it('cleans the scratch directory even when removing the probe directory fails, and logs it', async () => {
+    fakeGuard('protected', 'allow', `require('node:fs').chmodSync(${JSON.stringify(policyDir)}, 0o500)`)
+    const before = readdirSync(process.env['TMPDIR'] ?? '/tmp').filter(name => name.startsWith('dsh-canary-')).length
+    try {
+      await run({ policyIntact: () => true })
+      expect(logs.some(line => line.includes('could not remove') && line.includes('canary-'))).toBe(true)
+      expect(readdirSync(process.env['TMPDIR'] ?? '/tmp').filter(name => name.startsWith('dsh-canary-')).length).toBe(before)
+    } finally {
+      chmodSync(policyDir, 0o700)
+    }
   })
 
   it('code changed: the policy file no longer holds its bytes', async () => {

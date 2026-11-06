@@ -42,10 +42,11 @@ export interface CloneCheck {
   /** The roles whose queries it runs for. */
   readonly roles: readonly PolicyRole[]
   /**
-   * Judge one query's clone. Must be synchronous and must fail closed: the caller (`extend`) refuses on any throw.
+   * Judge one query's clone. Must be synchronous and return nothing: the caller (`extend`) refuses on any throw and on any returned value
+   * (a promise approves nothing).
    * @throws {CloneCheckError} to refuse; any other thrown value is wrapped into a refusal by the caller.
    */
-  readonly check: (ctx: CloneCheckContext) => void
+  readonly check: (ctx: CloneCheckContext) => unknown
 }
 
 /** Holds the registered clone checks. Entries cannot be removed. */

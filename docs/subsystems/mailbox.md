@@ -197,9 +197,10 @@ The `claudeCodeGuardProbe` service.
 /**
  * Run the probe once. Never rejects; the result says whether the guard behaved.
  * @param signal - aborts the run (reported as a failed result).
- * @returns the result.
+ * @param timeoutMs - timeout of each hook run in milliseconds; overrides the provider's default of 15000.
+ * @returns the result. A failure is also logged in full (with its reason) at error level; the reason may hold paths, so keep it out of seat-visible text.
  */
-probe(signal?: AbortSignal): Promise<GuardProbeResult>
+probe(signal?: AbortSignal, timeoutMs?: number): Promise<GuardProbeResult>
 ```
 
 Source: [`packages/agent/agent-claude-code-tools/src/guard-probe.ts:41`](../../packages/agent/agent-claude-code-tools/src/guard-probe.ts)

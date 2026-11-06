@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import { attestFile } from './attest-guard.ts'
 import type { AttestedFile } from './attest-guard.ts'
 import { ContributorRegistry } from './contributors.ts'
-import { assertProbeOutcome, ProbeOutcomeError, runGuardHook, verifyGuardCommandAsync } from './verify-guard.ts'
+import { assertProbeOutcome, PROBE_TOOL, ProbeOutcomeError, runGuardHook } from './verify-guard.ts'
 import type { GuardHookRunOptions } from './verify-guard.ts'
 import { generateSeatPolicy } from './settings.ts'
 import type { SeatPolicy } from './settings.ts'
@@ -42,9 +42,11 @@ export interface GuardProbe {
   /**
    * Run the probe once. Never rejects; the result says whether the guard behaved.
    * @param signal - aborts the run (reported as a failed result).
-   * @returns the result.
+   * @param timeoutMs - timeout of each hook run in milliseconds; overrides the provider's default of 15000.
+   * @returns the result. A failure is also logged in full at error level; the reason may hold paths and
+   *   digests, so keep it out of seat-visible text.
    */
-  probe(signal?: AbortSignal): Promise<GuardProbeResult>
+  probe(signal?: AbortSignal, timeoutMs?: number): Promise<GuardProbeResult>
 }
 
 /** What {@link createGuardProbe} needs from the policy provider (the same resolved options seats use). */
@@ -59,6 +61,8 @@ export interface GuardProbeDeps {
   readonly policyIntact: (policy: SeatPolicy) => boolean
   /** Timeout of each hook run in milliseconds; default 15000. */
   readonly timeoutMs?: number
+  /** Host log sink at error level: failed probes with their full reason, and cleanup problems. */
+  readonly log: (message: string) => void
   /** Shell override for tests; default `/bin/sh`. */
   readonly shell?: string
 }
@@ -78,7 +82,15 @@ function fail(code: GuardProbeCode, error: unknown): GuardProbeResult {
  * @returns the service.
  */
 export function createGuardProbe(deps: GuardProbeDeps): GuardProbe {
-  const run = async (signal: AbortSignal | undefined): Promise<GuardProbeResult> => {
+  // Cleanup must never throw out of `finally` and one failed removal must not skip the other.
+  const remove = (path: string): void => {
+    try {
+      rmSync(path, { recursive: true, force: true })
+    } catch (error: unknown) {
+      deps.log(`agent-claude-code-tools: guard probe could not remove ${path}: ${(error as Error).message}`)
+    }
+  }
+  const run = async (signal: AbortSignal | undefined, timeoutMs: number | undefined): Promise<GuardProbeResult> => {
     let node: AttestedFile
     let guard: AttestedFile
     try {
@@ -86,8 +98,9 @@ export function createGuardProbe(deps: GuardProbeDeps): GuardProbe {
     } catch (error: unknown) {
       return fail('attest', error)
     }
-    const options: GuardHookRunOptions = {
-      ...deps.timeoutMs === undefined ? {} : { timeoutMs: deps.timeoutMs },
+    const timeout = timeoutMs ?? deps.timeoutMs
+    const base: GuardHookRunOptions = {
+      ...timeout === undefined ? {} : { timeoutMs: timeout },
       ...deps.shell === undefined ? {} : { shell: deps.shell },
       ...signal === undefined ? {} : { signal },
     }
@@ -95,9 +108,21 @@ export function createGuardProbe(deps: GuardProbeDeps): GuardProbe {
     const probeDir = join(deps.policyDir, `canary-${randomBytes(6).toString('hex')}`)
     try {
       const cwd = join(scratch, 'cwd')
+      const options: GuardHookRunOptions = { ...base, cwd }
       mkdirSync(join(cwd, '.git'), { recursive: true })
       const readable = join(cwd, 'control.txt')
       writeFileSync(readable, 'control\n')
+      // The shape of the CLI's PreToolUse input (see hooks-claude-code): session, transcript, cwd, mode, event, tool.
+      const payload = (toolName: string, toolInput: Record<string, string>): string => JSON.stringify({
+        session_id: RESERVED_PROBE_SEAT,
+        transcript_path: join(scratch, 'transcript.jsonl'),
+        cwd,
+        permission_mode: 'dontAsk',
+        hook_event_name: 'PreToolUse',
+        tool_name: toolName,
+        tool_input: toolInput,
+        tool_use_id: 'toolu_canary',
+      })
       const policy = generateSeatPolicy({
         seat: RESERVED_PROBE_SEAT,
         role: 'coder',
@@ -110,12 +135,12 @@ export function createGuardProbe(deps: GuardProbeDeps): GuardProbe {
         guard,
       })
       const command = guardCommandOf(policy)
-      await verifyGuardCommandAsync(command, options)
+      assertProbeOutcome(await runGuardHook(command, payload(PROBE_TOOL, {}), options), { kind: 'deny', reasons: [`tool ${PROBE_TOOL} is not granted`] })
       assertProbeOutcome(
-        await runGuardHook(command, JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: join(cwd, '.git', 'config'), old_string: 'a', new_string: 'b' } }), options),
+        await runGuardHook(command, payload('Edit', { file_path: join(cwd, '.git', 'config'), old_string: 'a', new_string: 'b' }), options),
         { kind: 'deny', reasons: ['protected location'] },
       )
-      const control = await runGuardHook(command, JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: readable } }), options)
+      const control = await runGuardHook(command, payload('Read', { file_path: readable }), options)
       try {
         assertProbeOutcome(control, { kind: 'allow' })
       } catch (error: unknown) {
@@ -133,9 +158,13 @@ export function createGuardProbe(deps: GuardProbeDeps): GuardProbe {
     } catch (error: unknown) {
       return fail(error instanceof ProbeOutcomeError ? error.code : 'error', error)
     } finally {
-      rmSync(probeDir, { recursive: true, force: true })
-      rmSync(scratch, { recursive: true, force: true })
+      remove(probeDir)
+      remove(scratch)
     }
   }
-  return { probe: signal => run(signal).catch((error: unknown) => fail('error', error)) }
+  const logged = (result: GuardProbeResult): GuardProbeResult => {
+    if (!result.ok) deps.log(`agent-claude-code-tools: guard probe FAILED ${result.code}: ${result.reason}`)
+    return result
+  }
+  return { probe: (signal, timeoutMs) => run(signal, timeoutMs).catch((error: unknown) => fail('error', error)).then(logged) }
 }

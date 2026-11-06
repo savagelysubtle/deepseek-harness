@@ -13,8 +13,16 @@ import type { PolicyReadiness, ReadinessContributor, ReadinessRequirement } from
 /** Every requirement a coder seat needs, in report order. */
 export const CODER_REQUIREMENTS: readonly ReadinessRequirement[] = ['sandbox', 'canary', 'rules-hooks']
 
-/** Longest note kept, in characters. */
-const MAX_NOTE = 300
+/** What a note id or code may look like: a short plain word phrase, never a path or a digest. */
+const SAFE_NOTE = /^[A-Za-z][A-Za-z0-9 _-]{0,63}$/
+
+/** A run this long is a digest or a token, never a word. */
+const LONG_TOKEN = /[A-Za-z0-9]{24}/
+
+const isSafe = (text: string): boolean => SAFE_NOTE.test(text) && !LONG_TOKEN.test(text)
+
+/** Most distinct note ids kept. */
+const MAX_NOTE_IDS = 64
 
 /** Holds the registered readiness contributors. */
 export class ReadinessRegistry {
@@ -39,13 +47,18 @@ export class ReadinessRegistry {
   }
 
   /**
-   * Record why a requirement is not met (for example `canary FAILED exit`). Replaces an earlier note with the
-   * same id. Line breaks are flattened and the text is cut at 300 characters. Does not touch readiness or `version`.
+   * Record why a requirement is not met, as a short CODE such as `canary FAILED attest`. The text goes into the
+   * error a seat turn can see, so it must hold no path, hash or excerpt: anything that is not a short plain word
+   * phrase (letters, digits, space, `_` and `-`, at most 64 characters) is replaced by `see host log`, and an id
+   * that is not a plain word is stored as `unknown`. The caller logs the full reason to the host log. Replaces an
+   * earlier note with the same id; at most 64 ids are kept, later new ids are dropped. Does not touch readiness or `version`.
    * @param id - the contributor id the note is about.
-   * @param reason - one line for the operator.
+   * @param code - the short failure code.
    */
-  note(id: string, reason: string): void {
-    this.reasons.set(id, reason.replace(/[\r\n]+/g, ' ').slice(0, MAX_NOTE))
+  note(id: string, code: string): void {
+    const key = isSafe(id) ? id : 'unknown'
+    if (!this.reasons.has(key) && this.reasons.size >= MAX_NOTE_IDS) return
+    this.reasons.set(key, isSafe(code) ? code : 'see host log')
   }
 
   /**

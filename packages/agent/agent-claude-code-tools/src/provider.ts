@@ -128,6 +128,10 @@ export interface PolicyOptions {
   readonly verify?: (command: string) => void
   /** Host-side warning sink (the plugin passes `ctx.logger.warn`); never shown to the model. */
   readonly warn: (message: string) => void
+  /** Host-side error sink for the guard probe (the plugin passes `ctx.logger.error`); defaults to `warn`. */
+  readonly logError?: (message: string) => void
+  /** Default timeout of each guard probe hook run in milliseconds; default 15000. */
+  readonly probeTimeoutMs?: number
   /** Mint trace ids; defaults to a random UUID. */
   readonly newTraceId?: () => string
 }
@@ -236,7 +240,7 @@ export function createClaudeCodePolicy(options: PolicyOptions): ClaudeCodePolicy
  * @param options - directories, binaries, the mailbox publish function and the registries.
  * @returns the policy the driver consumes and the boot probe.
  */
-function createPolicyParts(options: PolicyOptions): { readonly policy: ClaudeCodePolicy; readonly probe: GuardProbe } {
+export function createPolicyParts(options: PolicyOptions): { readonly policy: ClaudeCodePolicy; readonly probe: GuardProbe } {
   const readiness = options.readiness ?? new ReadinessRegistry()
   const contributors = options.contributors ?? new ContributorRegistry()
   const cloneChecks = options.cloneChecks ?? new CloneCheckRegistry()
@@ -288,12 +292,17 @@ function createPolicyParts(options: PolicyOptions): { readonly policy: ClaudeCod
     if (pinned !== undefined && pinned !== cwd) {
       throw new Error(`agent-claude-code-tools: seat "${seat}": working directory ${JSON.stringify(cwd)} is not the pinned ${JSON.stringify(pinned)}`)
     }
-    if (role === 'coder' && !cloneChecks.has(CLONE_HOOKS_CHECK_ID)) {
-      throw new CloneCheckError(seat, 'check-missing', `no ${CLONE_HOOKS_CHECK_ID} clone check is registered, so the clone cannot be checked; see the host log lines starting agent-claude-code-seat-checks:`)
+    if (role === 'coder' && !cloneChecks.checksFor('coder').some(entry => entry.id === CLONE_HOOKS_CHECK_ID)) {
+      throw new CloneCheckError(seat, 'check-missing', `no ${CLONE_HOOKS_CHECK_ID} clone check is registered for coder seats, so the clone cannot be checked; see the host log lines starting agent-claude-code-seat-checks:`)
     }
     for (const entry of cloneChecks.checksFor(role)) {
       try {
-        entry.check({ seat, cwd })
+        const returned: unknown = entry.check({ seat, cwd })
+        if (returned !== undefined) {
+          // An async check (or any value) has approved nothing yet: refuse, and swallow a later rejection.
+          if (returned instanceof Promise) returned.catch(() => undefined)
+          throw new CloneCheckError(seat, 'check-failed', `clone check ${entry.id} must be synchronous and return nothing`)
+        }
       } catch (error: unknown) {
         if (error instanceof CloneCheckError) throw error
         // Fail closed: a check that throws anything else has not approved the clone.
@@ -355,7 +364,14 @@ function createPolicyParts(options: PolicyOptions): { readonly policy: ClaudeCod
     return { settings: policy.settings, mcpServers: { dsh: server }, allow: policy.allow }
   }
 
-  const probe = createGuardProbe({ policyDir: options.policyDir, home: options.home, attest, policyIntact: policyFileIntact })
+  const probe = createGuardProbe({
+    policyDir: options.policyDir,
+    home: options.home,
+    attest,
+    policyIntact: policyFileIntact,
+    log: options.logError ?? options.warn,
+    ...options.probeTimeoutMs === undefined ? {} : { timeoutMs: options.probeTimeoutMs },
+  })
   return {
     policy: {
       version: 1,
@@ -395,6 +411,7 @@ export function mountPolicyProvider(ctx: Context, config: Config): void {
     guardPath: config.guardPath ?? guardScriptPath(),
     ...config.allowedCwdRoots === undefined ? {} : { allowedCwdRoots: config.allowedCwdRoots },
     warn: (message) => { ctx.logger.warn(message) },
+    logError: (message) => { ctx.logger.error(message) },
     publish: (input, signal) => {
       const mailbox = ctx.get('mailbox')
       if (mailbox === undefined) throw new Error('the mailbox service is not mounted')

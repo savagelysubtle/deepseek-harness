@@ -14,8 +14,11 @@ import { spawn, spawnSync } from 'node:child_process'
 /** Tool name no policy grants; the guard's "not granted" reason proves the policy file loaded too. */
 export const PROBE_TOOL = '__seat_guard_probe__'
 
-/** Longest stderr kept from a hook run; the guard prints one short line. */
+/** Longest stderr or stdout kept from a hook run; the guard prints one short line. */
 const MAX_STDERR = 4096
+
+/** How long a run may keep waiting for its pipes to close after the process itself exited, in milliseconds. */
+const EXIT_GRACE_MS = 300
 
 /** Default timeout of one hook run, in milliseconds. */
 const DEFAULT_TIMEOUT_MS = 15_000
@@ -40,6 +43,8 @@ export interface HookProbeOutcome {
   readonly signal: NodeJS.Signals | null
   /** Captured stderr (capped). */
   readonly stderr: string
+  /** Captured stdout (capped); a granted call must leave it empty. */
+  readonly stdout: string
   /** Set when the process could not be started (ENOENT, EACCES) or the run was aborted. */
   readonly error?: Error | undefined
   /** True when the run was killed for exceeding its timeout. */
@@ -73,7 +78,9 @@ export function assertProbeOutcome(outcome: HookProbeOutcome, expected: ProbeExp
     throw new ProbeOutcomeError('exit', `agent-claude-code-tools: the seat guard ${what} (exit ${String(outcome.status)}): ${excerpt}`)
   }
   if (expected.kind === 'allow') {
-    if (outcome.stderr !== '') throw new ProbeOutcomeError('reason', `agent-claude-code-tools: the seat guard wrote to stderr on a granted control: ${excerpt}`)
+    if (outcome.stderr !== '' || outcome.stdout !== '') {
+      throw new ProbeOutcomeError('reason', `agent-claude-code-tools: the seat guard wrote output on a granted control: ${excerpt}${outcome.stdout.slice(0, 200)}`)
+    }
     return
   }
   if (!outcome.stderr.startsWith('seat-guard: denied: ') || !(expected.reasons ?? []).every(reason => outcome.stderr.includes(reason))) {
@@ -108,6 +115,7 @@ export function verifyGuardCommand(command: string, timeoutMs: number = DEFAULT_
     status: result.status,
     signal: result.signal,
     stderr: result.stderr,
+    stdout: result.stdout,
     error,
     timedOut: error?.message.endsWith('ETIMEDOUT') === true,
   }
@@ -120,6 +128,8 @@ export interface GuardHookRunOptions {
   readonly timeoutMs?: number
   /** Abort the run; the outcome then carries the abort as its `error`. */
   readonly signal?: AbortSignal
+  /** Working directory of the hook process; default the host's. The probe passes its scratch cwd, as the CLI does. */
+  readonly cwd?: string
   /** The shell to run the command with; default `/bin/sh`. Tests point it at a missing or unusable file. */
   readonly shell?: string
 }
@@ -135,38 +145,64 @@ export interface GuardHookRunOptions {
 export function runGuardHook(command: string, payload: string, options: GuardHookRunOptions = {}): Promise<HookProbeOutcome> {
   return new Promise((resolve) => {
     let stderr = ''
+    let stdout = ''
     let timedOut = false
     let settled = false
-    const child = spawn(options.shell ?? '/bin/sh', ['-c', command], { env: { PATH: process.env['PATH'] }, stdio: ['pipe', 'pipe', 'pipe'] })
+    let grace: NodeJS.Timeout | undefined
+    // Own process group, so a timeout, an abort or the exit of the shell takes down every descendant that could
+    // otherwise keep the pipes open.
+    const child = spawn(options.shell ?? '/bin/sh', ['-c', command], {
+      env: { PATH: process.env['PATH'] },
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: true,
+      ...options.cwd === undefined ? {} : { cwd: options.cwd },
+    })
+    const killGroup = (): void => {
+      try {
+        // pid is undefined when the spawn failed, which makes this throw before anything is signalled.
+        process.kill(-(child.pid as number), 'SIGKILL')
+      } catch {
+        child.kill('SIGKILL')
+      }
+    }
     const timer = setTimeout(() => {
       timedOut = true
-      child.kill('SIGKILL')
+      killGroup()
     }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
-    const onAbort = (): void => { child.kill('SIGKILL') }
+    const onAbort = (): void => { killGroup() }
     options.signal?.addEventListener('abort', onAbort, { once: true })
     if (options.signal?.aborted === true) onAbort()
     const finish = (outcome: HookProbeOutcome): void => {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      clearTimeout(grace)
       options.signal?.removeEventListener('abort', onAbort)
+      child.stdout.destroy()
+      child.stderr.destroy()
       resolve(outcome)
     }
-    child.stderr.setEncoding('utf8')
-    child.stderr.on('data', (chunk: string) => { stderr = (stderr + chunk).slice(0, MAX_STDERR) })
-    child.stdout.resume()
-    child.stdin.on('error', () => undefined)
-    child.on('error', (error) => { finish({ status: null, signal: null, stderr, error }) })
-    child.on('close', (status, signal) => {
-      const aborted = options.signal?.aborted === true
-      finish({
-        status,
-        signal,
-        stderr,
-        ...aborted ? { error: new Error('aborted') } : {},
-        ...timedOut ? { timedOut: true } : {},
-      })
+    const outcomeOf = (status: number | null, signal: NodeJS.Signals | null): HookProbeOutcome => ({
+      status,
+      signal,
+      stderr,
+      stdout,
+      ...options.signal?.aborted === true ? { error: new Error('aborted') } : {},
+      ...timedOut ? { timedOut: true } : {},
     })
+    child.stderr.setEncoding('utf8')
+    child.stdout.setEncoding('utf8')
+    child.stderr.on('data', (chunk: string) => { stderr = (stderr + chunk).slice(0, MAX_STDERR) })
+    child.stdout.on('data', (chunk: string) => { stdout = (stdout + chunk).slice(0, MAX_STDERR) })
+    child.stdin.on('error', () => undefined)
+    child.on('error', (error) => { finish({ status: null, signal: null, stderr, stdout, error }) })
+    // The process exited: kill leftovers in its group, give the pipes a moment to drain, then settle regardless,
+    // so an escaped descendant holding a pipe cannot hang the probe.
+    child.on('exit', (status, signal) => {
+      killGroup()
+      grace = setTimeout(() => { finish(outcomeOf(status, signal)) }, EXIT_GRACE_MS)
+    })
+    child.on('close', (status, signal) => { finish(outcomeOf(status, signal)) })
     child.stdin.end(payload)
   })
 }

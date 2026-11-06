@@ -49,7 +49,7 @@ const denial = 'seat-guard: denied: tool __seat_guard_probe__ is not granted to 
 const DENY = { kind: 'deny', reasons: ['tool __seat_guard_probe__ is not granted'] } as const
 
 describe('assertProbeOutcome', () => {
-  const outcome = (over: Partial<HookProbeOutcome> = {}): HookProbeOutcome => ({ status: 2, signal: null, stderr: denial, ...over })
+  const outcome = (over: Partial<HookProbeOutcome> = {}): HookProbeOutcome => ({ status: 2, signal: null, stderr: denial, stdout: '', ...over })
   const codeOf = (run: () => void): string | undefined => {
     try {
       run()
@@ -75,6 +75,7 @@ describe('assertProbeOutcome', () => {
     expect(codeOf(() => { assertProbeOutcome(outcome({ stderr: 'nope' }), DENY) })).toBe('reason')
     expect(codeOf(() => { assertProbeOutcome(outcome({ stderr: 'seat-guard: denied: other' }), DENY) })).toBe('reason')
     expect(codeOf(() => { assertProbeOutcome(outcome({ status: 0, stderr: 'noise' }), { kind: 'allow' }) })).toBe('reason')
+    expect(codeOf(() => { assertProbeOutcome(outcome({ status: 0, stderr: '', stdout: 'out' }), { kind: 'allow' }) })).toBe('reason')
   })
 
   it('names the exit code and a stderr excerpt', () => {
@@ -106,7 +107,7 @@ describe('runGuardHook and verifyGuardCommandAsync', () => {
 
   it('reports the payload it was given on stdin, captured stderr and a null signal', async () => {
     const out = await runGuardHook('cat >&2; exit 2', 'hello')
-    expect(out).toEqual({ status: 2, signal: null, stderr: 'hello' })
+    expect(out).toEqual({ status: 2, signal: null, stderr: 'hello', stdout: '' })
   })
 
   it('caps stderr', async () => {
@@ -130,6 +131,13 @@ describe('runGuardHook and verifyGuardCommandAsync', () => {
     await expect(verifyGuardCommandAsync('exec sleep 5', { timeoutMs: 100 })).rejects.toThrow('timed out')
   })
 
+  it('an abort with a shell that never started still settles (the group kill falls back)', async () => {
+    const early = new AbortController()
+    early.abort()
+    const out = await runGuardHook('true', '', { signal: early.signal, shell: join(box.root, 'no-such-shell') })
+    expect(out.error).toBeDefined()
+  })
+
   it('an abort, before or during the run, kills it and is reported as an error outcome', async () => {
     const early = new AbortController()
     early.abort()
@@ -138,6 +146,26 @@ describe('runGuardHook and verifyGuardCommandAsync', () => {
     const pending = runGuardHook('exec sleep 5', '', { signal: late.signal })
     setTimeout(() => { late.abort() }, 50)
     expect((await pending).error?.message).toBe('aborted')
+  })
+
+  it('captures stdout and runs in the given cwd', async () => {
+    const out = await runGuardHook('pwd; exit 0', '', { cwd: box.root })
+    expect(out.stdout.trim()).toBe(box.root)
+    expect(out.stderr).toBe('')
+  })
+
+  it('a descendant that keeps the pipes open is killed with the group, so the run settles at once', async () => {
+    const started = Date.now()
+    const out = await runGuardHook('sleep 30 & exit 0', '')
+    expect(out.status).toBe(0)
+    expect(Date.now() - started).toBeLessThan(5000)
+  })
+
+  it('a descendant that escaped the group (own session) cannot hang the run: it settles after the grace period', async () => {
+    const started = Date.now()
+    const out = await runGuardHook('setsid -f sleep 3; exit 0', '')
+    expect(out.status).toBe(0)
+    expect(Date.now() - started).toBeLessThan(2500)
   })
 
   it('a command that exits before reading stdin does not crash the host (EPIPE is swallowed)', async () => {

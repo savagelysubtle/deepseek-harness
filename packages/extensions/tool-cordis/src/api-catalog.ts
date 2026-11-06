@@ -411,10 +411,10 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     description: 'The `claudeCodeGuardProbe` service.',
     methods: [
       {
-        signature: 'probe(signal?: AbortSignal): Promise<GuardProbeResult>',
+        signature: 'probe(signal?: AbortSignal, timeoutMs?: number): Promise<GuardProbeResult>',
         description: 'Run the probe once. Never rejects; the result says whether the guard behaved.',
-        parameters: [{ name: 'signal', description: 'aborts the run (reported as a failed result).' }],
-        returns: 'the result.',
+        parameters: [{ name: 'signal', description: 'aborts the run (reported as a failed result).' }, { name: 'timeoutMs', description: 'timeout of each hook run in milliseconds; overrides the provider\'s default of 15000.' }],
+        returns: 'the result. A failure is also logged in full (with its reason) at error level; the reason may hold paths, so keep it out of seat-visible text.',
       },
     ],
   },
@@ -4403,7 +4403,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ReadinessRegistry',
-    declaration: 'export class ReadinessRegistry {\n    get version(): number;\n    register(contributor: ReadinessContributor): void;\n    note(id: string, reason: string): void;\n    notesText(): string;\n    readiness(): PolicyReadiness;\n}',
+    declaration: 'export class ReadinessRegistry {\n    get version(): number;\n    register(contributor: ReadinessContributor): void;\n    note(id: string, code: string): void;\n    notesText(): string;\n    readiness(): PolicyReadiness;\n}',
   },
   {
     name: 'ReadinessRequirement',

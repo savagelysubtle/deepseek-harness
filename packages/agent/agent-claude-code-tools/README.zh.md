@@ -43,12 +43,12 @@ lead 模板恰好是 `mailbox_send` 和 `mailbox_directory`。主机条目的 `t
 
 ### 就绪状态
 
-`lead` 除本插件外不需要任何东西。`coder` 需要提供 `sandbox`、`canary` 和 `rules-hooks` 的贡献者;`sandbox` 来自 S6 的 bash 插件,`canary` 和 `rules-hooks` 来自 S7 的包 `agent-claude-code-seat-checks`。三者全部注册之前,coder 策略一直报告未就绪(`sandbox` 注册后为 `missing: canary, rules-hooks`),驱动在创建时以缺失项名称拒绝该席位。不伪造任何贡献者。`ReadinessRegistry` 还保留一个非契约的 `notes` 映射(`note(id, reason)`、`notesText()`):失败的贡献者在此记录原因,`extend()` 会把它附加到未就绪错误之后。被冻结的 `PolicyReadiness` 报告不变,也从不携带 notes。
+`lead` 除本插件外不需要任何东西。`coder` 需要提供 `sandbox`、`canary` 和 `rules-hooks` 的贡献者;`sandbox` 来自 S6 的 bash 插件,`canary` 和 `rules-hooks` 来自 S7 的包 `agent-claude-code-seat-checks`。三者全部注册之前,coder 策略一直报告未就绪(`sandbox` 注册后为 `missing: canary, rules-hooks`),驱动在创建时以缺失项名称拒绝该席位。不伪造任何贡献者。`ReadinessRegistry` 还保留一个非契约的 `notes` 映射(`note(id, code)`、`notesText()`,最多 64 个 id):失败的贡献者在此记录简短代码,例如 `canary FAILED attest`,`extend()` 会把它附加到未就绪错误之后。凡不是简短普通短语的内容(路径、摘要、片段)都会被替换为 `see host log`;探测器改为在 error 级别记录完整原因。被冻结的 `PolicyReadiness` 报告不变,也从不携带 notes。
 
 ### 克隆检查与守卫探测(S7 接缝)
 
 - **`CloneCheckRegistry`**(`registries.cloneChecks`)。插件注册 `{id, roles, check({seat, cwd})}`;`extend()` 在每次查询时、固定 cwd 之后、构建策略之前,运行该席位角色的所有检查。检查通过抛出 `CloneCheckError(seat, code, reason)` 来拒绝,它继承自 `SeatMutedByPolicyError`,因此驱动会记录 `claude-code/refused` 并抛出带类型的回合错误。抛出的任何其他值都会被包装成代码为 `check-failed` 的 `CloneCheckError`(失败即关闭)。coder 查询还会在未注册 id 为 `clone-hooks-check`(`CLONE_HOOKS_CHECK_ID`)的检查时抛错(`check-missing`),所以仅靠一个伪造的 `rules-hooks` 就绪贡献者无法解除强制执行。
-- **`claudeCodeGuardProbe`** 服务(`probe(signal?)`)。为保留席位 `dsh-canary-probe`(同名的真实席位会被 `extend()` 拒绝)在 `policyDir` 自己的子目录下生成真实的 coder 策略,通过 `/bin/sh` 运行完全相同的钩子命令,并要求:未知工具被守卫以其自身文本拒绝;对 `<cwd>/.git/config` 的 `Edit` 因受保护位置被拒绝;被授权的 `Read` 被放行且 stderr 为空(负向对照,可识破“一律拒绝”的伪守卫);随后重新核对 node、守卫副本和策略文件的哈希。结果为 `{ok: true, nodeSha256, guardSha256, policySha256}` 或 `{ok: false, code, reason}`,code 为 `attest`、`timeout`、`exit`、`reason`、`control`、`changed`、`spawn`、`error` 之一。它从不 reject;调用方只有在 `ok: true` 时才注册 `canary`。它证明的是经 `/bin/sh` 运行的生成命令,而不是 Claude CLI 会调用该钩子并遵从退出码 2(那由 S8 的实机探测证明)。
+- **`claudeCodeGuardProbe`** 服务(`probe(signal?, timeoutMs?)`)。为保留席位 `dsh-canary-probe`(同名的真实席位会被 `extend()` 拒绝)在 `policyDir` 自己的子目录下生成真实的 coder 策略,通过 `/bin/sh` 运行完全相同的钩子命令,并要求:未知工具被守卫以其自身文本拒绝;对 `<cwd>/.git/config` 的 `Edit` 因受保护位置被拒绝;被授权的 `Read` 被放行且 stderr 为空(负向对照,可识破“一律拒绝”的伪守卫);随后重新核对 node、守卫副本和策略文件的哈希。结果为 `{ok: true, nodeSha256, guardSha256, policySha256}` 或 `{ok: false, code, reason}`,code 为 `attest`、`timeout`、`exit`、`reason`、`control`、`changed`、`spawn`、`error` 之一。它从不 reject;调用方只有在 `ok: true` 时才注册 `canary`。它证明的是经 `/bin/sh` 运行的生成命令,而不是 Claude CLI 会调用该钩子并遵从退出码 2(那由 S8 的实机探测证明)。
 - 坦白说明:认证无法防御同一 uid 的进程替换 node 或守卫并改写 0700 的策略文件;每次查询的重新认证(大小、mtime、ctime、inode)把窗口缩短到一个回合。
 
 ## seat-guard 钩子
@@ -84,7 +84,7 @@ lead 模板恰好是 `mailbox_send` 和 `mailbox_directory`。主机条目的 `t
 - **路径守卫看不到 shell。** 原生 `Bash` 被禁用;shell 沙箱属于后续切片。
 - **cwd 中的模式字符被拒绝而不是转义。** 请把工作移到不含这些字符的路径。
 - **守卫是构建产物。** `lib/seat-guard.js` 被 gitignore,由 `pnpm run typecheck`(或包构建)生成。守卫文件缺失的 provider 永远不会返回扩展(验证会拒绝它);运行守卫的测试在文件缺失时会先构建它。
-- **在 S7 包注册之前,coder 策略一直未就绪。** `sandbox` 贡献者通过 `claudeCodePolicyRegistries` 注册;在 seat-checks 包注册 `canary` 和 `rules-hooks` 之前,报告仍是 `missing: canary, rules-hooks`,驱动拒绝该席位。就绪状态以 `provides` 字符串为键,而不是以注册者为键,所以第二个声称提供 `sandbox` 的贡献者不会改变任何事(测试固定了两点)。这里不伪造任何贡献者。
+- **只有三个贡献者全部注册后,coder 策略才就绪。** `sandbox` 贡献者(S6)以及 `canary` 与 `rules-hooks` 贡献者(S7 seat-checks 包)都通过 `claudeCodePolicyRegistries` 注册;在它们注册之前,报告会列出缺少的项,例如 `missing: canary, rules-hooks`,驱动拒绝该席位。就绪状态以 `provides` 字符串为键,而不是以注册者为键,所以第二个声称提供 `sandbox` 的贡献者不会改变任何事(测试固定了两点)。这里不伪造任何贡献者。
 - **注册表通过服务共享,挂载顺序不限。** `claudeCodePolicyRegistries` 是 `{readiness, contributors, tools, cloneChecks}`,与策略使用的是同一批实例。后续插件在其 `inject` 中列出 `claudeCodePolicyRegistries`,无论谁先挂载,都会在 provider 挂载后启动。注册工具分两步:在 `tools` 上注册工厂,并在 `contributors` 上为允许的角色注册名称(只在其中之一出现的名称会让席位静音,并指出缺少的名称)。
 - **污染盖章只打标签,不拒绝。** 被操纵的受污染会话仍可在其 `send_to` 列表内发送。
 - **工具结果是经过清洗的文本。** 操作员 home 或席位 cwd 下的路径被替换为 `[path]`(工具可以只选 `home`);其他路径原样通过。
