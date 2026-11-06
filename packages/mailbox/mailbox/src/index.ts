@@ -39,6 +39,11 @@ export {
   diffRosters, loadRegistrySeatNames, rosterDriftWarning, unknownServedSeats, unknownServedSeatsWarning,
 } from './roster.ts'
 export type { RegistryLoadOutcome, RosterDrift } from './roster.ts'
+export {
+  buildTerritories, DEFAULT_MAX_SCAN_FILES, findOverlaps, findOwners, formatOverlapReport, formatOwnerLookup,
+  globToRegExp, hasGlobChars, normalizeAbsolutePattern, patternMatches,
+} from './owners.ts'
+export type { OverlapPair, OverlapReport, OwnerLookup, SeatTerritory, TerritoryTable } from './owners.ts'
 
 /** Deployment config of the registry service. */
 export interface Config {

@@ -42,6 +42,11 @@ switch (invocation.mode) {
     process.exit(runPlugin(invocation.profile, invocation.args))
     break
   }
+  case 'owners': {
+    const { runOwners } = await import('./owners.ts')
+    process.exit(await runOwners({ path: invocation.path, overlaps: invocation.overlaps }))
+    break
+  }
   case 'dump-config': {
     const { runDumpConfig } = await import('./dump-config.ts')
     runDumpConfig(invocation.profile, invocation.defaultOnly, invocation.patches)

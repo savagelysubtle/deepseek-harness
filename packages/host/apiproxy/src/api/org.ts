@@ -41,6 +41,8 @@ export interface OrgSeat {
   readonly department?: string
   /** Restricts which tools the seat's agent may use; absent means unrestricted. */
   readonly tools?: OrgSeatTools
+  /** Advisory territory: glob patterns relative to the seat's cwd, or absolute under /mnt/Dev/Coding; absent means none declared. */
+  readonly owns?: readonly string[]
   /** Which driver runs the seat; absent means `default`. Routing only: cost and trust settings live in host config. */
   readonly driver?: 'default' | 'claude-code'
   /** Seats whose mail a `claude-code` seat admits; absent or empty admits nobody. */
@@ -130,6 +132,8 @@ export interface OrgRegistryDocumentSeat {
   readonly department?: string
   /** Restricts which tools the seat's agent may use; absent means unrestricted. */
   readonly tools?: OrgSeatTools
+  /** Advisory territory: glob patterns relative to the seat's cwd, or absolute under /mnt/Dev/Coding; absent means none declared. */
+  readonly owns?: readonly string[]
   /** Which driver runs the seat; absent means `default`. Routing only: cost and trust settings live in host config. */
   readonly driver?: 'default' | 'claude-code'
   /** Seats whose mail a `claude-code` seat admits; absent or empty admits nobody. */

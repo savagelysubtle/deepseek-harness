@@ -1009,3 +1009,96 @@ describe('seat driver fields and quarantine (OP #292 S3)', () => {
     })
   })
 })
+
+describe('seat owns (OP-115 advisory territory)', () => {
+  const PLAIN = 'baseDir: /p\nseats:\n  alfred: { cwd: a }\n  batman: { cwd: b }\n'
+
+  function ownsRegistry(ownsYaml: string, driver = ''): string {
+    return `baseDir: /p\nseats:\n  alfred: { cwd: a }\n  batman: { cwd: b${driver}, owns: ${ownsYaml} }\n`
+  }
+
+  it('parses owns and keeps the list in order, trimmed', () => {
+    const registry = parseOrgRegistry(ownsRegistry('["src/**", " docs/*.md ", "/mnt/Dev/Coding/x/**"]'))
+    expect(registry.seats.batman?.owns).toEqual(['src/**', 'docs/*.md', '/mnt/Dev/Coding/x/**'])
+  })
+
+  it('a registry without owns parses to exactly the pre-change objects (no owns key)', () => {
+    const registry = parseOrgRegistry(PLAIN)
+    expect(registry).toEqual({
+      baseDir: '/p',
+      seats: { alfred: { cwd: 'a' }, batman: { cwd: 'b' } },
+      edges: [],
+      callUp: [],
+    })
+    expect('owns' in (registry.seats.batman as object)).toBe(false)
+  })
+
+  it('does NOT quarantine a claude-code seat carrying owns, even under strict parsing', () => {
+    const text = ownsRegistry('["src/**"]', ', driver: claude-code')
+    for (const strictSeats of [false, true]) {
+      const seat = parseOrgRegistry(text, { strictSeats }).seats.batman
+      expect(seat?.invalid).toBeUndefined()
+      expect(seat?.driver).toBe('claude-code')
+      expect(seat?.owns).toEqual(['src/**'])
+    }
+  })
+
+  const BAD_CASES: ReadonlyArray<readonly [string, string, string]> = [
+    ['an empty string entry', '[""]', 'must be a list of non-empty strings'],
+    ['a whitespace-only entry', '["  "]', 'must be a list of non-empty strings'],
+    ['a non-string entry', '[3]', 'must be a list of non-empty strings'],
+    ['a scalar instead of a list', '"src/**"', 'must be a list of non-empty strings'],
+    ['a mapping instead of a list', '{ a: 1 }', 'must be a list of non-empty strings'],
+    ['an empty list', '[]', 'must not be an empty list'],
+    ['a leading .. segment', '["../x/**"]', 'must not contain a ".." segment'],
+    ['an inner .. segment', '["a/../b"]', 'must not contain a ".." segment'],
+    ['a .. segment in an absolute path', '["/mnt/Dev/Coding/../etc/**"]', 'must not contain a ".." segment'],
+    ['an absolute path outside /mnt/Dev/Coding', '["/etc/**"]', 'is absolute and outside /mnt/Dev/Coding'],
+    ['a sibling-prefixed absolute path', '["/mnt/Dev/CodingX/**"]', 'is absolute and outside /mnt/Dev/Coding'],
+  ]
+
+  it.each(BAD_CASES)('rejects %s with a visible message naming the seat and field', (_name, ownsYaml, message) => {
+    expect(() => parseOrgRegistry(ownsRegistry(ownsYaml))).toThrow(message)
+    expect(() => parseOrgRegistry(ownsRegistry(ownsYaml))).toThrow('seats.batman.owns')
+    // Same on a claude-code seat: a bad pattern is a hard error, not a silent quarantine.
+    expect(() => parseOrgRegistry(ownsRegistry(ownsYaml, ', driver: claude-code'))).toThrow(message)
+  })
+
+  it('accepts the absolute root itself and a nested absolute path', () => {
+    expect(parseOrgRegistry(ownsRegistry('["/mnt/Dev/Coding", "/mnt/Dev/Coding/a/b/*.ts"]')).seats.batman?.owns)
+      .toEqual(['/mnt/Dev/Coding', '/mnt/Dev/Coding/a/b/*.ts'])
+  })
+
+  it('round-trips through YAML parse -> stringify -> parse unchanged', () => {
+    const text = ownsRegistry('["src/**", "docs/*.md"]')
+    const first = parseOrgRegistry(text)
+    const rewritten = stringifyYaml(
+      { baseDir: first.baseDir, seats: first.seats, edges: first.edges, callUp: first.callUp },
+      { indentSeq: false },
+    )
+    expect(parseOrgRegistry(rewritten)).toEqual(first)
+    expect(stringifyYaml(parseYaml(rewritten), { indentSeq: false })).toBe(rewritten)
+  })
+
+  it('writeOrgRegistry keeps owns on disk and a re-read returns it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-org-owns-'))
+    try {
+      const path = join(dir, 'registry.yml')
+      writeFileSync(path, stringifyYaml({ baseDir: dir, seats: { alfred: { cwd: '.' } } }, { indentSeq: false }))
+      const before = await loadOrgRegistryWithToken(path)
+      await writeOrgRegistry(path, {
+        baseDir: dir,
+        seats: { alfred: { cwd: '.', owns: ['src/**'] }, claudie: { cwd: '.', driver: 'claude-code', owns: ['/mnt/Dev/Coding/x/**'] } },
+        edges: [],
+        callUp: [],
+      }, before.token)
+      const after = await loadOrgRegistryWithToken(path)
+      expect(after.registry.seats.alfred?.owns).toEqual(['src/**'])
+      expect(after.registry.seats.claudie?.owns).toEqual(['/mnt/Dev/Coding/x/**'])
+      expect(after.registry.seats.claudie?.invalid).toBeUndefined()
+      expect(readFileSync(path, 'utf8')).toContain('owns:')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

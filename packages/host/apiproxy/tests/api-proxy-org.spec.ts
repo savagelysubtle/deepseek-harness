@@ -83,7 +83,7 @@ function expectErr<T>(response: RpcResponse<T>): { code: string; message: string
 /** Minimal valid registry YAML: baseDir plus a seats map, edges/callUp omitted unless given. */
 function writeRegistry(
   dir: string,
-  seats: Record<string, { cwd?: string; test?: boolean; department?: string }>,
+  seats: Record<string, { cwd?: string; test?: boolean; department?: string; owns?: string[] }>,
   extra: { edges?: [string, string][]; callUp?: string[] } = {},
 ): string {
   const path = join(dir, 'registry.yml')
@@ -95,6 +95,7 @@ function writeRegistry(
         cwd: seat.cwd ?? '.',
         ...seat.test === undefined ? {} : { test: seat.test },
         ...seat.department === undefined ? {} : { department: seat.department },
+        ...seat.owns === undefined ? {} : { owns: seat.owns },
       },
     ])),
     ...extra.edges === undefined ? {} : { edges: extra.edges },
@@ -538,6 +539,92 @@ describe('seat department (SWD-178)', () => {
     const seat = (department: string): unknown => ({ baseDir: '/p', seats: { 'tt-alpha': { cwd: '.', department } }, edges: [], callUp: [] })
     expect(orgRegistryDocumentSchema.safeParse(seat('')).success).toBe(false)
     expect(orgRegistryDocumentSchema.safeParse(seat('x'.repeat(49))).success).toBe(false)
+  })
+})
+
+describe('seat owns (OP-115)', () => {
+  it('org.get shows owns in the registry view and document, and omits the key when absent', async () => {
+    const registryDir = tempDir('dsh-org-registry-')
+    const profileDir = tempDir('dsh-org-profile-')
+    writeProfile(profileDir, [
+      { id: 'mailbox-bridge', addresses: ['tt-alpha'] },
+      { id: 'tool-mailbox', addresses: ['tt-alpha'] },
+    ])
+    const path = writeRegistry(registryDir, { 'tt-alpha': { owns: ['src/**'] }, 'tt-bravo': {} })
+    const value = expectOk(await api(await floor(), { orgRegistryPath: path, orgProfileDir: profileDir }).org.get(request()))
+    const parsed = orgGetValueSchema.parse(value)
+    if (!parsed.registry.ok) throw new Error('unreachable')
+    expect(parsed.registry.registry.seats['tt-alpha']?.owns).toEqual(['src/**'])
+    expect(parsed.registry.document.seats['tt-alpha']?.owns).toEqual(['src/**'])
+    expect('owns' in (parsed.registry.registry.seats['tt-bravo'] as object)).toBe(false)
+    expect('owns' in (parsed.registry.document.seats['tt-bravo'] as object)).toBe(false)
+  })
+
+  it('org.write accepts owns (also on a claude-code seat) and writes it back, kept through a re-read', async () => {
+    const registryDir = tempDir('dsh-org-registry-')
+    const registryPath = writeRegistry(registryDir, { 'tt-alpha': {} })
+    const app = api(await floor(), { orgRegistryPath: registryPath, orgProfileDir: tempDir('dsh-org-profile-') })
+    const before = expectOk(await app.org.get(request()))
+    if (!before.registry.ok) throw new Error('unreachable')
+    const document: OrgRegistryDocument = {
+      baseDir: registryDir,
+      seats: {
+        'tt-alpha': { cwd: '.', owns: ['src/**', 'docs/*.md'] },
+        'tt-claudie': { cwd: '.', driver: 'claude-code', owns: ['/mnt/Dev/Coding/x/**'] },
+      },
+      edges: [],
+      callUp: [],
+    }
+    expect(orgRegistryDocumentSchema.parse(document)).toEqual(document)
+    const written = expectOk(await app.org.write(requestWith({ document, expectedToken: before.registry.token })))
+    expect(written.registry.seats['tt-alpha']?.owns).toEqual(['src/**', 'docs/*.md'])
+    const after = expectOk(await app.org.get(request()))
+    if (!after.registry.ok) throw new Error('unreachable')
+    expect(after.registry.document.seats['tt-alpha']?.owns).toEqual(['src/**', 'docs/*.md'])
+    expect(after.registry.document.seats['tt-claudie']?.owns).toEqual(['/mnt/Dev/Coding/x/**'])
+    expect(after.registry.registry.seats['tt-claudie']?.invalid).toBeUndefined()
+    expect(readFileSync(registryPath, 'utf8')).toContain('owns:')
+  })
+
+  it('the document schema rejects a non-array owns and an empty entry', () => {
+    const seat = (owns: unknown): unknown => ({ baseDir: '/p', seats: { 'tt-alpha': { cwd: '.', owns } }, edges: [], callUp: [] })
+    expect(orgRegistryDocumentSchema.safeParse(seat('src/**')).success).toBe(false)
+    expect(orgRegistryDocumentSchema.safeParse(seat([''])).success).toBe(false)
+    expect(orgRegistryDocumentSchema.safeParse(seat([3])).success).toBe(false)
+  })
+
+  it('org.write refuses a ".." or outside-root pattern with org-registry-rejected and writes nothing', async () => {
+    const registryDir = tempDir('dsh-org-registry-')
+    const registryPath = writeRegistry(registryDir, { 'tt-alpha': {} })
+    const app = api(await floor(), { orgRegistryPath: registryPath, orgProfileDir: tempDir('dsh-org-profile-') })
+    const before = expectOk(await app.org.get(request()))
+    if (!before.registry.ok) throw new Error('unreachable')
+    const originalBytes = readFileSync(registryPath)
+    for (const [pattern, message] of [['../x/**', '".." segment'], ['/etc/**', 'outside /mnt/Dev/Coding']] as const) {
+      const document: OrgRegistryDocument = { baseDir: registryDir, seats: { 'tt-alpha': { cwd: '.', owns: [pattern] } }, edges: [], callUp: [] }
+      const error = expectErr(await app.org.write(requestWith({ document, expectedToken: before.registry.token })))
+      expect(error.code).toBe('org-registry-rejected')
+      expect(error.message).toContain(message)
+    }
+    expect(readFileSync(registryPath)).toEqual(originalBytes)
+  })
+
+  it('the served rosters and drift report are identical with and without owns', async () => {
+    const profileDir = tempDir('dsh-org-profile-')
+    writeProfile(profileDir, [
+      { id: 'mailbox-bridge', addresses: ['tt-alpha', 'tt-ghost'] },
+      { id: 'tool-mailbox', addresses: ['tt-alpha'] },
+    ])
+    const plain = expectOk(await api(await floor(), {
+      orgRegistryPath: writeRegistry(tempDir('dsh-org-registry-'), { 'tt-alpha': {}, 'tt-bravo': {} }), orgProfileDir: profileDir,
+    }).org.get(request()))
+    const owned = expectOk(await api(await floor(), {
+      orgRegistryPath: writeRegistry(tempDir('dsh-org-registry-'), { 'tt-alpha': { owns: ['a/**'] }, 'tt-bravo': { owns: ['b/**'] } }),
+      orgProfileDir: profileDir,
+    }).org.get(request()))
+    expect(owned.mailboxBridge).toEqual(plain.mailboxBridge)
+    expect(owned.toolMailbox).toEqual(plain.toolMailbox)
+    expect(owned.drift).toEqual(plain.drift)
   })
 })
 
