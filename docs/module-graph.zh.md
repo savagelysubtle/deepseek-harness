@@ -106,6 +106,7 @@ flowchart TD
     pkg_acp["acp"]
   end
   subgraph group_agent["packages/agent"]
+    pkg_agent_claude_code_bash["agent-claude-code-bash"]
     pkg_agent_claude_code_driver["agent-claude-code-driver"]
     pkg_agent_claude_code_registry["agent-claude-code-registry"]
     pkg_agent_claude_code_tools["agent-claude-code-tools"]
@@ -1296,6 +1297,10 @@ flowchart TD
   pkg_host_apiproxy --> pkg_invariants
   pkg_host_apiproxy --> pkg_mcp_status
   pkg_host_apiproxy --> pkg_workflow_remote
+  pkg_agent_claude_code_bash --> pkg_agent_claude_code_tools
+  pkg_agent_claude_code_bash --> pkg_invariants
+  pkg_agent_claude_code_bash --> pkg_sandbox_local
+  pkg_agent_claude_code_bash --> pkg_subprocess
   pkg_client_runtime --> pkg_api_remotes
   pkg_client_runtime --> pkg_invariants
   pkg_client_runtime --> pkg_typert_protocol
@@ -1819,6 +1824,7 @@ flowchart TD
 | [`api-remotes`](../packages/api/remotes) | `api` | [`agent`](../packages/core/agent), [`agent-presets`](../packages/preset/agent-presets), [`api-gateway`](../packages/api/gateway), [`commands`](../packages/interaction/commands), [`cordis-host-runner`](../packages/extensions/cordis-host-runner), [`credentials`](../packages/credentials/credentials), [`goal`](../packages/goal/goal), [`host-plugin-inventory`](../packages/host/plugin-inventory), [`invariants`](../packages/runtime-diagnostics/invariants), [`llm`](../packages/llm/llm), [`mcp-client`](../packages/mcp/mcp-client), [`mcp-status`](../packages/mcp/mcp-status), [`message-feedback`](../packages/feedback/message-feedback), [`session`](../packages/core/session), [`session-persistence`](../packages/session/session-persistence), [`settings`](../packages/settings/settings), [`typert-registry`](../packages/typert/registry), [`workflow-remote`](../packages/workflow/workflow-remote) |
 | [`acp-demo`](../packages/examples/acp-demo) | `examples` | [`acp`](../packages/acp/acp), [`agent-instructions`](../packages/context/agent-instructions), [`agent-spine-demo`](../packages/examples/agent-spine-demo), [`app-boot`](../packages/boot/app-boot), [`invariants`](../packages/runtime-diagnostics/invariants), [`session-checkpoint-policy`](../packages/session/session-checkpoint-policy), [`session-persistence-jsonl`](../packages/session/session-persistence-jsonl), [`session-query`](../packages/session-query/session-query), [`session-query-sqlite`](../packages/session-query/session-query-sqlite), [`tools`](../packages/core/tools) |
 | [`host-apiproxy`](../packages/host/apiproxy) | `host` | [`agent-presets`](../packages/preset/agent-presets), [`cordis-host-runner`](../packages/extensions/cordis-host-runner), [`invariants`](../packages/runtime-diagnostics/invariants), [`mcp-status`](../packages/mcp/mcp-status), [`workflow-remote`](../packages/workflow/workflow-remote) |
+| [`agent-claude-code-bash`](../packages/agent/agent-claude-code-bash) | `agent` | [`agent-claude-code-tools`](../packages/agent/agent-claude-code-tools), [`invariants`](../packages/runtime-diagnostics/invariants), [`sandbox-local`](../packages/sandbox/sandbox-local), [`subprocess`](../packages/subprocess/subprocess) |
 | [`client-runtime`](../packages/client/runtime) | `client` | [`api-remotes`](../packages/api/remotes), [`invariants`](../packages/runtime-diagnostics/invariants), [`typert-protocol`](../packages/typert/protocol), [`typert-registry`](../packages/typert/registry) |
 | [`client-ui-settings`](../packages/client/ui-settings) | `client` | [`api-remotes`](../packages/api/remotes), [`client-connection`](../packages/client/connection), [`client-runtime`](../packages/client/runtime), [`client-schema-form`](../packages/client/schema-form), [`client-ui-slots`](../packages/client/ui-slots), [`invariants`](../packages/runtime-diagnostics/invariants), [`settings`](../packages/settings/settings) |
 | [`client-ui-settings-models`](../packages/client/ui-settings-models) | `client` | [`api-remotes`](../packages/api/remotes), [`client-connection`](../packages/client/connection), [`client-runtime`](../packages/client/runtime), [`client-schema-form`](../packages/client/schema-form), [`client-ui-primitives`](../packages/client/ui-primitives), [`client-ui-slots`](../packages/client/ui-slots), [`client-web-react`](../packages/client/web-react), [`invariants`](../packages/runtime-diagnostics/invariants) |

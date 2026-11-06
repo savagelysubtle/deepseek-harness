@@ -116,6 +116,48 @@ export interface AgUiConfig {
 
 Source: [`packages/agui/ag-ui/src/index.ts:48`](../packages/agui/ag-ui/src/index.ts)
 
+<a id="deepseek-aidsh-agent-claude-code-bash"></a>
+
+## `@deepseek-ai/dsh-agent-claude-code-bash`
+
+```ts config-catalog
+/** Deployment configuration of the plugin. */
+export interface Config {
+  /** Turn the tool off without removing the row: nothing is registered and coder seats stay not-ready. Default true. */
+  enabled?: boolean
+  /** Deadline of a call that gives no `timeout_s`, in seconds. Default 120. */
+  deadlineS?: number
+  /** Longest deadline a call may ask for, in seconds. Default and ceiling 600. */
+  maxDeadlineS?: number
+  /** `MemoryMax` of a call's cgroup scope in bytes (tmpfs pages count against it). Default 6 GiB. */
+  memoryMaxBytes?: number
+  /** `TasksMax` of a call's cgroup scope (it counts threads). Default 1024. */
+  tasksMax?: number
+  /** Free bytes the clone's filesystem must keep; a call below it is refused and a running one is killed. Default 1 GiB. */
+  minFreeBytes?: number
+  /** Absolute path of the bwrap binary; default the first of /usr/bin/bwrap, /usr/local/bin/bwrap, /bin/bwrap that exists. */
+  bwrapPath?: string
+  /** Node installation directory bound read-only into the sandbox; default the install of the running node. */
+  nodeDir?: string
+  /** Directory on the sandbox PATH for node; default `<nodeDir>/bin`. */
+  nodeBinDir?: string
+  /** `COREPACK_HOME`, bound read-only; default a directory in the sandbox home tmpfs (which has no network to fill it). */
+  corepackHome?: string
+  /** Exact extra read-only binds (for example a pnpm binary outside `nodeDir`); absolute and canonical. */
+  roPaths?: string[]
+  /** Extra directories on the sandbox PATH. */
+  pathDirs?: string[]
+  /** Extra host paths a seat must never see (the policy directory is the usual one). */
+  deniedPaths?: string[]
+  /** The operator's home directory; default the real path of the running user's home. */
+  home?: string
+  /** Directory the preflight creates its throwaway clone in; default the OS temp directory. */
+  scratchDir?: string
+}
+```
+
+Source: [`packages/agent/agent-claude-code-bash/src/config.ts:18`](../packages/agent/agent-claude-code-bash/src/config.ts)
+
 <a id="deepseek-aidsh-agent-claude-code-driver"></a>
 
 ## `@deepseek-ai/dsh-agent-claude-code-driver`

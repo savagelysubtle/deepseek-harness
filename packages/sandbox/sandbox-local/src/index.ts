@@ -231,7 +231,7 @@ const WINDOWS_ACL_RUNNER_FAILURE_EXIT = 127
  * assembled snapshot fixture at
  * `examples/acp-agent/tests/fixtures/partial-landlock-sandbox.ts`.
  */
-const RUNNER_FAILURE_RULES = {
+export const RUNNER_FAILURE_RULES = {
   bwrap: [{ fatalSignatures: ['bwrap: '] }],
   landlock: [{
     allowedExitCodes: [LAUNCHER_FAILURE_EXIT],

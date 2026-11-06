@@ -673,6 +673,15 @@
         "tests/**/*.ts"
       ]
     },
+    "packages/agent/agent-claude-code-bash": {
+      "entry": [
+        "tests/**/*.spec.ts"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "tests/**/*.ts"
+      ]
+    },
     "packages/subagent/subagent-claude-code": {
       "entry": [
         "tests/**/*.spec.ts",

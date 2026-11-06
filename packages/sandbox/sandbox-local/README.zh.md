@@ -4,7 +4,7 @@
 
 [`dsh-sandbox`](../sandbox/) seam 的本地实现。它选择并缓存一个平台 runner：Linux 优先选择可工作的 `bwrap`，否则选择 Landlock；macOS 使用 Seatbelt；Windows 使用 ACL 受限令牌 runner。多个候选项会按顺序探测，只有一个候选项时则直接选择。
 
-包根目录导出默认及命名的 `LocalSandboxProvider` 插件和 `Config`，以及 seat profile builder（`planSeatLaunch` 及其类型，见下文）；平台 profile builder 仍为内部实现。
+包根目录导出默认及命名的 `LocalSandboxProvider` 插件和 `Config`，以及 seat profile builder（`planSeatLaunch` 及其类型，见下文），以及 `RUNNER_FAILURE_RULES`（provider 上报的各 runner 致命诊断规则，导出后 seat 工具可用同一条规则判定 bwrap 启动失败）；平台 profile builder 仍为内部实现。
 
 不受支持的平台和不可用 runner 会以 `SANDBOX_UNAVAILABLE` 拒绝执行；执行绝不会静默回退为不受限制。每次包装都携带结构化 runner 失败规则，使消费方能够区分损坏的沙箱与命令失败。
 
