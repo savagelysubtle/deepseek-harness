@@ -32,8 +32,8 @@ usage: dsh-hire <seat> [options]
 claude-code seats (OP #292):
   --driver <default|claude-code>   which driver runs the seat (default: default)
   --model <id>       model for the printed host-config stanza (required for claude-code)
-  --role <role>      mail-only (default) or lead; coder is refused until the sandbox (S6) and
-                     canary (S7) readiness exist
+  --role <role>      mail-only (default), lead or coder; the host refuses a coder seat at create
+                     until readiness reports sandbox, canary and rules-hooks
   --admit-from a,b   seats whose mail the seat admits (default: nobody)
   --admit <classes>  sender classes admitted (only seat; the default)
   --test             write test: true on the new row
@@ -388,8 +388,7 @@ main()
 REGTOOL_PY
 }
 
-# Printed with the coder refusal today; S7 lifts the refusal and reuses this function for the
-# coder hire output, so the wording lives in exactly one place.
+# Printed with the coder hire output (after the host-config stanza); the wording lives in exactly one place.
 cc_print_coder_operator_rules() {
   cat <<'RULES'
 
@@ -397,8 +396,11 @@ cc_print_coder_operator_rules() {
 1. A seat's clone is hostile by construction: nobody runs git, pnpm, node or an editor with
    project trust inside it, and nobody opens it in a Claude session.
 2. Host-side git on a seat clone always runs
-     git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.pager=cat
-   with GIT_CONFIG_NOSYSTEM=1.
+     git -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.pager=cat
+   with GIT_CONFIG_NOSYSTEM=1. Never `git add -A` in a clone: a seat can write a nested
+   sub/.git/config, and `git status` ran its core.fsmonitor once the host added `sub`.
+   Call assertCloneHookState(<clone>) (agent-claude-code-seat-checks) before every host-side git
+   command on a clone.
 3. Work comes out by `git fetch` into a separate trusted checkout, or is reviewed as patch text.
 4. Trust prompts for .mcp.json and .claude are never pre-accepted.
 
@@ -406,8 +408,9 @@ cc_print_coder_operator_rules() {
 1. git clone --no-hardlinks <src> <clone>
 2. Assert <clone>/.git is a directory (not a worktree file) and
    <clone>/.git/objects/info/alternates is absent.
-3. In <clone>: pnpm install --offline --config.package-import-method=copy
-   (dependencies are copied, never hardlinked from the store; there is no network inside the sandbox)
+3. In <clone>: pnpm install --offline --ignore-scripts --config.package-import-method=copy
+   (dependencies are copied, never hardlinked from the store; there is no network inside the sandbox;
+   --ignore-scripts keeps the repo's postinstall from writing git hooks into the clone)
 4. In <clone>: mkdir -p node_modules/.vite node_modules/.vite-temp node_modules/.cache
    (the sandbox mounts scratch space there and refuses an unprovisioned clone)
 5. find <clone> -type f -links +1 must print nothing.
@@ -416,21 +419,17 @@ The sandbox binds the whole .git and node_modules read-only, so the seat cannot 
 RULES
 }
 
-cc_refuse_coder() {
-  {
-    printf 'dsh-hire: %s\n' 'coder rows are refused until the sandbox (S6) and canary (S7) readiness exist; hire the seat as "lead" (mailbox tools only) or "mail-only" meanwhile'
-    cc_print_coder_operator_rules
-    printf '\nWhen S7 lifts this refusal the same rules apply to every coder clone.\n'
-  } >&2
-  exit 1
+cc_print_coder_tail() {
+  [ "$ROLE" = coder ] || return 0
+  cc_print_coder_operator_rules
+  printf '\nNOTE: the host refuses the seat at create until readiness reports canary and rules-hooks; see host log lines starting agent-claude-code-seat-checks:\n'
 }
 
 cc_hire() {
   # --- argument validation (no registry access yet) ---
   case "$ROLE" in
-    mail-only|lead) ;;
-    coder) cc_refuse_coder ;;
-    *) die "unknown role \"$ROLE\"; accepted roles are \"mail-only\" and \"lead\"" ;;
+    mail-only|lead|coder) ;;
+    *) die "unknown role \"$ROLE\"; accepted roles are \"mail-only\", \"lead\" and \"coder\"" ;;
   esac
   [ -n "$MODEL" ] || die "--model is required for --driver claude-code (it goes into the printed host-config stanza)"
   case "$MODEL" in *$'\n'*) die "invalid --model (contains a newline)";; esac
@@ -520,6 +519,7 @@ INFO
     elif [ "$RESEED" -eq 1 ]; then echo "dry run — would replace sessionId $OLD_ID with $SESSION_ID_CC; nothing written"
     else echo "dry run — the registry row already matches; nothing to write"; fi
     cc_print_stanza "$SESSION_ID_CC"
+    cc_print_coder_tail
     exit 0
   fi
 
@@ -550,6 +550,7 @@ INFO
   echo "$SEAT is served by the mail bridge; first mail starts it; refused until the host-config stanza below is added."
   echo "Nothing was spawned and no kickoff was sent."
   cc_print_stanza "$SESSION_ID_CC"
+  cc_print_coder_tail
 }
 
 cc_print_stanza() {

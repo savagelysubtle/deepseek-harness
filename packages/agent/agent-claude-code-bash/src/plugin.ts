@@ -3,7 +3,8 @@
  * `sandbox` readiness contributor and the `bash` tool into the policy registries. When the config turns the tool off
  * or the preflight fails, NOTHING is registered, so a coder seat stays not-ready, and the reason is warn-logged.
  * Registration order is tool, contributor, readiness: the readiness entry is what unlocks the role, so it goes last.
- * A coder is still refused after this plugin: `canary` and `rules-hooks` belong to a later slice.
+ * A coder is still refused after this plugin alone: `canary` and `rules-hooks` come from the
+ * `agent-claude-code-seat-checks` plugin, and readiness lists coder only when all three are registered.
  *
  * @module @deepseek-ai/dsh-agent-claude-code-bash/plugin
  */
