@@ -414,7 +414,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         signature: 'probe(signal?: AbortSignal, timeoutMs?: number): Promise<GuardProbeResult>',
         description: 'Run the probe once. Never rejects; the result says whether the guard behaved.',
         parameters: [{ name: 'signal', description: 'aborts the run (reported as a failed result).' }, { name: 'timeoutMs', description: 'timeout of each hook run in milliseconds; overrides the provider\'s default of 15000.' }],
-        returns: 'the result. A failure is also logged in full (with its reason) at error level; the reason may hold paths, so keep it out of seat-visible text.',
+        returns: 'the result. A failure is also logged in full at error level; the reason may hold paths and digests, so keep it out of seat-visible text.',
       },
     ],
   },
@@ -3287,7 +3287,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'CloneCheck',
-    declaration: 'export interface CloneCheck {\n    readonly id: string;\n    readonly roles: readonly PolicyRole[];\n    readonly check: (ctx: CloneCheckContext) => void;\n}',
+    declaration: 'export interface CloneCheck {\n    readonly id: string;\n    readonly roles: readonly PolicyRole[];\n    readonly check: (ctx: CloneCheckContext) => unknown;\n}',
   },
   {
     name: 'CloneCheckContext',

@@ -59,5 +59,13 @@
         # Where the per-seat policy files are written (created with mode 0700). Host-owned; a seat
         # cannot write it, and the guard hook pins each file by its SHA-256.
         policyDir: /home/me/.dsh/claude-code/policy
+    - id: agent-claude-code-seat-checks
+      name: '@deepseek-ai/dsh-agent-claude-code-seat-checks'
+      config:
+        # Runs the guard boot canary and the clone-check self-test, then registers the `canary` and
+        # `rules-hooks` readiness entries and the per-query clone hook check. Every key is optional:
+        # `enabled: false` registers nothing (coder seats stay not-ready), `gitPath` defaults to the
+        # first of /usr/bin/git and /usr/local/bin/git, `canaryTimeoutMs` defaults to 20000.
+        enabled: true
     - id: agent-claude-code-registry
       name: '@deepseek-ai/dsh-agent-claude-code-registry'

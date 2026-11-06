@@ -33,6 +33,7 @@ const NO_MODEL_EXPERIENCE_SECTION: Readonly<Record<string, string>> = {
   'packages/core/scope': 'The package is a model-agnostic registration and lifecycle primitive; model-facing consumers own any context selection.',
   'packages/agent/agent-claude-code-driver': 'The package drives an external Claude Code process whose context and prompts it does not author; model-visible text is whatever the dispatched mail contains.',
   'packages/agent/agent-claude-code-registry': 'The package only verifies the mailbox bridge\'s seat binding and applies a registry row\'s sender lists; it registers no prompt, tool, or message, and the Claude Code process it gates owns its own context.',
+  'packages/agent/agent-claude-code-seat-checks': 'The package runs boot proofs and registers readiness entries and a per-query clone check for an external Claude Code process; it registers no prompt, tool, or message, and a refusal text is shown to the operator, never to the model.',
   'packages/agent/agent-claude-code-tools': 'The package generates permission rules, a deny-only hook and a policy file for an external Claude Code process; it registers no prompt, tool, or message of its own, and model-visible tool descriptions belong to the later provider slice.',
   'packages/core/agent-claude-code': 'The package records log-only driver events that never enter a provider request; the Claude Code process it will drive owns its own context.',
   'packages/util/brand': 'The package is a type-only primitive erased at compile time.',

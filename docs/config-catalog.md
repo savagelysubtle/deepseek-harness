@@ -276,6 +276,24 @@ export type ClaudeCodeRole = 'coder' | 'lead' | 'mail-only'
 
 Source: [`packages/agent/agent-claude-code-driver/src/index.ts:169`](../packages/agent/agent-claude-code-driver/src/index.ts)
 
+<a id="deepseek-aidsh-agent-claude-code-seat-checks"></a>
+
+## `@deepseek-ai/dsh-agent-claude-code-seat-checks`
+
+```ts config-catalog
+/** Deployment configuration of the plugin. */
+export interface Config {
+  /** Turn the checks off without removing the row: nothing is registered and coder seats stay not-ready. Default true. */
+  enabled?: boolean
+  /** Absolute path of the git binary; default the first of /usr/bin/git, /usr/local/bin/git that exists. */
+  gitPath?: string
+  /** Timeout of the guard boot canary in milliseconds. Default 20000, ceiling 300000. */
+  canaryTimeoutMs?: number
+}
+```
+
+Source: [`packages/agent/agent-claude-code-seat-checks/src/config.ts:17`](../packages/agent/agent-claude-code-seat-checks/src/config.ts)
+
 <a id="deepseek-aidsh-agent-claude-code-tools"></a>
 
 ## `@deepseek-ai/dsh-agent-claude-code-tools`
@@ -2620,7 +2638,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/subagent/subagent-claude-code/src/index.ts:33`](../packages/subagent/subagent-claude-code/src/index.ts)
+Source: [`packages/subagent/subagent-claude-code/src/index.ts:39`](../packages/subagent/subagent-claude-code/src/index.ts)
 
 <a id="deepseek-aidsh-subagent-codex"></a>
 
