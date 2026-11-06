@@ -52,7 +52,7 @@
     #   tools: [mailbox_send, mailbox_directory]   # exact dsh tools it may call (empty mutes the seat)
     #   send_to: [ops-lead]                        # the only seats it may mail (empty refuses every send)
     #   allow_blocking: false                      # optional: may it send blocking mail
-    # A `coder` row stays refused until the sandbox, canary and rules-hooks contributors exist (S6, S7).
+    # A `coder` row stays refused until the sandbox, canary and rules-hooks contributors have registered (S6 sandbox; S7 seat-checks).
     - id: agent-claude-code-tools
       name: '@deepseek-ai/dsh-agent-claude-code-tools'
       config:
