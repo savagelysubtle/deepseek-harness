@@ -140,7 +140,9 @@ declare module '@deepseek-ai/cordis' {
   interface Context {
     /**
      * The permission-policy provider (contract in `policy-contract.ts`). Read at use time, never at mount: `lead` and
-     * `coder` rows are accepted only while it is registered and its readiness lists the role.
+     * `coder` rows are accepted only while it is registered and its readiness lists the role
+     * (a coder needs the sandbox, canary and rules-hooks contributors; a refusal is not cached, so a retry
+     * works once the host logs the canary line).
      */
     claudeCodePolicy: ClaudeCodePolicy
     claudeCodeMailHooks: ClaudeCodeMailHooks

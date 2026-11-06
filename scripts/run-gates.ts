@@ -256,6 +256,9 @@ function ciSharedStaticGates(): Gate[] {
   return [
     pnpmScript('runtime-closure', 'verify-runtime-closure', { label: 'runtime closure' }),
     pnpmScript('cli-profile-closure', 'verify-cli-profile-closure', { label: 'CLI profile closure' }),
+    pnpmScript('no-cross-package-src-imports', 'verify:no-cross-package-src-imports', {
+      label: 'no cross-package src imports',
+    }),
     pnpmScript('constraints', 'constraints'),
     pnpmScript('dsh-package-licenses', 'verify-dsh-package-licenses', { label: 'DSH package licenses' }),
     pnpmScript('package-invariants', 'verify-package-invariants', { label: 'package invariants' }),

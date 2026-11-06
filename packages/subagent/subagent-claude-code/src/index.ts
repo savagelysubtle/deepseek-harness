@@ -24,6 +24,12 @@ import {
   type ClaudeCodeRunSpec,
 } from './run.ts'
 
+/**
+ * The managed-process adapter, re-exported so the Claude Code seat driver imports the built package root
+ * instead of reaching into this package's raw `src/` (which Node cannot load: it uses a TypeScript parameter property).
+ */
+export { claudeSpawnSpec, ManagedClaudeCodeProcess } from './process.ts'
+
 export const name = 'subagent-claude-code'
 export const inject = ['subagents', 'subprocess']
 

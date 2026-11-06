@@ -1,15 +1,16 @@
 /**
  * Role acceptance is lazy and driven by the policy service's readiness: `lead` needs the service and a `lead`
- * readiness, `coder` needs a `coder` readiness (which stays unreachable until the sandbox, canary and rules-hooks
- * contributors register), `mail-only` needs nothing. Host-private policy fields are validated, and a registry row
+ * readiness, `coder` needs a `coder` readiness (which exists only once the sandbox, canary and rules-hooks
+ * contributors have all registered), `mail-only` needs nothing. Host-private policy fields are validated, and a registry row
  * may never carry one.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { SeatMutedByPolicyError } from '../src/policy-contract.ts'
 import type { ClaudeCodePolicy } from '../src/policy-contract.ts'
 import { assertRoleServable, mergeHostSeat, parseHostSeat, POLICY_HOST_KEYS } from '../src/seat-config.ts'
-import { cleanHostEnv, cleanTempDirs, stubPolicy } from './fakes.ts'
+import { cleanHostEnv, cleanTempDirs, harness, mailMessage, stubPolicy } from './fakes.ts'
 import { bindingFor, bootedContext, hostSeat, hostWorld, optionsWith, registryRow, trustingSource } from './host-fakes.ts'
 
 const Driver = await import('../src/index.ts')
@@ -31,7 +32,10 @@ describe('assertRoleServable', () => {
     expect(() => { assertRoleServable('lead', 's', policy(['lead'])) }).not.toThrow()
     expect(() => { assertRoleServable('coder', 's', policy(['lead', 'coder'])) }).not.toThrow()
     expect(() => { assertRoleServable('coder', 's', policy(['lead'], ['sandbox', 'canary', 'rules-hooks'])) })
-      .toThrow(/not ready for it \(missing: sandbox, canary, rules-hooks\); coder seats wait for the sandbox \(S6\) and canary \(S7\)/)
+      .toThrow(new RegExp(
+        'not ready for it \\(missing: sandbox, canary, rules-hooks\\); coder seats wait for the sandbox, canary and rules-hooks '
+        + 'contributors, and a retry works once the host logs the canary line',
+      ))
     expect(() => { assertRoleServable('lead', 's', policy([])) }).toThrow(/not ready for it; coder seats wait/)
   })
 
@@ -150,6 +154,26 @@ describe('role acceptance through the plugin', () => {
     }
   })
 
+  it('re-calls requirePolicy on every create and caches no refusal: a refused coder is served once canary registers', async () => {
+    let missing: readonly ('sandbox' | 'canary' | 'rules-hooks')[] = ['canary', 'rules-hooks']
+    let roles: readonly ('lead' | 'coder')[] = ['lead']
+    const readiness = vi.fn(() => ({ roles: new Set(roles), missing }))
+    const policy: ClaudeCodePolicy = { version: 1, extend: () => ({}), readiness }
+    const { fiber, create } = await mount(policy, 'coder')
+    await expect(create('first')).rejects.toThrow(
+      /missing: canary, rules-hooks\); coder seats wait.*see host log lines starting agent-claude-code-seat-checks:/,
+    )
+    const afterFirst = readiness.mock.calls.length
+    expect(afterFirst).toBeGreaterThan(0)
+    await expect(create('second')).rejects.toThrow(/missing: canary, rules-hooks/)
+    expect(readiness.mock.calls.length).toBeGreaterThan(afterFirst)
+    missing = []
+    roles = ['lead', 'coder']
+    const handle = await create('third')
+    await handle.dispose()
+    await fiber.dispose()
+  })
+
   it('serves coder once readiness lists it', async () => {
     const { fiber, create } = await mount(stubPolicy({}, ['lead', 'coder']), 'coder')
     const handle = await create('ok')
@@ -172,5 +196,25 @@ describe('role acceptance through the plugin', () => {
     const handle = await create('second')
     await handle.dispose()
     await fiber.dispose()
+  })
+})
+
+describe('mail claimed before the policy extension throws', () => {
+  it.each<[string, () => Error, string]>([
+    ['a typed seat-muted refusal (what a clone check raises)', () => new SeatMutedByPolicyError('tester', 'clone hook state refused'), 'clone hook state refused'],
+    ['an ordinary provider error', () => new Error('provider bug'), 'provider bug'],
+  ])('fails its lease once with the reason, never loses it and never re-runs the turn: %s', async (_label, thrown, reasonText) => {
+    const h = await harness()
+    const extend = vi.fn(() => { throw thrown() })
+    h.state.policy = { ...stubPolicy(), extend }
+    const agent = h.agent()
+    agent.followup(mailMessage('hi', 'm-claimed'))
+    await agent.whenIdle()
+    await agent.whenIdle()
+    expect(h.queries).toHaveLength(0)
+    expect(extend).toHaveBeenCalledTimes(1)
+    expect(h.state.leases).toHaveLength(1)
+    expect(h.state.leases[0]).toMatch(/^fail:m-claimed:/)
+    expect(h.state.leases[0]).toContain(reasonText)
   })
 })

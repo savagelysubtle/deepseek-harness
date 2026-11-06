@@ -406,6 +406,19 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'claudeCodeGuardProbe',
+    summary: 'The `claudeCodeGuardProbe` service.',
+    description: 'The `claudeCodeGuardProbe` service.',
+    methods: [
+      {
+        signature: 'probe(signal?: AbortSignal, timeoutMs?: number): Promise<GuardProbeResult>',
+        description: 'Run the probe once. Never rejects; the result says whether the guard behaved.',
+        parameters: [{ name: 'signal', description: 'aborts the run (reported as a failed result).' }, { name: 'timeoutMs', description: 'timeout of each hook run in milliseconds; overrides the provider\'s default of 15000.' }],
+        returns: 'the result. A failure is also logged in full at error level; the reason may hold paths and digests, so keep it out of seat-visible text.',
+      },
+    ],
+  },
+  {
     key: 'claudeCodeMailHooks',
     summary: 'The mail seams a later slice (registry admission in S3, the mailbox bridge\'s lease in S8) plugs in by providing `ctx.claudeCodeMailHooks`.',
     description: 'The mail seams a later slice (registry admission in S3, the mailbox bridge\'s lease in S8) plugs in by providing `ctx.claudeCodeMailHooks`. Both are optional and read at use time, so the provider may load after this plugin.',
@@ -464,6 +477,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       {
         signature: 'readonly tools: SeatToolTemplate',
         description: 'The tool factories a seat\'s server is built from; a name here must also be offered by `contributors`.',
+        parameters: [],
+      },
+      {
+        signature: 'readonly cloneChecks: CloneCheckRegistry',
+        description: 'Synchronous checks of a seat\'s clone, run inside `extend` on every query; a coder needs `clone-hooks-check` here.',
         parameters: [],
       },
     ],
@@ -3268,6 +3286,18 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface ClientResponse {\n    type: \'client-response\';\n    rpcId: RpcId;\n    result: RpcResult<unknown>;\n}',
   },
   {
+    name: 'CloneCheck',
+    declaration: 'export interface CloneCheck {\n    readonly id: string;\n    readonly roles: readonly PolicyRole[];\n    readonly check: (ctx: CloneCheckContext) => unknown;\n}',
+  },
+  {
+    name: 'CloneCheckContext',
+    declaration: 'export interface CloneCheckContext {\n    readonly seat: string;\n    readonly cwd: string;\n}',
+  },
+  {
+    name: 'CloneCheckRegistry',
+    declaration: 'export class CloneCheckRegistry {\n    register(check: CloneCheck): void;\n    has(id: string): boolean;\n    checksFor(role: PolicyRole): readonly CloneCheck[];\n}',
+  },
+  {
     name: 'CodeBindingErrorClass',
     declaration: 'export interface CodeBindingErrorClass {\n    name: string;\n    memberNameProperty: string;\n}',
   },
@@ -3698,6 +3728,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'GraphNode',
     declaration: 'export interface GraphNode {\n    id: string;\n    kind: WorkflowNodeKind;\n    layer: number;\n    order: number;\n    gate: boolean;\n    when?: string;\n    triggerRule: TriggerRule;\n    dependsOn: string[];\n    tier?: WorkflowTier;\n    label: string;\n}',
+  },
+  {
+    name: 'GuardProbeCode',
+    declaration: 'export type GuardProbeCode = \'attest\' | \'timeout\' | \'exit\' | \'reason\' | \'control\' | \'changed\' | \'spawn\' | \'error\';',
+  },
+  {
+    name: 'GuardProbeResult',
+    declaration: 'export type GuardProbeResult = {\n    readonly ok: true;\n    readonly nodeSha256: string;\n    readonly guardSha256: string;\n    readonly policySha256: string;\n} | {\n    readonly ok: false;\n    readonly code: GuardProbeCode;\n    readonly reason: string;\n};',
   },
   {
     name: 'HookContext',
@@ -4365,7 +4403,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ReadinessRegistry',
-    declaration: 'export class ReadinessRegistry {\n    get version(): number;\n    register(contributor: ReadinessContributor): void;\n    readiness(): PolicyReadiness;\n}',
+    declaration: 'export class ReadinessRegistry {\n    get version(): number;\n    register(contributor: ReadinessContributor): void;\n    note(id: string, code: string): void;\n    notesText(): string;\n    readiness(): PolicyReadiness;\n}',
   },
   {
     name: 'ReadinessRequirement',

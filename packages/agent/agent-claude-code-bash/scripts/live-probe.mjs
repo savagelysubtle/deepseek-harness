@@ -10,7 +10,7 @@
  *   real tool handler (the one the registries serve) over a real mounted host, with a fake seat context.
  * - `model`: haiku through the Agent SDK. A coder policy is refused with the sandbox contributor registered; then,
  *   through a TEST-ONLY lead-shaped mount (the lead policy plus an explicit `bash` contributor and tool; no coder
- *   seat can exist until S7), the init tool list, an allowed call, taint, the 650 s sleep, and sandbox-down.
+ *   seat is mounted from a profile before S8), the init tool list, an allowed call, taint, the 650 s sleep, and sandbox-down.
  * - `gate`: the steps a coder would run, inside the sandbox on a PROVISIONED clone of the harness: `tsc --noEmit`,
  *   `vitest run` from the clone root, `pnpm -v` and `pnpm run typecheck`, with `pids.peak` read from the cgroup.
  *
@@ -646,8 +646,8 @@ function called(r, tool) {
 const forceCall = (tool, args) => `Call exactly this tool with these arguments and report the result verbatim; do nothing else.\nTool: ${tool}\nArguments: ${JSON.stringify(args)}`
 
 /**
- * TEST-ONLY lead-shaped mount: the lead policy plus an explicit `bash` contributor and tool. No coder seat can exist
- * until S7 (canary and rules-hooks), so this is how the tool is put in front of a real model. Not a production shape.
+ * TEST-ONLY lead-shaped mount: the lead policy plus an explicit `bash` contributor and tool. No coder seat is mounted
+ * from a profile until S8 (profile mounting), so this is how the tool is put in front of a real model. Not a production shape.
  */
 async function leadBashQuery(name, prompt, h, cwd, { env = {}, maxTurns = MAX_TURNS, sendTools = true } = {}) {
   const registries = h.ctx.claudeCodePolicyRegistries
@@ -672,7 +672,7 @@ async function leadBashQuery(name, prompt, h, cwd, { env = {}, maxTurns = MAX_TU
 }
 
 async function modelCases() {
-  // m0: a coder policy is refused although the sandbox contributor is registered (canary and rules-hooks are S7).
+  // m0: a coder policy is refused although the sandbox contributor is registered (canary and rules-hooks are registered by the S7 seat-checks package, which this probe does not mount).
   if (want('m0', 'model')) {
     const h = await mountHost('refusal')
     let message = 'NOT REFUSED'
@@ -704,7 +704,7 @@ async function modelCases() {
     const { r, options } = await leadBashQuery('m1', forceCall(BASH, { command: 'echo MODEL-ECHO-4417' }), h, clone)
     const tools = r.init?.tools
     const mismatch = r.init === undefined ? 'dry run' : toolSetMismatch(expectedInitTools(options), tools)
-    row('m1a init tool list has mcp__dsh__bash and NO Bash (test-only lead-shaped mount; no coder seat can exist until S7)', 'includes mcp__dsh__bash; excludes Bash; equals the driver expectation',
+    row('m1a init tool list has mcp__dsh__bash and NO Bash (test-only lead-shaped mount; no coder seat is mounted from a profile before S8)', 'includes mcp__dsh__bash; excludes Bash; equals the driver expectation',
       `${JSON.stringify(tools)}; mismatch=${mismatch ?? 'none'}`, DRY ? 'SKIP(dry)' : pass(tools.includes(BASH) && !tools.includes('Bash') && mismatch === undefined))
     const c = called(r, BASH)
     row('m1b allowed echo call through the model', 'result has status=exited exit_code=0 and MODEL-ECHO-4417', `${c.kind}: ${clip(c.text, 200)} (${c.ms} ms)`,

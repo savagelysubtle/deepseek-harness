@@ -130,6 +130,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'The same registry instances the policy uses, provided by the policy provider plugin so later slices can register their readiness contributors (see packages/agent/agent-claude-code-tools/src/provider.ts).',
   },
   {
+    key: 'claudeCodeGuardProbe',
+    pkg: 'agent-claude-code-tools',
+    title: 'Boot probe of the Claude Code seat guard',
+    mode: 'seam',
+    companions: ['agent-claude-code-tools'],
+    note: 'Runs the exact generated guard hook command against a synthetic coder policy and reports ok or a failure code; the S7 seat-checks package registers the canary readiness contributor only on an explicit ok (see packages/agent/agent-claude-code-tools/README.md).',
+  },
+  {
     key: 'claudeCodeSeatSource',
     pkg: 'agent-claude-code-registry',
     title: 'Registry row lookup for Claude Code seats the static config does not list',

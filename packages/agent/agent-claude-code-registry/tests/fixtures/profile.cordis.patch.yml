@@ -52,12 +52,24 @@
     #   tools: [mailbox_send, mailbox_directory]   # exact dsh tools it may call (empty mutes the seat)
     #   send_to: [ops-lead]                        # the only seats it may mail (empty refuses every send)
     #   allow_blocking: false                      # optional: may it send blocking mail
-    # A `coder` row stays refused until the sandbox, canary and rules-hooks contributors exist (S6, S7).
+    # A `coder` row stays refused until the sandbox, canary and rules-hooks contributors have registered (S6 sandbox; S7 seat-checks).
     - id: agent-claude-code-tools
       name: '@deepseek-ai/dsh-agent-claude-code-tools'
       config:
         # Where the per-seat policy files are written (created with mode 0700). Host-owned; a seat
         # cannot write it, and the guard hook pins each file by its SHA-256.
         policyDir: /home/me/.dsh/claude-code/policy
+    - id: agent-claude-code-seat-checks
+      name: '@deepseek-ai/dsh-agent-claude-code-seat-checks'
+      config:
+        # Runs the guard boot canary and the clone-check self-test, then registers the `canary` and
+        # `rules-hooks` readiness entries and the per-query clone hook check. Every key is optional:
+        # `enabled: false` registers nothing (coder seats stay not-ready), `gitPath` defaults to the
+        # first of /usr/bin/git and /usr/local/bin/git, `canaryTimeoutMs` defaults to 20000.
+        enabled: true
+        # Remote urls a coder clone may carry (exact values, or prefixes ending in `/`). Empty refuses
+        # every clone that has a remote url, so set it to the source repository.
+        remoteUrlAllow:
+          - /home/me/src/deepseek-harness/
     - id: agent-claude-code-registry
       name: '@deepseek-ai/dsh-agent-claude-code-registry'

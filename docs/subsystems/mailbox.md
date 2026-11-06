@@ -187,6 +187,25 @@ Admission is enforced at drain time: a sender must be one of the served addresse
 
 Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — this section is byte-identical in both language sides of the page. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
 
+<a id="ctxclaudecodeguardprobe--guardprobe"></a>
+
+### `ctx.claudeCodeGuardProbe` — `GuardProbe`
+
+The `claudeCodeGuardProbe` service.
+
+```ts cordis-catalog
+/**
+ * Run the probe once. Never rejects; the result says whether the guard behaved.
+ * @param signal - aborts the run (reported as a failed result).
+ * @param timeoutMs - timeout of each hook run in milliseconds; overrides the provider's default of 15000.
+ * @returns the result. A failure is also logged in full at error level; the reason may hold paths and
+ *   digests, so keep it out of seat-visible text.
+ */
+probe(signal?: AbortSignal, timeoutMs?: number): Promise<GuardProbeResult>
+```
+
+Source: [`packages/agent/agent-claude-code-tools/src/guard-probe.ts:41`](../../packages/agent/agent-claude-code-tools/src/guard-probe.ts)
+
 <a id="ctxclaudecodemailhooks--claudecodemailhooks"></a>
 
 ### `ctx.claudeCodeMailHooks` — `ClaudeCodeMailHooks`
@@ -224,7 +243,7 @@ Source: [`packages/agent/agent-claude-code-driver/src/policy-contract.ts:63`](..
 
 The registries the policy reads, shared with later slices: S6 (sandbox) and S7 (canary) plugins register readiness contributors, extra tool names and tool factories here instead of editing S5 files.
 
-Source: [`packages/agent/agent-claude-code-tools/src/provider.ts:49`](../../packages/agent/agent-claude-code-tools/src/provider.ts)
+Source: [`packages/agent/agent-claude-code-tools/src/provider.ts:55`](../../packages/agent/agent-claude-code-tools/src/provider.ts)
 
 <a id="ctxclaudecodeseatsource--claudecodeseatsource"></a>
 

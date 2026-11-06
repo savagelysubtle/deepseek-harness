@@ -107,6 +107,7 @@ flowchart TD
     pkg_agent_claude_code_bash["agent-claude-code-bash"]
     pkg_agent_claude_code_driver["agent-claude-code-driver"]
     pkg_agent_claude_code_registry["agent-claude-code-registry"]
+    pkg_agent_claude_code_seat_checks["agent-claude-code-seat-checks"]
     pkg_agent_claude_code_tools["agent-claude-code-tools"]
   end
   subgraph group_agui["packages/agui"]
@@ -1299,6 +1300,8 @@ flowchart TD
   pkg_agent_claude_code_bash --> pkg_invariants
   pkg_agent_claude_code_bash --> pkg_sandbox_local
   pkg_agent_claude_code_bash --> pkg_subprocess
+  pkg_agent_claude_code_seat_checks --> pkg_agent_claude_code_tools
+  pkg_agent_claude_code_seat_checks --> pkg_invariants
   pkg_client_runtime --> pkg_api_remotes
   pkg_client_runtime --> pkg_invariants
   pkg_client_runtime --> pkg_typert_protocol
@@ -1823,6 +1826,7 @@ flowchart TD
 | [`acp-demo`](../packages/examples/acp-demo) | `examples` | [`acp`](../packages/acp/acp), [`agent-instructions`](../packages/context/agent-instructions), [`agent-spine-demo`](../packages/examples/agent-spine-demo), [`app-boot`](../packages/boot/app-boot), [`invariants`](../packages/runtime-diagnostics/invariants), [`session-checkpoint-policy`](../packages/session/session-checkpoint-policy), [`session-persistence-jsonl`](../packages/session/session-persistence-jsonl), [`session-query`](../packages/session-query/session-query), [`session-query-sqlite`](../packages/session-query/session-query-sqlite), [`tools`](../packages/core/tools) |
 | [`host-apiproxy`](../packages/host/apiproxy) | `host` | [`agent-presets`](../packages/preset/agent-presets), [`cordis-host-runner`](../packages/extensions/cordis-host-runner), [`invariants`](../packages/runtime-diagnostics/invariants), [`mcp-status`](../packages/mcp/mcp-status), [`workflow-remote`](../packages/workflow/workflow-remote) |
 | [`agent-claude-code-bash`](../packages/agent/agent-claude-code-bash) | `agent` | [`agent-claude-code-tools`](../packages/agent/agent-claude-code-tools), [`invariants`](../packages/runtime-diagnostics/invariants), [`sandbox-local`](../packages/sandbox/sandbox-local), [`subprocess`](../packages/subprocess/subprocess) |
+| [`agent-claude-code-seat-checks`](../packages/agent/agent-claude-code-seat-checks) | `agent` | [`agent-claude-code-tools`](../packages/agent/agent-claude-code-tools), [`invariants`](../packages/runtime-diagnostics/invariants) |
 | [`client-runtime`](../packages/client/runtime) | `client` | [`api-remotes`](../packages/api/remotes), [`invariants`](../packages/runtime-diagnostics/invariants), [`typert-protocol`](../packages/typert/protocol), [`typert-registry`](../packages/typert/registry) |
 | [`client-ui-settings`](../packages/client/ui-settings) | `client` | [`api-remotes`](../packages/api/remotes), [`client-connection`](../packages/client/connection), [`client-runtime`](../packages/client/runtime), [`client-schema-form`](../packages/client/schema-form), [`client-ui-slots`](../packages/client/ui-slots), [`invariants`](../packages/runtime-diagnostics/invariants), [`settings`](../packages/settings/settings) |
 | [`client-ui-settings-models`](../packages/client/ui-settings-models) | `client` | [`api-remotes`](../packages/api/remotes), [`client-connection`](../packages/client/connection), [`client-runtime`](../packages/client/runtime), [`client-schema-form`](../packages/client/schema-form), [`client-ui-primitives`](../packages/client/ui-primitives), [`client-ui-slots`](../packages/client/ui-slots), [`client-web-react`](../packages/client/web-react), [`invariants`](../packages/runtime-diagnostics/invariants) |

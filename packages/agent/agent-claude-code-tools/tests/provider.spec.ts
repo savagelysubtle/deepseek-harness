@@ -6,10 +6,12 @@ import { SeatMutedByPolicyError } from '@deepseek-ai/dsh-agent-claude-code-drive
 import type { ClaudeCodePolicy, PolicyQueryContext } from '@deepseek-ai/dsh-agent-claude-code-driver'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { attestFile } from '../src/attest-guard.ts'
+import { CLONE_HOOKS_CHECK_ID, CloneCheckError, CloneCheckRegistry } from '../src/clone-checks.ts'
 import { installGuardCopy } from '../src/guard-copy.ts'
+import { RESERVED_PROBE_SEAT } from '../src/guard-probe.ts'
 import { ContributorRegistry, GUARD_MATCHER } from '../src/index.ts'
 import * as Plugin from '../src/index.ts'
-import { createClaudeCodePolicy } from '../src/provider.ts'
+import { createClaudeCodePolicy, createPolicyParts } from '../src/provider.ts'
 import type { PolicyOptions } from '../src/provider.ts'
 import { ReadinessRegistry } from '../src/readiness.ts'
 import { createLeadTemplate } from '../src/mcp/template.ts'
@@ -452,7 +454,9 @@ describe('readiness and roles', () => {
   it('a coder is served once S6 and S7 register their contributors', () => {
     const readiness = new ReadinessRegistry()
     for (const provides of ['sandbox', 'canary', 'rules-hooks'] as const) readiness.register({ id: provides, provides })
-    const policy = createClaudeCodePolicy(options({ readiness }))
+    const cloneChecks = new CloneCheckRegistry()
+    cloneChecks.register({ id: CLONE_HOOKS_CHECK_ID, roles: ['coder'], check: () => undefined })
+    const policy = createClaudeCodePolicy(options({ readiness, cloneChecks }))
     expect([...policy.readiness().roles].sort()).toEqual(['coder', 'lead'])
     const ext = policy.extend(query({ tools: ['mailbox_send'], send_to: ['sam'] }, { role: 'coder', seat: 'coder-one' }))
     expect(ext.allow).toContain('mcp__dsh__mailbox_send')
@@ -757,5 +761,147 @@ describe('mounting', () => {
         expect(() => policy.extend(query({ tools: ['bash_sandboxed'] }, { role: 'coder', seat: 'coder-one' }))).toThrow(/role coder is not ready \(missing: canary, rules-hooks\)/)
       })
     }
+  })
+})
+
+describe('createPolicyParts', () => {
+  it('shares the policy attestation with the probe; logs to warn unless a logError sink is given; honours probeTimeoutMs', async () => {
+    const { node, guard } = installRealGuard(box.root)
+    const warns: string[] = []
+    const errors: string[] = []
+    const base = options({ nodePath: node, guardPath: guard, warn: (message) => { warns.push(message) } })
+    const { verify: _verify, ...rest } = base
+    const viaWarn = createPolicyParts({ ...rest, probeTimeoutMs: 5000 })
+    const viaError = createPolicyParts({ ...rest, logError: (message) => { errors.push(message) } })
+    expect(await viaWarn.probe.probe()).toMatchObject({ ok: true })
+    expect(await viaError.probe.probe()).toMatchObject({ ok: true })
+    writeFileSync(guard, '// tampered\n')
+    expect(await viaWarn.probe.probe()).toMatchObject({ ok: false, code: 'attest' })
+    expect(warns).toHaveLength(1)
+    expect(errors).toHaveLength(0)
+    expect(await viaError.probe.probe()).toMatchObject({ ok: false, code: 'attest' })
+    expect(errors).toHaveLength(1)
+    expect(warns).toHaveLength(1)
+  })
+})
+
+describe('clone checks and the S7 seams in extend', () => {
+  const coderQuery = (over: Partial<PolicyQueryContext> = {}): PolicyQueryContext => query({ tools: ['mailbox_send'], send_to: ['sam'] }, { role: 'coder', seat: 'coder-one', ...over })
+  const readyReadiness = (): ReadinessRegistry => {
+    const readiness = new ReadinessRegistry()
+    for (const provides of ['sandbox', 'canary', 'rules-hooks'] as const) readiness.register({ id: provides, provides })
+    return readiness
+  }
+
+  it('a ready coder is still refused (typed, muting) when no clone-hooks-check is registered', () => {
+    const policy = createClaudeCodePolicy(options({ readiness: readyReadiness() }))
+    let caught: unknown
+    try {
+      policy.extend(coderQuery())
+    } catch (error: unknown) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(CloneCheckError)
+    expect(caught).toBeInstanceOf(SeatMutedByPolicyError)
+    expect((caught as CloneCheckError).code).toBe('check-missing')
+    expect((caught as CloneCheckError).reason).toContain('agent-claude-code-seat-checks:')
+  })
+
+  it('a clone check with another id does not satisfy the coupling', () => {
+    const cloneChecks = new CloneCheckRegistry()
+    cloneChecks.register({ id: 'other', roles: ['coder'], check: () => undefined })
+    const policy = createClaudeCodePolicy(options({ readiness: readyReadiness(), cloneChecks }))
+    expect(() => policy.extend(coderQuery())).toThrow(CloneCheckError)
+  })
+
+  it('a clone-hooks-check registered for the wrong roles does not satisfy the coupling', () => {
+    const cloneChecks = new CloneCheckRegistry()
+    cloneChecks.register({ id: CLONE_HOOKS_CHECK_ID, roles: ['lead'], check: () => undefined })
+    const policy = createClaudeCodePolicy(options({ readiness: readyReadiness(), cloneChecks }))
+    expect(() => policy.extend(coderQuery())).toThrow(expect.objectContaining({ code: 'check-missing' }) as Error)
+  })
+
+  it('an async or value-returning check approves nothing: refused as check-failed, a later rejection is swallowed', async () => {
+    for (const result of [Promise.resolve(), Promise.reject(new Error('late')), true, null]) {
+      const cloneChecks = new CloneCheckRegistry()
+      cloneChecks.register({ id: CLONE_HOOKS_CHECK_ID, roles: ['coder'], check: () => result })
+      const policy = createClaudeCodePolicy(options({ readiness: readyReadiness(), cloneChecks }))
+      expect(() => policy.extend(coderQuery())).toThrow(expect.objectContaining({ code: 'check-failed' }) as Error)
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  })
+
+  it('runs the registered checks for the role on every query with the seat and cwd; a lead needs none', () => {
+    const cloneChecks = new CloneCheckRegistry()
+    const calls: unknown[] = []
+    cloneChecks.register({ id: CLONE_HOOKS_CHECK_ID, roles: ['coder'], check: (ctx) => { calls.push(ctx) } })
+    cloneChecks.register({ id: 'lead-only', roles: ['lead'], check: () => { calls.push('lead') } })
+    const policy = createClaudeCodePolicy(options({ readiness: readyReadiness(), cloneChecks }))
+    policy.extend(coderQuery())
+    policy.extend(coderQuery())
+    expect(calls).toEqual([{ seat: 'coder-one', cwd: box.cwd }, { seat: 'coder-one', cwd: box.cwd }])
+    policy.extend(query(LEAD))
+    expect(calls).toHaveLength(3)
+    expect(calls[2]).toBe('lead')
+  })
+
+  it('a CloneCheckError from a check propagates unchanged and no policy is written', () => {
+    const cloneChecks = new CloneCheckRegistry()
+    const refusal = new CloneCheckError('coder-one', 'hooks-path', 'core.hooksPath is set')
+    cloneChecks.register({ id: CLONE_HOOKS_CHECK_ID, roles: ['coder'], check: () => { throw refusal } })
+    const opts = options({ readiness: readyReadiness(), cloneChecks })
+    expect(() => createClaudeCodePolicy(opts).extend(coderQuery())).toThrow(refusal)
+    expect(existsSync(join(opts.policyDir, 'coder-one.json'))).toBe(false)
+  })
+
+  it('fails closed: a check that throws something else, even a non-Error, becomes a typed refusal', () => {
+    for (const thrown of [new TypeError('boom'), 'plain string']) {
+      const cloneChecks = new CloneCheckRegistry()
+      cloneChecks.register({ id: CLONE_HOOKS_CHECK_ID, roles: ['coder'], check: () => { throw thrown } })
+      let caught: unknown
+      try {
+        createClaudeCodePolicy(options({ readiness: readyReadiness(), cloneChecks })).extend(coderQuery())
+      } catch (error: unknown) {
+        caught = error
+      }
+      expect(caught).toBeInstanceOf(CloneCheckError)
+      expect((caught as CloneCheckError).code).toBe('check-failed')
+      expect((caught as CloneCheckError).reason).toBe(`clone check ${CLONE_HOOKS_CHECK_ID} failed unexpectedly (${thrown instanceof Error ? 'TypeError' : 'error'})`)
+    }
+  })
+
+  it('refuses the reserved probe seat name for any role, before anything else', () => {
+    const policy = createClaudeCodePolicy(options())
+    expect(() => policy.extend(query(LEAD, { seat: RESERVED_PROBE_SEAT }))).toThrow(/reserved for the guard boot probe/)
+    expect(() => policy.extend(coderQuery({ seat: RESERVED_PROBE_SEAT }))).toThrow(/reserved for the guard boot probe/)
+  })
+
+  it('appends the readiness notes to the not-ready error and never to a ready one', () => {
+    const readiness = new ReadinessRegistry()
+    readiness.register({ id: 'sandbox-bwrap-seat', provides: 'sandbox' })
+    readiness.note('guard-boot-canary', 'canary FAILED exit')
+    const policy = createClaudeCodePolicy(options({ readiness }))
+    expect(() => policy.extend(coderQuery())).toThrow('role coder is not ready (missing: canary, rules-hooks); guard-boot-canary: canary FAILED exit')
+    expect(policy.readiness().missing).toEqual(['canary', 'rules-hooks'])
+  })
+
+  it('mount provides the clone-check registry and the guard probe service, same instances the policy uses', async () => {
+    const ctx = new Context()
+    const real = installRealGuard(box.root)
+    await ctx.plugin(Plugin, Plugin.Config({ policyDir: join(box.root, 'p'), home: box.home, nodePath: real.node, guardPath: real.guard, allowedCwdRoots: [box.root] }))
+    const registries = ctx.get('claudeCodePolicyRegistries')
+    expect(registries?.cloneChecks).toBeInstanceOf(CloneCheckRegistry)
+    const probed = await ctx.get('claudeCodeGuardProbe')?.probe()
+    expect(probed?.ok).toBe(true)
+    for (const provides of ['sandbox', 'canary', 'rules-hooks'] as const) registries?.readiness.register({ id: provides, provides })
+    const policy = ctx.get('claudeCodePolicy') as ClaudeCodePolicy
+    expect(() => policy.extend(coderQuery())).toThrow(CloneCheckError)
+    registries?.cloneChecks.register({ id: CLONE_HOOKS_CHECK_ID, roles: ['coder'], check: () => undefined })
+    expect(policy.extend(coderQuery()).allow).toContain('mcp__dsh__mailbox_send')
+    const errorLog = vi.spyOn(ctx.logger, 'error').mockImplementation(() => undefined)
+    writeFileSync(real.guard, '// tampered\n')
+    const failed = await ctx.get('claudeCodeGuardProbe')?.probe()
+    expect(failed).toMatchObject({ ok: false, code: 'attest' })
+    expect(errorLog).toHaveBeenCalledWith(expect.stringContaining('guard probe FAILED attest'))
   })
 })

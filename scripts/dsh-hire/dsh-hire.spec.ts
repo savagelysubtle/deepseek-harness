@@ -240,7 +240,6 @@ describe('claude-code hire', () => {
 
   describe('refusals', () => {
     it.each([
-      ['coder', ['--role', 'coder'], 'coder rows are refused until the sandbox (S6) and canary (S7) readiness exist'],
       ['a policy key on the command line (tools)', ['--role', 'lead', '--tools', 'x'], 'belong in the host profile only'],
       ['a policy key on the command line (send-to)', ['--role', 'lead', '--send-to', 'x'], 'the driver refuse the seat at create'],
       ['a policy key on the command line (allow-blocking)', ['--role', 'lead', '--allow-blocking'], 'belong in the host profile only'],
@@ -265,22 +264,23 @@ describe('claude-code hire', () => {
       expect(backups(r)).toEqual([])
     })
 
-    it('the coder refusal prints the operator rules and provisioning steps, exit code unchanged', () => {
+    it('accepts a coder, inserts the row, and prints the stanza, the operator rules and the readiness caveat', () => {
       const r = rig()
-      const before = readRegistry(r)
       const out = run(r, HIRE_CC(r, '--role', 'coder'))
-      expect(out.status).toBe(1)
-      expect(out.stderr.split('\n')[0]).toBe(
-        'dsh-hire: coder rows are refused until the sandbox (S6) and canary (S7) readiness exist; hire the seat as "lead" (mailbox tools only) or "mail-only" meanwhile',
-      )
-      const block = [
+      expect(out.status, out.stderr).toBe(0)
+      expect(out.stderr).not.toContain('refused')
+      expect(readRegistry(r)).toContain('driver: claude-code')
+      const tail = [
         '',
         "----- Operator rules for this seat's clone -----",
         "1. A seat's clone is hostile by construction: nobody runs git, pnpm, node or an editor with",
         '   project trust inside it, and nobody opens it in a Claude session.',
         '2. Host-side git on a seat clone always runs',
-        '     git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.pager=cat',
-        '   with GIT_CONFIG_NOSYSTEM=1.',
+        '     git -c core.fsmonitor=false -c core.hooksPath=/dev/null -c core.pager=cat',
+        '   with GIT_CONFIG_NOSYSTEM=1. Never `git add -A` in a clone: a seat can write a nested',
+        '   sub/.git/config, and `git status` ran its core.fsmonitor once the host added `sub`.',
+        '   Call assertCloneHookState(<clone>) (agent-claude-code-seat-checks) before every host-side git',
+        '   command on a clone.',
         '3. Work comes out by `git fetch` into a separate trusted checkout, or is reviewed as patch text.',
         '4. Trust prompts for .mcp.json and .claude are never pre-accepted.',
         '',
@@ -288,19 +288,31 @@ describe('claude-code hire', () => {
         '1. git clone --no-hardlinks <src> <clone>',
         '2. Assert <clone>/.git is a directory (not a worktree file) and',
         '   <clone>/.git/objects/info/alternates is absent.',
-        '3. In <clone>: pnpm install --offline --config.package-import-method=copy',
-        '   (dependencies are copied, never hardlinked from the store; there is no network inside the sandbox)',
+        '   Set remoteUrlAllow in the agent-claude-code-seat-checks row to <src> (exact, or a prefix ending in /);',
+        '   an empty list refuses every clone that has a remote url.',
+        '3. In <clone>: pnpm install --offline --ignore-scripts --config.package-import-method=copy',
+        '   (dependencies are copied, never hardlinked from the store; there is no network inside the sandbox;',
+        "   --ignore-scripts keeps the repo's postinstall from writing git hooks into the clone)",
         '4. In <clone>: mkdir -p node_modules/.vite node_modules/.vite-temp node_modules/.cache',
         '   (the sandbox mounts scratch space there and refuses an unprovisioned clone)',
         '5. find <clone> -type f -links +1 must print nothing.',
         '6. Refuse the clone if it holds setuid or setgid files, or files on a different device.',
         'The sandbox binds the whole .git and node_modules read-only, so the seat cannot commit or install.',
         '',
-        'When S7 lifts this refusal the same rules apply to every coder clone.',
+        'NOTE: the host refuses the seat at create until readiness reports canary and rules-hooks; see host log lines starting agent-claude-code-seat-checks:',
         '',
       ].join('\n')
-      expect(out.stderr.slice(out.stderr.indexOf('\n') + 1)).toBe(block)
-      expect(out.stdout).toBe('')
+      expect(out.stdout.endsWith(tail)).toBe(true)
+      expect(out.stdout).toContain('role: coder')
+    })
+
+    it('a coder dry run writes nothing and still prints the rules and the caveat', () => {
+      const r = rig()
+      const before = readRegistry(r)
+      const out = run(r, [...HIRE_CC(r, '--role', 'coder'), '--dry-run'])
+      expect(out.status, out.stderr).toBe(0)
+      expect(out.stdout).toContain('Operator rules for this seat')
+      expect(out.stdout).toContain('agent-claude-code-seat-checks:')
       expect(readRegistry(r)).toBe(before)
     })
 

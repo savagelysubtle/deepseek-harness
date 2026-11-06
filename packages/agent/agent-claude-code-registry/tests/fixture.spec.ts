@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import * as yaml from 'js-yaml'
 import * as Driver from '@deepseek-ai/dsh-agent-claude-code-driver'
+import * as SeatChecks from '@deepseek-ai/dsh-agent-claude-code-seat-checks'
 import * as Tools from '@deepseek-ai/dsh-agent-claude-code-tools'
 
 interface Row {
@@ -23,10 +24,11 @@ function rows(): Row[] {
 }
 
 describe('profile.cordis.patch.yml', () => {
-  it('inserts the driver row, the tools provider row and the glue row, in that order', () => {
+  it('inserts the driver row, the tools provider row, the seat-checks row and the glue row, in that order', () => {
     expect(rows().map(row => row.name)).toEqual([
       '@deepseek-ai/dsh-agent-claude-code-driver',
       '@deepseek-ai/dsh-agent-claude-code-tools',
+      '@deepseek-ai/dsh-agent-claude-code-seat-checks',
       '@deepseek-ai/dsh-agent-claude-code-registry',
     ])
   })
@@ -50,8 +52,19 @@ describe('profile.cordis.patch.yml', () => {
     expect(Tools.name).toBe('agent-claude-code-tools')
   })
 
+  it('gives the seat-checks row a Config the plugin accepts, with the canary and clone check switched on', () => {
+    const row = rows()[2] as Row
+    expect(row.id).toBe('agent-claude-code-seat-checks')
+    const config = SeatChecks.Config(row.config)
+    expect(config.enabled).toBe(true)
+    expect(config.gitPath).toBeUndefined()
+    expect(config.canaryTimeoutMs).toBe(20_000)
+    expect(config.remoteUrlAllow).toEqual(['/home/me/src/deepseek-harness/'])
+    expect(SeatChecks.name).toBe('agent-claude-code-seat-checks')
+  })
+
   it('gives the registry glue row no config at all', () => {
-    const glue = rows()[2] as Row
+    const glue = rows()[3] as Row
     expect('config' in glue).toBe(false)
   })
 })

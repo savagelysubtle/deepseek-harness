@@ -190,7 +190,7 @@ export function parseSeatRow(row: ClaudeCodeSeatRow, seat: string, options: Pars
     fail(`claude_code.role must be one of ${CLAUDE_CODE_ROLES.join(', ')}`)
   }
   if (block.role === 'coder' && options.policyExtension !== true) {
-    fail('role "coder" is refused until the permission-policy extension (slice S5) is registered; use "lead" or "mail-only"')
+    fail('role "coder" is refused until the permission-policy extension is registered and its readiness lists coder (sandbox, canary and rules-hooks contributors); use "lead" or "mail-only" meanwhile')
   }
   if (block.effort !== undefined && !CLAUDE_CODE_EFFORTS.includes(block.effort)) {
     fail(`claude_code.effort must be one of ${CLAUDE_CODE_EFFORTS.join(', ')}`)
@@ -235,7 +235,7 @@ export function parseSeatRow(row: ClaudeCodeSeatRow, seat: string, options: Pars
  * Whether a seat's role can be served right now. `mail-only` always can. `lead` and `coder` need the
  * `claudeCodePolicy` service (read at use time, so it may register after mount) at a known contract
  * version whose readiness lists the role; `coder` is listed only when sandbox, canary and rules-hooks
- * contributors are all registered.
+ * contributors are all registered (the seat-checks plugin registers canary and rules-hooks, the bash plugin sandbox).
  * @param role - the seat's role.
  * @param seat - seat label used in the error message.
  * @param policy - the service as read just now, or `undefined` when none is registered.
@@ -260,7 +260,7 @@ export function assertRoleServable(role: ClaudeCodeRole, seat: string, policy: C
     return refuse(`the policy service could not report readiness (${error instanceof Error ? error.message : String(error)})`)
   }
   if (!ready) {
-    refuse(`the policy service is not ready for it${missing.length === 0 ? '' : ` (missing: ${missing.join(', ')})`}; coder seats wait for the sandbox (S6) and canary (S7) contributors`)
+    refuse(`the policy service is not ready for it${missing.length === 0 ? '' : ` (missing: ${missing.join(', ')})`}; coder seats wait for the sandbox, canary and rules-hooks contributors, and a retry works once the host logs the canary line (see host log lines starting agent-claude-code-seat-checks:) and readiness lists coder`)
   }
 }
 
