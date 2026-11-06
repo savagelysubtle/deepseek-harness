@@ -80,6 +80,16 @@ interface MailboxMessage {
    * contract line: the blocking contract when true, the FYI contract otherwise.
    */
   readonly blocking?: boolean
+  /**
+   * Whether the sender's turn had read untrusted content. Absent means provenance is not asserted,
+   * never "clean": consumers may only ever add taint from other evidence, never clear it.
+   */
+  readonly tainted?: boolean
+  /**
+   * Sender hops, oldest first, appended to by each relaying seat. Absent means provenance is not
+   * asserted, never "clean". Additive only: a hop is never removed or rewritten.
+   */
+  readonly chain?: readonly string[]
 }
 ```
 
@@ -146,7 +156,7 @@ A provider implements the five operations over one logical store per deployment 
 | `lookupByTraceId(traceId, signal?)` | Reads every stored message carrying the correlation id, in any lifecycle state; the pure read answers "what became of the message" and claims nothing. |
 | `lookupInboundSince(address, sinceMs, signal?)` | Reads every stored message addressed to one address admitted at or after a time, in any lifecycle state; the pure read is the half of reply detection that sees mail another consumer already claimed or settled. |
 
-Address-resolution policies (chair-to-chair aliasing) layer ON TOP of the grammar: the reserved `AddressResolutionExtension = never` marks the extension point in [`provider.ts`](../../packages/mailbox/mailbox/src/provider.ts), and no resolution policy ships today. The shipped store is [dsh-mailbox-local](../../packages/mailbox/local), registering as provider `local`: one SQLite file over `node:sqlite` whose monotonic `SCHEMA_VERSION` stamp (currently 3) makes opening any foreign, older, or newer database fail loud instead of migrating, and whose guarded transaction claims admit exactly one winner per message ([sqlite.ts](../../packages/mailbox/local/src/sqlite.ts)).
+Address-resolution policies (chair-to-chair aliasing) layer ON TOP of the grammar: the reserved `AddressResolutionExtension = never` marks the extension point in [`provider.ts`](../../packages/mailbox/mailbox/src/provider.ts), and no resolution policy ships today. The shipped store is [dsh-mailbox-local](../../packages/mailbox/local), registering as provider `local`: one SQLite file over `node:sqlite` whose monotonic `SCHEMA_VERSION` stamp (currently 4) lets a version-3 file migrate forward in place at open (two added nullable provenance columns, `tainted` and `chain`) and makes opening any other foreign, older, or newer database fail loud, and whose guarded transaction claims admit exactly one winner per message ([sqlite.ts](../../packages/mailbox/local/src/sqlite.ts)).
 
 `claimableAddresses` is the seam's discovery operation for wake drivers; none ships today — the bridge steers every admitted delivery into a live turn, so nothing polls the store for claimable work beside the host (the one-writer rule in [architecture.md](../architecture.md) § "Session log").
 
@@ -183,7 +193,38 @@ Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnp
 
 The mail seams a later slice (registry admission in S3, the mailbox bridge's lease in S8) plugs in by providing `ctx.claudeCodeMailHooks`. Both are optional and read at use time, so the provider may load after this plugin.
 
-Source: [`packages/agent/agent-claude-code-driver/src/index.ts:85`](../../packages/agent/agent-claude-code-driver/src/index.ts)
+Source: [`packages/agent/agent-claude-code-driver/src/index.ts:92`](../../packages/agent/agent-claude-code-driver/src/index.ts)
+
+<a id="ctxclaudecodepolicy--claudecodepolicy"></a>
+
+### `ctx.claudeCodePolicy` — `ClaudeCodePolicy`
+
+The `claudeCodePolicy` service a provider plugin registers and the driver reads at use time.
+
+```ts cordis-catalog
+/**
+ * Build the contribution for one query.
+ * @param ctx - what the driver tells the provider about the query, plus the live taint controls.
+ * @returns the settings, in-process server and allow entries the driver then validates.
+ */
+extend(ctx: PolicyQueryContext): PolicyExtension
+
+/**
+ * Report which roles are servable now.
+ * @returns the servable roles and the requirements still unmet.
+ */
+readiness(): PolicyReadiness
+```
+
+Source: [`packages/agent/agent-claude-code-driver/src/policy-contract.ts:63`](../../packages/agent/agent-claude-code-driver/src/policy-contract.ts)
+
+<a id="ctxclaudecodepolicyregistries--policyregistries"></a>
+
+### `ctx.claudeCodePolicyRegistries` — `PolicyRegistries`
+
+The registries the policy reads, shared with later slices: S6 (sandbox) and S7 (canary) plugins register readiness contributors, extra tool names and tool factories here instead of editing S5 files.
+
+Source: [`packages/agent/agent-claude-code-tools/src/provider.ts:46`](../../packages/agent/agent-claude-code-tools/src/provider.ts)
 
 <a id="ctxclaudecodeseatsource--claudecodeseatsource"></a>
 
@@ -209,7 +250,7 @@ resolve(request: SeatSourceRequest): SeatSourceResolution
 hasRow?(seat: string): boolean | undefined
 ```
 
-Source: [`packages/agent/agent-claude-code-driver/src/index.ts:115`](../../packages/agent/agent-claude-code-driver/src/index.ts)
+Source: [`packages/agent/agent-claude-code-driver/src/index.ts:122`](../../packages/agent/agent-claude-code-driver/src/index.ts)
 
 <a id="ctxmailbox--mailboxregistry"></a>
 

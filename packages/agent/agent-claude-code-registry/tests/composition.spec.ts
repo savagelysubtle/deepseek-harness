@@ -99,11 +99,11 @@ describe('mounting the glue, the driver and the bridge', () => {
     expect(Object.keys(hooks)).toEqual(['admit'])
   })
 
-  it('refuses at mount a lead role in the host entry, with the permission-slice message', async () => {
+  it('mounts a lead host entry without a policy service: the role is judged at create time, not at mount (see role-gates.spec.ts in the driver)', async () => {
     const w = world()
     const ctx = await bootedContext()
     await ctx.plugin(Glue)
-    await expect(ctx.plugin(Driver, driverConfig(w, hostSeat(w, { role: 'lead' })))).rejects.toThrow(/role "lead" is refused for registry-routed seats/)
+    await expect(ctx.plugin(Driver, driverConfig(w, hostSeat(w, { role: 'lead' })))).resolves.toBeDefined()
   })
 
   it('refuses a row without a host entry and prints the stanza, through the real source', async () => {

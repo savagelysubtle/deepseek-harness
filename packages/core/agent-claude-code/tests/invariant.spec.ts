@@ -52,6 +52,7 @@ describe('claude-code durable record invariants', () => {
     raw(session, 'claude-code/refused', { version: 1, reason: 'admission', messageId: 'm', detail: 'd', at: 13 })
     raw(session, 'claude-code/refused', { version: 1, reason: 'kill-switch', detail: '', at: 14 })
     raw(session, 'claude-code/throwaway-turn', { version: 1, turnIndex: 3, at: 15 })
+    raw(session, 'claude-code/session-tainted', { version: 1, reason: 'tool:Read', at: 16 })
   })
 
   const cases: readonly [string, string, unknown, RegExp][] = [
@@ -85,6 +86,8 @@ describe('claude-code durable record invariants', () => {
     ['mail-outcome non-string reason', 'claude-code/mail-outcome', { version: 1, messageId: 'm', outcome: 'failed', at: 1 }, /reason must be a string/],
     ['refused bad reason', 'claude-code/refused', { version: 1, reason: 'nope', detail: '', at: 1 }, /reason nope is invalid/],
     ['throwaway-turn without a turn', 'claude-code/throwaway-turn', { version: 1, turnIndex: 0, at: 1 }, /turnIndex must be at least 1/],
+    ['session-tainted without a reason', 'claude-code/session-tainted', { version: 1, reason: '', at: 1 }, /reason must be a non-empty string/],
+    ['session-tainted reason too long', 'claude-code/session-tainted', { version: 1, reason: 'x'.repeat(201), at: 1 }, /reason must be at most 200 characters/],
     ['refused empty message id', 'claude-code/refused', { version: 1, reason: 'admission', messageId: '', detail: '', at: 1 }, /messageId must be a non-empty string/],
   ]
   for (const [label, type, data, message] of cases) {

@@ -16,6 +16,9 @@ flowchart LR
   pkg_llm_pi_ai["llm-pi-ai"]
   pkg_agent_claude_code_driver["agent-claude-code-driver"]
   svc_claudeCodeMailHooks["ctx.claudeCodeMailHooks<br/>Optional mail admission and lease hooks for Claude Code seats"]
+  pkg_agent_claude_code_tools["agent-claude-code-tools"]
+  svc_claudeCodePolicy["ctx.claudeCodePolicy<br/>Host-side permission policy for Claude Code seats"]
+  svc_claudeCodePolicyRegistries["ctx.claudeCodePolicyRegistries<br/>Readiness and contributor registries behind the Claude Code policy"]
   pkg_agent_claude_code_registry["agent-claude-code-registry"]
   svc_claudeCodeSeatSource["ctx.claudeCodeSeatSource<br/>Registry row lookup for Claude Code seats the static config does not list"]
   pkg_mailbox["mailbox"]
@@ -213,6 +216,8 @@ flowchart LR
   pkg_agent --> svc_agents
   pkg_agent_claude_code_driver --> svc_claudeCodeMailHooks
   pkg_agent_claude_code_registry --> svc_claudeCodeSeatSource
+  pkg_agent_claude_code_tools --> svc_claudeCodePolicy
+  pkg_agent_claude_code_tools --> svc_claudeCodePolicyRegistries
   pkg_agent_default_model --> svc_agentDefaultModel
   pkg_agent_loop --> svc_agentLoop
   pkg_agent_presets --> svc_agentPresets
@@ -329,6 +334,7 @@ flowchart LR
   svc_attachments --> pkg_host_runtime
   svc_attachments --> pkg_llm_pi_ai
   svc_claudeCodeMailHooks --> pkg_agent_claude_code_driver
+  svc_claudeCodePolicy --> pkg_agent_claude_code_driver
   svc_claudeCodeSeatSource --> pkg_agent_claude_code_driver
   svc_clientModules --> pkg_hmr
   svc_codeRuntime --> pkg_tools
@@ -434,6 +440,7 @@ flowchart LR
   svc_workflowEngine --> pkg_tool_workflow_run
   svc_workspaceRegistry --> pkg_apiproxy
   svc_worktrees --> pkg_host_apiproxy
+  svc_claudeCodePolicyRegistries -. event gate .-> pkg_agent_claude_code_tools
   svc_fs -. event gate .-> pkg_fs_observation_policy
 ```
 
@@ -441,6 +448,8 @@ flowchart LR
 | --- | --- | --- | --- | --- | --- | --- |
 | `ctx.attachments` | `seam` | [`attachment`](../packages/attachment/attachment) | [`attachment-local`](../packages/attachment/attachment-local) | `host-runtime`, [`llm-pi-ai`](../packages/llm/llm-pi-ai) | - | 宿主会在会话事件之前提交已接受的图片；提供方适配器将已授权的持久引用解析为提供方原生内容。 |
 | `ctx.claudeCodeMailHooks` | `seam` | [`agent-claude-code-driver`](../packages/agent/agent-claude-code-driver) | - | [`agent-claude-code-driver`](../packages/agent/agent-claude-code-driver) | - | 可选服务,由后续切片提供:Claude Code 席位驱动调用的准入检查与邮箱租约接收器,使用时才读取;缺省时驱动回退到默认拒绝的准入且不处理租约(见 packages/agent/agent-claude-code-driver/README.md)。 |
+| `ctx.claudeCodePolicy` | `seam` | [`agent-claude-code-tools`](../packages/agent/agent-claude-code-tools) | - | [`agent-claude-code-driver`](../packages/agent/agent-claude-code-driver) | - | 策略提供者插件注册该服务;驱动使用时才读取,用它固定席位工作目录、生成并验证拒绝/允许策略,并拒绝尚未就绪的席位(见 packages/agent/agent-claude-code-tools/README.md)。 |
+| `ctx.claudeCodePolicyRegistries` | `seam` | [`agent-claude-code-tools`](../packages/agent/agent-claude-code-tools) | - | - | [`agent-claude-code-tools`](../packages/agent/agent-claude-code-tools) | 与策略所用的同一批注册表实例,由策略提供者插件提供,以便后续切片注册各自的就绪贡献者(见 packages/agent/agent-claude-code-tools/src/provider.ts)。 |
 | `ctx.claudeCodeSeatSource` | `seam` | [`agent-claude-code-registry`](../packages/agent/agent-claude-code-registry) | - | [`agent-claude-code-driver`](../packages/agent/agent-claude-code-driver) | - | 注册表胶水包把邮箱桥的席位绑定与邮箱桥当前条目核对后,把条目交给驱动;驱动使用时才读取,没有来源的席位会被拒绝(见 packages/agent/agent-claude-code-registry/README.md)。 |
 | `ctx.mailbox` | `seam` | [`mailbox`](../packages/mailbox/mailbox) | `local` | `bridge` | - | Service Definition 为每个部署解析出唯一的存储提供方；SQLite 本地提供方拥有 lease 与 settle，投递 bridge 把已 claim 的消息导入指定收件方的 agent 轮次（见 docs/subsystems/mailbox.md）。 |
 | `ctx.memory` | `core` | [`memory`](../packages/memory/memory) | - | - | - | 同一个包交付 ctx.memory 服务、其背后项目作用域的本地提供方，以及共享 realm 中面向模型的工具消费方（见 docs/subsystems/memory.md）。 |

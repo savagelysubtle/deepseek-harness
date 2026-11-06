@@ -660,6 +660,16 @@
         "@openai/codex"
       ]
     },
+    "packages/agent/agent-claude-code-tools": {
+      "entry": [
+        "src/bin.ts",
+        "tests/**/*.spec.ts"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "tests/**/*.ts"
+      ]
+    },
     "packages/subagent/subagent-claude-code": {
       "entry": [
         "tests/**/*.spec.ts",

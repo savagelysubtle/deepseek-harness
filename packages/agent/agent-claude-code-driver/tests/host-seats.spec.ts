@@ -27,11 +27,11 @@ describe('parseHostSeat', () => {
     })
   })
 
-  it('refuses every role but mail-only with the permission-slice message', () => {
+  it('parses lead and coder entries (the role is served or refused later, against the policy service) and rejects an unknown role', () => {
     const w = hostWorld()
     const prefixes = [w.prefix]
-    expect(() => parseHostSeat(hostSeat(w, { role: 'lead' }), 'ops', prefixes)).toThrow(/role "lead" is refused for registry-routed seats until the permission-policy extension \(slice S5\)/)
-    expect(() => parseHostSeat(hostSeat(w, { role: 'coder' }), 'ops', prefixes)).toThrow(/role "coder" is refused until the permission-policy extension \(slice S5\)/)
+    expect(parseHostSeat(hostSeat(w, { role: 'lead' }), 'ops', prefixes).role).toBe('lead')
+    expect(parseHostSeat(hostSeat(w, { role: 'coder' }), 'ops', prefixes).role).toBe('coder')
     expect(() => parseHostSeat(hostSeat(w, { role: 'boss' as never }), 'ops', prefixes)).toThrow(/role must be one of/)
   })
 
@@ -189,13 +189,12 @@ describe('mounting host seats', () => {
     }))).rejects.toThrow(/seat "ops" is configured in both seats and hostSeats/)
   })
 
-  it('fails the mount on a bad host entry: lead role, fable without opt-in, binary outside the prefix', async () => {
+  it('fails the mount on a bad host entry: fable without opt-in, binary outside the prefix', async () => {
     const world = hostWorld()
     const mount = (host: ReturnType<typeof hostSeat>, prefix = world.prefix) =>
       bootedContext().then(ctx => ctx.plugin(Driver, Driver.Config({
         seats: {}, stateDir: 'claude-code', dshHome: world.dshHome, claudePathPrefixes: [prefix], hostSeats: { ops: host },
       })))
-    await expect(mount(hostSeat(world, { role: 'lead' }))).rejects.toThrow(/role "lead" is refused/)
     await expect(mount(hostSeat(world, { model: 'fable' }))).rejects.toThrow(/fable/)
     await expect(mount(hostSeat(world), tempDir())).rejects.toThrow(/outside every claudePathPrefixes/)
   })

@@ -137,7 +137,7 @@ describe('validated hooks are a structural copy (round 4)', () => {
     group.hooks.push({ type: 'http', url: 'https://evil.example' })
     delete group.matcher
     expect(JSON.stringify(options.settings)).toBe(snapshot)
-    expect(options.settings).toEqual({ hooks: { Stop: [{ matcher: 'x', hooks: [{ type: 'command', command: 'echo ok', timeout: 3 }] }] } })
+    expect(options.settings).toEqual({ hooks: { Stop: [{ matcher: 'x', hooks: [{ type: 'command', command: 'echo ok', timeout: 3 }] }] }, autoMemoryEnabled: false })
     expect((options.settings as { hooks: unknown }).hooks).not.toBe(hooks)
   })
 
@@ -152,7 +152,7 @@ describe('validated hooks are a structural copy (round 4)', () => {
     }
     const options = buildQueryOptions(baseInput({ Stop: [{ hooks: [handler] }] }))
     expect(reads).toBe(1)
-    expect(options.settings).toEqual({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo ok' }] }] } })
+    expect(options.settings).toEqual({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo ok' }] }] }, autoMemoryEnabled: false })
     const copy = (options.settings as { hooks: { Stop: { hooks: object[] }[] } }).hooks.Stop[0]?.hooks[0] as object
     expect(Object.getOwnPropertyDescriptor(copy, 'type')?.value).toBe('command')
   })

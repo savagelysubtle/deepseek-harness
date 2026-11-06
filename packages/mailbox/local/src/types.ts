@@ -22,6 +22,10 @@ export interface MessageRow {
   trace_id: string | null
   /** `1` iff the sender marked itself blocked waiting for an answer; `null` = false. */
   blocking: number | null
+  /** `1`/`0` when the sender asserted taint; `null` = provenance not asserted (never read as clean). */
+  tainted: number | null
+  /** JSON-encoded string array of sender hops; `null` = not asserted (never read as empty). */
+  chain: string | null
   state: 'pending' | 'claimed' | 'done' | 'failed'
   /** Epoch-ms admission time of the message; read back unchanged as its sent time (`MailboxMessage.sentAt`). */
   created_at: number

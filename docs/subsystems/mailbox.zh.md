@@ -80,6 +80,16 @@ interface MailboxMessage {
    * contract line: the blocking contract when true, the FYI contract otherwise.
    */
   readonly blocking?: boolean
+  /**
+   * Whether the sender's turn had read untrusted content. Absent means provenance is not asserted,
+   * never "clean": consumers may only ever add taint from other evidence, never clear it.
+   */
+  readonly tainted?: boolean
+  /**
+   * Sender hops, oldest first, appended to by each relaying seat. Absent means provenance is not
+   * asserted, never "clean". Additive only: a hop is never removed or rewritten.
+   */
+  readonly chain?: readonly string[]
 }
 ```
 
@@ -146,7 +156,7 @@ type MailboxOutcome =
 | `lookupByTraceId(traceId, signal?)` | 读取携带该关联 id 的每一条存储消息，不限生命周期状态；此纯读取回答"这条消息后来怎样了"，不作任何认领。 |
 | `lookupInboundSince(address, sinceMs, signal?)` | 读取在某一时刻之后准入、发往某一地址的每一条存储消息，不限生命周期状态；此纯读取是回复检测的另一半，能看到已被其他消费者认领或落定的邮件。 |
 
-地址解析策略（chair-to-chair 别名）叠加在文法之上：保留的 `AddressResolutionExtension = never` 在 [`provider.ts`](../../packages/mailbox/mailbox/src/provider.ts) 中标记该扩展点，目前没有任何解析策略随附发布。随附的存储是 [dsh-mailbox-local](../../packages/mailbox/local)，以提供方名称 `local` 注册：基于 `node:sqlite` 的单个 SQLite 文件，其单调 `SCHEMA_VERSION` 戳记（当前为 3）使打开任何外来、更旧或更新的数据库响亮失败而非就地迁移，其守卫式事务认领保证每条消息恰有一个赢家（[sqlite.ts](../../packages/mailbox/local/src/sqlite.ts)）。
+地址解析策略（chair-to-chair 别名）叠加在文法之上：保留的 `AddressResolutionExtension = never` 在 [`provider.ts`](../../packages/mailbox/mailbox/src/provider.ts) 中标记该扩展点，目前没有任何解析策略随附发布。随附的存储是 [dsh-mailbox-local](../../packages/mailbox/local)，以提供方名称 `local` 注册：基于 `node:sqlite` 的单个 SQLite 文件，其单调 `SCHEMA_VERSION` 戳记（当前为 4）允许版本 3 的文件在打开时就地向前迁移（新增两个可为空的来源列 `tainted` 与 `chain`），并使打开任何其他外来、更旧或更新的数据库响亮失败，其守卫式事务认领保证每条消息恰有一个赢家（[sqlite.ts](../../packages/mailbox/local/src/sqlite.ts)）。
 
 `claimableAddresses` 是接缝为唤醒驱动器保留的发现操作；今天没有任何唤醒驱动器随附发布——桥把每一条已准入的投递都拼接进活跃回合，因此宿主旁没有任何东西在轮询存储寻找可认领的工作（[architecture.md](../architecture.md) § "会话日志"中的一次写入规则）。
 
@@ -183,7 +193,38 @@ Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnp
 
 The mail seams a later slice (registry admission in S3, the mailbox bridge's lease in S8) plugs in by providing `ctx.claudeCodeMailHooks`. Both are optional and read at use time, so the provider may load after this plugin.
 
-Source: [`packages/agent/agent-claude-code-driver/src/index.ts:85`](../../packages/agent/agent-claude-code-driver/src/index.ts)
+Source: [`packages/agent/agent-claude-code-driver/src/index.ts:92`](../../packages/agent/agent-claude-code-driver/src/index.ts)
+
+<a id="ctxclaudecodepolicy--claudecodepolicy"></a>
+
+### `ctx.claudeCodePolicy` — `ClaudeCodePolicy`
+
+The `claudeCodePolicy` service a provider plugin registers and the driver reads at use time.
+
+```ts cordis-catalog
+/**
+ * Build the contribution for one query.
+ * @param ctx - what the driver tells the provider about the query, plus the live taint controls.
+ * @returns the settings, in-process server and allow entries the driver then validates.
+ */
+extend(ctx: PolicyQueryContext): PolicyExtension
+
+/**
+ * Report which roles are servable now.
+ * @returns the servable roles and the requirements still unmet.
+ */
+readiness(): PolicyReadiness
+```
+
+Source: [`packages/agent/agent-claude-code-driver/src/policy-contract.ts:63`](../../packages/agent/agent-claude-code-driver/src/policy-contract.ts)
+
+<a id="ctxclaudecodepolicyregistries--policyregistries"></a>
+
+### `ctx.claudeCodePolicyRegistries` — `PolicyRegistries`
+
+The registries the policy reads, shared with later slices: S6 (sandbox) and S7 (canary) plugins register readiness contributors, extra tool names and tool factories here instead of editing S5 files.
+
+Source: [`packages/agent/agent-claude-code-tools/src/provider.ts:46`](../../packages/agent/agent-claude-code-tools/src/provider.ts)
 
 <a id="ctxclaudecodeseatsource--claudecodeseatsource"></a>
 
@@ -209,7 +250,7 @@ resolve(request: SeatSourceRequest): SeatSourceResolution
 hasRow?(seat: string): boolean | undefined
 ```
 
-Source: [`packages/agent/agent-claude-code-driver/src/index.ts:115`](../../packages/agent/agent-claude-code-driver/src/index.ts)
+Source: [`packages/agent/agent-claude-code-driver/src/index.ts:122`](../../packages/agent/agent-claude-code-driver/src/index.ts)
 
 <a id="ctxmailbox--mailboxregistry"></a>
 

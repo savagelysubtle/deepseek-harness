@@ -114,6 +114,22 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'An optional service a later slice provides: the admission check and the mailbox lease sink the Claude Code seat driver calls, read lazily; the driver falls back to its default-deny admission and no lease (see packages/agent/agent-claude-code-driver/README.md).',
   },
   {
+    key: 'claudeCodePolicy',
+    pkg: 'agent-claude-code-tools',
+    title: 'Host-side permission policy for Claude Code seats',
+    mode: 'seam',
+    consumers: ['agent-claude-code-driver'],
+    note: 'The policy provider plugin registers the service; the driver reads it lazily at use time to pin the seat working directory, generate and prove the deny/allow policy, and refuse a seat that is not ready (see packages/agent/agent-claude-code-tools/README.md).',
+  },
+  {
+    key: 'claudeCodePolicyRegistries',
+    pkg: 'agent-claude-code-tools',
+    title: 'Readiness and contributor registries behind the Claude Code policy',
+    mode: 'seam',
+    companions: ['agent-claude-code-tools'],
+    note: 'The same registry instances the policy uses, provided by the policy provider plugin so later slices can register their readiness contributors (see packages/agent/agent-claude-code-tools/src/provider.ts).',
+  },
+  {
     key: 'claudeCodeSeatSource',
     pkg: 'agent-claude-code-registry',
     title: 'Registry row lookup for Claude Code seats the static config does not list',

@@ -423,6 +423,52 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'claudeCodePolicy',
+    summary: 'The `claudeCodePolicy` service a provider plugin registers and the driver reads at use time.',
+    description: 'The `claudeCodePolicy` service a provider plugin registers and the driver reads at use time.',
+    methods: [
+      {
+        signature: 'readonly version: 1',
+        description: 'Contract version; the driver refuses any value it does not know.',
+        parameters: [],
+      },
+      {
+        signature: 'extend(ctx: PolicyQueryContext): PolicyExtension',
+        description: 'Build the contribution for one query.',
+        parameters: [{ name: 'ctx', description: 'what the driver tells the provider about the query, plus the live taint controls.' }],
+        returns: 'the settings, in-process server and allow entries the driver then validates.',
+      },
+      {
+        signature: 'readiness(): PolicyReadiness',
+        description: 'Report which roles are servable now.',
+        parameters: [],
+        returns: 'the servable roles and the requirements still unmet.',
+      },
+    ],
+  },
+  {
+    key: 'claudeCodePolicyRegistries',
+    summary: 'The registries the policy reads, shared with later slices: S6 (sandbox) and S7 (canary) plugins register readiness contributors, extra tool names and tool factories here instead of editing S5 files.',
+    description: 'The registries the policy reads, shared with later slices: S6 (sandbox) and S7 (canary) plugins register readiness contributors, extra tool names and tool factories here instead of editing S5 files.',
+    methods: [
+      {
+        signature: 'readonly readiness: ReadinessRegistry',
+        description: 'Which requirements (sandbox, canary, rules-hooks) are satisfied; a coder needs all three.',
+        parameters: [],
+      },
+      {
+        signature: 'readonly contributors: ContributorRegistry',
+        description: 'Extra dsh tool names and hook groups per role.',
+        parameters: [],
+      },
+      {
+        signature: 'readonly tools: SeatToolTemplate',
+        description: 'The tool factories a seat\'s server is built from; a name here must also be offered by `contributors`.',
+        parameters: [],
+      },
+    ],
+  },
+  {
     key: 'claudeCodeSeatSource',
     summary: 'Finds the registry row of a seat that is not in the static `seats` config.',
     description: 'Finds the registry row of a seat that is not in the static `seats` config. Provided as `ctx.claudeCodeSeatSource` (by the registry glue package); read at use time, so its provider may load after this plugin. A source must refuse (throw) when it cannot prove the row is the bridge\'s current one.',
@@ -3202,6 +3248,18 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface CancelScope {\n    readonly workspace: string;\n    readonly sessionId?: string;\n}',
   },
   {
+    name: 'ClaudeCodeEffort',
+    declaration: 'export type ClaudeCodeEffort = \'low\' | \'medium\' | \'high\' | \'xhigh\' | \'max\';',
+  },
+  {
+    name: 'ClaudeCodeRole',
+    declaration: 'export type ClaudeCodeRole = \'coder\' | \'lead\' | \'mail-only\';',
+  },
+  {
+    name: 'ClaudeCodeSeatConfig',
+    declaration: 'export interface ClaudeCodeSeatConfig {\n    readonly model: string;\n    readonly effort?: ClaudeCodeEffort;\n    readonly role: ClaudeCodeRole;\n    readonly maxTurns: number;\n    readonly maxBudgetUsd: number;\n    readonly claudePath: string;\n    readonly maxCallsPerWindow: number;\n    readonly callWindowMs: number;\n    readonly claudePathSha256?: string;\n    readonly fableOk: boolean;\n    readonly policy?: PolicyHostSeatFields;\n}',
+  },
+  {
     name: 'ClientResponse',
     declaration: 'export interface ClientResponse {\n    type: \'client-response\';\n    rpcId: RpcId;\n    result: RpcResult<unknown>;\n}',
   },
@@ -3332,6 +3390,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'ContinuableSubagentDescriptorData',
     declaration: 'export interface ContinuableSubagentDescriptorData extends SubagentDescriptorBase {\n    readonly mode: \'continuable\';\n    readonly label: string;\n    readonly agentProvider?: string;\n    readonly agentModel?: string;\n    readonly persona?: string;\n    readonly toolFilter?: ToolRestriction;\n}',
+  },
+  {
+    name: 'ContributorRegistry',
+    declaration: 'export class ContributorRegistry {\n    get version(): number;\n    registerToolContributor(contributor: ToolContributor): void;\n    registerHookContributor(contributor: HookContributor): void;\n    templateTools(role: PolicyRole): string[];\n    extraHookGroups(context: HookContext): Record<string, HookGroup[]>;\n}',
   },
   {
     name: 'CordisDynamicPackageId',
@@ -3510,6 +3572,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface EpochHeader {\n    config: LlmCallConfig;\n    adapterDefaults?: LlmCallConfigAdapterDefaults;\n    system?: string;\n    tools?: ToolSchema[];\n}',
   },
   {
+    name: 'ExtensionSettings',
+    declaration: 'export interface ExtensionSettings {\n    readonly hooks?: Readonly<Record<string, unknown>>;\n    readonly permissions?: {\n        readonly deny?: readonly string[];\n        readonly ask?: readonly string[];\n    };\n}',
+  },
+  {
     name: 'FileDiff',
     declaration: 'export interface FileDiff {\n    path: string;\n    oldText: string | null;\n    newText: string;\n}',
   },
@@ -3628,6 +3694,18 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'GraphNode',
     declaration: 'export interface GraphNode {\n    id: string;\n    kind: WorkflowNodeKind;\n    layer: number;\n    order: number;\n    gate: boolean;\n    when?: string;\n    triggerRule: TriggerRule;\n    dependsOn: string[];\n    tier?: WorkflowTier;\n    label: string;\n}',
+  },
+  {
+    name: 'HookContext',
+    declaration: 'export interface HookContext {\n    readonly seat: string;\n    readonly role: PolicyRole;\n}',
+  },
+  {
+    name: 'HookContributor',
+    declaration: 'export interface HookContributor {\n    readonly id: string;\n    readonly roles: readonly PolicyRole[];\n    groups(context: HookContext): Readonly<Record<string, readonly HookGroup[]>>;\n}',
+  },
+  {
+    name: 'HookGroup',
+    declaration: 'export interface HookGroup {\n    readonly matcher?: string;\n    readonly hooks: readonly {\n        readonly type: \'command\';\n        readonly command: string;\n        readonly timeout?: number;\n    }[];\n}',
   },
   {
     name: 'ImageAttachmentLimits',
@@ -3907,7 +3985,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'MailboxMessage',
-    declaration: 'export interface MailboxMessage {\n    readonly id?: MailboxMessageId;\n    readonly to: MailboxAddress;\n    readonly from: string;\n    readonly sentAt: number;\n    readonly type?: string;\n    readonly subject?: string;\n    readonly payload?: unknown;\n    readonly traceId?: string;\n    readonly blocking?: boolean;\n}',
+    declaration: 'export interface MailboxMessage {\n    readonly id?: MailboxMessageId;\n    readonly to: MailboxAddress;\n    readonly from: string;\n    readonly sentAt: number;\n    readonly type?: string;\n    readonly subject?: string;\n    readonly payload?: unknown;\n    readonly traceId?: string;\n    readonly blocking?: boolean;\n    readonly tainted?: boolean;\n    readonly chain?: readonly string[];\n}',
   },
   {
     name: 'MailboxMessageId',
@@ -4174,6 +4252,26 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface PermissionSelect {\n    options: PresetOption[];\n    currentValue: string;\n}',
   },
   {
+    name: 'PolicyExtension',
+    declaration: 'export interface PolicyExtension {\n    readonly settings?: ExtensionSettings;\n    readonly mcpServers?: Readonly<Record<\'dsh\', McpSdkServerConfigWithInstance>>;\n    readonly allow?: readonly string[];\n}',
+  },
+  {
+    name: 'PolicyHostSeatFields',
+    declaration: 'export interface PolicyHostSeatFields {\n    readonly tools?: readonly string[];\n    readonly send_to?: readonly string[];\n    readonly allow_blocking?: boolean;\n    readonly rules_dir?: string;\n}',
+  },
+  {
+    name: 'PolicyQueryContext',
+    declaration: 'export interface PolicyQueryContext {\n    readonly seat: string;\n    readonly role: ClaudeCodeRole;\n    readonly config: ClaudeCodeSeatConfig;\n    readonly cwd: string;\n    readonly binding: QueryBinding;\n    isTurnTainted(): boolean;\n    markTurnTainted(reason: string): void;\n    deliveredTraceIds(): ReadonlySet<string>;\n}',
+  },
+  {
+    name: 'PolicyReadiness',
+    declaration: 'export interface PolicyReadiness {\n    readonly roles: ReadonlySet<\'lead\' | \'coder\'>;\n    readonly missing: readonly ReadinessRequirement[];\n}',
+  },
+  {
+    name: 'PolicyRole',
+    declaration: 'export type PolicyRole = \'lead\' | \'coder\';',
+  },
+  {
     name: 'PostToolDecision',
     declaration: 'export type PostToolDecision = {\n    kind: \'accept\';\n    content?: ContentBlock[];\n    value?: never;\n    additionalContexts?: UserMessage[];\n} | {\n    kind: \'accept\';\n    value: JsonValue;\n    content?: never;\n    additionalContexts?: UserMessage[];\n} | {\n    kind: \'block\';\n    feedback: ContentBlock[];\n    additionalContexts?: UserMessage[];\n};',
   },
@@ -4246,8 +4344,24 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type ProviderRequestId = Branded<\'ProviderRequestId\'>;',
   },
   {
+    name: 'QueryBinding',
+    declaration: 'export type QueryBinding = {\n    readonly kind: \'first\';\n    readonly sdkSessionId: string;\n} | {\n    readonly kind: \'resume\';\n    readonly sdkSessionId: string;\n};',
+  },
+  {
     name: 'ReadFileLine',
     declaration: 'export interface ReadFileLine {\n    number: number;\n    text: string;\n}',
+  },
+  {
+    name: 'ReadinessContributor',
+    declaration: 'export interface ReadinessContributor {\n    readonly id: string;\n    readonly provides: ReadinessRequirement;\n}',
+  },
+  {
+    name: 'ReadinessRegistry',
+    declaration: 'export class ReadinessRegistry {\n    get version(): number;\n    register(contributor: ReadinessContributor): void;\n    readiness(): PolicyReadiness;\n}',
+  },
+  {
+    name: 'ReadinessRequirement',
+    declaration: 'export type ReadinessRequirement = \'sandbox\' | \'canary\' | \'rules-hooks\';',
   },
   {
     name: 'ReadResultView',
@@ -4470,8 +4584,28 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SeatSourceResolution {\n    readonly seat: string;\n    readonly row: RegistrySeatView;\n}',
   },
   {
+    name: 'SeatTool',
+    declaration: 'export interface SeatTool {\n    readonly name: string;\n    readonly description: string;\n    readonly inputSchema: z.ZodType;\n    handler(input: unknown): Promise<SeatToolResult>;\n}',
+  },
+  {
+    name: 'SeatToolContext',
+    declaration: 'export interface SeatToolContext {\n    readonly seat: string;\n    readonly sendTo: readonly string[];\n    readonly allowBlocking: boolean;\n    isTainted(): boolean;\n    markTainted(reason: string): void;\n    deliveredTraceIds(): ReadonlySet<string>;\n    publish(input: MailboxPublishInput, signal?: AbortSignal): Promise<unknown>;\n    newTraceId(): string;\n    warn(message: string): void;\n    scrub(text: string): string;\n}',
+  },
+  {
+    name: 'SeatToolFactory',
+    declaration: 'export type SeatToolFactory = (context: SeatToolContext) => SeatTool;',
+  },
+  {
+    name: 'SeatToolResult',
+    declaration: 'export interface SeatToolResult {\n    [key: string]: unknown;\n    readonly content: {\n        type: \'text\';\n        text: string;\n    }[];\n    readonly isError?: boolean;\n}',
+  },
+  {
     name: 'SeatToolsRestricted',
     declaration: 'export interface SeatToolsRestricted {\n    readonly seatName: string;\n    readonly muted: boolean;\n    readonly degraded: boolean;\n    readonly missing: readonly string[];\n    readonly remaining: readonly string[];\n}',
+  },
+  {
+    name: 'SeatToolTemplate',
+    declaration: 'export class SeatToolTemplate {\n    get version(): number;\n    register(name: string, factory: SeatToolFactory): void;\n    names(): string[];\n    check(seat: string, requested: readonly string[]): void;\n    build(seat: string, requested: readonly string[], context: SeatToolContext): SeatTool[];\n}',
   },
   {
     name: 'ServerResponse',
@@ -5132,6 +5266,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'ToolCallView',
     declaration: 'export type ToolCallView = GenericCallView | TerminalCallView | DiffCallView;',
+  },
+  {
+    name: 'ToolContributor',
+    declaration: 'export interface ToolContributor {\n    readonly id: string;\n    readonly roles: readonly PolicyRole[];\n    readonly names: readonly string[];\n}',
   },
   {
     name: 'ToolDefinition',

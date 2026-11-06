@@ -14,6 +14,9 @@ flowchart LR
   pkg_llm_pi_ai["llm-pi-ai"]
   pkg_agent_claude_code_driver["agent-claude-code-driver"]
   svc_claudeCodeMailHooks["ctx.claudeCodeMailHooks<br/>Optional mail admission and lease hooks for Claude Code seats"]
+  pkg_agent_claude_code_tools["agent-claude-code-tools"]
+  svc_claudeCodePolicy["ctx.claudeCodePolicy<br/>Host-side permission policy for Claude Code seats"]
+  svc_claudeCodePolicyRegistries["ctx.claudeCodePolicyRegistries<br/>Readiness and contributor registries behind the Claude Code policy"]
   pkg_agent_claude_code_registry["agent-claude-code-registry"]
   svc_claudeCodeSeatSource["ctx.claudeCodeSeatSource<br/>Registry row lookup for Claude Code seats the static config does not list"]
   pkg_mailbox["mailbox"]
@@ -211,6 +214,8 @@ flowchart LR
   pkg_agent --> svc_agents
   pkg_agent_claude_code_driver --> svc_claudeCodeMailHooks
   pkg_agent_claude_code_registry --> svc_claudeCodeSeatSource
+  pkg_agent_claude_code_tools --> svc_claudeCodePolicy
+  pkg_agent_claude_code_tools --> svc_claudeCodePolicyRegistries
   pkg_agent_default_model --> svc_agentDefaultModel
   pkg_agent_loop --> svc_agentLoop
   pkg_agent_presets --> svc_agentPresets
@@ -327,6 +332,7 @@ flowchart LR
   svc_attachments --> pkg_host_runtime
   svc_attachments --> pkg_llm_pi_ai
   svc_claudeCodeMailHooks --> pkg_agent_claude_code_driver
+  svc_claudeCodePolicy --> pkg_agent_claude_code_driver
   svc_claudeCodeSeatSource --> pkg_agent_claude_code_driver
   svc_clientModules --> pkg_hmr
   svc_codeRuntime --> pkg_tools
@@ -432,6 +438,7 @@ flowchart LR
   svc_workflowEngine --> pkg_tool_workflow_run
   svc_workspaceRegistry --> pkg_apiproxy
   svc_worktrees --> pkg_host_apiproxy
+  svc_claudeCodePolicyRegistries -. event gate .-> pkg_agent_claude_code_tools
   svc_fs -. event gate .-> pkg_fs_observation_policy
 ```
 
@@ -439,6 +446,8 @@ flowchart LR
 | --- | --- | --- | --- | --- | --- | --- |
 | `ctx.attachments` | `seam` | [`attachment`](../packages/attachment/attachment) | [`attachment-local`](../packages/attachment/attachment-local) | `host-runtime`, [`llm-pi-ai`](../packages/llm/llm-pi-ai) | - | The host commits accepted images before session events; provider adapters resolve authorized durable references into provider-native content. |
 | `ctx.claudeCodeMailHooks` | `seam` | [`agent-claude-code-driver`](../packages/agent/agent-claude-code-driver) | - | [`agent-claude-code-driver`](../packages/agent/agent-claude-code-driver) | - | An optional service a later slice provides: the admission check and the mailbox lease sink the Claude Code seat driver calls, read lazily; the driver falls back to its default-deny admission and no lease (see packages/agent/agent-claude-code-driver/README.md). |
+| `ctx.claudeCodePolicy` | `seam` | [`agent-claude-code-tools`](../packages/agent/agent-claude-code-tools) | - | [`agent-claude-code-driver`](../packages/agent/agent-claude-code-driver) | - | The policy provider plugin registers the service; the driver reads it lazily at use time to pin the seat working directory, generate and prove the deny/allow policy, and refuse a seat that is not ready (see packages/agent/agent-claude-code-tools/README.md). |
+| `ctx.claudeCodePolicyRegistries` | `seam` | [`agent-claude-code-tools`](../packages/agent/agent-claude-code-tools) | - | - | [`agent-claude-code-tools`](../packages/agent/agent-claude-code-tools) | The same registry instances the policy uses, provided by the policy provider plugin so later slices can register their readiness contributors (see packages/agent/agent-claude-code-tools/src/provider.ts). |
 | `ctx.claudeCodeSeatSource` | `seam` | [`agent-claude-code-registry`](../packages/agent/agent-claude-code-registry) | - | [`agent-claude-code-driver`](../packages/agent/agent-claude-code-driver) | - | The registry glue package verifies the mailbox bridge seat binding against the bridge current row and hands the driver the row; the driver reads it lazily and refuses a seat with no source (see packages/agent/agent-claude-code-registry/README.md). |
 | `ctx.mailbox` | `seam` | [`mailbox`](../packages/mailbox/mailbox) | `local` | `bridge` | - | The service definition resolves one storage provider per deployment; the SQLite local provider owns leases and settlement, and the delivery bridge steers claimed messages into addressed agent turns (see docs/subsystems/mailbox.md). |
 | `ctx.memory` | `core` | [`memory`](../packages/memory/memory) | - | - | - | One package ships the ctx.memory service, the project-scoped local provider behind it, and the model-facing tool consumer in a shared realm (see docs/subsystems/memory.md). |

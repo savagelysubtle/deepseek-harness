@@ -199,6 +199,33 @@ describe('claude-code hire', () => {
     expect(readRegistry(r)).not.toContain('haiku')
   })
 
+  it('accepts a lead: routing-only row, stanza carries the policy placeholders and the warnings', () => {
+    const r = rig()
+    const out = run(r, HIRE_CC(r, '--role', 'lead', '--admit-from', 'alfred'))
+    expect(out.status, out.stderr).toBe(0)
+    expect(out.stdout).toContain('role: lead')
+    expect(out.stdout).toContain('tools: [mailbox_send, mailbox_directory]')
+    expect(out.stdout).toContain('send_to: []')
+    expect(out.stdout).toContain('allow_blocking: false')
+    expect(out.stdout).not.toMatch(/^\s+rules_dir:/m)
+    expect(out.stdout).toContain('attests it is not externally exposed')
+    expect(out.stdout).toContain('must verify claude_path and its sha256 independently')
+    const row = readRegistry(r)
+    for (const key of ['tools', 'send_to', 'allow_blocking', 'rules_dir', 'role', 'mailbox_send']) {
+      expect(row).not.toMatch(new RegExp(`^\\s+${key}:`, 'm'))
+    }
+    expect(row).toContain('driver: claude-code')
+    expect(row).toContain('admit_from:')
+  })
+
+  it('a mail-only stanza has no policy fields', () => {
+    const r = rig()
+    const out = run(r, HIRE_CC(r))
+    expect(out.stdout).not.toContain('send_to:')
+    expect(out.stdout).not.toContain('tools: [')
+    expect(out.stdout).toContain('attests it is not externally exposed')
+  })
+
   it('is idempotent: an existing matching row is left alone', () => {
     const r = rig()
     expect(run(r, HIRE_CC(r, '--admit-from', 'alfred')).status).toBe(0)
@@ -213,8 +240,11 @@ describe('claude-code hire', () => {
 
   describe('refusals', () => {
     it.each([
-      ['coder', ['--role', 'coder'], 'slice S5'],
-      ['lead', ['--role', 'lead'], 'slice S5'],
+      ['coder', ['--role', 'coder'], 'coder rows are refused until the sandbox (S6) and canary (S7) readiness exist'],
+      ['a policy key on the command line (tools)', ['--role', 'lead', '--tools', 'x'], 'belong in the host profile only'],
+      ['a policy key on the command line (send-to)', ['--role', 'lead', '--send-to', 'x'], 'the driver refuse the seat at create'],
+      ['a policy key on the command line (allow-blocking)', ['--role', 'lead', '--allow-blocking'], 'belong in the host profile only'],
+      ['a policy key on the command line (rules-dir)', ['--role', 'lead', '--rules-dir', 'x'], 'belong in the host profile only'],
       ['an unknown role', ['--role', 'boss'], 'unknown role'],
       ['a fable model', ['--model', 'fable-5'], 'fable'],
       ['a mixed-case fable model', ['--model', 'Claude-FABLE-1'], 'fable'],

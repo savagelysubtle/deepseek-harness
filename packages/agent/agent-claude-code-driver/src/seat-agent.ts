@@ -39,15 +39,20 @@ import { assertCleanHostEnv } from './env.ts'
 import { MailLog } from './mail-lease.ts'
 import type { MailLeaseSink, MailState } from './mail-lease.ts'
 import { StreamMapper } from './mapper.ts'
-import { buildQueryOptions } from './options.ts'
-import type { QueryBinding, QueryOptionsExtension } from './options.ts'
+import { buildQueryOptions, expectedInitTools, toolSetMismatch } from './options.ts'
+import type { QueryBinding } from './options.ts'
+import { SeatMutedByPolicyError } from './policy-contract.ts'
+import type { ClaudeCodePolicy, PolicyExtension, PolicyQueryContext } from './policy-contract.ts'
 import { PromptStream } from './prompt-stream.ts'
-import { isAllowedModel } from './seat-config.ts'
+import { assertRoleServable, isAllowedModel } from './seat-config.ts'
 import type { ClaudeCodeSeatConfig } from './seat-config.ts'
 import type { ProcessLedger } from './ledger.ts'
 
 /** Longest error text the driver lets into a durable record or a warning. */
 const MAX_ERROR_TEXT_CHARS = 400
+
+/** Longest reason kept in a session-taint record. */
+const MAX_REASON_CHARS = 200
 
 /** How often a live turn re-reads the kill-switch flag file, so a switch set mid-tool still aborts the query. */
 const KILL_SWITCH_POLL_MS = 500
@@ -83,6 +88,12 @@ export const CLAUDE_CODE_TURN_ERROR_CODES = {
   callWindow: 'CLAUDE_CODE_CALL_WINDOW',
   /** A tainted turn was about to run with tools. */
   tainted: 'CLAUDE_CODE_TAINTED_TOOLS',
+  /** The seat's role cannot be served now: the policy service is absent, unknown, or not ready for it. */
+  policy: 'CLAUDE_CODE_POLICY',
+  /** The policy left the seat no tools, so it is muted rather than started. */
+  muted: 'CLAUDE_CODE_SEAT_MUTED',
+  /** The query's `system/init` message reported a tool set other than the expected one. */
+  toolSet: 'CLAUDE_CODE_TOOL_SET',
 } as const
 
 /** A driver failure carrying a stable machine code for `turn/end`. */
@@ -129,8 +140,11 @@ export interface SeatAgentDeps {
    * real path the SDK must run; absent means no attestation, and the configured path is used.
    */
   readonly attestedBinary?: ((seat: string) => string) | undefined
-  /** Optional S5 settings extension. */
-  readonly extension?: QueryOptionsExtension | undefined
+  /**
+   * The permission-policy service as it is registered right now (`ctx.get('claudeCodePolicy')`), read per turn and
+   * never cached: a `lead` or `coder` seat cannot run a normal turn without it, and `mail-only` never reads it.
+   */
+  readonly policy?: (() => ClaudeCodePolicy | undefined) | undefined
   /** Mail admission check for the send and steer paths; defaults to {@link defaultAdmission}. */
   readonly admit?: MailAdmission | undefined
   /** The mailbox bridge's lease, settled or failed deterministically per mail; absent means no lease calls. */
@@ -267,6 +281,12 @@ class LiveTurn {
   killed = false
   /** Files were read or content was fetched during this turn. */
   tainted = false
+  /** The tool names the query's `system/init` message must report; unset until the options are built. */
+  expectedTools: readonly string[] | undefined
+  /** Why the init message's tool list was refused; the query was aborted. */
+  toolMismatch: string | undefined
+  /** A `system/init` message has arrived; until then no assistant or result message is trusted. */
+  initSeen = false
   /** Every mail in the turn was a duplicate, so no query ran. */
   noQuery = false
   /** Steered messages claimed but not yet pushed (waiting for their claim records to be durable). */
@@ -399,6 +419,12 @@ function untilOf(deps: SeatAgentDeps, reset: number | undefined): number {
   return Math.min(reset !== undefined && reset > now ? reset : now + deps.defaultPauseMs, now + MAX_PAUSE_MS)
 }
 
+/** Whether the log's last turn started and never ended: the process died inside it. */
+function endedMidTurn(session: Session): boolean {
+  const start = session.events.findLastIndex(event => event.type === 'turn/start')
+  return start !== -1 && !session.events.slice(start + 1).some(event => event.type === 'turn/end')
+}
+
 /** The pause still in force according to the last `claude-code/paused` record of a session; 0 when none. */
 function restoredPause(session: Session, deps: SeatAgentDeps): number {
   const until = (session.events.findLast(event => event.type === 'claude-code/paused')?.data as { until?: unknown } | undefined)?.until
@@ -430,6 +456,8 @@ export class ClaudeCodeSeatAgent implements Agent {
   /** Lease calls still running; `whenIdle` waits for them. */
   private readonly leaseWork = new Set<Promise<void>>()
   private readonly digestKey: Uint8Array
+  /** Why this Claude session is tainted (sticky: only a fresh session, which has a new log, starts clean); undefined when clean. */
+  private sessionTaint: string | undefined
 
   /**
    * @param loopCtx - registration context carrying `agents`.
@@ -461,6 +489,12 @@ export class ClaudeCodeSeatAgent implements Agent {
     this.phase = { kind: 'idle', lastTurn: session.events.findLast(event => event.type === 'turn/start')?.data.turn ?? 0 }
     this.pausedUntil = restoredPause(session, deps)
     this.mail = new MailLog(session)
+    this.sessionTaint = (session.events.findLast(event => event.type === 'claude-code/session-tainted')?.data as { reason?: string } | undefined)?.reason
+    // A crash mid-turn may have lost the taint record with the turn's unflushed events: restore fail closed.
+    if (this.sessionTaint === undefined && endedMidTurn(session)) {
+      this.sessionTaint = 'restored-mid-turn'
+      this.rec('claude-code/session-tainted', { reason: this.sessionTaint, at: deps.now() })
+    }
     // A step that started is a query (or an all-duplicate turn): rebuild the call window the process lost.
     gate.seed(seat, session.events.filter(event => event.type === 'step/start').map(event => event.time))
     this.digestKey = deps.digestKey ?? randomBytes(32)
@@ -481,6 +515,53 @@ export class ClaudeCodeSeatAgent implements Agent {
   get turnTainted(): boolean {
     const live = this.phase.kind === 'running' ? this.phase.live : undefined
     return live !== undefined && (live.tainted || live.throwaway)
+  }
+
+  /**
+   * Whether the Claude session has taken in untrusted content: tainted by an earlier turn or a restored log
+   * (sticky per session), or this turn is tainted or a throwaway. The policy's mail tools read this to label sends.
+   * @returns true when anything the seat now sends may carry untrusted content.
+   */
+  isTurnTainted(): boolean {
+    return this.sessionTaint !== undefined || this.turnTainted
+  }
+
+  /**
+   * Mark the whole Claude session tainted and log why; never cleared here. A compaction does not clear it: the SDK gives
+   * no way to confirm the summary dropped the tainted text, so only a fresh session (a host reseed) starts clean.
+   * @param reason - short reason; control-stripped, redacted and capped before it is logged.
+   */
+  markTurnTainted(reason: string): void {
+    const live = this.phase.kind === 'running' ? this.phase.live : undefined
+    if (live !== undefined) live.tainted = true
+    if (this.sessionTaint !== undefined) return
+    this.sessionTaint = sanitizeFreeText(reason, MAX_REASON_CHARS) || 'unspecified'
+    this.rec('claude-code/session-tainted', { reason: this.sessionTaint, at: this.deps.now() })
+    // Best effort: a crash before the next flush would otherwise restore the session as clean.
+    const lost = (error: unknown): void => {
+      this.deps.warn(`agent-claude-code-driver: could not make the session taint durable: ${errText(error)}`)
+    }
+    try {
+      void this.deps.flush(this.session).catch(lost)
+    } catch (error: unknown) {
+      lost(error)
+    }
+  }
+
+  /**
+   * Trace ids of the mailbox mail this seat has been handed, rebuilt from its log.
+   * @returns a fresh set of the `traceId` of every logged mailbox relay message.
+   */
+  deliveredTraceIds(): ReadonlySet<string> {
+    const ids = new Set<string>()
+    for (const event of this.session.events) {
+      if (event.type !== 'user/message') continue
+      const source = (event.data as { source?: { kind?: unknown; form?: unknown; traceId?: unknown } | null }).source
+      if (source?.kind === 'mailbox' && (source.form === undefined || source.form === 'relay') && typeof source.traceId === 'string' && source.traceId !== '') {
+        ids.add(source.traceId)
+      }
+    }
+    return ids
   }
 
   /** Lift a pause early (for example after the operator confirms the window reopened). */
@@ -865,6 +946,14 @@ export class ClaudeCodeSeatAgent implements Agent {
   /** Inspect one SDK message for turn-level facts. */
   private observe(phase: RunningPhase, live: LiveTurn, message: SDKMessage): void {
     if (this.killSwitchUp()) this.tripKillSwitch(live)
+    // After a tool-set refusal the query is being torn down: whatever was already buffered is not mapped or recorded.
+    if (live.toolMismatch !== undefined) return
+    if (message.type === 'system' && message.subtype === 'init') {
+      live.initSeen = true
+      this.checkInitTools(live, message.tools)
+    } else if ((message.type === 'assistant' || message.type === 'result') && this.requireInit(live, message.type)) {
+      return
+    }
     live.mapper?.map(message)
     if (message.type === 'rate_limit_event') {
       const info = message.rate_limit_info
@@ -904,6 +993,33 @@ export class ClaudeCodeSeatAgent implements Agent {
     if (matched === 0) live.unanswered.clear()
     if (live.unanswered.size === 0 && !this.steeringWaiting(live) && live.inflight === 0) live.stream.end()
     else this.pumpSteer(phase)
+  }
+
+  /** Abort the query when its init message reports a tool set other than the expected one. */
+  private checkInitTools(live: LiveTurn, reported: unknown): void {
+    // The expected set is stored before the query exists, so it is always set once messages flow.
+    const mismatch = toolSetMismatch(live.expectedTools as readonly string[], reported)
+    if (mismatch !== undefined) this.failToolSet(live, mismatch)
+  }
+
+  /**
+   * Fail closed when a message that can start or end a tool call arrives before any `system/init`: the tool list
+   * was never checked, so nothing the query does is trusted.
+   * @returns true when the query was just aborted for it.
+   */
+  private requireInit(live: LiveTurn, kind: string): boolean {
+    if (live.expectedTools === undefined || live.initSeen) return false
+    this.failToolSet(live, `no system/init before first ${kind} message`)
+    return true
+  }
+
+  /** Record a tool-set refusal, then abort and tear the query down. */
+  private failToolSet(live: LiveTurn, mismatch: string): void {
+    live.toolMismatch = mismatch
+    this.rec('claude-code/refused', { reason: 'admission', detail: `tool set mismatch: ${mismatch}`, at: this.deps.now() })
+    this.deps.warn(`agent-claude-code-driver: seat "${this.seat}": ${mismatch}; the query was aborted`)
+    live.abort.abort({ kind: 'hook', reason: 'claude-code tool set mismatch' })
+    void live.teardown()
   }
 
   /** Whether the kill-switch flag is up; an injected check that throws counts as up (fail closed). */
@@ -1145,6 +1261,15 @@ export class ClaudeCodeSeatAgent implements Agent {
         error: { code: CLAUDE_CODE_TURN_ERROR_CODES.killSwitch, message: 'The kill-switch flag file appeared; the running query was aborted. Remove the file to resume.' },
       }
     }
+    if (live?.toolMismatch !== undefined) {
+      return {
+        kind: 'error',
+        error: {
+          code: CLAUDE_CODE_TURN_ERROR_CODES.toolSet,
+          message: `Claude Code reported a tool set the policy did not expect (${live.toolMismatch}); the query was aborted. Check the policy's tools against the live CLI.`,
+        },
+      }
+    }
     if (live?.interrupted === true) {
       return { kind: 'aborted', reason: { kind: 'hook', reason: 'claude-code steer interrupt' } }
     }
@@ -1198,6 +1323,8 @@ export class ClaudeCodeSeatAgent implements Agent {
       this.gate.acquire(this.seat, this)
       holdsGate = true
       const plan = this.planClaim()
+      // A lead or coder turn, throwaway or not, needs the policy service as registered right now.
+      this.requirePolicy()
       // Mark the turn before any of its messages are logged, so no re-seed digest can carry its untrusted text.
       if (plan.tainted && !this.rec('claude-code/throwaway-turn', { turnIndex: turn, at: this.deps.now() })) {
         unmarkedTainted = true
@@ -1209,6 +1336,8 @@ export class ClaudeCodeSeatAgent implements Agent {
       // Tainted mail never touches the seat's Claude session: a fresh id, nothing bound, nothing resumed.
       binding = plan.tainted ? { kind: 'first', sdkSessionId: randomUUID() } : await this.resolveBinding()
       signal.throwIfAborted()
+      // The binding await can outlast a policy change: look again before anything is claimed (a refusal keeps the mail queued).
+      this.requirePolicy()
 
       const claimed = this.inbox.claim(plan.target, turn)
       const run = this.screenClaimed(claimed, mailIds)
@@ -1224,11 +1353,17 @@ export class ClaudeCodeSeatAgent implements Agent {
         live.noQuery = true
       } else {
         const active = live
+        // The claim flush above can outlast a policy change too: the query uses the object read here, not an earlier one.
+        const policy = this.requirePolicy()
         active.mapper = new StreamMapper({
           record: (type, data) => { this.rec(type, data) },
           assistantText: (text) => { this.appendAssistant(turn, text) },
           sessionInit: (init) => { this.noteSessionInit(active, init) },
-          toolStarted: (name) => { if (TAINTING_TOOLS.has(name)) active.tainted = true },
+          toolStarted: (name) => {
+            if (!TAINTING_TOOLS.has(name)) return
+            active.tainted = true
+            if (!active.throwaway) this.markTurnTainted(`tool:${name}`)
+          },
         }, this.deps.now, this.digestKey)
         const options = buildQueryOptions({
           seat: this.seat,
@@ -1238,11 +1373,17 @@ export class ClaudeCodeSeatAgent implements Agent {
           env: this.deps.childEnv(),
           abortController: phase.abort,
           spawn: this.makeSpawn(live),
-          extension: this.deps.extension,
+          extension: plan.tainted || policy === undefined ? undefined : context => this.extendPolicy(policy, context),
+          controls: {
+            isTurnTainted: () => this.isTurnTainted(),
+            markTurnTainted: (why) => { this.markTurnTainted(why) },
+            deliveredTraceIds: () => this.deliveredTraceIds(),
+          },
           executable,
           throwaway: plan.tainted,
           warn: this.deps.warn,
         })
+        active.expectedTools = expectedInitTools(options)
         const violation = plan.tainted ? throwawayViolation(options, this.config.fableOk) : undefined
         if (violation !== undefined) {
           throw new ClaudeCodeDriverError(
@@ -1299,6 +1440,33 @@ export class ClaudeCodeSeatAgent implements Agent {
     phase.abort = new AbortController()
     phase.wakeRequested = false
     return true
+  }
+
+  /**
+   * The policy service for a lead or coder turn, after checking that it can serve the role right now. A failure is a
+   * loud refusal (record, warning through the turn error) and leaves the mail queued, like a kill switch.
+   */
+  private requirePolicy(): ClaudeCodePolicy | undefined {
+    if (this.config.role === 'mail-only') return undefined
+    const policy = this.deps.policy?.()
+    try {
+      assertRoleServable(this.config.role, this.seat, policy)
+    } catch (error: unknown) {
+      this.rec('claude-code/refused', { reason: 'admission', detail: errText(error), at: this.deps.now() })
+      throw new ClaudeCodeDriverError(CLAUDE_CODE_TURN_ERROR_CODES.policy, errText(error))
+    }
+    return policy
+  }
+
+  /** Ask the policy for its contribution; a seat it leaves with no tools is muted, loudly, instead of started. */
+  private extendPolicy(policy: ClaudeCodePolicy, context: PolicyQueryContext): PolicyExtension {
+    try {
+      return policy.extend(context)
+    } catch (error: unknown) {
+      if (!(error instanceof SeatMutedByPolicyError)) throw error
+      this.rec('claude-code/refused', { reason: 'admission', detail: `seat muted by policy: ${error.reason}`, at: this.deps.now() })
+      throw new ClaudeCodeDriverError(CLAUDE_CODE_TURN_ERROR_CODES.muted, `agent-claude-code-driver: seat "${this.seat}" is muted by policy: ${errText(error.reason)}`)
+    }
   }
 
   /** Whether mail is queued; a method so flow narrowing from earlier checks does not go stale across awaits. */

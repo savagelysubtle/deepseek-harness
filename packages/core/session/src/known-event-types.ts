@@ -33,6 +33,7 @@ export const KNOWN_SESSION_EVENT_TYPES: ReadonlySet<string> = new Set([
   'claude-code/refused',
   'claude-code/resume-failed',
   'claude-code/session-bound',
+  'claude-code/session-tainted',
   'claude-code/steer',
   'claude-code/thinking',
   'claude-code/throwaway-turn',

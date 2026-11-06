@@ -211,12 +211,15 @@ interface InboxEntryView {
   readonly subject?: string
   readonly payload?: unknown
   readonly traceId?: string
+  /** Present only when the stored message asserted provenance; absent = not asserted. */
+  readonly tainted?: boolean
+  readonly chain?: readonly string[]
   readonly claimedAt: number
 }
 
 /** Project one lease's message onto its wire view; absent fields stay omitted. */
 function toEntry(lease: MailboxLeaseView): InboxEntryView {
-  const { id, from, type, subject, payload, traceId } = lease.message
+  const { id, from, type, subject, payload, traceId, tainted, chain } = lease.message
   if (id === undefined) throw new Error(`claimed message from "${from}" has no provider id`)
   return {
     messageId: id,
@@ -226,6 +229,8 @@ function toEntry(lease: MailboxLeaseView): InboxEntryView {
     ...subject !== undefined ? { subject } : {},
     ...payload !== undefined ? { payload } : {},
     ...traceId !== undefined ? { traceId } : {},
+    ...tainted !== undefined ? { tainted } : {},
+    ...chain !== undefined ? { chain } : {},
     claimedAt: lease.claimedAt,
   }
 }

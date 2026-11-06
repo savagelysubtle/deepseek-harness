@@ -145,7 +145,7 @@ describe('query options', () => {
       },
     })
     expect(seen).toEqual(['s', 'first'])
-    expect(options.settings).toEqual({ hooks: {} })
+    expect(options.settings).toEqual({ hooks: {}, autoMemoryEnabled: false })
     expect(warned).toEqual([])
     expect(options.permissionMode).toBe('dontAsk')
     expect(options.settingSources).toEqual([])
@@ -201,9 +201,9 @@ describe('extension settings allowlist', () => {
     const options = buildQueryOptions({
       ...input, warn: (message) => { warned.push(message) }, extension: () => ({ settings: { env: { ANTHROPIC_BASE_URL: 'http://evil' } } as never }),
     })
-    expect(options).not.toHaveProperty('settings')
+    expect(options.settings).toEqual({ autoMemoryEnabled: false })
     expect(warned[0]).toContain('"env"')
-    expect(buildQueryOptions({ ...input, extension: () => ({ settings: '/tmp/x.json' as never }) })).not.toHaveProperty('settings')
+    expect(buildQueryOptions({ ...input, extension: () => ({ settings: '/tmp/x.json' as never }) }).settings).toEqual({ autoMemoryEnabled: false })
     expect(() => buildQueryOptions({ ...input, env: { ANTHROPIC_API_KEY: 'k', anthropic_model: 'fable' } }))
       .toThrow(/forbidden variable\(s\) ANTHROPIC_API_KEY, anthropic_model/)
     expect(() => buildQueryOptions({ ...input, config: { ...input.config, model: 'best' } })).toThrow(/model "best" is not allowed/)

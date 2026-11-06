@@ -12,7 +12,8 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import {
-  cleanHostEnv, cleanTempDirs, FakeQuery, fakeChild, fakeClaudeBinary, mailMessage, resultMessage, seatRow, tempDir, tick, userMessage,
+  cleanHostEnv, cleanTempDirs, FakeQuery, fakeChild, fakeClaudeBinary, mailMessage, resultMessage, seatRow, stubPolicy, tempDir, tick,
+  userMessage,
 } from './fakes.ts'
 
 const sdk = vi.hoisted(() => ({
@@ -66,6 +67,7 @@ async function bootedContext(): Promise<Context> {
   await ctx.plugin(SessionStore)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(FakeSubprocess)
+  ctx.provide('claudeCodePolicy', stubPolicy({}, ['lead']))
   return ctx
 }
 
@@ -182,11 +184,12 @@ describe('the plugin running a turn', () => {
     await fiber.dispose()
   })
 
-  it('refuses a coder row at start because no permission-policy extension exists yet', async () => {
+  it('mounts a coder row but refuses it at create while the policy service is not ready for coder', async () => {
     const ctx = await bootedContext()
-    const { dshHome, binary } = setup()
-    await expect(ctx.plugin(Driver, Driver.Config({ stateDir: 'claude-code', dshHome, seats: { c: seatRow({ role: 'coder', claude_path: binary }) } })))
-      .rejects.toThrow(/coder/)
+    const { dshHome, binary, cwd } = setup()
+    await ctx.plugin(Driver, Driver.Config({ stateDir: 'claude-code', dshHome, seats: { c: seatRow({ role: 'coder', claude_path: binary }) } }))
+    await expect(ctx.agents.create({ sessionId: SessionId('c'), driver: 'claude-code', meta: { cwd } }))
+      .rejects.toThrow(/role "coder" is refused: the policy service is not ready for it/)
   })
 
   it('refuses a state directory outside the harness home and an unattestable binary', async () => {

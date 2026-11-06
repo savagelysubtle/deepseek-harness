@@ -884,6 +884,9 @@ importers:
       '@deepseek-ai/dsh-agent-claude-code-driver':
         specifier: workspace:^
         version: link:../agent-claude-code-driver
+      '@deepseek-ai/dsh-agent-claude-code-tools':
+        specifier: workspace:^
+        version: link:../agent-claude-code-tools
       '@deepseek-ai/dsh-invariants':
         specifier: workspace:^
         version: link:../../runtime-diagnostics/invariants
@@ -911,6 +914,34 @@ importers:
       '@deepseek-ai/dsh-subprocess':
         specifier: workspace:^
         version: link:../../subprocess/subprocess
+
+  packages/agent/agent-claude-code-tools:
+    dependencies:
+      '@anthropic-ai/claude-agent-sdk':
+        specifier: 0.3.263
+        version: 0.3.263(@anthropic-ai/sdk@0.93.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.32.2(zod@4.4.3))(zod@4.4.3)
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../vendor/schemastery
+        version: link:../../../vendor/schemastery
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-agent-claude-code-driver':
+        specifier: workspace:^
+        version: link:../agent-claude-code-driver
+      '@deepseek-ai/dsh-invariants':
+        specifier: workspace:^
+        version: link:../../runtime-diagnostics/invariants
+      '@deepseek-ai/dsh-mailbox':
+        specifier: workspace:^
+        version: link:../../mailbox/mailbox
+      '@deepseek-ai/dsh-mailbox-local':
+        specifier: workspace:^
+        version: link:../../mailbox/local
 
   packages/agui/ag-ui:
     dependencies:
