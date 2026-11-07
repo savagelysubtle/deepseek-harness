@@ -16,7 +16,7 @@ When `addresses` is configured (the multi-seat host), this mount declares its se
 
 | Arg | Type | Notes |
 |---|---|---|
-| `to` | string (required) | Recipient seat's bare name; grammar-checked at the admitting edge. |
+| `to` | string (required) | Recipient seat's bare name; grammar-checked at the admitting edge. Also accepted: the bare name of an outside operator that already wrote to this seat as `guest:<name>` (reply only; a name that never wrote stays refused). The operator reads the reply with `dsh-mailbox inbox --address <name>`. |
 | `subject` | string (required) | Short human-readable subject line. |
 | `body` | string (required) | The message text; self-contained, since the recipient may lack this conversation's context. |
 | `blocking` | boolean | True when the sender is blocked waiting on an answer; renders as the blocking contract line on delivery. |
