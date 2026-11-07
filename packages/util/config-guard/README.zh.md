@@ -27,6 +27,11 @@ import { guardConfigSchema, redactReceivedValue, RECEIVED_VALUE_WITHHELD } from 
 import z from '@deepseek-ai/schemastery'
 import { guardConfigSchema } from '@deepseek-ai/dsh-config-guard'
 
+export interface Config {
+  apiKey: string
+  env: Record<string, string>
+}
+
 export const Config: z<Config> = guardConfigSchema(z.object({
   apiKey: z.string(),
   env: z.dict(z.string()).default({}),
