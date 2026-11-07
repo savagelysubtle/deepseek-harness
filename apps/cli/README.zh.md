@@ -11,6 +11,7 @@
 | `dsh --profile <name>` | 启动位于 `$DSH_HOME/profiles/<name>` 的指定 profile。 |
 | `dsh --profile headless "job"` | 运行一个全新的持久化会话，打印最终答案并退出。 |
 | `dsh web` | `--profile web` 的别名。 |
+| `dsh open [--port N]` | 为正在运行的 `dsh web` 主机打印新的一次性访问链接，使用 `$XDG_RUNTIME_DIR` 中的重新链接密钥；仅在多个主机同时运行时才需要 `--port`。 |
 | `dsh plugin --profile <name> <pnpm args>` | 通过在 profile 目录中转发给 pnpm 来管理该 profile 的插件。 |
 
 运行命令时所在的目录将作为默认 workspace 根目录。`web` 和 `headless` profile 在首次使用时会从随附模板自动初始化；其他任何 profile 都必须通过 `dsh plugin` 创建。

@@ -14,11 +14,13 @@ node 半侧在桥接或 upgrade 前守卫 `/api` 下的每个入口（`src/api-r
 
 ## 每次启动的调用方令牌
 
-回环可达性无法识别操作者的浏览器：任何本地页面或进程都能通过。因此主机在每次启动时生成随机调用方令牌（`src/caller-token.ts` 中的 `createCallerAuth`），只保存在内存中，并要求特权方法在 `x-dsh-token` 请求头中携带它。使用请求头是因为浏览器会把 cookie 发送到每个回环端口，seat 自己的开发服务器可以重放它。闸门包裹共享的 `/api` 处理器，因此也覆盖由拦截器认领的端点。`PRIVILEGED_METHODS` 中的方法需要回环对端、回环 `Host` 和有效令牌；令牌缺失或错误会得到带平实消息的 401，以及一条限速的服务器 warning，其中从不包含令牌。`host.listDirectory` 与 `session.export` 保留普通的 `trustedHosts` 栅栏，并额外要求令牌。其他所有方法以及两条 WebSocket 下行都不需要令牌。
+回环可达性无法识别操作者的浏览器：任何本地页面或进程都能通过。因此主机在每次启动时生成随机调用方令牌（`src/caller-token.ts` 中的 `createCallerAuth`），只保存在内存中，并要求特权方法在 `x-dsh-token` 请求头中携带它。使用请求头是因为浏览器会把 cookie 发送到每个回环端口，seat 自己的开发服务器可以重放它。闸门包裹共享的 `/api` 处理器，因此也覆盖由拦截器认领的端点。`PRIVILEGED_METHODS` 中的方法需要回环对端、回环 `Host` 和有效令牌；令牌缺失或错误会得到带平实消息的 401，以及一条限速的服务器 warning，其中从不包含令牌。`host.listDirectory`、`session.export`、`commands/execute`（如 `/permission danger-full-access` 这类斜杠命令）以及插件运行器 Remote `dynamicCordisRunner/{runHostHalf,resolveRequestRun,settleUserRun,undefineFromPanel,stopFromPanel}` 构成 `TOKEN_REQUIRED_METHODS`：它们保留普通的 `trustedHosts` 栅栏，并额外要求令牌，因此不带令牌的 LAN 客户端会失去斜杠命令和插件面板。插件 Remote 除非列入该集合否则保持开放，所以新增的授予能力的 Remote 必须加入该集合；插件 Remote 的默认拒绝尚未实现。其他所有方法以及两条 WebSocket 下行都不需要令牌。
 
-主机通过一次性启动码（有效期 10 分钟，最多 16 个待兑换）把令牌交给页面。启动器向交互终端打印 `http://127.0.0.1:<port>/#dsh-boot=<code>`；stdout 不是 TTY 时，把链接写入权限为 0600 的文件并只打印路径（[组合包](../../bundle/web-app/README.md)）。启动码从不进入 `DSH_WEB_URL` 或任何环境变量。页面用 `history.replaceState` 移除片段，向 `POST /api/auth.exchange`（仅限回环对端和 `Host`）提交 `{code}`，收到 `{ok: true, token}` 后把令牌保存在内存和 `sessionStorage` 中，并在每个 API 请求中以 `x-dsh-token` 发送。`HostConnectionService.mintLaunchCode()` 方法生成启动码；页面侧位于 `src/client/caller-auth.ts`。
+主机通过一次性启动码（有效期 10 分钟，最多 16 个待兑换）把令牌交给页面。启动器向交互终端打印 `http://127.0.0.1:<port>/#dsh-boot=<code>`；stdout 不是 TTY 时，把链接写入权限为 0600 的文件并只打印路径（[组合包](../../bundle/web-app/README.md)）。启动码从不进入 `DSH_WEB_URL` 或任何环境变量。页面用 `history.replaceState` 移除片段，向 `POST /api/auth.exchange`（仅限回环对端和 `Host`）提交 `{code}`，收到 `{ok: true, token}` 后把令牌保存在内存和 `sessionStorage` 中，并在每个 API 请求中以 `x-dsh-token` 发送。兑换请求 10 秒后放弃，其他 API 请求会等待它。令牌本身在整次启动期间有效，只有启动码会过期，已打开的标签页通过 `sessionStorage` 继续工作。`ctx.connection.fetch` 是面向非 Connection RPC 的 Host 端点的同源 `fetch`：它等待兑换完成并附加该请求头，这是普通下载链接做不到的，所以会话导出通过它获取内容并保存 blob URL。`HostConnectionService.mintLaunchCode()` 方法生成启动码；页面侧位于 `src/client/caller-auth.ts`。
 
-被拒绝的兑换或任何 401 都会显示固定的红色条（`role="alert"`，`src/client/auth-banner.ts`），写明原因和「Reopen dsh from the launcher link」；不会静默重试。fixture 模式（`?fixture`）没有主机，也没有令牌。载体把令牌检查结果传给 [`@deepseek-ai/dsh-host-apiproxy`](../../host/apiproxy/README.md)，后者仅对持有令牌的调用方生成创始人标记并接受审批应答。决策记录：[每次启动调用方令牌 Agent Note](../../../.agents/notes/implemented/architecture/2026-11-06-op-270-per-boot-caller-token.md)。
+被拒绝的兑换或任何 401 都会显示固定的红色条（`role="alert"`，`src/client/auth-banner.ts`），写明原因和「Reopen dsh from the launcher link」；不会静默重试。fixture 模式（`?fixture`）没有主机，也没有令牌。
+
+启动器还会把每次启动的重新链接密钥写入 `$XDG_RUNTIME_DIR/dsh-web-relink-<port>.key`（权限 0600，主机停止时删除；该变量未设置时不写入）。`dsh open [--port N]`（[CLI](../../../apps/cli/README.md)）读取它，并在 `x-dsh-relink` 请求头中提交给仅限回环的 `POST /api/auth.relink`，后者返回 `{ok: true, code}`，即新的一次性启动码；密钥缺失或错误会得到 401。该密钥无法防御同一用户的恶意进程：任何能以该用户身份读取此文件的人（包括 seat 的 shell）都能生成链接。它把访问链接文件原有的暴露期从 10 分钟延长到主机的整个生命周期。载体把令牌检查结果传给 [`@deepseek-ai/dsh-host-apiproxy`](../../host/apiproxy/README.md)，后者仅对持有令牌的调用方生成创始人标记并接受审批应答。决策记录：[每次启动调用方令牌 Agent Note](../../../.agents/notes/implemented/architecture/2026-11-06-op-270-per-boot-caller-token.md)。
 
 ## `/api` WebSocket 下行
 
@@ -37,4 +39,5 @@ node 半侧在桥接或 upgrade 前守卫 `/api` 下的每个入口（`src/api-r
 - **History 会恢复未附加的会话**：打开 history 可能创建宿主侧 agent，并增加首次打开的延迟；没有仅从持久化读取的路径。
 - **`/api` 桥把每个请求体整体缓冲在内存里**：`maxRequestBodyBytes`（默认 160 MiB，按默认 100 MiB 图片总量上限经 base64 膨胀加信封余量得出）因此同时是单请求的驻留内存上界；要降低它而不缩小图片限额，需要流式请求体路径。
 - **现有自动化需要兑换才能使用特权方法**：解析 `dsh web:` 行的脚本仍可访问非特权方法，但特权方法需要来自终端行或 0600 文件的启动码、一次 `/api/auth.exchange` 调用以及 `x-dsh-token` 请求头。失败的兑换不会被限速，只有 warning 日志被限速。
+- **重新链接密钥文件可被同一用户的任何进程读取**：只要主机在运行，seat 的 shell 就能运行 `dsh open` 或读取密钥并生成访问链接。
 - **令牌不会在主机重启后保留**：已打开的标签页会显示红色条，直到操作者打开新的启动链接。
