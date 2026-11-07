@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-11-07-op-296-c-org-board-driver-and-quarantine-display.md
+2026-11-07-op-296-c-org-board-driver-and-quarantine-display.md: dd5a4a5e138e3aab9ba121fea3565db75e897503
+2026-11-07-op-296-c-org-board-driver-and-quarantine-display.zh.md: 56b9bfc1dd09f35dc41c992fa0ef14721337789c

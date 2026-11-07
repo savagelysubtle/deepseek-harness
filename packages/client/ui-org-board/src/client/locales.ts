@@ -31,6 +31,8 @@ export type OrgBoardKey =
   | 'band.count'
   | 'badge.lead'
   | 'badge.test'
+  | 'badge.invalid'
+  | 'badge.driver.claudeCode'
   | 'badge.unserved'
   | 'badge.callUp'
   | 'legend.edges'
@@ -43,6 +45,10 @@ export type OrgBoardKey =
   | 'detail.cwd'
   | 'detail.session'
   | 'detail.session.none'
+  | 'detail.driver'
+  | 'detail.admitFrom'
+  | 'detail.admitSenderClasses'
+  | 'detail.invalid'
   | 'detail.tools.allow'
   | 'detail.tools.deny'
   | 'detail.tools.none'
@@ -121,6 +127,8 @@ export const zh: Record<OrgBoardKey, string> = {
   'band.count': '{count} 个席位',
   'badge.lead': '负责人',
   'badge.test': '测试席位',
+  'badge.invalid': '已隔离',
+  'badge.driver.claudeCode': 'Claude Code 驱动',
   'badge.unserved': '未完全提供服务',
   'badge.callUp': '可致信任何席位',
   'legend.edges': '邮件权限连线仅在悬停或选中某个席位时显示。',
@@ -133,6 +141,10 @@ export const zh: Record<OrgBoardKey, string> = {
   'detail.cwd': '工作目录',
   'detail.session': '会话 ID',
   'detail.session.none': '未记录会话',
+  'detail.driver': '驱动',
+  'detail.admitFrom': '接收来源',
+  'detail.admitSenderClasses': '接收的发件人类别',
+  'detail.invalid': '已隔离（只读）',
   'detail.tools.allow': '允许的工具',
   'detail.tools.deny': '禁止的工具',
   'detail.tools.none': '无工具限制',
@@ -205,6 +217,8 @@ export const en: Record<OrgBoardKey, string> = {
   'band.count': '{count} seat(s)',
   'badge.lead': 'Lead',
   'badge.test': 'Test seat',
+  'badge.invalid': 'Quarantined',
+  'badge.driver.claudeCode': 'Claude Code driver',
   'badge.unserved': 'Not fully served',
   'badge.callUp': 'May mail anyone',
   'legend.edges': 'Mail-permission lines only show while a seat is hovered or selected.',
@@ -217,6 +231,10 @@ export const en: Record<OrgBoardKey, string> = {
   'detail.cwd': 'Working directory',
   'detail.session': 'Session ID',
   'detail.session.none': 'No session recorded',
+  'detail.driver': 'Driver',
+  'detail.admitFrom': 'Admits mail from',
+  'detail.admitSenderClasses': 'Admitted sender classes',
+  'detail.invalid': 'Quarantined (read-only)',
   'detail.tools.allow': 'Allowed tools',
   'detail.tools.deny': 'Denied tools',
   'detail.tools.none': 'No tool restrictions',

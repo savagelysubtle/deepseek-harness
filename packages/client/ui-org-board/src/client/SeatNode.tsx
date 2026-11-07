@@ -32,6 +32,8 @@ export type SeatNodeType = Node<SeatNodeData, 'seat'>
 const BADGE_CLASS: Record<SeatBadge['kind'], string | undefined> = {
   lead: css.badgeLead,
   test: css.badgeTest,
+  invalid: css.badgeInvalid,
+  driver: css.badgeDriver,
   unserved: css.badgeUnserved,
   callUp: css.badgeCallUp,
 }
@@ -44,8 +46,9 @@ const BADGE_CLASS: Record<SeatBadge['kind'], string | undefined> = {
 export function SeatNode({ data }: NodeProps<SeatNodeType>) {
   const { name, badges, selected, served, statusLabel } = data
   const unserved = badges.some(badge => badge.kind === 'unserved')
+  const invalid = badges.some(badge => badge.kind === 'invalid')
   return (
-    <div className={clsx(css.node, selected && css.nodeSelected, unserved && css.nodeUnserved)}>
+    <div className={clsx(css.node, selected && css.nodeSelected, (unserved || invalid) && css.nodeUnserved)}>
       {/* Registry edges are undirected; every node needs both handle types
           since it may play either side of any [from, to] pair. */}
       <Handle type="target" position={Position.Left} className={css.handle} />
