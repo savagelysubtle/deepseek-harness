@@ -823,15 +823,17 @@ export function OrgBoard({
                   <div className={css.detailHeaderRow}>
                     <p className={css.detailName}>{selectedSeat}</p>
                     <div className={css.detailActions}>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        disabled={pending}
-                        onClick={() => { setSeatToRemove(selectedSeat) }}
-                      >
-                        {t('seat.remove.trigger')}
-                      </Button>
+                      {selectedRecord.invalid === undefined && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={pending}
+                          onClick={() => { setSeatToRemove(selectedSeat) }}
+                        >
+                          {t('seat.remove.trigger')}
+                        </Button>
+                      )}
                       <Button type="button" variant="ghost" size="sm" onClick={() => { setSelectedSeat(null) }}>
                         {t('detail.close')}
                       </Button>
@@ -874,26 +876,28 @@ export function OrgBoard({
                     {selectedServedStatus !== null && (
                       <p className={css.detailValue}>{servedStatusLabel(selectedServedStatus, t)}</p>
                     )}
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      // Genuinely disabled -- a real `disabled` attribute,
-                      // never a CSS-only affordance -- whenever `!drift.ok`:
-                      // with no honest baseline to toggle from, acting on a
-                      // guessed empty list would write a roster derived
-                      // from nothing. The existing `error.drift` banner
-                      // above already explains why; this adds no new text.
-                      disabled={pending || servedPending || !drift.ok}
-                      onClick={() => {
-                        /* v8 ignore next -- defensive: rendered only inside the selectedRecord branch, which requires
-                           selectedSeat !== null in the same render */
-                        if (selectedSeat === null) return
-                        setServedToggle({ name: selectedSeat, nextServed: !selectedCurrentlyServedByMailboxBridge })
-                      }}
-                    >
-                      {t('detail.served.toggle')}
-                    </Button>
+                    {selectedRecord.invalid === undefined && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        // Genuinely disabled -- a real `disabled` attribute,
+                        // never a CSS-only affordance -- whenever `!drift.ok`:
+                        // with no honest baseline to toggle from, acting on a
+                        // guessed empty list would write a roster derived
+                        // from nothing. The existing `error.drift` banner
+                        // above already explains why; this adds no new text.
+                        disabled={pending || servedPending || !drift.ok}
+                        onClick={() => {
+                          /* v8 ignore next -- defensive: rendered only inside the selectedRecord branch, which requires
+                             selectedSeat !== null in the same render */
+                          if (selectedSeat === null) return
+                          setServedToggle({ name: selectedSeat, nextServed: !selectedCurrentlyServedByMailboxBridge })
+                        }}
+                      >
+                        {t('detail.served.toggle')}
+                      </Button>
+                    )}
                   </div>
                   {!hasAllow && !hasDeny && (
                     <p className={css.detailValue}>{t('detail.tools.none')}</p>

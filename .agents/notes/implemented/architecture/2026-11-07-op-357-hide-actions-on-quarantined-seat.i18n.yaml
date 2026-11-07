@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-11-07-op-357-hide-actions-on-quarantined-seat.md
+2026-11-07-op-357-hide-actions-on-quarantined-seat.md: 7dcf45666c6803ed993b399fe862ec62f722a382
+2026-11-07-op-357-hide-actions-on-quarantined-seat.zh.md: d39c24b479dde5bfdbffb93217aab20019d38202

@@ -459,6 +459,21 @@ describe('OrgBoard', () => {
       expect(robinPanel.queryByText('Driver')).toBeNull()
       expect(robinPanel.queryByText('Admits mail from')).toBeNull()
     })
+
+    it('offers no Remove seat or Change served status button on a quarantined seat, but keeps both on a plain and a claude-code seat', () => {
+      renderBoard(ready(withDriverSeats()))
+      fireEvent.click(screen.getByText('broken'))
+      expect(screen.queryByRole('button', { name: 'Remove seat' })).toBeNull()
+      expect(screen.queryByRole('button', { name: 'Change served status' })).toBeNull()
+      expect(screen.getByRole('button', { name: 'Close details' })).toBeTruthy()
+      fireEvent.click(screen.getByRole('button', { name: 'Close details' }))
+      for (const name of ['robin', 'claudie']) {
+        fireEvent.click(screen.getByText(name))
+        expect(screen.getByRole('button', { name: 'Remove seat' })).toBeTruthy()
+        expect(screen.getByRole('button', { name: 'Change served status' })).toBeTruthy()
+        fireEvent.click(screen.getByRole('button', { name: 'Close details' }))
+      }
+    })
   })
 
   it('a selected seat with a recorded session id shows it', () => {
