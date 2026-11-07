@@ -1031,6 +1031,51 @@ describe('org.write over rows the board cannot round-trip (OP #292 S3)', () => {
     expect(readdirSync(dir).sort()).toEqual(files)
   })
 
+  it('refuses a save that deletes a claude-code row, naming the seat and the manual remedy, and touches nothing', async () => {
+    const dir = tempDir('dsh-org-registry-')
+    const path = writeDriverRegistry(dir)
+    const { app, read } = await open(path)
+    const bytes = readFileSync(path)
+    const files = readdirSync(dir).sort()
+    const document: OrgRegistryDocument = { baseDir: dir, seats: { alfred: { cwd: '.' } }, edges: [], callUp: [] }
+    const error = expectErr(await app.org.write(requestWith({ document, expectedToken: read.token })))
+    expect(error.code).toBe('org-registry-rejected')
+    expect(error.message).toContain('org-registry-driver-seat-removed: seat "claudie" runs the claude-code driver')
+    expect(error.message).toContain('edit the registry file by hand and restart the host')
+    expect(readFileSync(path)).toEqual(bytes)
+    expect(readdirSync(dir).sort()).toEqual(files)
+  })
+
+  it('refuses a save that renames a claude-code row (a delete plus an add), and touches nothing', async () => {
+    const dir = tempDir('dsh-org-registry-')
+    const path = writeDriverRegistry(dir)
+    const { app, read } = await open(path)
+    const bytes = readFileSync(path)
+    const document: OrgRegistryDocument = {
+      baseDir: dir,
+      seats: { alfred: { cwd: '.' }, claudie2: { cwd: '.', driver: 'claude-code', admit_from: ['alfred'], admit_sender_classes: ['seat'] } },
+      edges: [['alfred', 'claudie2']],
+      callUp: [],
+    }
+    const error = expectErr(await app.org.write(requestWith({ document, expectedToken: read.token })))
+    expect(error.message).toContain('org-registry-driver-seat-removed: seat "claudie"')
+    expect(readFileSync(path)).toEqual(bytes)
+  })
+
+  it('still lets the board delete an ordinary default-loop seat', async () => {
+    const dir = tempDir('dsh-org-registry-')
+    const path = writeDriverRegistry(dir)
+    const { app, read } = await open(path)
+    const document: OrgRegistryDocument = {
+      ...read.document,
+      seats: { ...read.document.seats, extra: { cwd: '.' } },
+    }
+    const added = expectOk(await app.org.write(requestWith({ document, expectedToken: read.token })))
+    const after: OrgRegistryDocument = { ...document, seats: { alfred: document.seats.alfred!, claudie: document.seats.claudie! } }
+    const removed = expectOk(await app.org.write(requestWith({ document: after, expectedToken: added.token })))
+    expect(Object.keys(removed.registry.seats)).not.toContain('extra')
+  })
+
   it('still saves a valid registry and keeps the claude-code fields when only a department changes', async () => {
     const dir = tempDir('dsh-org-registry-')
     const path = writeDriverRegistry(dir)
