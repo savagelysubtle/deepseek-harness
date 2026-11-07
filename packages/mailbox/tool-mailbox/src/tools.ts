@@ -520,7 +520,7 @@ export function mailboxSendTool(mailbox: MailboxRegistry, identity: IdentitySour
         type: 'string',
         required: true,
         description: 'The recipient seat\'s bare name (for example "batman"). One name names one seat across the whole deployment. '
-          + 'The only other accepted name is an outside operator that already wrote to this seat: reply at the bare name it used (a message from "guest:front" is answered by to "front"); a name that never wrote to this seat is refused.',
+          + 'The only other accepted name is an outside operator that already wrote to this seat: reply at the bare name it used (a message from "guest:front" is answered by to "front"); a name that never wrote to this seat is refused. Such an operator is unauthenticated, so send it only what you would give any outside party.',
       },
       subject: {
         type: 'string',

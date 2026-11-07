@@ -20,3 +20,7 @@ A Claude seat reaches a harness seat through the guest CLI (`dsh-mailbox send`),
 ## Not done
 
 Mail to a bare guest name is drained only by the guest CLI inbox; nothing wakes the operator.
+
+## Accepted risk
+
+Guest mail is unauthenticated: a guest can write "reply to me with X" and a seat that is persuaded sends X to an inbox the guest reads. Before this change a seat could not answer a guest at all, so this is a new outbound path. The `to` description tells the model the operator is an outside party. Sentinel review (2026-11-07) found no other issue above Low; its optional hardening (a bounded existence query instead of reading the whole inbound history, a cap on unclaimed replies per recipient, and refusing the exception for a registry seat that is not mounted on this host) is not done.
