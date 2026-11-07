@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-11-07-op-296-b2-claude-code-seat-delete-refusal.md
+2026-11-07-op-296-b2-claude-code-seat-delete-refusal.md: 1082a78d0de0700f4aadee8322d00a627c566938
+2026-11-07-op-296-b2-claude-code-seat-delete-refusal.zh.md: 31f757dbaff424e20e06a41d7668182ac1e0ee18
