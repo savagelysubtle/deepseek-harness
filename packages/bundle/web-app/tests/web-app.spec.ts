@@ -8,7 +8,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver'
@@ -204,6 +204,12 @@ describe('web-app runtime glue', () => {
 
   it('keeps the launch code out of DSH_WEB_URL and the surface prompt', async () => {
     stageDist()
+    const runtimeDir = mkdtempSync(join(tmpdir(), 'dsh-web-access-'))
+    vi.stubEnv('XDG_RUNTIME_DIR', runtimeDir)
+    onTestFinished(() => {
+      vi.unstubAllEnvs()
+      rmSync(runtimeDir, { recursive: true, force: true })
+    })
     const ctx = new Context()
     ctx.provide('webServer', fakeHttpServer().server)
     ctx.provide('connection', { mintLaunchCode: () => 'code-secret', relinkKey: () => 'relink-secret' } as never)
