@@ -483,7 +483,8 @@ export function OrgBoard({
       selected: view.name === selectedSeat,
       // Unknown (no dot) whenever drift failed: an empty drift lookup
       // then says nothing about a seat, and must not read as served.
-      served: drift.ok ? !view.unserved : null,
+      // A quarantined row is never drawn as served either: the host does not load it.
+      served: drift.ok && !view.badges.some(badge => badge.kind === 'invalid') ? !view.unserved : null,
       statusLabel: view.unserved ? t('status.unserved') : t('status.served'),
     },
   }))

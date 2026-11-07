@@ -407,7 +407,7 @@ describe('OrgBoard', () => {
     expect(screen.getByLabelText<HTMLInputElement>('Denied tools').value).toBe('web')
   })
 
-  describe('claude-code driver rows and quarantined rows (OP #296 item 8)', () => {
+  describe('claude-code driver rows and quarantined rows', () => {
     function withDriverSeats(): ResponseValue<'org.get'> {
       if (!BASE_VALUE.registry.ok) throw new Error('fixture registry must be ok')
       const seats = {
@@ -427,6 +427,13 @@ describe('OrgBoard', () => {
       const alfredNode = container.querySelector('.react-flow__node[data-id="alfred"]') as HTMLElement
       expect(within(alfredNode).queryByText('Quarantined')).toBeNull()
       expect(within(alfredNode).queryByText('Claude Code driver')).toBeNull()
+    })
+
+    it('draws no served status dot on a quarantined seat, so it is never announced as served', () => {
+      const { container } = renderBoard(ready(withDriverSeats()))
+      const dots = (name: string) => within(container.querySelector(`.react-flow__node[data-id="${name}"]`) as HTMLElement).queryAllByRole('img', { hidden: true })
+      expect(dots('broken')).toHaveLength(0)
+      expect(dots('claudie').map(dot => dot.getAttribute('aria-label'))).toEqual(['served'])
     })
 
     it('shows the driver, admitted senders and sender classes read-only in the detail panel', () => {

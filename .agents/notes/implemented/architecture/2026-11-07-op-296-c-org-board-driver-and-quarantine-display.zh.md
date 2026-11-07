@@ -12,7 +12,7 @@
 
 看板用它已经收到的视图，以只读方式显示这些字段。线路格式、存储和写入路径均未改动。
 
-- **席位节点。** `seatBadges`（`packages/client/ui-org-board/src/client/derive.ts`）新增 `invalid` 徽章（错误色，节点边框同未服务席位一样变红）和针对 `driver: claude-code` 的 `driver` 徽章（中性描边）。两者也出现在图例行。
+- **席位节点。** `seatBadges`（`packages/client/ui-org-board/src/client/derive.ts`）新增 `invalid` 徽章（错误色，节点边框同未服务席位一样变红，被隔离的席位不绘制已服务状态圆点）和针对 `driver: claude-code` 的 `driver` 徽章（中性描边）。两者也出现在图例行。
 - **详情面板。** `OrgBoard.tsx` 显示 `Driver`、`Admits mail from`、`Admitted sender classes`，以及带解析器原因的 `Quarantined (read-only)`，每项仅在该行有对应字段时出现。
 - **第 9 项（guest 发件人）。** 不改动：`admit_sender_classes` 按存储值显示，在 S8 租约接收端落地之前，guest 发件人仍不能进入 claude-code 席位。
 

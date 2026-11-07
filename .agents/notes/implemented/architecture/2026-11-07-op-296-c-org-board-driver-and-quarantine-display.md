@@ -12,7 +12,7 @@ The org registry parser quarantines a seat row it cannot accept and reports the 
 
 The board renders these fields read-only, from the view it already receives. No wire, store, or write path changed.
 
-- **Seat node.** `seatBadges` (`packages/client/ui-org-board/src/client/derive.ts`) adds a `invalid` badge (error colour, with a red node border, like an unserved seat) and a `driver` badge (neutral outline) for `driver: claude-code`. Both appear in the legend row.
+- **Seat node.** `seatBadges` (`packages/client/ui-org-board/src/client/derive.ts`) adds an `invalid` badge (error colour, with a red node border, like an unserved seat; the served dot is not drawn for a quarantined seat) and a `driver` badge (neutral outline) for `driver: claude-code`. Both appear in the legend row.
 - **Detail panel.** `OrgBoard.tsx` shows `Driver`, `Admits mail from`, `Admitted sender classes`, and `Quarantined (read-only)` with the parser's reason, each only when the row has the field.
 - **Item 9 (guest senders).** No change: `admit_sender_classes` is displayed as stored, and guest senders stay out of claude-code seats until the S8 lease sink.
 
