@@ -247,6 +247,9 @@ interface SubagentReportOptions {
 The notice above is a best-effort push: it survives only while the manager and the parent's inbox are both reachable at the moment the Activation settles. The manager additionally appends an immutable `subagent/settlement` session event to the CHILD's own log — inside the same disposal critical section that computes `terminal.stopReason`, immediately after the epoch's output is captured and before the push is attempted — so the fact that a child settled, and how, survives a lost push, a parent that was never live to receive it, or a parent torn down before delivery. The append happens only for an Activation a caller actually received an id for (`activation.announced`); a materialization rolled back before its first acceptance produces neither event nor notice. An append failure is logged and disposal proceeds regardless — appending must never block teardown.
 
 ```ts
+import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { SubagentResult } from '@deepseek-ai/dsh-subagent'
+
 /** The durable terminal-outcome fact about one continuable subagent child. */
 interface SubagentSettlementData {
   readonly version: number

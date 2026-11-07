@@ -247,6 +247,9 @@ interface SubagentReportOptions {
 上文的通知是一次 best-effort 推送：只有当管理器与 parent 的 inbox 在 Activation 结算的那一刻都仍可达时，它才能送达。管理器还会向 CHILD 自己的日志追加一条不可变的 `subagent/settlement` 会话事件——位于计算 `terminal.stopReason` 的同一个 disposal 关键区段内，紧随该 epoch 的输出被捕获之后、推送尝试之前——因此即便推送丢失、parent 从未在线以接收它，或 parent 在投递前就被拆卸，child 已结算、以及如何结算的事实仍会留存。只有当调用方曾真正拿到过该 Activation 的 id 时（`activation.announced`）才会追加；在首次被接受之前就回滚的物化既不产生事件，也不产生通知。追加失败只会被记录日志，拆卸照常继续——追加绝不能阻塞拆卸。
 
 ```ts
+import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { SubagentResult } from '@deepseek-ai/dsh-subagent'
+
 /** The durable terminal-outcome fact about one continuable subagent child. */
 interface SubagentSettlementData {
   readonly version: number
