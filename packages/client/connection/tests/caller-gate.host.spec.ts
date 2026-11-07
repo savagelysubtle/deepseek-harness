@@ -11,12 +11,11 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { WebServer, WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import {
-  API_PATH, apply, AUTH_EXCHANGE_PATH, CALLER_TOKEN_REQUIRED_MESSAGE, inject,
+  API_PATH, apply, AUTH_EXCHANGE_PATH, CALLER_TOKEN_HEADER, CALLER_TOKEN_REQUIRED_MESSAGE, inject,
   LAUNCH_CODE_REJECTED_MESSAGE, type HostConnectionHandle,
 } from '../src/index.ts'
 
 const HOST = '127.0.0.1:3080'
-const COOKIE_NAME = 'dsh_auth_3080'
 const SECRET_MARKER = 'api-was-reached'
 
 function fakeHttpServer(routes: WebRoute[], upgrades: WebUpgradeRoute[]): Pick<WebServer, 'register' | 'registerUpgrade' | 'tapIndex' | 'port'> {
@@ -133,16 +132,16 @@ const envelope = (method: string, payload: unknown = {}) => ({
 const post = (method: string, extra: Partial<Call> = {}): Call =>
   ({ url: `${API_PATH}/${method}`, body: envelope(method), ...extra })
 
-/** Exchange a fresh launch code the way the browser does; returns the cookie pair to send back. */
+/** Exchange a fresh launch code the way the browser does; returns the token to send back in the `x-dsh-token` header. */
 async function login(r: Rig, host = HOST): Promise<string> {
   const code = r.connection.mintLaunchCode()
   const reply = await r.send({ url: AUTH_EXCHANGE_PATH, body: { code }, headers: { host } })
   expect(reply.status).toBe(200)
-  return reply.headers['set-cookie']!.split(';')[0]!
+  return (JSON.parse(reply.body) as { token: string }).token
 }
 
 describe('/api privileged gate (OP-270)', () => {
-  it('no cookie: 401 with the plain-words body, and the API is never reached', async () => {
+  it('no token: 401 with the plain-words body, and the API is never reached', async () => {
     const r = await rig()
     const reply = await r.send(post('session.stopAll'))
     expect(reply.status).toBe(401)
@@ -153,10 +152,9 @@ describe('/api privileged gate (OP-270)', () => {
 
   it('wrong token, truncated token and over-long token: 401, never a throw', async () => {
     const r = await rig()
-    const good = await login(r)
-    const value = good.slice(good.indexOf('=') + 1)
+    const value = await login(r)
     for (const bad of ['nope', value.slice(0, -1), `${value}x`, 'A'.repeat(5000), '']) {
-      const reply = await r.send(post('session.stopAll', { headers: { cookie: `${COOKIE_NAME}=${bad}` } }))
+      const reply = await r.send(post('session.stopAll', { headers: { [CALLER_TOKEN_HEADER]: bad } }))
       expect([bad.length, reply.status]).toEqual([bad.length, 401])
     }
     expect(r.calls).toEqual([])
@@ -165,54 +163,56 @@ describe('/api privileged gate (OP-270)', () => {
 
   it('a token minted by a previous boot (another instance) is refused', async () => {
     const previous = await rig()
-    const staleCookie = await login(previous)
+    const staleToken = await login(previous)
     await previous.dispose()
     const next = await rig()
-    const reply = await next.send(post('session.stopAll', { headers: { cookie: staleCookie } }))
+    const reply = await next.send(post('session.stopAll', { headers: { [CALLER_TOKEN_HEADER]: staleToken } }))
     expect(reply.status).toBe(401)
     expect(next.calls).toEqual([])
     await next.dispose()
   })
 
-  it('a cookie for a different port does not authenticate this port', async () => {
+  it('the token sent as a cookie (any name) does not authenticate: only the header counts', async () => {
     const r = await rig()
-    const good = await login(r)
-    const value = good.slice(good.indexOf('=') + 1)
-    const reply = await r.send(post('session.stopAll', { headers: { cookie: `dsh_auth_9999=${value}` } }))
-    expect(reply.status).toBe(401)
+    const value = await login(r)
+    for (const name of ['dsh_auth_3080', 'dsh_auth_9999', CALLER_TOKEN_HEADER]) {
+      const reply = await r.send(post('session.stopAll', { headers: { cookie: `${name}=${value}` } }))
+      expect([name, reply.status]).toEqual([name, 401])
+    }
+    expect(r.calls).toEqual([])
     await r.dispose()
   })
 
   it('a non-loopback peer holding a valid token is 403, not 401 and not served', async () => {
     const r = await rig({ trustedHosts: ['10.0.0.1'] })
-    const cookie = await login(r)
+    const token = await login(r)
     for (const peer of ['10.0.0.9', '::ffff:10.0.0.9', '203.0.113.5', '']) {
-      const reply = await r.send(post('session.stopAll', { headers: { cookie }, peer }))
+      const reply = await r.send(post('session.stopAll', { headers: { [CALLER_TOKEN_HEADER]: token }, peer }))
       expect([peer, reply.status]).toEqual([peer, 403])
     }
     // A spoofed loopback Host from a LAN peer is still 403.
-    const spoof = await r.send(post('session.stopAll', { headers: { cookie, host: 'localhost' }, peer: '10.0.0.9' }))
+    const spoof = await r.send(post('session.stopAll', { headers: { [CALLER_TOKEN_HEADER]: token, host: 'localhost' }, peer: '10.0.0.9' }))
     expect(spoof.status).toBe(403)
     expect(r.calls).toEqual([])
     await r.dispose()
   })
 
-  it('a valid cookie with a cross-site Sec-Fetch-Site or a foreign Origin is 403', async () => {
+  it('a valid token with a cross-site Sec-Fetch-Site or a foreign Origin is 403', async () => {
     const r = await rig()
-    const cookie = await login(r)
-    const crossSite = await r.send(post('session.stopAll', { headers: { cookie, 'sec-fetch-site': 'cross-site' } }))
+    const token = await login(r)
+    const crossSite = await r.send(post('session.stopAll', { headers: { [CALLER_TOKEN_HEADER]: token, 'sec-fetch-site': 'cross-site' } }))
     expect(crossSite.status).toBe(403)
-    const foreign = await r.send(post('session.stopAll', { headers: { cookie, origin: 'http://evil.example' } }))
+    const foreign = await r.send(post('session.stopAll', { headers: { [CALLER_TOKEN_HEADER]: token, origin: 'http://evil.example' } }))
     expect(foreign.status).toBe(403)
     expect(r.calls).toEqual([])
     await r.dispose()
   })
 
-  it('positive path: the UI with its cookie succeeds on a privileged method', async () => {
+  it('positive path: the UI with its token succeeds on a privileged method', async () => {
     const r = await rig()
-    const cookie = await login(r)
+    const token = await login(r)
     const reply = await r.send(post('session.stopAll', {
-      headers: { cookie, origin: `http://${HOST}`, 'sec-fetch-site': 'same-origin' },
+      headers: { [CALLER_TOKEN_HEADER]: token, origin: `http://${HOST}`, 'sec-fetch-site': 'same-origin' },
     }))
     expect(reply.status).toBe(200)
     expect(reply.body).toContain(SECRET_MARKER)
@@ -252,8 +252,8 @@ describe('/api privileged gate (OP-270)', () => {
       method: 'GET', url: `${API_PATH}/session.export?sessionId=x`, headers: { host: lan.host }, peer: lan.peer,
     })
     expect(exportNoToken.status).toBe(401)
-    const cookie = await login(r)
-    const withToken = await r.send(post('host.listDirectory', { headers: { cookie }, peer: '127.0.0.1' }))
+    const token = await login(r)
+    const withToken = await r.send(post('host.listDirectory', { headers: { [CALLER_TOKEN_HEADER]: token }, peer: '127.0.0.1' }))
     expect(withToken.status).toBe(200)
     expect(r.calls).toEqual(['host.listDirectory'])
     await r.dispose()
@@ -262,11 +262,10 @@ describe('/api privileged gate (OP-270)', () => {
   it('the privileged-call refusal warns once per window and never prints a token or code', async () => {
     const r = await rig()
     const warn = vi.spyOn(r.ctx.logger, 'warn').mockImplementation(() => undefined)
-    const cookie = await login(r)
-    const token = cookie.slice(cookie.indexOf('=') + 1)
+    const token = await login(r)
     const code = r.connection.mintLaunchCode()
     for (let i = 0; i < 5; i += 1) {
-      await r.send(post('session.stopAll', { headers: { cookie: `${COOKIE_NAME}=wrong-${String(i)}` } }))
+      await r.send(post('session.stopAll', { headers: { [CALLER_TOKEN_HEADER]: `wrong-${String(i)}` } }))
     }
     await r.send({ url: AUTH_EXCHANGE_PATH, body: { code: 'not-a-code' } })
     expect(warn.mock.calls.length).toBeGreaterThanOrEqual(1)
@@ -283,7 +282,7 @@ describe('/api privileged gate (OP-270)', () => {
 describe('/api/respond and founder stamp receive the authenticated fact', () => {
   const answer = { type: 'client-response', rpcId: 'rpc-approval', result: { ok: true, value: { approved: true } } }
 
-  it('without the cookie the real fetch handler reports callerAuthenticated=false and the answer is refused', async () => {
+  it('without the token the real fetch handler reports callerAuthenticated=false and the answer is refused', async () => {
     const r = await rig()
     const reply = await r.send({ url: `${API_PATH}/respond`, body: answer })
     expect(JSON.parse(reply.body)).toMatchObject({ accepted: false })
@@ -291,10 +290,10 @@ describe('/api/respond and founder stamp receive the authenticated fact', () => 
     await r.dispose()
   })
 
-  it('with the cookie the answer is accepted', async () => {
+  it('with the token the answer is accepted', async () => {
     const r = await rig()
-    const cookie = await login(r)
-    const reply = await r.send({ url: `${API_PATH}/respond`, body: answer, headers: { cookie } })
+    const token = await login(r)
+    const reply = await r.send({ url: `${API_PATH}/respond`, body: answer, headers: { [CALLER_TOKEN_HEADER]: token } })
     expect(JSON.parse(reply.body)).toEqual({ accepted: true })
     expect(r.respondSeen).toEqual([{ callerAuthenticated: true, peerIsLoopback: true }])
     await r.dispose()
@@ -302,11 +301,10 @@ describe('/api/respond and founder stamp receive the authenticated fact', () => 
 
   it('a LAN peer with a valid token is NOT authenticated (the token never widens who may call)', async () => {
     const r = await rig({ trustedHosts: ['10.0.0.1'] })
-    const cookie = await login(r)
-    const value = cookie.slice(cookie.indexOf('=') + 1)
+    const token = await login(r)
     const reply = await r.send({
       url: `${API_PATH}/respond`, body: answer, peer: '10.0.0.9',
-      headers: { host: '10.0.0.1:3080', cookie: `${COOKIE_NAME}=${value}` },
+      headers: { host: '10.0.0.1:3080', [CALLER_TOKEN_HEADER]: token },
     })
     expect(JSON.parse(reply.body)).toMatchObject({ accepted: false })
     expect(r.respondSeen).toEqual([{ callerAuthenticated: false, peerIsLoopback: false }])
@@ -322,25 +320,28 @@ describe('/api/respond and founder stamp receive the authenticated fact', () => 
 })
 
 describe('POST /api/auth.exchange', () => {
-  it('a valid code sets exactly the specified cookie and never echoes the token in the body', async () => {
+  it('a valid code returns the token once in the JSON body, uncached, and sets no cookie', async () => {
     const r = await rig()
     const code = r.connection.mintLaunchCode()
     const reply = await r.send({ url: AUTH_EXCHANGE_PATH, body: { code } })
     expect(reply.status).toBe(200)
-    const setCookie = reply.headers['set-cookie']!
-    expect(setCookie).toMatch(new RegExp(`^${COOKIE_NAME}=[A-Za-z0-9_-]{43}; HttpOnly; SameSite=Strict; Path=/$`))
-    const token = setCookie.slice(setCookie.indexOf('=') + 1, setCookie.indexOf(';'))
-    expect(reply.body).not.toContain(token)
+    expect(reply.headers['set-cookie']).toBeUndefined()
+    expect(reply.headers['cache-control']).toBe('no-store')
+    expect(reply.headers['content-type']).toBe('application/json')
+    const parsed = JSON.parse(reply.body) as { ok: boolean; token: string }
+    expect(Object.keys(parsed).sort()).toEqual(['ok', 'token'])
+    expect(parsed.ok).toBe(true)
+    expect(parsed.token).toMatch(/^[A-Za-z0-9_-]{43}$/)
     expect(reply.body).not.toContain(code)
-    expect(JSON.parse(reply.body)).toEqual({ ok: true })
     await r.dispose()
   })
 
-  it('the cookie name follows the Host header port', async () => {
+  it('the token is not tied to the Host port and no cookie is set for any Host', async () => {
     const r = await rig()
     const code = r.connection.mintLaunchCode()
     const reply = await r.send({ url: AUTH_EXCHANGE_PATH, body: { code }, headers: { host: 'localhost:41234' } })
-    expect(reply.headers['set-cookie']).toMatch(/^dsh_auth_41234=/)
+    expect(reply.status).toBe(200)
+    expect(reply.headers['set-cookie']).toBeUndefined()
     await r.dispose()
   })
 
@@ -405,8 +406,7 @@ describe('POST /api/auth.exchange', () => {
 describe('token confidentiality', () => {
   it('the token is absent from process.env and from every other reply surface', async () => {
     const r = await rig()
-    const cookie = await login(r)
-    const token = cookie.slice(cookie.indexOf('=') + 1)
+    const token = await login(r)
     expect(JSON.stringify(process.env)).not.toContain(token)
     for (const call of [
       post('session.list'),

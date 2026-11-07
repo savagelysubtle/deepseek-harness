@@ -21,7 +21,7 @@ export interface FetchHandler {
    * — never derived from a request header, which any client can set freely.
    * `false` wherever the carrier has not established it.
    * @param callerAuthenticated - whether the carrier verified the per-boot caller
-   * token (OP-270) for this request: computed in-process from the auth cookie,
+   * token (OP-270) for this request: computed in-process from the `x-dsh-token` request header,
    * never from a client-asserted flag. Omitted (`false`) wherever the carrier has
    * not verified one, so every handler fails closed on capability-granting paths.
    * @returns complete or streaming Fetch response.

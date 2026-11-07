@@ -1,7 +1,7 @@
-/** OP-270: the in-memory caller token, single-use launch codes, and the cookie helpers. */
+/** OP-270: the in-memory caller token, single-use launch codes, and the token header name. */
 import { describe, expect, it } from 'vitest'
 import {
-  authCookieHeader, authCookieName, createCallerAuth, LAUNCH_CODE_TTL_MS, MAX_PENDING_LAUNCH_CODES, readCookie,
+  CALLER_TOKEN_HEADER, createCallerAuth, LAUNCH_CODE_TTL_MS, MAX_PENDING_LAUNCH_CODES,
 } from '../src/caller-token.ts'
 
 function clock(start = 1_000_000): { now: () => number; advance: (ms: number) => void } {
@@ -85,24 +85,8 @@ describe('createCallerAuth', () => {
   })
 })
 
-describe('cookie helpers', () => {
-  it('names the cookie after the Host port, treating a stripped default port as 80', () => {
-    expect(authCookieName('3080')).toBe('dsh_auth_3080')
-    expect(authCookieName('')).toBe('dsh_auth_80')
-  })
-
-  it('emits exactly HttpOnly; SameSite=Strict; Path=/', () => {
-    expect(authCookieHeader('dsh_auth_3080', 'abc')).toBe('dsh_auth_3080=abc; HttpOnly; SameSite=Strict; Path=/')
-  })
-
-  it('reads an exact-name match from a Cookie header and nothing else', () => {
-    expect(readCookie('a=1; dsh_auth_3080=tok; b=2', 'dsh_auth_3080')).toBe('tok')
-    expect(readCookie('xdsh_auth_3080=bad', 'dsh_auth_3080')).toBeUndefined()
-    expect(readCookie('dsh_auth_3081=other', 'dsh_auth_3080')).toBeUndefined()
-    expect(readCookie('dsh_auth_3080=a=b', 'dsh_auth_3080')).toBe('a=b')
-    expect(readCookie('', 'dsh_auth_3080')).toBeUndefined()
-    expect(readCookie(null, 'dsh_auth_3080')).toBeUndefined()
-    expect(readCookie(undefined, 'dsh_auth_3080')).toBeUndefined()
-    expect(readCookie('dsh_auth_3080', 'dsh_auth_3080')).toBeUndefined()
+describe('token header', () => {
+  it('is the lowercase header name the web client sends', () => {
+    expect(CALLER_TOKEN_HEADER).toBe('x-dsh-token')
   })
 })

@@ -122,47 +122,9 @@ export function createCallerAuth(options: CallerAuthOptions = {}): CallerAuth {
 }
 
 /**
- * Cookie name carrying the caller token, parameterized by the server port so
- * that two instances on one host do not collide. The port comes from the
- * request's Host header; URL parsing strips the default port, so an empty
- * string means 80.
- * @param port - the Host header port, `''` when it is the default.
- * @returns the cookie name, e.g. `dsh_auth_80`.
+ * Request header that carries the per-boot caller token. A header, not a cookie: a cookie is
+ * sent to every port on the host by the browser, so a seat's own dev server on another
+ * loopback port could read and replay it. The page keeps the token in memory and attaches
+ * this header to each `fetch`.
  */
-export function authCookieName(port: string): string {
-  return `dsh_auth_${port === '' ? '80' : port}`
-}
-
-/**
- * Read one cookie value out of a raw `Cookie` header. The header is split on
- * `;`, each pair trimmed, then split at the FIRST `=`; the first pair whose
- * name matches exactly wins. Values are returned verbatim with no decoding,
- * which is correct for the base64url token.
- * @param header - the request's `Cookie` header, or null/undefined when absent.
- * @param name - the exact cookie name to find.
- * @returns the first matching value, or undefined for an absent or empty
- * header or when no pair matches.
- */
-export function readCookie(header: string | null | undefined, name: string): string | undefined {
-  if (header === null || header === undefined || header === '') return undefined
-  for (const piece of header.split(';')) {
-    const pair = piece.trim()
-    const separator = pair.indexOf('=')
-    if (separator < 0) continue
-    if (pair.slice(0, separator) === name) return pair.slice(separator + 1)
-  }
-  return undefined
-}
-
-/**
- * Serialize the caller-token cookie for a `Set-Cookie` header, with exactly
- * the attributes `HttpOnly; SameSite=Strict; Path=/`, in this order. No
- * `Secure`, because the server is plain HTTP on loopback/LAN; no `Max-Age`,
- * because the cookie is a session cookie that dies with the browser.
- * @param name - cookie name from {@link authCookieName}.
- * @param token - the per-boot caller token to hand to the browser.
- * @returns the full `Set-Cookie` value.
- */
-export function authCookieHeader(name: string, token: string): string {
-  return `${name}=${token}; HttpOnly; SameSite=Strict; Path=/`
-}
+export const CALLER_TOKEN_HEADER = 'x-dsh-token'

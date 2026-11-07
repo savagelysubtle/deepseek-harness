@@ -59,8 +59,9 @@ export class HostConnectionService extends Service implements HostConnectionHand
 
   /**
    * Mint one single-use launch code (valid 10 minutes) that the browser exchanges
-   * once at `/api/auth.exchange` for the per-boot token cookie. The launcher prints
-   * `http://127.0.0.1:<port>/#dsh-boot=<code>` from this; the code must not enter any env var.
+   * once at `/api/auth.exchange` for the per-boot token (returned in the reply body, then sent
+   * in the `x-dsh-token` header). The launcher prints `http://127.0.0.1:<port>/#dsh-boot=<code>`
+   * from this; the code must not enter any env var.
    * @returns the plaintext launch code.
    */
   mintLaunchCode(): string {

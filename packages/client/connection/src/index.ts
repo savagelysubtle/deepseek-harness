@@ -7,7 +7,7 @@ import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
 import { API_PATH, HOST_EVENTS_PATH, MUX_EVENTS_PATH } from './api-path.ts'
 import { bridge, DEFAULT_MAX_REQUEST_BODY_BYTES, type FetchHandler } from './http-bridge.ts'
-import { authCookieHeader, authCookieName, readCookie } from './caller-token.ts'
+import { CALLER_TOKEN_HEADER } from './caller-token.ts'
 import { assertTrustedAuthority, isTrustedApiRequest } from './api-request-trust.ts'
 import { isLoopbackAddress } from './loopback-hostname.ts'
 import { HostConnectionService } from './rpc-host.ts'
@@ -25,11 +25,11 @@ export { HostConnectionService } from './rpc-host.ts'
 
 export { API_PATH, HOST_EVENTS_PATH, MUX_EVENTS_PATH } from './api-path.ts'
 export {
-  authCookieHeader, authCookieName, createCallerAuth, LAUNCH_CODE_TTL_MS, readCookie,
+  CALLER_TOKEN_HEADER, createCallerAuth, LAUNCH_CODE_TTL_MS,
   type CallerAuth, type CallerAuthOptions,
 } from './caller-token.ts'
 
-/** Loopback-only POST that trades a single-use launch code for the per-boot token cookie (OP-270). */
+/** Loopback-only POST that trades a single-use launch code for the per-boot token (OP-270). */
 export const AUTH_EXCHANGE_PATH = `${API_PATH}/auth.exchange`
 
 /** 401 body for a privileged call without a valid per-boot token: plain words, no token value. */
@@ -193,7 +193,7 @@ const PRIVILEGED_METHODS = new Set([
  * the same `trustedHosts` Host fence as before, and a valid token is added on top (OP-270). Both
  * read the host filesystem (`host.listDirectory` lists any directory, `session.export` downloads a
  * session log). The token is only ever issued to a loopback browser, so in practice a LAN client
- * (no cookie) is refused with 401 here; the token never widens who may call.
+ * (no token header) is refused with 401 here; the token never widens who may call.
  */
 const TOKEN_REQUIRED_METHODS = new Set([
   'session.export',
@@ -321,17 +321,10 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
   })
 }
 
-/** The per-boot token the request carries in its `dsh_auth_<port>` cookie, or undefined. */
+/** The per-boot token the request carries in its `x-dsh-token` header, or undefined when absent or empty. */
 function requestToken(request: Request): string | undefined {
-  const host = request.headers.get('host')
-  if (host === null) return undefined
-  let port: string
-  try {
-    port = new URL(`http://${host}`).port
-  } catch {
-    return undefined
-  }
-  return readCookie(request.headers.get('cookie'), authCookieName(port))
+  const value = request.headers.get(CALLER_TOKEN_HEADER)
+  return value === null || value === '' ? undefined : value
 }
 
 function tokenRequiredResponse(): Response {
@@ -342,9 +335,10 @@ function tokenRequiredResponse(): Response {
 }
 
 /**
- * `POST /api/auth.exchange`: trade a single-use launch code for the per-boot token cookie.
- * Loopback peer and loopback Host only (403 otherwise); the token travels only in `Set-Cookie`,
- * never in the body.
+ * `POST /api/auth.exchange`: trade a single-use launch code for the per-boot token.
+ * Loopback peer and loopback Host only (403 otherwise). The token is returned once, in the JSON
+ * body of the 200 reply (`no-store`, no cookie); the page keeps it in memory and sends it back
+ * in the `x-dsh-token` header.
  */
 async function exchangeLaunchCode(
   request: Request,
@@ -371,14 +365,11 @@ async function exchangeLaunchCode(
       headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
     })
   }
-  // isTrustedApiRequest above proved a Host header exists and parses.
-  const port = new URL(`http://${request.headers.get('host') ?? ''}`).port
-  return new Response(JSON.stringify({ ok: true }), {
+  return new Response(JSON.stringify({ ok: true, token }), {
     status: 200,
     headers: {
       'content-type': 'application/json',
       'cache-control': 'no-store',
-      'set-cookie': authCookieHeader(authCookieName(port), token),
     },
   })
 }
