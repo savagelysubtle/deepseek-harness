@@ -10,7 +10,7 @@
 
 ## 决定
 
-`org.write`（`packages/host/apiproxy/src/api-proxy.ts`）同样拒绝省略了磁盘上驱动为 `claude-code` 的行的文档。拒绝代码为 `org-registry-rejected`，消息以 `org-registry-driver-seat-removed:` 开头，指出席位名、说明磁盘行保存着驱动设置且邮箱与会话与名字绑定，并给出解决办法：手工编辑注册表文件并重启主机。不会写入任何内容。普通的默认循环席位仍可从看板删除。
+`org.write`（`packages/host/apiproxy/src/api-proxy.ts`）同样拒绝省略了磁盘上驱动为 `claude-code` 的行的文档。拒绝代码为 `org-registry-rejected`，消息以 `org-registry-driver-seat-removed:` 开头，指出席位名、说明看板无法重建磁盘上的驱动设置，并给出解决办法：手工编辑注册表文件并重启主机。不会写入任何内容。普通的默认循环席位仍可从看板删除。
 
 ## 曾考虑的替代方案
 

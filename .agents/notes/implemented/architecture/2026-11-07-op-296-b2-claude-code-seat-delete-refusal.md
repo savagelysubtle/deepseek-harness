@@ -10,7 +10,7 @@ English | [中文](2026-11-07-op-296-b2-claude-code-seat-delete-refusal.zh.md)
 
 ## Decision
 
-`org.write` (`packages/host/apiproxy/src/api-proxy.ts`) also refuses a document that omits an on-disk row whose driver is `claude-code`. The refusal code is `org-registry-rejected` with a message starting `org-registry-driver-seat-removed:`. It names the seat, says the on-disk row carries the driver settings and the mailbox and session are tied to the name, and gives the remedy: edit the registry file by hand and restart the host. Nothing is written. Ordinary default-loop seats can still be deleted from the board.
+`org.write` (`packages/host/apiproxy/src/api-proxy.ts`) also refuses a document that omits an on-disk row whose driver is `claude-code`. The refusal code is `org-registry-rejected` with a message starting `org-registry-driver-seat-removed:`. It names the seat, says the board cannot recreate the on-disk driver settings, and gives the remedy: edit the registry file by hand and restart the host. Nothing is written. Ordinary default-loop seats can still be deleted from the board.
 
 ## Alternatives considered
 

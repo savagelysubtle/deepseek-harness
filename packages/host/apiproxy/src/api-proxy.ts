@@ -3723,8 +3723,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
               details: {},
             })
           }
-          // A deletion, or a rename (which reaches the host as a delete plus an add), of a claude-code seat would pass the
-          // dropped-driver check above because that check only looks at rows still present under the same name.
+          // The dropped-driver check above covers only rows kept under the same name. A rename reaches the host as a
+          // delete plus an add, so an absent on-disk claude-code row covers both deletion and rename.
           const removed = Object.entries(onDisk.seats)
             .filter(([name, seat]) => seat.driver === 'claude-code' && !Object.hasOwn(document.seats, name))
             .map(([name]) => JSON.stringify(name))
@@ -3732,7 +3732,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             return err(request, {
               code: 'org-registry-rejected',
               message: `org-registry-driver-seat-removed: seat ${removed.join(', ')} runs the claude-code driver and the incoming document deletes or renames it; `
-                + 'a claude-code seat cannot be deleted or renamed from the board because its on-disk row carries the driver settings and its mailbox and session are tied to the name; '
+                + 'the board cannot delete or rename a claude-code seat because it cannot recreate the on-disk driver settings; '
                 + 'to remove or rename it, edit the registry file by hand and restart the host',
               details: {},
             })
