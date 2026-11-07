@@ -966,7 +966,7 @@ export interface Config {
 export type OutputFormat = 'text' | 'json'
 ```
 
-Source: [`packages/bundle/headless/src/index.ts:55`](../packages/bundle/headless/src/index.ts)
+Source: [`packages/bundle/headless/src/index.ts:56`](../packages/bundle/headless/src/index.ts)
 
 <a id="deepseek-aidsh-hooks-claude-code"></a>
 

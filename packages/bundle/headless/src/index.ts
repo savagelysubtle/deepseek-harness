@@ -20,6 +20,7 @@ import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type { AgentSetup, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { recordedSeatDriver } from '@deepseek-ai/dsh-mailbox'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
@@ -305,6 +306,18 @@ async function run(ctx: Context, config: Config, io: HeadlessIo): Promise<void> 
       // Metadata-only existence probe: only a genuinely absent log falls back
       // to first creation; corruption and backend failures stay loud via resume.
       persisted = (await persistence.list()).some(header => header.id === spec.sessionId)
+      // The default agent loop never drives another driver's log: a Claude
+      // Code seat's named log would resume here under the wrong driver. Refuse
+      // before resume; the throw releases the lock in `finally`.
+      if (persisted) {
+        const recorded = recordedSeatDriver((await persistence.inspect(spec.sessionId)).events)
+        if (recorded !== undefined && recorded !== 'default') {
+          throw new Error(
+            `headless-runner: session "${spec.sessionId}" holds "${recorded}" driver history and cannot be `
+            + 'resumed by the default agent loop; a seat driven by another driver is reachable only through its own mail route',
+          )
+        }
+      }
     }
     const sessionId = spec.kind === 'named' ? spec.sessionId : SessionId(`session-${randomUUID()}`)
     const { agent } = persisted

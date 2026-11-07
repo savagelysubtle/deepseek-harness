@@ -38,6 +38,8 @@ interface Script {
   afterPrompt(session: Session, message: UserMessage): Promise<void> | void
   /** Session ids the stand-in persistence backend reports as materialized. */
   persisted?: SessionId[]
+  /** Events the stand-in backend's `inspect` returns for a persisted id (default: none). */
+  persistedEvents?: Array<{ type: string }>
   /** When true, `agents.create` rejects instead of building an Agent. */
   createRejects?: string | undefined
   /** When set, `agents.resume` rejects instead of building an Agent. */
@@ -141,6 +143,7 @@ async function bench(script: Script): Promise<{
   })
   ctx.provide('sessionPersistence', {
     list: async () => (script.persisted ?? []).map(id => ({ id })),
+    inspect: async (id: SessionId) => ({ meta: { id }, events: script.persistedEvents ?? [] }),
   } as never)
   return {
     ctx,
@@ -409,6 +412,54 @@ describe('headless named sessions', () => {
       part: { type: 'text', text: 'joined blocks' },
     })
     expect(result.out).not.toContain('pre-task noise')
+    await test.ctx.fiber.dispose()
+  })
+
+  it('refuses a persisted claude-code log: no resume, no create, lock released', async () => {
+    useTempHome()
+    const id = deriveNamedSessionId('seat')
+    const test = await bench({
+      persisted: [id],
+      persistedEvents: [{ type: 'claude-code/session-bound' }, { type: 'assistant/message' }],
+      afterPrompt(session, message) { appendTurn(session, 1, message, 'must not run', true) },
+    })
+    const result = await test.run({ sessionName: 'seat' })
+    expect(result.code).toBe(1)
+    expect(result.err).toContain('"claude-code" driver history')
+    expect(result.err).toContain('reachable only through its own mail route')
+    expect(test.resumed).toEqual([])
+    expect(test.created).toEqual([])
+    expect(result.out).toBe('')
+    expect(existsSync(namedLockPath('seat'))).toBe(false)
+  })
+
+  it('refuses a persisted log that mixes both drivers', async () => {
+    useTempHome()
+    const id = deriveNamedSessionId('mixed-seat')
+    const test = await bench({
+      persisted: [id],
+      persistedEvents: [{ type: 'claude-code/session-bound' }, { type: 'request/header' }],
+      afterPrompt() {},
+    })
+    const result = await test.run({ sessionName: 'mixed-seat' })
+    expect(result.code).toBe(1)
+    expect(result.err).toContain('"mixed" driver history')
+    expect(test.resumed).toEqual([])
+    expect(existsSync(namedLockPath('mixed-seat'))).toBe(false)
+  })
+
+  it('still resumes a persisted default-driver log', async () => {
+    useTempHome()
+    const id = deriveNamedSessionId('default-seat')
+    const test = await bench({
+      persisted: [id],
+      persistedEvents: [{ type: 'request/header' }, { type: 'assistant/message' }],
+      afterPrompt(session, message) { appendTurn(session, 1, message, 'resumed fine', true) },
+    })
+    const result = await test.run({ sessionName: 'default-seat' })
+    expect(result.code).toBe(0)
+    expect(test.resumed).toEqual([id])
+    expect(result.out).toBe('resumed fine\n')
     await test.ctx.fiber.dispose()
   })
 
