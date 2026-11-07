@@ -104,6 +104,13 @@ describe('createCallerAuthClient', () => {
     expect(listener).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps the host\'s own refusal text when a later request also gets 401', async () => {
+    const auth = createCallerAuthClient(env('#dsh-boot=bad', vi.fn(async () => new Response('launch code is not valid', { status: 401 }))).e)
+    await auth.ready
+    auth.noteResponse(new Response('x', { status: 401 }))
+    expect(auth.getMessage()).toBe('launch code is not valid')
+  })
+
   it('contains a throwing listener', async () => {
     const auth = createCallerAuthClient(env('#dsh-boot=c', okToken('t')).e)
     await auth.ready

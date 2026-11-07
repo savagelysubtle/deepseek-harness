@@ -162,7 +162,8 @@ export function createCallerAuthClient(env: CallerAuthEnv): CallerAuthClient {
       return { ...init, headers }
     },
     noteResponse(response) {
-      if (response.status === 401) publish('rejected', STALE_TOKEN_MESSAGE)
+      // A refusal already on screen (for example the host's launch-code message) is more specific than this one.
+      if (response.status === 401 && state !== 'rejected') publish('rejected', STALE_TOKEN_MESSAGE)
     },
   }
 }
