@@ -47,6 +47,11 @@ switch (invocation.mode) {
     process.exit(await runOwners({ path: invocation.path, overlaps: invocation.overlaps }))
     break
   }
+  case 'open': {
+    const { runOpen } = await import('./open.ts')
+    process.exit(await runOpen({ port: invocation.port }))
+    break
+  }
   case 'dump-config': {
     const { runDumpConfig } = await import('./dump-config.ts')
     runDumpConfig(invocation.profile, invocation.defaultOnly, invocation.patches)

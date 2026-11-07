@@ -11,7 +11,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { WebServer, WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import {
-  API_PATH, apply, AUTH_EXCHANGE_PATH, CALLER_TOKEN_HEADER, CALLER_TOKEN_REQUIRED_MESSAGE, inject,
+  API_PATH, apply, AUTH_EXCHANGE_PATH, AUTH_RELINK_PATH, RELINK_KEY_HEADER, CALLER_TOKEN_HEADER, CALLER_TOKEN_REQUIRED_MESSAGE, inject,
   LAUNCH_CODE_REJECTED_MESSAGE, type HostConnectionHandle,
 } from '../src/index.ts'
 
@@ -272,6 +272,28 @@ describe('/api privileged gate (OP-270)', () => {
       // The rig has no handler behind these names (404); what matters is that the gate let it through.
       expect([method, allowed.status === 401 || allowed.status === 403]).toEqual([method, false])
     }
+    await r.dispose()
+  })
+
+  it('/api/auth.relink hands a fresh single-use code only for this boot\'s relink key, from loopback', async () => {
+    const r = await rig({ trustedHosts: ['10.0.0.1'] })
+    const key = (r.connection as unknown as { relinkKey(): string }).relinkKey()
+    const wrong = await r.send({ url: AUTH_RELINK_PATH, body: {}, headers: { [RELINK_KEY_HEADER]: 'nope' } })
+    expect(wrong.status).toBe(401)
+    expect(wrong.body).not.toContain(key)
+    const missing = await r.send({ url: AUTH_RELINK_PATH, body: {} })
+    expect(missing.status).toBe(401)
+    const lan = await r.send({ url: AUTH_RELINK_PATH, body: {}, headers: { [RELINK_KEY_HEADER]: key, host: '10.0.0.1:3080' }, peer: '10.0.0.9' })
+    expect(lan.status).toBe(403)
+    const get = await r.send({ method: 'GET', url: AUTH_RELINK_PATH, headers: { [RELINK_KEY_HEADER]: key } })
+    expect(get.status).toBe(405)
+    const ok = await r.send({ url: AUTH_RELINK_PATH, body: {}, headers: { [RELINK_KEY_HEADER]: key } })
+    expect(ok.status).toBe(200)
+    const { code } = JSON.parse(ok.body) as { ok: boolean; code: string }
+    const exchanged = await r.send({ url: AUTH_EXCHANGE_PATH, body: { code }, headers: { host: HOST } })
+    expect(exchanged.status).toBe(200)
+    const replay = await r.send({ url: AUTH_EXCHANGE_PATH, body: { code }, headers: { host: HOST } })
+    expect(replay.status).toBe(401)
     await r.dispose()
   })
 

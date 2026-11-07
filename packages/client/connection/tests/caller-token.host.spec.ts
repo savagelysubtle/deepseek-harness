@@ -89,4 +89,15 @@ describe('token header', () => {
   it('is the lowercase header name the web client sends', () => {
     expect(CALLER_TOKEN_HEADER).toBe('x-dsh-token')
   })
+
+  it('checks the relink key in constant time and never confuses it with the token', () => {
+    const auth = createCallerAuth()
+    const key = auth.relinkKey()
+    expect(key.length).toBeGreaterThan(30)
+    expect(auth.verifyRelinkKey(key)).toBe(true)
+    expect(auth.verifyRelinkKey(`${key}x`)).toBe(false)
+    expect(auth.verifyRelinkKey(undefined)).toBe(false)
+    expect(auth.verifyRelinkKey(auth.exchange(auth.mintLaunchCode()))).toBe(false)
+    expect(createCallerAuth().verifyRelinkKey(key)).toBe(false)
+  })
 })

@@ -62,6 +62,12 @@ export interface HostConnectionHandle {
    * @returns the plaintext launch code; never log it outside the launcher's own printed URL.
    */
   mintLaunchCode(): string
+  /**
+   * This boot's relink key, which the launcher writes to a 0600 file so `dsh open` can ask for a
+   * fresh launch code after the first expired (OP-270).
+   * @returns the plaintext key; never print or log it.
+   */
+  relinkKey(): string
 }
 
 /** Client caller for logical RPC channels carried by the current transport. */

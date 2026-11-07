@@ -5,7 +5,7 @@
  * runtime's bind-dependent LAN snapshot.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -159,16 +159,21 @@ describe('web-app runtime glue', () => {
     const runtimeDir = mkdtempSync(join(tmpdir(), 'dsh-web-access-'))
     vi.stubEnv('XDG_RUNTIME_DIR', runtimeDir)
     const mint = vi.fn(() => 'code-xyz')
+    let keyWhileRunning: { text: string; mode: number } | undefined
+    let keyAfterStop = true
     const boot = async (isTTY: boolean): Promise<string[]> => {
       Object.defineProperty(process.stdout, 'isTTY', { value: isTTY, configurable: true })
       const ctx = new Context()
       ctx.provide('webServer', fakeHttpServer().server)
-      ctx.provide('connection', { mintLaunchCode: mint } as never)
+      ctx.provide('connection', { mintLaunchCode: mint, relinkKey: () => 'relink-key-1' } as never)
       const log = vi.spyOn(console, 'log').mockImplementation(() => {})
       apply(ctx, new Config({ printUrl: true, surfaceContext: true, trustedHosts: [] }))
       await new Promise(resolve => setTimeout(resolve, 0))
       const lines = log.mock.calls.map(call => String(call[0]))
+      const keyFile = join(runtimeDir, 'dsh-web-relink-4567.key')
+      keyWhileRunning = existsSync(keyFile) ? { text: readFileSync(keyFile, 'utf8'), mode: statSync(keyFile).mode & 0o777 } : undefined
       await ctx.fiber.dispose()
+      keyAfterStop = existsSync(keyFile)
       return lines
     }
     try {
@@ -179,9 +184,12 @@ describe('web-app runtime glue', () => {
       const piped = await boot(false)
       expect(piped.join('\n')).not.toContain('code-xyz')
       const file = join(runtimeDir, 'dsh-web-access-4567.url')
-      expect(piped).toContain(`dsh web access link written to ${file} (one use, valid 10 minutes)`)
+      expect(piped).toContain(`dsh web access link written to ${file} (one use, valid 10 minutes; later: dsh open)`)
       expect(readFileSync(file, 'utf8')).toBe('http://127.0.0.1:4567/#dsh-boot=code-xyz\n')
       expect(statSync(file).mode & 0o777).toBe(0o600)
+      expect(keyWhileRunning).toEqual({ text: 'relink-key-1\n', mode: 0o600 })
+      expect(keyAfterStop).toBe(false)
+      expect(piped.join('\n')).not.toContain('relink-key-1')
       vi.restoreAllMocks()
       vi.stubEnv('XDG_RUNTIME_DIR', '')
       const unset = await boot(false)
@@ -198,7 +206,7 @@ describe('web-app runtime glue', () => {
     stageDist()
     const ctx = new Context()
     ctx.provide('webServer', fakeHttpServer().server)
-    ctx.provide('connection', { mintLaunchCode: () => 'code-secret' } as never)
+    ctx.provide('connection', { mintLaunchCode: () => 'code-secret', relinkKey: () => 'relink-secret' } as never)
     const contributions: BashContribution[] = []
     ctx.provide('shellEnv', {
       register: (contribution: BashContribution) => { contributions.push(contribution); return () => {} },

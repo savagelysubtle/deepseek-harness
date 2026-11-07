@@ -68,6 +68,11 @@ export class HostConnectionService extends Service implements HostConnectionHand
     return this.callerAuth.mintLaunchCode()
   }
 
+  /** @inheritdoc */
+  relinkKey(): string {
+    return this.callerAuth.relinkKey()
+  }
+
   /** Generic channel registry scoped to the Context reading this service. */
   get rpc(): HostConnectionRpc {
     const owner = this.ctx

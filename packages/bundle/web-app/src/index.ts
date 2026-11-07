@@ -31,6 +31,13 @@ export const name = 'web-app'
 /** This dsh installation's root, from either this package's source or built entry. */
 const SOURCE_ROOT = fileURLToPath(new URL('../../../..', import.meta.url))
 
+export { AUTH_RELINK_PATH, RELINK_KEY_HEADER } from '@deepseek-ai/dsh-client-connection'
+
+/** Relink-key file name parts (`dsh-web-relink-<port>.key`); `dsh open` finds the file by this pattern. */
+export const RELINK_KEY_FILE_PREFIX = 'dsh-web-relink-'
+/** Suffix of the relink-key file name. */
+export const RELINK_KEY_FILE_SUFFIX = '.key'
+
 /** Runtime service that releases Web rows after bind-dependent values resolve. */
 const WEB_RUNTIME_SERVICE = 'webRuntime'
 
@@ -127,20 +134,37 @@ function localWebUrl(ctx: Context): string {
 function announceAccessLink(ctx: Context): void {
   const connection = ctx.get('connection')
   if (connection === undefined) return
+  const port = ctx.webServer.port
+  const directory = process.env['XDG_RUNTIME_DIR']
+  const hasDirectory = directory !== undefined && directory !== ''
+  if (hasDirectory) {
+    // `dsh open` reads this key to ask the running host for a fresh link; removed when the host stops.
+    const keyFile = join(directory, `${RELINK_KEY_FILE_PREFIX}${String(port)}${RELINK_KEY_FILE_SUFFIX}`)
+    writePrivateFile(keyFile, `${connection.relinkKey()}\n`)
+    ctx.effect(() => () => { rmSync(keyFile, { force: true }) }, 'web-app: relink key file')
+  }
   const link = `${localWebUrl(ctx)}/#dsh-boot=${connection.mintLaunchCode()}`
   if (process.stdout.isTTY) {
     console.log(`dsh web access link (one use, valid 10 minutes): ${link}`)
     return
   }
-  const directory = process.env['XDG_RUNTIME_DIR']
-  if (directory === undefined || directory === '') {
+  if (!hasDirectory) {
     console.log('dsh web access link not written: stdout is not a terminal and XDG_RUNTIME_DIR is unset; restart from a terminal to get the link')
     return
   }
-  const file = join(directory, `dsh-web-access-${String(ctx.webServer.port)}.url`)
+  const file = join(directory, `dsh-web-access-${String(port)}.url`)
+  writePrivateFile(file, `${link}\n`)
+  console.log(`dsh web access link written to ${file} (one use, valid 10 minutes; later: dsh open)`)
+}
+
+/**
+ * Write a secret file readable only by this user, replacing any earlier file at the path.
+ * @param file - destination path.
+ * @param text - file content.
+ */
+function writePrivateFile(file: string, text: string): void {
   rmSync(file, { force: true })
-  writeFileSync(file, `${link}\n`, { mode: 0o600, flag: 'wx' })
-  console.log(`dsh web access link written to ${file} (one use, valid 10 minutes)`)
+  writeFileSync(file, text, { mode: 0o600, flag: 'wx' })
 }
 
 /** Dist location is workspace knowledge of this bundle: resolved through the frontend package exports, not configured. */

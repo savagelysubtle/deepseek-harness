@@ -52,6 +52,18 @@ export interface CallerAuth {
    */
   mintLaunchCode(): string
   /**
+   * This boot's relink key: the secret `dsh open` presents to `/api/auth.relink` to obtain a
+   * fresh launch code after the first one expired. The web launcher writes it to a 0600 file.
+   * @returns the plaintext key.
+   */
+  relinkKey(): string
+  /**
+   * Check a presented relink key against this boot's key in constant time.
+   * @param key - the presented key; any non-string is rejected.
+   * @returns true only for this boot's exact key.
+   */
+  verifyRelinkKey(key: unknown): boolean
+  /**
    * Exchange a launch code for the per-boot caller token. Single use: the
    * code is consumed even when it turns out to be expired.
    * @param code - the plaintext code as presented; any non-string is rejected.
@@ -85,6 +97,9 @@ export function createCallerAuth(options: CallerAuthOptions = {}): CallerAuth {
   const callerToken = randomBytes(32).toString('base64url')
   const callerTokenDigest = createHash('sha256').update(callerToken, 'utf8').digest()
 
+  const relinkKey = randomBytes(32).toString('base64url')
+  const relinkKeyDigest = createHash('sha256').update(relinkKey, 'utf8').digest()
+
   // sha256 hex digest of a pending code -> absolute expiry; insertion order = mint order.
   const pending = new Map<string, number>()
 
@@ -114,6 +129,11 @@ export function createCallerAuth(options: CallerAuthOptions = {}): CallerAuth {
       if (expiry <= now()) return undefined
       return callerToken
     },
+    relinkKey: () => relinkKey,
+    verifyRelinkKey(key: unknown): boolean {
+      if (typeof key !== 'string') return false
+      return timingSafeEqual(createHash('sha256').update(key, 'utf8').digest(), relinkKeyDigest)
+    },
     verify(token: unknown): boolean {
       if (typeof token !== 'string') return false
       return timingSafeEqual(createHash('sha256').update(token, 'utf8').digest(), callerTokenDigest)
@@ -121,4 +141,4 @@ export function createCallerAuth(options: CallerAuthOptions = {}): CallerAuth {
   }
 }
 
-export { CALLER_TOKEN_HEADER } from './caller-token-header.ts'
+export { CALLER_TOKEN_HEADER, RELINK_KEY_HEADER } from './caller-token-header.ts'

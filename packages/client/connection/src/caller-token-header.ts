@@ -5,3 +5,6 @@
  * this header to each `fetch`. Browser-safe: shared by the host gate and the page.
  */
 export const CALLER_TOKEN_HEADER = 'x-dsh-token'
+
+/** Request header that carries the relink key to `/api/auth.relink` (`dsh open`). */
+export const RELINK_KEY_HEADER = 'x-dsh-relink'

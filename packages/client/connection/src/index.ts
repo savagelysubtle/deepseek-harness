@@ -8,6 +8,7 @@ import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
 import { API_PATH, HOST_EVENTS_PATH, MUX_EVENTS_PATH } from './api-path.ts'
 import { bridge, DEFAULT_MAX_REQUEST_BODY_BYTES, type FetchHandler } from './http-bridge.ts'
 import { CALLER_TOKEN_HEADER } from './caller-token.ts'
+import { RELINK_KEY_HEADER } from './caller-token-header.ts'
 import { assertTrustedAuthority, isTrustedApiRequest } from './api-request-trust.ts'
 import { isLoopbackAddress } from './loopback-hostname.ts'
 import { HostConnectionService } from './rpc-host.ts'
@@ -25,16 +26,23 @@ export { HostConnectionService } from './rpc-host.ts'
 
 export { API_PATH, HOST_EVENTS_PATH, MUX_EVENTS_PATH } from './api-path.ts'
 export {
-  CALLER_TOKEN_HEADER, createCallerAuth, LAUNCH_CODE_TTL_MS,
+  CALLER_TOKEN_HEADER, createCallerAuth, LAUNCH_CODE_TTL_MS, RELINK_KEY_HEADER,
   type CallerAuth, type CallerAuthOptions,
 } from './caller-token.ts'
 
 /** Loopback-only POST that trades a single-use launch code for the per-boot token (OP-270). */
 export const AUTH_EXCHANGE_PATH = `${API_PATH}/auth.exchange`
 
+/** Endpoint where `dsh open` trades the relink key for a fresh launch code. */
+export const AUTH_RELINK_PATH = `${API_PATH}/auth.relink`
+
 /** 401 body for a privileged call without a valid per-boot token: plain words, no token value. */
 export const CALLER_TOKEN_REQUIRED_MESSAGE =
   'dsh: this action needs the per-boot token. Reopen dsh from the launcher link (a token from a previous boot stops working).'
+
+/** Plain-words 401 body for a refused relink. */
+export const RELINK_REJECTED_MESSAGE =
+  'The relink key is missing or belongs to another start of dsh. Run dsh open on the machine that runs this host, after it started.'
 
 /** 401 body for a launch code that is wrong, already used, or older than its lifetime. */
 export const LAUNCH_CODE_REJECTED_MESSAGE =
@@ -264,6 +272,11 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
   const fetchHandler: FetchHandler = {
     async fetch(request, peerIsLoopback) {
       const pathname = new URL(request.url).pathname
+      if (pathname === AUTH_RELINK_PATH) {
+        return relinkLaunchCode(
+          request, peerIsLoopback, key => callerAuth.verifyRelinkKey(key), () => callerAuth.mintLaunchCode(), warnRefusal,
+        )
+      }
       if (pathname === AUTH_EXCHANGE_PATH) {
         return exchangeLaunchCode(request, peerIsLoopback, code => callerAuth.exchange(code), warnRefusal)
       }
@@ -352,6 +365,38 @@ function tokenRequiredResponse(): Response {
  * body of the 200 reply (`no-store`, no cookie); the page keeps it in memory and sends it back
  * in the `x-dsh-token` header.
  */
+/**
+ * `POST /api/auth.relink`: a loopback caller that presents this boot's relink key (read from the
+ * 0600 file the launcher wrote) receives a fresh single-use launch code. Used by `dsh open`.
+ * @param request - incoming request.
+ * @param peerIsLoopback - raw socket peer is loopback.
+ * @param verifyKey - constant-time relink-key check.
+ * @param mint - mints one launch code.
+ * @param warnRefusal - rate-limited refusal logger.
+ * @returns the JSON `{ok:true, code}` reply, or a refusal.
+ */
+function relinkLaunchCode(
+  request: Request,
+  peerIsLoopback: boolean,
+  verifyKey: (key: unknown) => boolean,
+  mint: () => string,
+  warnRefusal: (what: string) => void,
+): Response {
+  if (!peerIsLoopback || !isTrustedApiRequest(request, [])) return new Response('forbidden', { status: 403 })
+  if (request.method !== 'POST') return new Response('method not allowed', { status: 405, headers: { allow: 'POST' } })
+  if (!verifyKey(request.headers.get(RELINK_KEY_HEADER) ?? undefined)) {
+    warnRefusal('relink: missing or wrong relink key')
+    return new Response(RELINK_REJECTED_MESSAGE, {
+      status: 401,
+      headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+    })
+  }
+  return new Response(JSON.stringify({ ok: true, code: mint() }), {
+    status: 200,
+    headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
+  })
+}
+
 async function exchangeLaunchCode(
   request: Request,
   peerIsLoopback: boolean,
