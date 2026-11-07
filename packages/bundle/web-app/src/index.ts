@@ -10,8 +10,10 @@
  * @module @deepseek-ai/dsh-web-app
  */
 
+import { rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { networkInterfaces } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -19,6 +21,7 @@ import { addHarnessSourceSection } from '@deepseek-ai/dsh-app-boot'
 import * as FrontendStatic from '@deepseek-ai/dsh-host-frontend-static'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-shell-env'
 
@@ -27,6 +30,13 @@ export const name = 'web-app'
 
 /** This dsh installation's root, from either this package's source or built entry. */
 const SOURCE_ROOT = fileURLToPath(new URL('../../../..', import.meta.url))
+
+export { AUTH_RELINK_PATH, RELINK_KEY_HEADER } from '@deepseek-ai/dsh-client-connection'
+
+/** Relink-key file name parts (`dsh-web-relink-<port>.key`); `dsh open` finds the file by this pattern. */
+export const RELINK_KEY_FILE_PREFIX = 'dsh-web-relink-'
+/** Suffix of the relink-key file name. */
+export const RELINK_KEY_FILE_SUFFIX = '.key'
 
 /** Runtime service that releases Web rows after bind-dependent values resolve. */
 const WEB_RUNTIME_SERVICE = 'webRuntime'
@@ -112,6 +122,51 @@ function localWebUrl(ctx: Context): string {
   return `http://${LOOPBACK_HOST}:${String(port)}`
 }
 
+/**
+ * Hand the operator the one-use launch link (OP-270) that opens the page with its per-boot caller
+ * token. The code is secret: it is not part of {@link localWebUrl}, never enters `DSH_WEB_URL` or
+ * the surface prompt (both reach the agent's environment), and is printed only to an interactive
+ * terminal. A non-interactive start writes the link to a 0600 file under `$XDG_RUNTIME_DIR`
+ * and prints only that path; without `XDG_RUNTIME_DIR` it writes nothing (a shared temp dir is not
+ * safe for the secret). A host without the connection service prints nothing.
+ * @param ctx - plugin context that may carry the host connection service.
+ */
+function announceAccessLink(ctx: Context): void {
+  const connection = ctx.get('connection')
+  if (connection === undefined) return
+  const port = ctx.webServer.port
+  const directory = process.env['XDG_RUNTIME_DIR']
+  const hasDirectory = directory !== undefined && directory !== ''
+  if (hasDirectory) {
+    // `dsh open` reads this key to ask the running host for a fresh link; removed when the host stops.
+    const keyFile = join(directory, `${RELINK_KEY_FILE_PREFIX}${String(port)}${RELINK_KEY_FILE_SUFFIX}`)
+    writePrivateFile(keyFile, `${connection.relinkKey()}\n`)
+    ctx.effect(() => () => { rmSync(keyFile, { force: true }) }, 'web-app: relink key file')
+  }
+  const link = `${localWebUrl(ctx)}/#dsh-boot=${connection.mintLaunchCode()}`
+  if (process.stdout.isTTY) {
+    console.log(`dsh web access link (one use, valid 10 minutes): ${link}`)
+    return
+  }
+  if (!hasDirectory) {
+    console.log('dsh web access link not written: stdout is not a terminal and XDG_RUNTIME_DIR is unset; restart from a terminal to get the link')
+    return
+  }
+  const file = join(directory, `dsh-web-access-${String(port)}.url`)
+  writePrivateFile(file, `${link}\n`)
+  console.log(`dsh web access link written to ${file} (one use, valid 10 minutes; later: dsh open)`)
+}
+
+/**
+ * Write a secret file readable only by this user, replacing any earlier file at the path.
+ * @param file - destination path.
+ * @param text - file content.
+ */
+function writePrivateFile(file: string, text: string): void {
+  rmSync(file, { force: true })
+  writeFileSync(file, text, { mode: 0o600, flag: 'wx' })
+}
+
 /** Dist location is workspace knowledge of this bundle: resolved through the frontend package exports, not configured. */
 function resolveDistIndex(): string {
   const require = createRequire(import.meta.url)
@@ -166,6 +221,7 @@ export function apply(ctx: Context, config: Config): void {
       const lanCandidate = runtime.lanAddresses[0]
       const port = ctx.webServer.port
       console.log(`dsh web: ${localWebUrl(ctx)}${lanCandidate === undefined ? '' : ` (LAN: http://${lanCandidate}:${String(port)})`}`)
+      announceAccessLink(ctx)
     }
     // This row's own activation can precede a sibling failure. The app owns
     // readiness by waiting for its Loader tree, or prints at once in a

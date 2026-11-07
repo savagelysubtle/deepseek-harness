@@ -52,8 +52,9 @@ export type WorkflowReadMethod = typeof WORKFLOW_READ_METHODS[number]
 export type WorkflowPrivilegedMethod = typeof WORKFLOW_PRIVILEGED_METHODS[number]
 
 /**
- * Wire endpoint names the loopback-only client is privileged to call. Mirrors
- * `packages/client/connection/src/index.ts`'s `PRIVILEGED_METHODS` (a test keeps the two equal).
+ * Wire endpoint names the loopback-only client is privileged to call. Mirrors the
+ * `workflow/*` entries of `packages/client/connection/src/index.ts`'s `PRIVILEGED_METHODS` (a test keeps the two equal; the
+ * non-workflow privileged methods added by OP-270 have no wire constant here).
  * The reads in {@link WORKFLOW_READ_METHODS} are deliberately absent.
  */
 export const WORKFLOW_PRIVILEGED_ENDPOINTS: ReadonlySet<string> = new Set(
@@ -69,13 +70,24 @@ export const WORKFLOW_LOOPBACK_ONLY_MESSAGE =
   'Saving, running, cancelling and approving workflows, and reading raw node output, are loopback-only: open dsh on the machine that hosts it (http://127.0.0.1) to do this.'
 
 /**
+ * Text for a missing-or-stale-token refusal (OP-270). The connection layer answers a privileged
+ * call that lacks the per-boot caller token with `401` and a plain-words body; a screen that shows
+ * only a status code is a silent fence on the founder, so the UI shows this instead.
+ */
+export const WORKFLOW_TOKEN_REQUIRED_MESSAGE =
+  'This action needs the per-boot token. Reopen dsh from the launcher link (a token from a previous boot stops working).'
+
+/**
  * Explain a refused call.
  * @param endpoint - the wire endpoint that was called, for example `workflow/save`.
  * @param status - the HTTP status the call was answered with.
- * @returns the loopback-only message for a 403 on a privileged workflow endpoint, otherwise undefined.
+ * @returns the loopback-only message for a 403, or the token message for a 401, on a privileged workflow endpoint; otherwise undefined.
  */
 export function explainWorkflowRefusal(endpoint: string, status: number): string | undefined {
-  return status === 403 && WORKFLOW_PRIVILEGED_ENDPOINTS.has(endpoint) ? WORKFLOW_LOOPBACK_ONLY_MESSAGE : undefined
+  if (!WORKFLOW_PRIVILEGED_ENDPOINTS.has(endpoint)) return undefined
+  if (status === 403) return WORKFLOW_LOOPBACK_ONLY_MESSAGE
+  if (status === 401) return WORKFLOW_TOKEN_REQUIRED_MESSAGE
+  return undefined
 }
 
 /** Wire event: a run started, advanced a node, or ended. */

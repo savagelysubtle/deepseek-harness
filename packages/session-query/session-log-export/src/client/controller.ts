@@ -17,6 +17,9 @@ export interface SessionLogDownloadState {
   bySession: Record<string, SessionLogDownloadEntry | undefined>
 }
 
+/** Delay before the blob URL is released; the browser reads the blob asynchronously after the click. */
+const BLOB_URL_REVOKE_DELAY_MS = 60_000
+
 type Fetch = (input: string | URL, init?: RequestInit) => Promise<Response>
 type Save = (url: string, filename: string) => void
 
@@ -114,12 +117,20 @@ export class SessionLogDownloadController {
       const url = new URL('/api/session.export', hostBase())
       url.searchParams.set('sessionId', sessionId)
       url.searchParams.set('includeDescendants', 'true')
-      const response = await this.fetcher(url, { method: 'HEAD', signal })
+      // The archive is fetched with the caller token (a plain download link cannot carry the
+      // header) and handed to the browser as a blob URL.
+      const response = await this.fetcher(url, { signal })
       if (!response.ok) {
         const detail = await response.text().catch(() => '')
         throw new Error(`Export failed: HTTP ${response.status}${detail === '' ? '' : ` ${detail}`}`)
       }
-      this.save(url.toString(), sessionLogZipFilename(sessionId))
+      const blobUrl = URL.createObjectURL(await response.blob())
+      try {
+        this.save(blobUrl, sessionLogZipFilename(sessionId))
+      } finally {
+        // The anchor click has already started the download from the blob when `save` returns.
+        setTimeout(() => { URL.revokeObjectURL(blobUrl) }, BLOB_URL_REVOKE_DELAY_MS)
+      }
       const open = this.store.getSnapshot().bySession[String(sessionId)]?.open ?? true
       this.publish(sessionId, { open, status: 'success', error: null })
     } catch (error: unknown) {

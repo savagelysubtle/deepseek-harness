@@ -6,11 +6,21 @@
 
 ## /api 浏览器信任栅栏
 
-node 半侧在桥接或 upgrade 前守卫 `/api` 下的每个入口（`src/api-request-trust.ts`）。每个请求——无论是否带浏览器标记——`Host` 都必须是回环地址权威，或与某个 `trustedHosts` 条目匹配：带端口的 `host:port` 条目精确匹配，不带端口的条目匹配任意端口，两侧均经 WHATWG 归一化后比较（DNS rebinding 防御）。刻意不为无浏览器标记的 HTTP 请求开捷径：明文 HTTP 下浏览器的图片与导航读取既不带 `Origin` 也不带 Fetch-Metadata，因此无标记请求仍可能是被重绑页面发起的、响应可被读走的读取，而 Host 是重绑唯一伪造不了的请求头；WebSocket 浏览器握手会带 `Origin` 并通过同一道比较。非浏览器客户端经由回环地址、部署推导的 LAN IP 字面量或已声明的权威通过同一道栅栏。当标记存在时，如附带 `Origin`，则它必须与 Host 权威完全一致；显式的 `sec-fetch-site: cross-site` 标记一律拒绝。不是纯的、规范形 `host[:port]` 权威的 `trustedHosts` 条目——即 WHATWG 解析读回后与原文不完全一致的——会让插件加载明确报错：否则解析会悄悄授权 `harness.internal/path` 这类笔误里的 hostname，或把悬空冒号、补零端口放大成任意端口授权。HTTP 失败在任何 RPC 分发之前以纯 403 应答，upgrade 失败在启动任何事件流前拒绝握手。非回环组合必须显式信任其服务权威：Web 运行时从全接口服务器配置推导 LAN IP 字面量，cordis.yml 中的 `trustedHosts` 与 CLI（命令行界面）的 `--trusted-host` flag 则声明具名权威。`dsh web --host 0.0.0.0` 在远程访问具备认证层之前有意不受支持。这道栅栏是可达性策略，而不是认证；Web 载体不提供认证层。决策记录：[api 浏览器信任边界 Agent Note](../../../.agents/notes/implemented/architecture/2026-07-28-api-browser-trust-boundary.md)。
+node 半侧在桥接或 upgrade 前守卫 `/api` 下的每个入口（`src/api-request-trust.ts`）。每个请求——无论是否带浏览器标记——`Host` 都必须是回环地址权威，或与某个 `trustedHosts` 条目匹配：带端口的 `host:port` 条目精确匹配，不带端口的条目匹配任意端口，两侧均经 WHATWG 归一化后比较（DNS rebinding 防御）。刻意不为无浏览器标记的 HTTP 请求开捷径：明文 HTTP 下浏览器的图片与导航读取既不带 `Origin` 也不带 Fetch-Metadata，因此无标记请求仍可能是被重绑页面发起的、响应可被读走的读取，而 Host 是重绑唯一伪造不了的请求头；WebSocket 浏览器握手会带 `Origin` 并通过同一道比较。非浏览器客户端经由回环地址、部署推导的 LAN IP 字面量或已声明的权威通过同一道栅栏。当标记存在时，如附带 `Origin`，则它必须与 Host 权威完全一致；显式的 `sec-fetch-site: cross-site` 标记一律拒绝。不是纯的、规范形 `host[:port]` 权威的 `trustedHosts` 条目——即 WHATWG 解析读回后与原文不完全一致的——会让插件加载明确报错：否则解析会悄悄授权 `harness.internal/path` 这类笔误里的 hostname，或把悬空冒号、补零端口放大成任意端口授权。HTTP 失败在任何 RPC 分发之前以纯 403 应答，upgrade 失败在启动任何事件流前拒绝握手。非回环组合必须显式信任其服务权威：Web 运行时从全接口服务器配置推导 LAN IP 字面量，cordis.yml 中的 `trustedHosts` 与 CLI（命令行界面）的 `--trusted-host` flag 则声明具名权威。`dsh web --host 0.0.0.0` 在远程访问具备认证层之前有意不受支持。这道栅栏是可达性策略，而不是认证；下文的每次启动调用方令牌守卫特权方法。决策记录：[api 浏览器信任边界 Agent Note](../../../.agents/notes/implemented/architecture/2026-07-28-api-browser-trust-boundary.md)。
 
 ## `peerIsLoopback` 创始人标记事实
 
 与上面的 Host 权威信任栅栏不同，`/api` 路由的 `apply()` 与 `HostConnectionService.register()` 自己的路由各自会计算原始 TCP 对端是否回环——`src/loopback-hostname.ts` 中的 `isLoopbackAddress(req.socket.remoteAddress)`，它识别 IPv6 回环字面量 `::1`、`127/8` 段内的任意 IPv4 地址，以及双栈绑定时报出的 IPv4 映射 IPv6 回环地址（`::ffff:127.x.y.z`）——并在进程内经 `bridge()` 与 `toFetchHandler()` 把这个布尔值串联进 `RpcRequest.peerIsLoopback`。它绝不是请求头：客户端无法设置或伪造它。该字段是可选的，除了宿主侧入向的 unary 分发（`handleUnary`）之外处处缺失，与显式的 `false` 同义；`register()` 的路由出于对称性串联同一事实，即便当前没有任何 interceptor 读取它。[`@deepseek-ai/dsh-host-apiproxy`](../../host/apiproxy/README.md) 的 `session.prompt` 与 `session.sendAll` 是目前仅有的消费方——只有这个事实为 `true` 时，它们才会在持久用户消息上铸造 `MessageSourceMap.user.founder: true`。
+
+## 每次启动的调用方令牌
+
+回环可达性无法识别操作者的浏览器：任何本地页面或进程都能通过。因此主机在每次启动时生成随机调用方令牌（`src/caller-token.ts` 中的 `createCallerAuth`），只保存在内存中，并要求特权方法在 `x-dsh-token` 请求头中携带它。使用请求头是因为浏览器会把 cookie 发送到每个回环端口，seat 自己的开发服务器可以重放它。闸门包裹共享的 `/api` 处理器，因此也覆盖由拦截器认领的端点。`PRIVILEGED_METHODS` 中的方法需要回环对端、回环 `Host` 和有效令牌；令牌缺失或错误会得到带平实消息的 401，以及一条限速的服务器 warning，其中从不包含令牌。`host.listDirectory`、`session.export`、`commands/execute`（如 `/permission danger-full-access` 这类斜杠命令）以及插件运行器 Remote `dynamicCordisRunner/{runHostHalf,resolveRequestRun,settleUserRun,undefineFromPanel,stopFromPanel}` 构成 `TOKEN_REQUIRED_METHODS`：它们保留普通的 `trustedHosts` 栅栏，并额外要求令牌，因此不带令牌的 LAN 客户端会失去斜杠命令和插件面板。插件 Remote 除非列入该集合否则保持开放，所以新增的授予能力的 Remote 必须加入该集合；插件 Remote 的默认拒绝尚未实现。其他所有方法以及两条 WebSocket 下行都不需要令牌。
+
+主机通过一次性启动码（有效期 10 分钟，最多 16 个待兑换）把令牌交给页面。启动器向交互终端打印 `http://127.0.0.1:<port>/#dsh-boot=<code>`；stdout 不是 TTY 时，把链接写入权限为 0600 的文件并只打印路径（[组合包](../../bundle/web-app/README.md)）。启动码从不进入 `DSH_WEB_URL` 或任何环境变量。页面用 `history.replaceState` 移除片段，向 `POST /api/auth.exchange`（仅限回环对端和 `Host`）提交 `{code}`，收到 `{ok: true, token}` 后把令牌保存在内存和 `sessionStorage` 中，并在每个 API 请求中以 `x-dsh-token` 发送。兑换请求 10 秒后放弃，其他 API 请求会等待它。令牌本身在整次启动期间有效，只有启动码会过期，已打开的标签页通过 `sessionStorage` 继续工作。`ctx.connection.fetch` 是面向非 Connection RPC 的 Host 端点的同源 `fetch`：它等待兑换完成并附加该请求头，这是普通下载链接做不到的，所以会话导出通过它获取内容并保存 blob URL。`HostConnectionService.mintLaunchCode()` 方法生成启动码；页面侧位于 `src/client/caller-auth.ts`。
+
+被拒绝的兑换或任何 401 都会显示固定的红色条（`role="alert"`，`src/client/auth-banner.ts`），写明原因和「Reopen dsh from the launcher link」；不会静默重试。fixture 模式（`?fixture`）没有主机，也没有令牌。
+
+启动器还会把每次启动的重新链接密钥写入 `$XDG_RUNTIME_DIR/dsh-web-relink-<port>.key`（权限 0600，主机停止时删除；该变量未设置时不写入）。`dsh open [--port N]`（[CLI](../../../apps/cli/README.md)）读取它，并在 `x-dsh-relink` 请求头中提交给仅限回环的 `POST /api/auth.relink`，后者返回 `{ok: true, code}`，即新的一次性启动码；密钥缺失或错误会得到 401。该密钥无法防御同一用户的恶意进程：任何能以该用户身份读取此文件的人（包括 seat 的 shell）都能生成链接。它把访问链接文件原有的暴露期从 10 分钟延长到主机的整个生命周期。载体把令牌检查结果传给 [`@deepseek-ai/dsh-host-apiproxy`](../../host/apiproxy/README.md)，后者仅对持有令牌的调用方生成创始人标记并接受审批应答。决策记录：[每次启动调用方令牌 Agent Note](../../../.agents/notes/implemented/architecture/2026-11-06-op-270-per-boot-caller-token.md)。
 
 ## `/api` WebSocket 下行
 
@@ -28,3 +38,6 @@ node 半侧在桥接或 upgrade 前守卫 `/api` 下的每个入口（`src/api-r
 
 - **History 会恢复未附加的会话**：打开 history 可能创建宿主侧 agent，并增加首次打开的延迟；没有仅从持久化读取的路径。
 - **`/api` 桥把每个请求体整体缓冲在内存里**：`maxRequestBodyBytes`（默认 160 MiB，按默认 100 MiB 图片总量上限经 base64 膨胀加信封余量得出）因此同时是单请求的驻留内存上界；要降低它而不缩小图片限额，需要流式请求体路径。
+- **现有自动化需要兑换才能使用特权方法**：解析 `dsh web:` 行的脚本仍可访问非特权方法，但特权方法需要来自终端行或 0600 文件的启动码、一次 `/api/auth.exchange` 调用以及 `x-dsh-token` 请求头。失败的兑换不会被限速，只有 warning 日志被限速。
+- **重新链接密钥文件可被同一用户的任何进程读取**：只要主机在运行，seat 的 shell 就能运行 `dsh open` 或读取密钥并生成访问链接。
+- **令牌不会在主机重启后保留**：已打开的标签页会显示红色条，直到操作者打开新的启动链接。

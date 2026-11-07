@@ -5,10 +5,10 @@
  * runtime's bind-dependent LAN snapshot.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import type { WebServer } from '@deepseek-ai/dsh-host-webserver'
@@ -151,6 +151,79 @@ describe('web-app runtime glue', () => {
     apply(ctx, new Config({ printUrl: true, surfaceContext: true, trustedHosts: [] }))
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(log).toHaveBeenCalledWith('dsh web: http://127.0.0.1:4567')
+    await ctx.fiber.dispose()
+  })
+
+  it('hands the one-use launch link to a terminal, and to a 0600 file when stdout is not a terminal', async () => {
+    stageDist()
+    const runtimeDir = mkdtempSync(join(tmpdir(), 'dsh-web-access-'))
+    vi.stubEnv('XDG_RUNTIME_DIR', runtimeDir)
+    const mint = vi.fn(() => 'code-xyz')
+    let keyWhileRunning: { text: string; mode: number } | undefined
+    let keyAfterStop = true
+    const boot = async (isTTY: boolean): Promise<string[]> => {
+      Object.defineProperty(process.stdout, 'isTTY', { value: isTTY, configurable: true })
+      const ctx = new Context()
+      ctx.provide('webServer', fakeHttpServer().server)
+      ctx.provide('connection', { mintLaunchCode: mint, relinkKey: () => 'relink-key-1' } as never)
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+      apply(ctx, new Config({ printUrl: true, surfaceContext: true, trustedHosts: [] }))
+      await new Promise(resolve => setTimeout(resolve, 0))
+      const lines = log.mock.calls.map(call => String(call[0]))
+      const keyFile = join(runtimeDir, 'dsh-web-relink-4567.key')
+      keyWhileRunning = existsSync(keyFile) ? { text: readFileSync(keyFile, 'utf8'), mode: statSync(keyFile).mode & 0o777 } : undefined
+      await ctx.fiber.dispose()
+      keyAfterStop = existsSync(keyFile)
+      return lines
+    }
+    try {
+      const tty = await boot(true)
+      expect(tty).toContain('dsh web: http://127.0.0.1:4567')
+      expect(tty).toContain('dsh web access link (one use, valid 10 minutes): http://127.0.0.1:4567/#dsh-boot=code-xyz')
+      vi.restoreAllMocks()
+      const piped = await boot(false)
+      expect(piped.join('\n')).not.toContain('code-xyz')
+      const file = join(runtimeDir, 'dsh-web-access-4567.url')
+      expect(piped).toContain(`dsh web access link written to ${file} (one use, valid 10 minutes; later: dsh open)`)
+      expect(readFileSync(file, 'utf8')).toBe('http://127.0.0.1:4567/#dsh-boot=code-xyz\n')
+      expect(statSync(file).mode & 0o777).toBe(0o600)
+      expect(keyWhileRunning).toEqual({ text: 'relink-key-1\n', mode: 0o600 })
+      expect(keyAfterStop).toBe(false)
+      expect(piped.join('\n')).not.toContain('relink-key-1')
+      vi.restoreAllMocks()
+      vi.stubEnv('XDG_RUNTIME_DIR', '')
+      const unset = await boot(false)
+      expect(unset.join('\n')).not.toContain('code-xyz')
+      expect(unset.join('\n')).toContain('access link not written')
+    } finally {
+      Reflect.deleteProperty(process.stdout, 'isTTY')
+      vi.unstubAllEnvs()
+      rmSync(runtimeDir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps the launch code out of DSH_WEB_URL and the surface prompt', async () => {
+    stageDist()
+    const runtimeDir = mkdtempSync(join(tmpdir(), 'dsh-web-access-'))
+    vi.stubEnv('XDG_RUNTIME_DIR', runtimeDir)
+    onTestFinished(() => {
+      vi.unstubAllEnvs()
+      rmSync(runtimeDir, { recursive: true, force: true })
+    })
+    const ctx = new Context()
+    ctx.provide('webServer', fakeHttpServer().server)
+    ctx.provide('connection', { mintLaunchCode: () => 'code-secret', relinkKey: () => 'relink-secret' } as never)
+    const contributions: BashContribution[] = []
+    ctx.provide('shellEnv', {
+      register: (contribution: BashContribution) => { contributions.push(contribution); return () => {} },
+    } as never)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    apply(ctx, new Config({ printUrl: true, surfaceContext: true, trustedHosts: [] }))
+    await ctx.plugin(SystemPrompt, { persona: '' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(JSON.stringify(contributions.map(entry => entry.resolve()))).not.toContain('code-secret')
+    const assembly = await ctx.systemPrompt.assemble()
+    expect(JSON.stringify(assembly.sections)).not.toContain('code-secret')
     await ctx.fiber.dispose()
   })
 

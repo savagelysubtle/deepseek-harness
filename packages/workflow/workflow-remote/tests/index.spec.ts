@@ -11,6 +11,7 @@ import {
   WORKFLOW_PRIVILEGED_METHODS,
   WORKFLOW_READ_METHODS,
 } from '../src/index.ts'
+import { WORKFLOW_TOKEN_REQUIRED_MESSAGE } from '../src/wire.ts'
 import { setupRemote } from './support.ts'
 
 describe('workflow-remote wire contract', () => {
@@ -41,6 +42,11 @@ describe('workflow-remote wire contract', () => {
       expect(explainWorkflowRefusal(endpoint, 500)).toBeUndefined()
     }
     expect(explainWorkflowRefusal('workflow/list', 403)).toBeUndefined()
+    for (const endpoint of WORKFLOW_PRIVILEGED_ENDPOINTS) {
+      expect(explainWorkflowRefusal(endpoint, 401)).toBe(WORKFLOW_TOKEN_REQUIRED_MESSAGE)
+    }
+    expect(explainWorkflowRefusal('workflow/list', 401)).toBeUndefined()
+    expect(WORKFLOW_TOKEN_REQUIRED_MESSAGE).toContain('Reopen dsh from the launcher link')
     expect(WORKFLOW_LOOPBACK_ONLY_MESSAGE).toContain('loopback-only')
     expect(WORKFLOW_LOOPBACK_ONLY_MESSAGE).toContain('open dsh on the machine that hosts it')
   })

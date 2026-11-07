@@ -15,7 +15,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import type { ApprovalRequestId } from '@deepseek-ai/dsh-user-approval'
-import type { ApiProxy, MuxFrame, RpcRequest } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type { ApiProxy, MuxFrame, RespondCaller, RpcRequest } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api/rpc'
 import { RpcId as mintRpcId } from '@deepseek-ai/dsh-host-apiproxy/api/rpc'
 import { createApiProxy } from '../src/api-proxy.ts'
@@ -84,6 +84,9 @@ function answer(rpcId: RpcId, sessionId: unknown, approvalId: ApprovalRequestId,
   return { type: 'client-response', rpcId, result: { ok: true, value: { sessionId, approvalId, outcome } } }
 }
 
+/** The caller facts the real carrier supplies for the UI: loopback peer + valid per-boot token (OP-270). */
+const AUTH: RespondCaller = { peerIsLoopback: true, callerAuthenticated: true }
+
 describe('approval pending registry', () => {
   it('round-trips ask → requested frame → respond → outcome + resolved broadcast', async () => {
     const { ctx, api } = await harness()
@@ -96,7 +99,7 @@ describe('approval pending registry', () => {
     expect(requested).toMatchObject({ toolName: 'bash', reason: 'sandbox escalation', sessionId: agent.session.id })
 
     const envelope = mux.envelopes.find(e => e.payload.type === 'approval/requested') as RpcRequest<MuxFrame>
-    const receipt = await api.respond(answer(envelope.rpcId, requested.sessionId, requested.approvalId, 'allowed-once'))
+    const receipt = await api.respond(answer(envelope.rpcId, requested.sessionId, requested.approvalId, 'allowed-once'), AUTH)
     expect(receipt).toEqual({ accepted: true })
     await expect(asked).resolves.toBe('allowed-once')
 
@@ -104,7 +107,7 @@ describe('approval pending registry', () => {
     expect(resolved).toMatchObject({ approvalId: requested.approvalId, outcome: 'allowed-once' })
 
     // The question settled: a duplicate answer is late, not re-decidable.
-    const dup = await api.respond(answer(envelope.rpcId, requested.sessionId, requested.approvalId, 'rejected'))
+    const dup = await api.respond(answer(envelope.rpcId, requested.sessionId, requested.approvalId, 'rejected'), AUTH)
     expect(dup).toEqual({ accepted: false, reason: 'not-pending' })
     abort.abort()
   })
@@ -127,7 +130,7 @@ describe('approval pending registry', () => {
     expect(secondEnvelope.rpcId).toBe(firstEnvelope.rpcId)
     expect(replayed.approvalId).toBe(requested.approvalId)
 
-    const receipt = await api.respond(answer(secondEnvelope.rpcId, replayed.sessionId, replayed.approvalId, 'rejected'))
+    const receipt = await api.respond(answer(secondEnvelope.rpcId, replayed.sessionId, replayed.approvalId, 'rejected'), AUTH)
     expect(receipt).toEqual({ accepted: true })
     await expect(asked).resolves.toBe('rejected')
     second.abort()
@@ -143,16 +146,16 @@ describe('approval pending registry', () => {
     const envelope = mux.envelopes.find(e => e.payload.type === 'approval/requested') as RpcRequest<MuxFrame>
 
     // Unknown rpcId: not routed to any pending entry.
-    expect(await api.respond(answer(mintRpcId('ghost'), requested.sessionId, requested.approvalId, 'rejected')))
+    expect(await api.respond(answer(mintRpcId('ghost'), requested.sessionId, requested.approvalId, 'rejected'), AUTH))
       .toEqual({ accepted: false, reason: 'not-pending' })
     // Error-branch result: the client can only answer with a value.
-    expect(await api.respond({ type: 'client-response', rpcId: envelope.rpcId, result: { ok: false, error: { code: 'internal', message: 'x', details: {} } } }))
+    expect(await api.respond({ type: 'client-response', rpcId: envelope.rpcId, result: { ok: false, error: { code: 'internal', message: 'x', details: {} } } }, AUTH))
       .toEqual({ accepted: false, reason: 'bad-response' })
     // Wrong audit correlation: the rpcId routed, but the payload disagrees.
-    expect(await api.respond(answer(envelope.rpcId, requested.sessionId, 'other-approval' as ApprovalRequestId, 'rejected')))
+    expect(await api.respond(answer(envelope.rpcId, requested.sessionId, 'other-approval' as ApprovalRequestId, 'rejected'), AUTH))
       .toEqual({ accepted: false, reason: 'bad-response' })
     // Malformed payload shape.
-    expect(await api.respond({ type: 'client-response', rpcId: envelope.rpcId, result: { ok: true, value: { nonsense: 1 } } }))
+    expect(await api.respond({ type: 'client-response', rpcId: envelope.rpcId, result: { ok: true, value: { nonsense: 1 } } }, AUTH))
       .toEqual({ accepted: false, reason: 'bad-response' })
     abort.abort()
   })
@@ -171,7 +174,7 @@ describe('approval pending registry', () => {
     await expect(asked).resolves.toBe('cancelled')
     const resolved = await mux.waitFor('approval/resolved')
     expect(resolved).toMatchObject({ approvalId: requested.approvalId, outcome: 'cancelled' })
-    expect(await api.respond(answer(envelope.rpcId, requested.sessionId, requested.approvalId, 'allowed-once')))
+    expect(await api.respond(answer(envelope.rpcId, requested.sessionId, requested.approvalId, 'allowed-once'), AUTH))
       .toEqual({ accepted: false, reason: 'not-pending' })
     abort.abort()
   })
@@ -241,7 +244,7 @@ describe('approval pending registry', () => {
     const requested = requestedOf(await mux.waitFor('approval/requested'))
     expect(requested.callId).toBe('call-9')
     const envelope = mux.envelopes.find(e => e.payload.type === 'approval/requested') as RpcRequest<MuxFrame>
-    expect(await api.respond(answer(envelope.rpcId, requested.sessionId, requested.approvalId, 'allowed-once')))
+    expect(await api.respond(answer(envelope.rpcId, requested.sessionId, requested.approvalId, 'allowed-once'), AUTH))
       .toEqual({ accepted: true })
     await expect(asked).resolves.toBe('allowed-once')
     // Late abort: the pending entry is gone; settle's delete-guard returns.
@@ -270,9 +273,9 @@ describe('approval pending registry', () => {
     expect(requestedOf(frameA.payload).approvalId).toBe(askedIdByCall.get('call-a'))
     expect(requestedOf(frameB.payload).approvalId).toBe(askedIdByCall.get('call-b'))
     // Answers route back to the right ask through the pairing.
-    expect(await api.respond(answer(frameB.rpcId, agent.session.id, requestedOf(frameB.payload).approvalId, 'rejected')))
+    expect(await api.respond(answer(frameB.rpcId, agent.session.id, requestedOf(frameB.payload).approvalId, 'rejected'), AUTH))
       .toEqual({ accepted: true })
-    expect(await api.respond(answer(frameA.rpcId, agent.session.id, requestedOf(frameA.payload).approvalId, 'allowed-once')))
+    expect(await api.respond(answer(frameA.rpcId, agent.session.id, requestedOf(frameA.payload).approvalId, 'allowed-once'), AUTH))
       .toEqual({ accepted: true })
     await expect(askA).resolves.toBe('allowed-once')
     await expect(askB).resolves.toBe('rejected')
@@ -293,9 +296,9 @@ describe('approval pending registry', () => {
     // Without a callId the pairing is heuristic, but never shared: the second
     // dispatch skips the id the first pending entry already claimed.
     expect(requestedOf(frameA.payload).approvalId).not.toBe(requestedOf(frameB.payload).approvalId)
-    expect(await api.respond(answer(frameA.rpcId, agent.session.id, requestedOf(frameA.payload).approvalId, 'allowed-once')))
+    expect(await api.respond(answer(frameA.rpcId, agent.session.id, requestedOf(frameA.payload).approvalId, 'allowed-once'), AUTH))
       .toEqual({ accepted: true })
-    expect(await api.respond(answer(frameB.rpcId, agent.session.id, requestedOf(frameB.payload).approvalId, 'rejected')))
+    expect(await api.respond(answer(frameB.rpcId, agent.session.id, requestedOf(frameB.payload).approvalId, 'rejected'), AUTH))
       .toEqual({ accepted: true })
     await expect(askA).resolves.toBe('allowed-once')
     await expect(askB).resolves.toBe('rejected')

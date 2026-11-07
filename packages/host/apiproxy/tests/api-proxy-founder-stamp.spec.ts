@@ -28,11 +28,12 @@ let nextRpc = 1
  * from the request object, matching how every carrier path other than
  * `handleUnary`'s host-inbound dispatch actually produces one.
  */
-function request<P>(payload: P, peerIsLoopback?: boolean): RpcRequest<P> {
+function request<P>(payload: P, peerIsLoopback?: boolean, callerAuthenticated?: boolean): RpcRequest<P> {
   return {
     rpcId: RpcId(`founder-stamp-${String(nextRpc++)}`),
     payload,
     ...(peerIsLoopback === undefined ? {} : { peerIsLoopback }),
+    ...(callerAuthenticated === undefined ? {} : { callerAuthenticated }),
   }
 }
 
@@ -57,7 +58,7 @@ describe('session.prompt founder stamp', () => {
       sessionId: agent.id,
       mode: 'queue' as const,
       content: [{ type: 'text' as const, text: 'founder work' }],
-    }, true)
+    }, true, true)
 
     const response = await api.sessions.prompt(req)
 
@@ -68,6 +69,39 @@ describe('session.prompt founder stamp', () => {
     expect(followup).toHaveBeenCalledOnce()
     const delivered = followup.mock.calls[0]?.[0] as UserMessage
     expect(delivered.source).toEqual({ kind: 'user', founder: true, rpcId: req.rpcId })
+  })
+
+  it('does NOT stamp over a proven-loopback peer that carries no caller token (OP-270)', async () => {
+    const { api, agent, followup } = await promptBench()
+    for (const callerAuthenticated of [undefined, false]) {
+      followup.mockClear()
+      const req = request({
+        sessionId: agent.id,
+        mode: 'queue' as const,
+        content: [{ type: 'text' as const, text: 'same-user process' }],
+      }, true, callerAuthenticated)
+
+      const response = await api.sessions.prompt(req)
+
+      expect(response.result).toEqual({ ok: true, value: { accepted: true, founderStamped: false } })
+      const delivered = followup.mock.calls[0]?.[0] as UserMessage
+      expect(delivered.source).toEqual({ kind: 'user', rpcId: req.rpcId })
+    }
+  })
+
+  it('does NOT stamp a token-bearing caller whose peer is not loopback', async () => {
+    const { api, agent, followup } = await promptBench()
+    const req = request({
+      sessionId: agent.id,
+      mode: 'queue' as const,
+      content: [{ type: 'text' as const, text: 'lan with token' }],
+    }, false, true)
+
+    const response = await api.sessions.prompt(req)
+
+    expect(response.result).toEqual({ ok: true, value: { accepted: true, founderStamped: false } })
+    const delivered = followup.mock.calls[0]?.[0] as UserMessage
+    expect(delivered.source).toEqual({ kind: 'user', rpcId: req.rpcId })
   })
 
   it('leaves the source bare and reports founderStamped:false when the peer is proven non-loopback', async () => {
@@ -178,7 +212,7 @@ describe('session.sendAll founder stamp', () => {
     const second = fakeAgent(sid('top-founder-2'))
     const { api } = sendAllBench([first, second])
 
-    const req = request({ content: [{ type: 'text' as const, text: 'stand down' }] }, true)
+    const req = request({ content: [{ type: 'text' as const, text: 'stand down' }] }, true, true)
     const response = await api.sessions.sendAll(req)
 
     expect(response.result).toEqual({
@@ -212,11 +246,11 @@ describe('session.sendAll founder stamp', () => {
   it('reports founderStamped:true over loopback even with zero live top-level sessions to steer', async () => {
     const { api } = sendAllBench([])
 
-    const req = request({ content: [{ type: 'text' as const, text: 'stand down' }] }, true)
+    const req = request({ content: [{ type: 'text' as const, text: 'stand down' }] }, true, true)
     const response = await api.sessions.sendAll(req)
 
     // The founder-stamp decision is independent of root selection: it is
-    // taken from request.peerIsLoopback alone, so an empty broadcast still
+    // taken from request.peerIsLoopback and request.callerAuthenticated alone, so an empty broadcast still
     // reports founderStamped:true. sentCount:0 and result:'ok' are the
     // existing zero-root outcome (see api-proxy-send-all.spec.ts's own
     // "accepted zero-count no-op" case) — no root is ever steered, so the
@@ -224,6 +258,34 @@ describe('session.sendAll founder stamp', () => {
     expect(response.result).toEqual({
       ok: true,
       value: { sentCount: 0, result: 'ok', founderStamped: true },
+    })
+  })
+
+  it('does NOT stamp the broadcast over loopback without the caller token (OP-270)', async () => {
+    const first = fakeAgent(sid('top-notoken-1'))
+    const { api } = sendAllBench([first])
+
+    const req = request({ content: [{ type: 'text' as const, text: 'stand down' }] }, true)
+    const response = await api.sessions.sendAll(req)
+
+    expect(response.result).toEqual({
+      ok: true,
+      value: { sentCount: 1, result: 'ok', founderStamped: false },
+    })
+    const delivered = first.steer.mock.calls[0]?.[0] as UserMessage
+    expect(delivered.source).toEqual({ kind: 'user', rpcId: req.rpcId })
+  })
+
+  it('does NOT stamp the broadcast for a token-bearing non-loopback caller', async () => {
+    const first = fakeAgent(sid('top-lan-1'))
+    const { api } = sendAllBench([first])
+
+    const req = request({ content: [{ type: 'text' as const, text: 'stand down' }] }, false, true)
+    const response = await api.sessions.sendAll(req)
+
+    expect(response.result).toEqual({
+      ok: true,
+      value: { sentCount: 1, result: 'ok', founderStamped: false },
     })
   })
 })

@@ -15,6 +15,7 @@ import { bridge, type FetchHandler } from './http-bridge.ts'
 import { isTrustedApiRequest } from './api-request-trust.ts'
 import { isLoopbackAddress } from './loopback-hostname.ts'
 import { API_PATH } from './api-path.ts'
+import { createCallerAuth, type CallerAuth } from './caller-token.ts'
 import type {
   ConnectionRpcEndpointMatcher,
   ConnectionRpcHandler,
@@ -53,6 +54,25 @@ export class HostConnectionService extends Service implements HostConnectionHand
     super(ctx, 'connection')
   }
 
+  /** Per-boot caller authentication for the `/api` gate (OP-270); in memory only, new every boot. */
+  readonly callerAuth: CallerAuth = createCallerAuth()
+
+  /**
+   * Mint one single-use launch code (valid 10 minutes) that the browser exchanges
+   * once at `/api/auth.exchange` for the per-boot token (returned in the reply body, then sent
+   * in the `x-dsh-token` header). The launcher prints `http://127.0.0.1:<port>/#dsh-boot=<code>`
+   * from this; the code must not enter any env var.
+   * @returns the plaintext launch code.
+   */
+  mintLaunchCode(): string {
+    return this.callerAuth.mintLaunchCode()
+  }
+
+  /** @inheritdoc */
+  relinkKey(): string {
+    return this.callerAuth.relinkKey()
+  }
+
   /** Generic channel registry scoped to the Context reading this service. */
   get rpc(): HostConnectionRpc {
     const owner = this.ctx
@@ -74,11 +94,11 @@ export class HostConnectionService extends Service implements HostConnectionHand
     fallback: FetchHandler,
   ): FetchHandler {
     return {
-      fetch: (request, peerIsLoopback) => {
+      fetch: (request, peerIsLoopback, callerAuthenticated = false) => {
         const endpoint = endpointFromPath(channel, new URL(request.url).pathname)
         const interceptor = this.interceptors.get(channel)
         if (endpoint === undefined || interceptor === undefined || !interceptor.matches(endpoint)) {
-          return fallback.fetch(request, peerIsLoopback)
+          return fallback.fetch(request, peerIsLoopback, callerAuthenticated)
         }
         if (interceptor.options.authority === 'loopback' && !isTrustedApiRequest(request, [])) {
           return Promise.resolve(new Response('forbidden', { status: 403 }))

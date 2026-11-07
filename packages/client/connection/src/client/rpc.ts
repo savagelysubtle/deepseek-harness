@@ -7,6 +7,7 @@ import {
 } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { ClientConnectionRpc } from '../rpc.ts'
 import { randomUuid } from './random-uuid.ts'
+import type { CallerAuthClient } from './caller-auth.ts'
 
 const INTERNAL_BASE = 'http://dsh.internal'
 const CHANNEL_PATTERN = /^\/[A-Za-z0-9._~-]+$/
@@ -14,9 +15,10 @@ const ENDPOINT_SEGMENT_PATTERN = /^[A-Za-z0-9_$.-]+$/
 
 /**
  * Create the browser-backed generic RPC caller.
+ * @param auth - per-boot caller token holder; the request waits for its launch-code exchange and carries its header.
  * @returns caller that owns request correlation and response-envelope validation.
  */
-export function createWebConnectionRpc(): ClientConnectionRpc {
+export function createWebConnectionRpc(auth: CallerAuthClient): ClientConnectionRpc {
   return {
     async call(channel, endpoint, payload, signal) {
       assertTarget(channel, endpoint)
@@ -27,15 +29,17 @@ export function createWebConnectionRpc(): ClientConnectionRpc {
         method: endpoint,
         payload,
       }
+      await auth.ready
       const response = await globalThis.fetch(
         new URL(`${channel}/${endpoint}`, resolveBase()),
-        {
+        auth.applyTo({
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(message),
           ...signal === undefined ? {} : { signal },
-        },
+        }),
       )
+      auth.noteResponse(response)
       if (!response.ok) {
         throw new Error(`transport failure for ${channel}/${endpoint}: HTTP ${response.status}`)
       }

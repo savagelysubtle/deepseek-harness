@@ -8,6 +8,8 @@
   "files": [
     "src/api-path.ts",
     "src/api-request-trust.ts",
+    "src/caller-token-header.ts",
+    "src/caller-token.ts",
     "src/http-bridge.ts",
     "src/index.ts",
     "src/invariant.ts",

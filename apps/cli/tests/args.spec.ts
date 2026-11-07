@@ -26,6 +26,14 @@ describe('parseDshArgs', () => {
     expect(parse(['owners', '--overlaps'])).toEqual({ mode: 'owners', path: undefined, overlaps: true })
   })
 
+  it('routes dsh open with an optional --port and rejects a bad port (exit 2)', () => {
+    expect(parse(['open'])).toEqual({ mode: 'open', port: undefined })
+    expect(parse(['open', '--port', '3080'])).toEqual({ mode: 'open', port: 3080 })
+    expect(exitCode(['open', '--port', 'abc'])).toBe(2)
+    expect(exitCode(['open', '--port', '70000'])).toBe(2)
+    expect(exitCode(['--profile', 'tui', 'open'])).not.toBe(0)
+  })
+
   it('treats owners with a path and --overlaps, or with neither, as a usage error (exit 2)', () => {
     expect(exitCode(['owners', '--overlaps', 'src'])).toBe(2)
     expect(exitCode(['owners'])).toBe(2)

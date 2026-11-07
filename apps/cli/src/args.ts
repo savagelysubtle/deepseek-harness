@@ -53,8 +53,15 @@ interface OwnersInvocation {
   overlaps: boolean
 }
 
+/** Print a fresh one-use access link for a running `dsh web` host. */
+interface OpenInvocation {
+  mode: 'open'
+  /** Host port; absent means the only running host. */
+  port: number | undefined
+}
+
 /** The resolved `dsh` invocation. Help, version, and errors exit inside {@link parseDshArgs}. */
-export type DshInvocation = ProfileInvocation | DumpConfigInvocation | PluginInvocation | OwnersInvocation
+export type DshInvocation = ProfileInvocation | DumpConfigInvocation | PluginInvocation | OwnersInvocation | OpenInvocation
 
 /** Launcher flags shared by the default command and the `web` alias. */
 interface BootOptions {
@@ -80,6 +87,7 @@ Examples:
   dsh plugin --profile tui add <package>     install a plugin into the tui profile
   dsh owners <path>                          say which seat's declared territory covers a path
   dsh owners --overlaps                      list seats whose territories share paths (exit 1 if any)
+  dsh open [--port N]                        print a fresh one-use access link for a running dsh web host
 `
 
 /**
@@ -201,6 +209,18 @@ export function parseDshArgs(argv: readonly string[], version: string): DshInvoc
       if (overlaps && path !== undefined) program.error('error: owners --overlaps takes no path argument', { exitCode: 2 })
       if (!overlaps && (path === undefined || path === '')) program.error('error: owners needs a <path> or --overlaps', { exitCode: 2 })
       resolved = { mode: 'owners', path, overlaps }
+    })
+
+  const open = program.command('open').description('print a fresh one-use access link for a running dsh web host')
+  open
+    .option('--port <port>', 'port of the host to ask (needed only when several run)')
+    .action((options: { port?: string }) => {
+      rejectParentOptions('open')
+      const port = options.port === undefined ? undefined : Number(options.port)
+      if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+        program.error('error: open --port needs a port number from 1 to 65535', { exitCode: 2 })
+      }
+      resolved = { mode: 'open', port }
     })
 
   try {
