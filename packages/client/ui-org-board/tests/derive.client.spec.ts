@@ -112,6 +112,17 @@ describe('seatBadges', () => {
     expect(badges).toEqual([{ kind: 'test', label: t('badge.test') }])
   })
 
+  it('emits the quarantine and driver badges from the registry row, after lead and test', () => {
+    const badges = seatBadges('claudie', { cwd: '/x', test: true, driver: 'claude-code', invalid: 'model belongs in host config' }, [], undefined, t)
+    expect(badges.map(badge => badge.kind)).toEqual(['test', 'invalid', 'driver'])
+    expect(badges[1]?.label).toBe(t('badge.invalid'))
+    expect(badges[2]?.label).toBe(t('badge.driver.claudeCode'))
+  })
+
+  it('emits no driver badge for the default driver', () => {
+    expect(seatBadges('robin', { cwd: '/x', driver: 'default' }, [], undefined, t)).toEqual([])
+  })
+
   it('emits only the call-up badge when only call-up membership holds', () => {
     const badges = seatBadges('robin', { cwd: '/x' }, ['robin'], undefined, t)
     expect(badges).toEqual([{ kind: 'callUp', label: t('badge.callUp') }])

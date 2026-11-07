@@ -483,7 +483,8 @@ export function OrgBoard({
       selected: view.name === selectedSeat,
       // Unknown (no dot) whenever drift failed: an empty drift lookup
       // then says nothing about a seat, and must not read as served.
-      served: drift.ok ? !view.unserved : null,
+      // A quarantined row is never drawn as served either: the host does not load it.
+      served: drift.ok && !view.badges.some(badge => badge.kind === 'invalid') ? !view.unserved : null,
       statusLabel: view.unserved ? t('status.unserved') : t('status.served'),
     },
   }))
@@ -720,6 +721,8 @@ export function OrgBoard({
             </span>
             <span className={`${css.badge} ${css.badgeLead}`}>{t('badge.lead')}</span>
             <span className={`${css.badge} ${css.badgeTest}`}>{t('badge.test')}</span>
+            <span className={`${css.badge} ${css.badgeInvalid}`}>{t('badge.invalid')}</span>
+            <span className={`${css.badge} ${css.badgeDriver}`}>{t('badge.driver.claudeCode')}</span>
             <span className={`${css.badge} ${css.badgeUnserved}`}>{t('badge.unserved')}</span>
             <span className={`${css.badge} ${css.badgeCallUp}`}>{t('badge.callUp')}</span>
             <span className={css.legendHint}>{t('legend.edges')}</span>
@@ -842,6 +845,30 @@ export function OrgBoard({
                     <p className={css.detailLabel}>{t('detail.session')}</p>
                     <p className={css.detailValue}>{selectedRecord.sessionId ?? t('detail.session.none')}</p>
                   </div>
+                  {selectedRecord.invalid !== undefined && (
+                    <div className={css.detailRow} data-org-board-invalid="">
+                      <p className={css.detailLabel}>{t('detail.invalid')}</p>
+                      <p className={css.detailValue}>{selectedRecord.invalid}</p>
+                    </div>
+                  )}
+                  {selectedRecord.driver !== undefined && (
+                    <div className={css.detailRow} data-org-board-driver="">
+                      <p className={css.detailLabel}>{t('detail.driver')}</p>
+                      <p className={css.detailValue}>{selectedRecord.driver}</p>
+                    </div>
+                  )}
+                  {selectedRecord.admit_from !== undefined && (
+                    <div className={css.detailRow} data-org-board-admit-from="">
+                      <p className={css.detailLabel}>{t('detail.admitFrom')}</p>
+                      <p className={css.detailValue}>{selectedRecord.admit_from.join(', ')}</p>
+                    </div>
+                  )}
+                  {selectedRecord.admit_sender_classes !== undefined && (
+                    <div className={css.detailRow} data-org-board-admit-classes="">
+                      <p className={css.detailLabel}>{t('detail.admitSenderClasses')}</p>
+                      <p className={css.detailValue}>{selectedRecord.admit_sender_classes.join(', ')}</p>
+                    </div>
+                  )}
                   <div className={css.detailRow}>
                     <p className={css.detailLabel}>{t('detail.served.label')}</p>
                     {selectedServedStatus !== null && (

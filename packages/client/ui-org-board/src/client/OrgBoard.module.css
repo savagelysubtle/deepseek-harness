@@ -580,6 +580,17 @@
   color: var(--dsw-alias-label-secondary);
 }
 
+.badgeInvalid {
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 18%, transparent);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+/* Neutral outline like badgeCallUp: the driver is a configuration fact, not a status. */
+.badgeDriver {
+  border-color: var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-secondary);
+}
+
 .badgeUnserved {
   background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 18%, transparent);
   color: var(--dsw-alias-state-error-primary);

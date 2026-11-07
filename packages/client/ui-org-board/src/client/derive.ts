@@ -15,7 +15,7 @@ export type OrgBoardTranslate = TranslateNS<'orgBoard'>
 
 /** One badge shown on a seat node (and, for 'unserved', echoed in the detail panel). */
 export interface SeatBadge {
-  kind: 'lead' | 'test' | 'unserved' | 'callUp'
+  kind: 'lead' | 'test' | 'invalid' | 'driver' | 'unserved' | 'callUp'
   label: string
 }
 
@@ -69,7 +69,7 @@ export function servedRosterLabels(row: OrgDriftRow, t: OrgBoardTranslate): stri
 }
 
 /**
- * Every badge one seat earns: lead/test come straight off the registry row,
+ * Every badge one seat earns: lead/test/invalid/driver come straight off the registry row,
  * `unserved` from the drift lookup (present only when `drift.ok`, per the
  * hard requirement that a suppressed drift result must not silently read as
  * "fully served"), and `callUp` from registry-level membership.
@@ -90,6 +90,8 @@ export function seatBadges(
   const badges: SeatBadge[] = []
   if (seat.lead === true) badges.push({ kind: 'lead', label: t('badge.lead') })
   if (seat.test === true) badges.push({ kind: 'test', label: t('badge.test') })
+  if (seat.invalid !== undefined) badges.push({ kind: 'invalid', label: t('badge.invalid') })
+  if (seat.driver === 'claude-code') badges.push({ kind: 'driver', label: t('badge.driver.claudeCode') })
   if (driftRow !== undefined) badges.push({ kind: 'unserved', label: t('badge.unserved') })
   if (callUp.includes(name)) badges.push({ kind: 'callUp', label: t('badge.callUp') })
   return badges

@@ -407,6 +407,60 @@ describe('OrgBoard', () => {
     expect(screen.getByLabelText<HTMLInputElement>('Denied tools').value).toBe('web')
   })
 
+  describe('claude-code driver rows and quarantined rows', () => {
+    function withDriverSeats(): ResponseValue<'org.get'> {
+      if (!BASE_VALUE.registry.ok) throw new Error('fixture registry must be ok')
+      const seats = {
+        ...BASE_VALUE.registry.registry.seats,
+        claudie: { cwd: '/org/deepseek-harness', driver: 'claude-code' as const, admit_from: ['alfred', 'batman'], admit_sender_classes: ['seat' as const] },
+        broken: { cwd: '/org/deepseek-harness', invalid: 'model belongs in host config' },
+      }
+      return { ...BASE_VALUE, registry: { ...BASE_VALUE.registry, registry: { ...BASE_VALUE.registry.registry, seats } } }
+    }
+
+    it('badges a claude-code seat and a quarantined seat on their nodes', () => {
+      const { container } = renderBoard(ready(withDriverSeats()))
+      const claudieNode = container.querySelector('.react-flow__node[data-id="claudie"]') as HTMLElement
+      const brokenNode = container.querySelector('.react-flow__node[data-id="broken"]') as HTMLElement
+      expect(within(claudieNode).getByText('Claude Code driver')).toBeTruthy()
+      expect(within(brokenNode).getByText('Quarantined')).toBeTruthy()
+      const alfredNode = container.querySelector('.react-flow__node[data-id="alfred"]') as HTMLElement
+      expect(within(alfredNode).queryByText('Quarantined')).toBeNull()
+      expect(within(alfredNode).queryByText('Claude Code driver')).toBeNull()
+    })
+
+    it('draws no served status dot on a quarantined seat, so it is never announced as served', () => {
+      const { container } = renderBoard(ready(withDriverSeats()))
+      const dots = (name: string) => within(container.querySelector(`.react-flow__node[data-id="${name}"]`) as HTMLElement).queryAllByRole('img', { hidden: true })
+      expect(dots('broken')).toHaveLength(0)
+      expect(dots('claudie').map(dot => dot.getAttribute('aria-label'))).toEqual(['served'])
+    })
+
+    it('shows the driver, admitted senders and sender classes read-only in the detail panel', () => {
+      renderBoard(ready(withDriverSeats()))
+      fireEvent.click(screen.getByText('claudie'))
+      const panel = within(screen.getByRole('complementary'))
+      expect(panel.getByText('Driver')).toBeTruthy()
+      expect(panel.getByText('claude-code')).toBeTruthy()
+      expect(panel.getByText('alfred, batman')).toBeTruthy()
+      expect(panel.getByText('seat')).toBeTruthy()
+      expect(panel.queryByText('Quarantined (read-only)')).toBeNull()
+    })
+
+    it('shows the quarantine reason in the detail panel and no driver rows for a plain seat', () => {
+      renderBoard(ready(withDriverSeats()))
+      fireEvent.click(screen.getByText('broken'))
+      const panel = within(screen.getByRole('complementary'))
+      expect(panel.getByText('Quarantined (read-only)')).toBeTruthy()
+      expect(panel.getByText('model belongs in host config')).toBeTruthy()
+      fireEvent.click(screen.getByRole('button', { name: 'Close details' }))
+      fireEvent.click(screen.getByText('robin'))
+      const robinPanel = within(screen.getByRole('complementary'))
+      expect(robinPanel.queryByText('Driver')).toBeNull()
+      expect(robinPanel.queryByText('Admits mail from')).toBeNull()
+    })
+  })
+
   it('a selected seat with a recorded session id shows it', () => {
     renderBoard(ready(BASE_VALUE))
     fireEvent.click(screen.getByText('alfred'))
