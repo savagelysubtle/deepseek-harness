@@ -11,6 +11,8 @@ import { API_PATH } from '../api-path.ts'
 import { CALLER_TOKEN_HEADER } from '../caller-token-header.ts'
 
 const LAUNCH_CODE_PARAM = 'dsh-boot'
+/** A stalled exchange must not hold every later API request (they wait on `ready`). */
+const EXCHANGE_TIMEOUT_MS = 10_000
 const STORAGE_KEY = 'dsh-caller-token'
 const AUTH_EXCHANGE_URL_PATH = `${API_PATH}/auth.exchange`
 
@@ -107,6 +109,7 @@ export function createCallerAuthClient(env: CallerAuthEnv): CallerAuthClient {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ code }),
+        signal: AbortSignal.timeout(EXCHANGE_TIMEOUT_MS),
       })
     } catch {
       publish('rejected', 'Could not reach the host to start this session. Reopen dsh from the launcher link.')

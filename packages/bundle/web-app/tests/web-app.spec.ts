@@ -182,6 +182,11 @@ describe('web-app runtime glue', () => {
       expect(piped).toContain(`dsh web access link written to ${file} (one use, valid 10 minutes)`)
       expect(readFileSync(file, 'utf8')).toBe('http://127.0.0.1:4567/#dsh-boot=code-xyz\n')
       expect(statSync(file).mode & 0o777).toBe(0o600)
+      vi.restoreAllMocks()
+      vi.stubEnv('XDG_RUNTIME_DIR', '')
+      const unset = await boot(false)
+      expect(unset.join('\n')).not.toContain('code-xyz')
+      expect(unset.join('\n')).toContain('access link not written')
     } finally {
       Reflect.deleteProperty(process.stdout, 'isTTY')
       vi.unstubAllEnvs()

@@ -10,9 +10,9 @@
  * @module @deepseek-ai/dsh-web-app
  */
 
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { networkInterfaces, tmpdir } from 'node:os'
+import { networkInterfaces } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
@@ -120,7 +120,8 @@ function localWebUrl(ctx: Context): string {
  * token. The code is secret: it is not part of {@link localWebUrl}, never enters `DSH_WEB_URL` or
  * the surface prompt (both reach the agent's environment), and is printed only to an interactive
  * terminal. A non-interactive start writes the link to a 0600 file under `$XDG_RUNTIME_DIR`
- * (else the OS temp dir) and prints only that path. A host without the connection service prints nothing.
+ * and prints only that path; without `XDG_RUNTIME_DIR` it writes nothing (a shared temp dir is not
+ * safe for the secret). A host without the connection service prints nothing.
  * @param ctx - plugin context that may carry the host connection service.
  */
 function announceAccessLink(ctx: Context): void {
@@ -131,10 +132,14 @@ function announceAccessLink(ctx: Context): void {
     console.log(`dsh web access link (one use, valid 10 minutes): ${link}`)
     return
   }
-  const directory = process.env['XDG_RUNTIME_DIR'] ?? tmpdir()
-  mkdirSync(directory, { recursive: true, mode: 0o700 })
+  const directory = process.env['XDG_RUNTIME_DIR']
+  if (directory === undefined || directory === '') {
+    console.log('dsh web access link not written: stdout is not a terminal and XDG_RUNTIME_DIR is unset; restart from a terminal to get the link')
+    return
+  }
   const file = join(directory, `dsh-web-access-${String(ctx.webServer.port)}.url`)
-  writeFileSync(file, `${link}\n`, { mode: 0o600 })
+  rmSync(file, { force: true })
+  writeFileSync(file, `${link}\n`, { mode: 0o600, flag: 'wx' })
   console.log(`dsh web access link written to ${file} (one use, valid 10 minutes)`)
 }
 

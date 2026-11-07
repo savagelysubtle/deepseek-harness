@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-11-06-op-270-per-boot-caller-token.md
-2026-11-06-op-270-per-boot-caller-token.md: eea3187304fa0d18cd2aea4e1ddd0911b2a7db50
-2026-11-06-op-270-per-boot-caller-token.zh.md: 0106c3ab633493cd27d0be6bcc68455de661981d
+2026-11-06-op-270-per-boot-caller-token.md: 37ff6aa24b002b92e6f87eb688c31953b3b46e14
+2026-11-06-op-270-per-boot-caller-token.zh.md: 8e1a4d632bb986bc6192a5611f09f9ee54a95f0f
