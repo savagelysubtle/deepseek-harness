@@ -382,6 +382,52 @@ async function registryRecipientRefusal(to: MailboxAddress, registryPath: string
 }
 
 /**
+ * Prefix the guest CLI (`dsh-mailbox send`) stamps onto every sender it
+ * stores, so a row from an outside operator reads `guest:<--from value>`.
+ * Mirrors `GUEST_SENDER_PREFIX` in `@deepseek-ai/dsh-mailbox-local`, which
+ * this package does not depend on.
+ */
+const GUEST_SENDER_PREFIX = 'guest:'
+
+/**
+ * Whether `to` names an outside operator that has already written to the
+ * sending seat, so a reply to it is admissible even though no seat or
+ * roster entry carries that name.
+ *
+ * The guest CLI stores its sender as `guest:<name>`, but the mailbox address
+ * grammar has no colon, so a reply cannot be addressed to `guest:<name>`
+ * itself. The reply goes to the bare `<name>` the guest chose, and the guest
+ * reads it with `dsh-mailbox inbox --address <name>`. Admission requires an
+ * existing row from `guest:<name>` addressed to THIS seat, which makes the
+ * exception reply-only: a seat can never open a conversation with an
+ * arbitrary name, and a guest that never wrote to this seat stays refused.
+ * The check reads only rows already addressed to the sender's own address,
+ * so it cannot be satisfied by mail to another seat.
+ * @param mailbox - the mailbox service to read the sending seat's inbound rows from.
+ * @param self - the sending seat's own address.
+ * @param to - the destination the send names.
+ * @param signal - cancellation for the store read.
+ * @returns true when a row from `guest:<to>` to `self` exists.
+ */
+async function isReplyToWritingGuest(
+  mailbox: Pick<MailboxRegistry, 'lookupInboundSince'>,
+  self: string,
+  to: MailboxAddress,
+  signal: AbortSignal | undefined,
+): Promise<boolean> {
+  let selfAddress: MailboxAddress
+  try {
+    selfAddress = parseMailboxAddress(self)
+  } catch {
+    // A sender identity outside the address grammar has no inbox to read, so no guest can have written to it.
+    return false
+  }
+  const inbound = await mailbox.lookupInboundSince(selfAddress, 0, signal)
+  const guestSender = `${GUEST_SENDER_PREFIX}${to}`
+  return inbound.some(entry => entry.from === guestSender)
+}
+
+/**
  * Longest an in-process pre-storage refusal record is kept before it is
  * treated as expired. Bounded by {@link AWAIT_MAX_DEADLINE_MS}: that is the
  * longest a single `mailbox_await` call can hold a turn, so a wait that
@@ -473,7 +519,8 @@ export function mailboxSendTool(mailbox: MailboxRegistry, identity: IdentitySour
       to: {
         type: 'string',
         required: true,
-        description: 'The recipient seat\'s bare name (for example "batman"). One name names one seat across the whole deployment.',
+        description: 'The recipient seat\'s bare name (for example "batman"). One name names one seat across the whole deployment. '
+          + 'The only other accepted name is an outside operator that already wrote to this seat: reply at the bare name it used (a message from "guest:front" is answered by to "front"); a name that never wrote to this seat is refused.',
       },
       subject: {
         type: 'string',
@@ -541,9 +588,14 @@ export function mailboxSendTool(mailbox: MailboxRegistry, identity: IdentitySour
       // {@link unknownRecipientRefusal} for why a served roster is the
       // stronger check where one exists, and {@link registryRecipientRefusal}
       // for what guards a deployment that mounts none.
-      const unknownRecipient = identity.addresses !== undefined && identity.addresses.length > 0
+      let unknownRecipient = identity.addresses !== undefined && identity.addresses.length > 0
         ? unknownRecipientRefusal(to, identity.addresses)
         : await registryRecipientRefusal(to, identity.orgRegistryPath ?? dshHomePath('org', 'registry.yml'))
+      // Reply-only exception: an outside operator that already wrote to THIS
+      // seat may be answered at its bare name; see {@link isReplyToWritingGuest}.
+      if (unknownRecipient !== undefined && await isReplyToWritingGuest(mailbox, from, to, exec.signal)) {
+        unknownRecipient = undefined
+      }
       if (unknownRecipient !== undefined) {
         // Recorded so a same-process mailbox_await on THIS traceId reports
         // the refusal immediately instead of polling out its full deadline

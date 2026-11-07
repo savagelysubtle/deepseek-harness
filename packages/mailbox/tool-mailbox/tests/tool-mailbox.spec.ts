@@ -356,6 +356,95 @@ describe('mailbox_send — known recipient admission (SWD-140)', () => {
     await ctx.fiber.dispose()
   })
 
+  describe('replying to an outside operator that wrote first', () => {
+    /** Store one message the way the guest CLI does: sender stamped `guest:<name>`. */
+    async function guestWrites(ctx: Context, guest: string, to: string): Promise<void> {
+      await ctx.mailbox.publish({
+        to: to as never,
+        from: `guest:${guest}`,
+        subject: 'hello',
+        payload: { text: 'from outside' },
+        traceId: `guest-trace-${guest}-${to}`,
+      })
+    }
+
+    it('stores a reply at the guest\'s bare name once that guest wrote to this seat', async () => {
+      const registryPath = writeSeatRegistry(['batman', 'alfred'])
+      const { ctx, dbPath } = await setup('batman', { orgRegistryPath: registryPath })
+      await guestWrites(ctx, 'front', 'batman')
+      const result = await call(ctx, 'mailbox_send', { to: 'front', subject: 're: hello', body: 'answer' })
+      expect(result.isError).toBe(false)
+      if (result.isError) throw new Error('expected mailbox_send success')
+      expect((result.value as { deliveryState: string }).deliveryState).toBe('pending')
+      const rows = storedRows(dbPath, 'front')
+      expect(rows).toHaveLength(1)
+      expect(rows[0]?.from_address).toBe('batman')
+      await ctx.fiber.dispose()
+    })
+
+    it('refuses a name that never wrote to this seat, with the existing registry message', async () => {
+      const registryPath = writeSeatRegistry(['batman', 'alfred'])
+      const { ctx, dbPath } = await setup('batman', { orgRegistryPath: registryPath })
+      const result = await call(ctx, 'mailbox_send', { to: 'front', subject: 's', body: 'b' })
+      if (result.isError) throw new Error('expected a graceful refusal, not a tool error')
+      expect((result.value as { deliveryState: string }).deliveryState).toBe('refused')
+      expect((result.value as { refusalReason: string }).refusalReason).toContain('not a seat in the org registry')
+      expect(storedRows(dbPath, 'front')).toHaveLength(0)
+      await ctx.fiber.dispose()
+    })
+
+    it('refuses a guest that wrote to a different seat — the row must be addressed to the sender', async () => {
+      const registryPath = writeSeatRegistry(['batman', 'alfred'])
+      const { ctx, dbPath } = await setup('batman', { orgRegistryPath: registryPath })
+      await guestWrites(ctx, 'front', 'alfred')
+      const result = await call(ctx, 'mailbox_send', { to: 'front', subject: 's', body: 'b' })
+      if (result.isError) throw new Error('expected a graceful refusal, not a tool error')
+      expect((result.value as { deliveryState: string }).deliveryState).toBe('refused')
+      expect(storedRows(dbPath, 'front')).toHaveLength(0)
+      await ctx.fiber.dispose()
+    })
+
+    it('does not treat a plain seat-style row as guest mail — only the guest: prefix counts', async () => {
+      const registryPath = writeSeatRegistry(['batman', 'alfred'])
+      const { ctx, dbPath } = await setup('batman', { orgRegistryPath: registryPath })
+      await ctx.mailbox.publish({ to: 'batman' as never, from: 'front', subject: 'x', payload: {}, traceId: 'plain-front' })
+      const result = await call(ctx, 'mailbox_send', { to: 'front', subject: 's', body: 'b' })
+      if (result.isError) throw new Error('expected a graceful refusal, not a tool error')
+      expect((result.value as { deliveryState: string }).deliveryState).toBe('refused')
+      expect(storedRows(dbPath, 'front')).toHaveLength(0)
+      await ctx.fiber.dispose()
+    })
+
+    it('replies on a many-seat host too — the served roster does not block a guest that wrote first', async () => {
+      const { ctx, dbPath } = await setup(undefined, { addresses: ['batman', 'alfred'] })
+      await guestWrites(ctx, 'front', 'batman')
+      const sent = await callAs(ctx, 'batman', 'mailbox_send', { to: 'front', subject: 're', body: 'answer' })
+      if (sent.isError) throw new Error('expected mailbox_send success')
+      expect((sent.value as { deliveryState: string }).deliveryState).toBe('pending')
+      expect(storedRows(dbPath, 'front')).toHaveLength(1)
+      const refused = await callAs(ctx, 'batman', 'mailbox_send', { to: 'penny', subject: 're', body: 'x' })
+      if (refused.isError) throw new Error('expected a graceful refusal, not a tool error')
+      expect((refused.value as { deliveryState: string }).deliveryState).toBe('refused')
+      expect(storedRows(dbPath, 'penny')).toHaveLength(0)
+      await ctx.fiber.dispose()
+    })
+
+    it('a guest named like a real seat reaches only that seat\'s own mailbox, as before', async () => {
+      // `guest:alfred` writing to batman must not let batman reach anything
+      // new: `alfred` is already a seat, so the send is admitted by the
+      // ordinary registry check and lands in alfred's own inbox exactly as
+      // it would without any guest row.
+      const registryPath = writeSeatRegistry(['batman', 'alfred'])
+      const { ctx, dbPath } = await setup('batman', { orgRegistryPath: registryPath })
+      await guestWrites(ctx, 'alfred', 'batman')
+      const result = await call(ctx, 'mailbox_send', { to: 'alfred', subject: 's', body: 'b' })
+      if (result.isError) throw new Error('expected mailbox_send success')
+      expect((result.value as { deliveryState: string }).deliveryState).toBe('pending')
+      expect(storedRows(dbPath, 'alfred')).toHaveLength(1)
+      await ctx.fiber.dispose()
+    })
+  })
+
   it('admits when the org registry cannot be read — a local file fault must not become a mail outage', async () => {
     // The check can only prove a name is unknown when it has the list to
     // prove it against. With no readable registry it admits, exactly as it
@@ -461,7 +550,7 @@ describe('mailbox_send — known recipient admission (SWD-140)', () => {
   it('never calls the underlying publish for a refused destination', async () => {
     const publish = vi.fn(async () => 'should-not-be-called')
     const send = mailboxSendTool(
-      { publish, lookupByTraceId: async () => [] } as unknown as MailboxRegistryShape,
+      { publish, lookupByTraceId: async () => [], lookupInboundSince: async () => [] } as unknown as MailboxRegistryShape,
       { addresses: ['batman', 'alfred'] },
     )
     const args = { to: 'robin', subject: 's', body: 'b' }
