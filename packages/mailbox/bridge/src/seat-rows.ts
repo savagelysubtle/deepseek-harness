@@ -21,7 +21,7 @@ import {
   seatRoutingProjection,
   seatRowHash,
 } from '@deepseek-ai/dsh-mailbox'
-import type { OrgRegistry, OrgRegistrySeat, SeatBinding, SeatDriverKey } from '@deepseek-ai/dsh-mailbox'
+import type { OrgRegistry, OrgRegistrySeat, SeatBinding, SeatDriverKey, SeatSenderClass } from '@deepseek-ai/dsh-mailbox'
 
 /** One seat's row frozen at a single registry read, with the hash of its security fields. */
 export interface SeatRowView {
@@ -36,6 +36,25 @@ export interface SeatRowView {
 }
 
 /**
+ * What {@link MailboxSeatRows.current} hands another package: the seat's
+ * security hash, its driver and its admission lists, and nothing else. The
+ * full row (cwd, session id, tools) stays inside the bridge; a caller that
+ * needs it gets it through the binding the bridge itself hands the driver.
+ * The lists are the row's own deep-frozen arrays (an absent list reads as
+ * empty, which {@link admitsMail} treats the same way).
+ */
+export interface SeatCurrentView {
+  /** {@link seatRowHash} of the seat's current row. */
+  readonly rowHash: string
+  /** The driver the row selects. */
+  readonly driver: SeatDriverKey
+  /** The row's `admit_from` list (empty when the row has none). */
+  readonly admit_from: readonly string[]
+  /** The row's `admit_sender_classes` list (empty when the row has none). */
+  readonly admit_sender_classes: readonly SeatSenderClass[]
+}
+
+/**
  * The context service other packages (the Claude Code driver glue) use to
  * ask the bridge which row a seat currently has, so there is exactly one
  * view of the registry in the process. Provided under `mailboxSeatRows`.
@@ -44,15 +63,15 @@ export interface MailboxSeatRows {
   /** The org registry file this service reads through; two bridges must agree on it. */
   readonly registryPath: string
   /**
-   * The seat's row and security hash as of the bridge's last registry read.
+   * The seat's security hash, driver and admission lists as of the bridge's last registry read.
    * Synchronous and read from the bridge's own cache: it never touches the
    * disk. A seat that is unknown, quarantined (`invalid`), or absent because
    * no registry has loaded yet resolves to `undefined`, so a caller can never
    * open a seat on a row the bridge itself would refuse.
    * @param seat - the seat name.
-   * @returns the frozen row and its hash, or `undefined`.
+   * @returns the narrowed view (no row, cwd, session id or tools), or `undefined`.
    */
-  current(seat: string): { readonly row: OrgRegistrySeat; readonly rowHash: string } | undefined
+  current(seat: string): SeatCurrentView | undefined
 }
 
 /** Names of the security fields whose change must dispose a resident seat, in projection order. */
@@ -158,7 +177,13 @@ export function createMailboxSeatRows(registryPath: string, peek: () => OrgRegis
     registryPath,
     current(seat: string) {
       const view = seatViewOf(peek(), seat)
-      return view === undefined ? undefined : { row: view.row, rowHash: view.rowHash }
+      if (view === undefined) return undefined
+      return Object.freeze({
+        rowHash: view.rowHash,
+        driver: view.driver,
+        admit_from: view.row.admit_from ?? [],
+        admit_sender_classes: view.row.admit_sender_classes ?? [],
+      })
     },
   })
 }

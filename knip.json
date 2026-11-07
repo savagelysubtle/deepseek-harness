@@ -827,7 +827,6 @@
     "packages/bundle/headless": {
       "ignoreDependencies": [
         "@deepseek-ai/dsh-code-runtime-worker-thread",
-        "@deepseek-ai/dsh-mailbox",
         "@deepseek-ai/dsh-mailbox-local",
         "@deepseek-ai/dsh-tool-mailbox"
       ]

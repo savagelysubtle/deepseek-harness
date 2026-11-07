@@ -48,7 +48,7 @@
 | 可见性 | 每次注册表重载都按席位做差异比较：对当前或曾经为非默认（或刚变为 invalid）的席位，桥发出警告并发出 `mailbox/seat-driver-row-changed { seat, changed }`。 |
 | 拒绝通知 | 被拒发送方的行若选择了非默认驱动或被隔离，则其日志中不会有通知（桥既不恢复它也不追加）；`mailbox/refused` 事件和一条警告保留。 |
 
-桥提供上下文服务 `mailboxSeatRows`（`registryPath`，以及 `current(seat)`，从桥自己的缓存返回冻结的行和哈希，未知或被隔离的席位返回 `undefined`），供驱动胶水确认绑定仍是最新的。两个桥若指定不同的 `orgRegistryPath`，挂载时失败。桥从不提供驱动的邮件租约钩子：租约仍然只在 follow-up 之后结算一次。已知遗留：暂停或超额的驱动席位会把邮件排队，而租约按已投递结算；真正的邮箱租约汇点属于后续切片。
+桥提供上下文服务 `mailboxSeatRows`（`registryPath`，以及 `current(seat)`，从桥自己的缓存只返回行哈希、驱动和两个准入列表（`admit_from`、`admit_sender_classes`）组成的冻结视图，不含行的 cwd、会话 id 或工具；未知或被隔离的席位返回 `undefined`），供驱动胶水确认绑定仍是最新的。两个桥若指定不同的 `orgRegistryPath`，挂载时失败。桥从不提供驱动的邮件租约钩子：租约仍然只在 follow-up 之后结算一次。已知遗留：暂停或超额的驱动席位会把邮件排队，而租约按已投递结算；真正的邮箱租约汇点属于后续切片。
 
 ## Roster-drift alarm (SWD-118)
 

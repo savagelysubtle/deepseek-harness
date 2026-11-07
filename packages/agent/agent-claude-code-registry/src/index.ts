@@ -17,7 +17,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { admitsMail, SEAT_SENDER_CLASSES, seatRowHash } from '@deepseek-ai/dsh-mailbox'
-import type { OrgRegistrySeat, SeatSenderClass } from '@deepseek-ai/dsh-mailbox'
+import type { SeatSenderClass } from '@deepseek-ai/dsh-mailbox'
 import type {
   ClaudeCodeMailHooks, ClaudeCodeSeatSource, MailAdmission, MailAdmissionDecision, MailAdmissionRequest, SeatSourceRequest,
   SeatSourceResolution,
@@ -37,8 +37,16 @@ const DRIVER_KEY = 'claude-code'
  * bridge) so this package depends on the mailbox seam only, never on the bridge package.
  */
 export interface SeatRowsService {
-  /** The seat's current frozen row and hash, or `undefined` for an unknown or quarantined seat. */
-  current(seat: string): { readonly row: OrgRegistrySeat; readonly rowHash: string } | undefined
+  /**
+   * The seat's current hash, driver and admission lists (never its cwd, session id or tools), or `undefined`
+   * for an unknown or quarantined seat.
+   */
+  current(seat: string): {
+    readonly rowHash: string
+    readonly driver: string
+    readonly admit_from: readonly string[]
+    readonly admit_sender_classes: readonly SeatSenderClass[]
+  } | undefined
 }
 
 const PREFIX = 'agent-claude-code-registry:'
@@ -76,7 +84,7 @@ export function createSeatSource(rows: () => SeatRowsService | undefined): Claud
     },
     hasRow(seat: string): boolean | undefined {
       const service = rows()
-      return service === undefined ? undefined : service.current(seat)?.row.driver === DRIVER_KEY
+      return service === undefined ? undefined : service.current(seat)?.driver === DRIVER_KEY
     },
   }
 }
@@ -104,7 +112,7 @@ export function createAdmission(rows: () => SeatRowsService | undefined): MailAd
     const classes = request.externalHops.length === 0 ? ['seat'] : request.externalHops
     const unknown = classes.find(senderClass => !isSenderClass(senderClass))
     if (unknown !== undefined) return deny(`sender class "${unknown}" is not a class a registry row can admit`)
-    const verdict = admitsMail(current.row, { from: request.from, classes: classes as SeatSenderClass[] })
+    const verdict = admitsMail(current, { from: request.from, classes: classes as SeatSenderClass[] })
     return verdict.allow ? { allow: true } : deny(verdict.reason)
   }
 }
