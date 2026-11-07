@@ -10,8 +10,10 @@
  * @module @deepseek-ai/dsh-web-app
  */
 
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { networkInterfaces } from 'node:os'
+import { networkInterfaces, tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -19,6 +21,7 @@ import { addHarnessSourceSection } from '@deepseek-ai/dsh-app-boot'
 import * as FrontendStatic from '@deepseek-ai/dsh-host-frontend-static'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-shell-env'
 
@@ -112,6 +115,29 @@ function localWebUrl(ctx: Context): string {
   return `http://${LOOPBACK_HOST}:${String(port)}`
 }
 
+/**
+ * Hand the operator the one-use launch link (OP-270) that opens the page with its per-boot caller
+ * token. The code is secret: it is not part of {@link localWebUrl}, never enters `DSH_WEB_URL` or
+ * the surface prompt (both reach the agent's environment), and is printed only to an interactive
+ * terminal. A non-interactive start writes the link to a 0600 file under `$XDG_RUNTIME_DIR`
+ * (else the OS temp dir) and prints only that path. A host without the connection service prints nothing.
+ * @param ctx - plugin context that may carry the host connection service.
+ */
+function announceAccessLink(ctx: Context): void {
+  const connection = ctx.get('connection')
+  if (connection === undefined) return
+  const link = `${localWebUrl(ctx)}/#dsh-boot=${connection.mintLaunchCode()}`
+  if (process.stdout.isTTY) {
+    console.log(`dsh web access link (one use, valid 10 minutes): ${link}`)
+    return
+  }
+  const directory = process.env['XDG_RUNTIME_DIR'] ?? tmpdir()
+  mkdirSync(directory, { recursive: true, mode: 0o700 })
+  const file = join(directory, `dsh-web-access-${String(ctx.webServer.port)}.url`)
+  writeFileSync(file, `${link}\n`, { mode: 0o600 })
+  console.log(`dsh web access link written to ${file} (one use, valid 10 minutes)`)
+}
+
 /** Dist location is workspace knowledge of this bundle: resolved through the frontend package exports, not configured. */
 function resolveDistIndex(): string {
   const require = createRequire(import.meta.url)
@@ -166,6 +192,7 @@ export function apply(ctx: Context, config: Config): void {
       const lanCandidate = runtime.lanAddresses[0]
       const port = ctx.webServer.port
       console.log(`dsh web: ${localWebUrl(ctx)}${lanCandidate === undefined ? '' : ` (LAN: http://${lanCandidate}:${String(port)})`}`)
+      announceAccessLink(ctx)
     }
     // This row's own activation can precede a sibling failure. The app owns
     // readiness by waiting for its Loader tree, or prints at once in a

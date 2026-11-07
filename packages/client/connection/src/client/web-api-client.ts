@@ -4,6 +4,7 @@ import type { ApiProxy, HostFrame, MuxFrame, RpcRequest, ServerRequest } from '.
 import { AbstractApiClient } from './api.ts'
 import { hostFrameSchema, muxFrameSchema } from '@deepseek-ai/dsh-host-apiproxy/api/events.schema'
 import { serverRequestSchema } from '@deepseek-ai/dsh-host-apiproxy/api/rpc.schema'
+import type { CallerAuthClient } from './caller-auth.ts'
 import { HOST_EVENTS_PATH, MUX_EVENTS_PATH } from '../api-path.ts'
 
 type SocketItem<F> = { kind: 'frame'; envelope: RpcRequest<F> } | { kind: 'end' }
@@ -11,8 +12,18 @@ type Parser<F> = { parse(value: unknown): F }
 
 /** Browser platform subclass: unary/respond use fetch; mux/host use downlink-only WebSockets. */
 export class WebApiClient extends AbstractApiClient {
-  protected doFetch(input: URL, init?: RequestInit): Promise<Response> {
-    return globalThis.fetch(input, init)
+  /**
+   * @param auth - per-boot caller token holder; every request waits for its launch-code exchange and carries its header.
+   */
+  constructor(private readonly auth: CallerAuthClient) {
+    super()
+  }
+
+  protected async doFetch(input: URL, init?: RequestInit): Promise<Response> {
+    await this.auth.ready
+    const response = await globalThis.fetch(input, this.auth.applyTo(init))
+    this.auth.noteResponse(response)
+    return response
   }
 
   protected override openMux(

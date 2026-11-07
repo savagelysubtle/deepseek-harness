@@ -5,7 +5,7 @@
  * runtime's bind-dependent LAN snapshot.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -151,6 +151,60 @@ describe('web-app runtime glue', () => {
     apply(ctx, new Config({ printUrl: true, surfaceContext: true, trustedHosts: [] }))
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(log).toHaveBeenCalledWith('dsh web: http://127.0.0.1:4567')
+    await ctx.fiber.dispose()
+  })
+
+  it('hands the one-use launch link to a terminal, and to a 0600 file when stdout is not a terminal', async () => {
+    stageDist()
+    const runtimeDir = mkdtempSync(join(tmpdir(), 'dsh-web-access-'))
+    vi.stubEnv('XDG_RUNTIME_DIR', runtimeDir)
+    const mint = vi.fn(() => 'code-xyz')
+    const boot = async (isTTY: boolean): Promise<string[]> => {
+      Object.defineProperty(process.stdout, 'isTTY', { value: isTTY, configurable: true })
+      const ctx = new Context()
+      ctx.provide('webServer', fakeHttpServer().server)
+      ctx.provide('connection', { mintLaunchCode: mint } as never)
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+      apply(ctx, new Config({ printUrl: true, surfaceContext: true, trustedHosts: [] }))
+      await new Promise(resolve => setTimeout(resolve, 0))
+      const lines = log.mock.calls.map(call => String(call[0]))
+      await ctx.fiber.dispose()
+      return lines
+    }
+    try {
+      const tty = await boot(true)
+      expect(tty).toContain('dsh web: http://127.0.0.1:4567')
+      expect(tty).toContain('dsh web access link (one use, valid 10 minutes): http://127.0.0.1:4567/#dsh-boot=code-xyz')
+      vi.restoreAllMocks()
+      const piped = await boot(false)
+      expect(piped.join('\n')).not.toContain('code-xyz')
+      const file = join(runtimeDir, 'dsh-web-access-4567.url')
+      expect(piped).toContain(`dsh web access link written to ${file} (one use, valid 10 minutes)`)
+      expect(readFileSync(file, 'utf8')).toBe('http://127.0.0.1:4567/#dsh-boot=code-xyz\n')
+      expect(statSync(file).mode & 0o777).toBe(0o600)
+    } finally {
+      Reflect.deleteProperty(process.stdout, 'isTTY')
+      vi.unstubAllEnvs()
+      rmSync(runtimeDir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps the launch code out of DSH_WEB_URL and the surface prompt', async () => {
+    stageDist()
+    const ctx = new Context()
+    ctx.provide('webServer', fakeHttpServer().server)
+    ctx.provide('connection', { mintLaunchCode: () => 'code-secret' } as never)
+    const contributions: BashContribution[] = []
+    ctx.provide('shellEnv', {
+      register: (contribution: BashContribution) => { contributions.push(contribution); return () => {} },
+    } as never)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    apply(ctx, new Config({ printUrl: true, surfaceContext: true, trustedHosts: [] }))
+    await ctx.plugin(SystemPrompt, { persona: '' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(JSON.stringify(contributions.map(entry => entry.resolve()))).not.toContain('code-secret')
+    const assembly = await ctx.systemPrompt.assemble()
+    expect(JSON.stringify(assembly.sections)).not.toContain('code-secret')
     await ctx.fiber.dispose()
   })
 

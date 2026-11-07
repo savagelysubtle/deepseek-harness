@@ -9,6 +9,8 @@ import { ConnectionController, type ConnectionConfig, type ConnectionSinks, type
 import { FixtureApiClient } from './fixture.ts'
 import { WebApiClient } from './web-api-client.ts'
 import { createWebConnectionRpc } from './rpc.ts'
+import { mountAuthBanner } from './auth-banner.ts'
+import { createCallerAuthClient, type CallerAuthView } from './caller-auth.ts'
 import { isLoopbackHostname } from '../loopback-hostname.ts'
 import type { ClientConnectionRpc } from '../rpc.ts'
 
@@ -44,6 +46,7 @@ export {
 // controller remains package-internal.
 export type { ConnectionConfig, ConnectionSinks, ConnectionState }
 export type { ClientConnectionRpc } from '../rpc.ts'
+export type { CallerAuthState, CallerAuthView } from './caller-auth.ts'
 
 /** Observable Host description published by each completed connection handshake. */
 export interface HostDescriptionSource {
@@ -70,6 +73,8 @@ export interface ConnectionHandle {
   readonly hostDescription: HostDescriptionSource
   /** Generic logical RPC channels over the same Connection transport. */
   readonly rpc: ClientConnectionRpc
+  /** State of the per-boot caller token (OP-270); absent in fixture mode, which has no host. */
+  readonly callerAuth: CallerAuthView | undefined
   /**
    * Start the connect/pump/reconnect loop with the consumer's frame sinks.
    * One consumer owns the streams (the runtime object layer); a second call
@@ -89,8 +94,9 @@ export function apply(ctx: Context): void {
   const pageLocation = typeof location === 'undefined' ? undefined : location
   const fixture = pageLocation !== undefined && new URLSearchParams(pageLocation.search).has('fixture')
   const fixtureClient = fixture ? new FixtureApiClient() : undefined
-  const api: IApiClient = fixtureClient ?? new WebApiClient()
-  const rpc = fixtureClient?.rpc ?? createWebConnectionRpc()
+  const auth = createCallerAuthClient(browserAuthEnv(fixture ? undefined : pageLocation))
+  const api: IApiClient = fixtureClient ?? new WebApiClient(auth)
+  const rpc = fixtureClient?.rpc ?? createWebConnectionRpc(auth)
   let started = false
   let description: HostDescription | undefined
   const descriptionListeners = new Set<() => void>()
@@ -116,6 +122,7 @@ export function apply(ctx: Context): void {
       },
     },
     rpc,
+    callerAuth: fixture ? undefined : auth,
     start(sinks, config) {
       if (started) throw new Error('connection: the stream loop is already owned by another consumer')
       started = true
@@ -144,5 +151,33 @@ export function apply(ctx: Context): void {
       }
     },
   }
+  if (!fixture && typeof document !== 'undefined') {
+    ctx.effect(() => mountAuthBanner(auth, document), 'client-connection: caller-token banner')
+  }
   ctx.provide('connection', handle)
+}
+
+/**
+ * Browser facilities for the caller-token holder; outside a page (no `location`) it sees an
+ * empty location, no history and no storage, so it holds no token and sends none.
+ * @param pageLocation - the page location, or undefined outside a browser page.
+ * @returns the environment for {@link createCallerAuthClient}.
+ */
+function browserAuthEnv(pageLocation: Location | undefined): Parameters<typeof createCallerAuthClient>[0] {
+  const inPage = pageLocation !== undefined
+  return {
+    location: pageLocation ?? { origin: 'null', pathname: '/', search: '', hash: '' },
+    history: inPage && typeof history !== 'undefined' ? history : { replaceState: () => {} },
+    storage: inPage ? safeSessionStorage() : undefined,
+    fetch: (input, init) => globalThis.fetch(input, init),
+  }
+}
+
+function safeSessionStorage(): Storage | undefined {
+  try {
+    return typeof sessionStorage === 'undefined' ? undefined : sessionStorage
+  } catch {
+    // Reading `sessionStorage` throws a SecurityError when the browser blocks site data.
+    return undefined
+  }
 }
