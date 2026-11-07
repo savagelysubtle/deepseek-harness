@@ -76,6 +76,11 @@ export interface ConnectionHandle {
   /** State of the per-boot caller token (OP-270); absent in fixture mode, which has no host. */
   readonly callerAuth: CallerAuthView | undefined
   /**
+   * Same-origin `fetch` that waits for the launch-code exchange and carries the caller token, for
+   * Host endpoints that are not Connection RPC (for example the session export download).
+   */
+  readonly fetch: (input: string | URL, init?: RequestInit) => Promise<Response>
+  /**
    * Start the connect/pump/reconnect loop with the consumer's frame sinks.
    * One consumer owns the streams (the runtime object layer); a second call
    * throws.
@@ -123,6 +128,12 @@ export function apply(ctx: Context): void {
     },
     rpc,
     callerAuth: fixture ? undefined : auth,
+    fetch: async (input, init) => {
+      await auth.ready
+      const response = await globalThis.fetch(input, auth.applyTo(init))
+      auth.noteResponse(response)
+      return response
+    },
     start(sinks, config) {
       if (started) throw new Error('connection: the stream loop is already owned by another consumer')
       started = true

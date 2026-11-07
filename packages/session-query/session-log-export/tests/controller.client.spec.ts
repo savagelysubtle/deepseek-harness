@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-client-runtime/client'
 import {
   downloadUrl, SessionLogDownloadController, sessionLogZipFilename,
@@ -7,9 +7,20 @@ import {
 
 const SID = 'session-export-controller' as SessionId
 
+let blobCount = 0
+const revoked: string[] = []
+
+beforeEach(() => {
+  blobCount = 0
+  revoked.length = 0
+  URL.createObjectURL = () => `blob:fake-${String(++blobCount)}`
+  URL.revokeObjectURL = (url: string) => { revoked.push(url) }
+})
+
 afterEach(() => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
+  vi.useRealTimers()
 })
 
 describe('SessionLogDownloadController', () => {
@@ -25,15 +36,24 @@ describe('SessionLogDownloadController', () => {
     expect(url.pathname).toBe('/api/session.export')
     expect(url.searchParams.get('sessionId')).toBe(SID)
     expect(url.searchParams.get('includeDescendants')).toBe('true')
-    expect(init.method).toBe('HEAD')
+    expect(init.method).toBeUndefined()
     expect(init.signal).toBeInstanceOf(AbortSignal)
     expect(save).toHaveBeenCalledWith(
-      url.toString(),
+      'blob:fake-1',
       'dsh-session-session-export-controller.zip',
     )
     expect(controller.store.getSnapshot().bySession[SID]).toEqual({
       open: true, status: 'success', error: null,
     })
+  })
+
+  it('releases the blob URL after a delay', async () => {
+    vi.useFakeTimers()
+    const controller = new SessionLogDownloadController(async () => new Response('zip'), vi.fn())
+    await controller.download(SID)
+    expect(revoked).toEqual([])
+    vi.advanceTimersByTime(60_000)
+    expect(revoked).toEqual(['blob:fake-1'])
   })
 
   it('collapses concurrent gestures and preserves a dismissed dialog', async () => {
@@ -109,7 +129,6 @@ describe('SessionLogDownloadController', () => {
     await controller.download(SID)
 
     expect((fetcher.mock.calls[0]?.[0] as URL).origin).toBe('http://dsh.internal')
-    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({ method: 'HEAD' })
     expect(click).toHaveBeenCalledOnce()
   })
 

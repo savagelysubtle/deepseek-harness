@@ -62,6 +62,7 @@ async function mount(): Promise<Bench> {
     api,
     isLoopback: true,
     callerAuth: undefined,
+    fetch: async () => new Response(null),
     hostDescription: {
       getSnapshot: () => undefined,
       subscribe: () => () => {},

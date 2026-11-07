@@ -259,6 +259,22 @@ describe('/api privileged gate (OP-270)', () => {
     await r.dispose()
   })
 
+  it('slash-command execution and the plugin-runner panel calls need the token', async () => {
+    const r = await rig({})
+    const token = await login(r)
+    for (const method of [
+      'commands/execute', 'dynamicCordisRunner/runHostHalf', 'dynamicCordisRunner/resolveRequestRun',
+      'dynamicCordisRunner/settleUserRun', 'dynamicCordisRunner/undefineFromPanel', 'dynamicCordisRunner/stopFromPanel',
+    ]) {
+      const refused = await r.send(post(method))
+      expect([method, refused.status]).toEqual([method, 401])
+      const allowed = await r.send(post(method, { headers: { [CALLER_TOKEN_HEADER]: token } }))
+      // The rig has no handler behind these names (404); what matters is that the gate let it through.
+      expect([method, allowed.status === 401 || allowed.status === 403]).toEqual([method, false])
+    }
+    await r.dispose()
+  })
+
   it('the privileged-call refusal warns once per window and never prints a token or code', async () => {
     const r = await rig()
     const warn = vi.spyOn(r.ctx.logger, 'warn').mockImplementation(() => undefined)

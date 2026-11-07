@@ -71,7 +71,16 @@ describe('every unary route is classified (OP-270)', () => {
       'host.createDirectory', 'session.sendAll', 'session.stopAll', 'session.stopTree',
     ]) expect(privileged.has(m)).toBe(true)
     const tokenOnly = new Set(setEntries('TOKEN_REQUIRED_METHODS'))
-    expect([...tokenOnly].sort()).toEqual(['host.listDirectory', 'session.export'])
+    expect([...tokenOnly].sort()).toEqual([
+      'commands/execute',
+      'dynamicCordisRunner/resolveRequestRun',
+      'dynamicCordisRunner/runHostHalf',
+      'dynamicCordisRunner/settleUserRun',
+      'dynamicCordisRunner/stopFromPanel',
+      'dynamicCordisRunner/undefineFromPanel',
+      'host.listDirectory',
+      'session.export',
+    ])
     for (const open of ['mailbox.publish', 'session.create', 'session.prompt', 'subagent.prompt', 'session.history', 'session.rename', 'mcp/status']) {
       expect(privileged.has(open)).toBe(false)
       expect(tokenOnly.has(open)).toBe(false)

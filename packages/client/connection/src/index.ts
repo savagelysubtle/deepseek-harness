@@ -198,6 +198,18 @@ const PRIVILEGED_METHODS = new Set([
 const TOKEN_REQUIRED_METHODS = new Set([
   'session.export',
   'host.listDirectory',
+  // Plugin (typert) Remotes that grant capability. `commands/execute` runs slash commands such as
+  // `/permission danger-full-access` (approval `never`) and `/plan off`, so leaving it open lets
+  // a token-less caller switch the approval gate off and then prompt a session to run bash.
+  // The `dynamicCordisRunner` methods start Host code from a panel gesture or answer a plugin-run
+  // approval. Plugin Remotes are open unless listed here: a new capability-granting Remote must be
+  // added to this set.
+  'commands/execute',
+  'dynamicCordisRunner/runHostHalf',
+  'dynamicCordisRunner/resolveRequestRun',
+  'dynamicCordisRunner/settleUserRun',
+  'dynamicCordisRunner/undefineFromPanel',
+  'dynamicCordisRunner/stopFromPanel',
 ])
 
 /**
